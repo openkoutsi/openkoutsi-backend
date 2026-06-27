@@ -75,7 +75,15 @@ New per-user databases are always created with the latest schema. Existing per-u
 USER_ID=<user-uuid> uv run alembic -c backend/alembic-user.ini upgrade head
 ```
 
-You can find your user UUIDs by listing `data/users/`. This step is only needed when upgrading an existing deployment — new installs handle schema creation automatically on first startup.
+You can find your user UUIDs by listing `data/users/`. To upgrade **all** per-user
+databases in one go, use the helper script (it loops over `data/users/*` and runs
+the migration for each):
+
+```bash
+uv run python backend/scripts/migrate_user_dbs.py        # add --dry-run to preview
+```
+
+This step is only needed when upgrading an existing deployment — new installs handle schema creation automatically on first startup.
 
 > **Upgrading from a multi-team (v1) deployment?** openkoutsi v2 removes the team
 > layer in favour of a single instance with per-user databases. Migrate existing
