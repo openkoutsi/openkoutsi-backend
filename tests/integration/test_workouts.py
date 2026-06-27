@@ -52,14 +52,14 @@ class TestListWorkouts:
     async def test_empty_for_new_athlete(self, client, auth_headers):
         resp = await client.get("/api/workouts", headers=auth_headers)
         assert resp.status_code == 200
-        assert resp.json() == []
+        assert resp.json()["items"] == []
 
     async def test_returns_created_workout(self, client, auth_headers):
         await client.post("/api/workouts", json=_WORKOUT_BODY, headers=auth_headers)
         resp = await client.get("/api/workouts", headers=auth_headers)
         assert resp.status_code == 200
-        assert len(resp.json()) == 1
-        assert resp.json()[0]["name"] == "Threshold Session"
+        assert len(resp.json()["items"]) == 1
+        assert resp.json()["items"][0]["name"] == "Threshold Session"
 
     async def test_unauthenticated_returns_401(self, client):
         resp = await client.get("/api/workouts")

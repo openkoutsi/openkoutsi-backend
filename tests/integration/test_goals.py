@@ -7,7 +7,19 @@ class TestListGoals:
     async def test_empty_list_for_new_athlete(self, client, auth_headers):
         resp = await client.get("/api/goals", headers=auth_headers)
         assert resp.status_code == 200
-        assert resp.json() == []
+        body = resp.json()
+        assert body == {"items": [], "total": 0, "page": 1, "page_size": 50}
+
+    async def test_pagination_envelope(self, client, auth_headers):
+        for i in range(3):
+            await client.post("/api/goals", json={"title": f"Goal {i}"}, headers=auth_headers)
+        resp = await client.get("/api/goals?page=2&page_size=2", headers=auth_headers)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["total"] == 3
+        assert body["page"] == 2
+        assert body["page_size"] == 2
+        assert len(body["items"]) == 1
 
     async def test_unauthenticated_returns_401(self, client):
         resp = await client.get("/api/goals")
@@ -32,8 +44,8 @@ class TestCreateGoal:
     async def test_goal_appears_in_list(self, client, auth_headers):
         await client.post("/api/goals", json={"title": "Goal A"}, headers=auth_headers)
         resp = await client.get("/api/goals", headers=auth_headers)
-        assert len(resp.json()) == 1
-        assert resp.json()[0]["title"] == "Goal A"
+        assert len(resp.json()["items"]) == 1
+        assert resp.json()["items"][0]["title"] == "Goal A"
 
     async def test_missing_title_returns_422(self, client, auth_headers):
         resp = await client.post("/api/goals", json={}, headers=auth_headers)
@@ -149,7 +161,7 @@ class TestDeleteGoal:
         goal_id = create_resp.json()["id"]
         await client.delete(f"/api/goals/{goal_id}", headers=auth_headers)
         resp = await client.get("/api/goals", headers=auth_headers)
-        assert resp.json() == []
+        assert resp.json()["items"] == []
 
     async def test_unauthenticated_returns_401(self, client):
         resp = await client.delete("/api/goals/some-id")

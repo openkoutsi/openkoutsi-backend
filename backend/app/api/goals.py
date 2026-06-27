@@ -1,12 +1,13 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.deps import get_ctx_and_session
 from backend.app.models.user_orm import Athlete, Goal
 from backend.app.schemas.goals import GoalCreate, GoalResponse, GoalUpdate
+from backend.app.schemas.pagination import Page, PageParams, paginate_params
 
 router = APIRouter(prefix="/goals", tags=["goals"])
 
@@ -19,16 +20,26 @@ async def _get_athlete(global_user_id: str, session: AsyncSession) -> Athlete:
     return athlete
 
 
-@router.get("", response_model=list[GoalResponse])
-async def list_goals(ctx_session=Depends(get_ctx_and_session)):
+@router.get("", response_model=Page[GoalResponse],
+            operation_id="listGoals", summary="List goals")
+async def list_goals(
+    ctx_session=Depends(get_ctx_and_session),
+    params: PageParams = Depends(paginate_params),
+):
     ctx, session = ctx_session
     athlete = await _get_athlete(ctx.user_id, session)
+    total = (await session.execute(
+        select(func.count()).select_from(Goal).where(Goal.athlete_id == athlete.id)
+    )).scalar_one()
     result = await session.execute(
         select(Goal)
         .where(Goal.athlete_id == athlete.id)
         .order_by(Goal.created_at.desc())
+        .offset(params.offset)
+        .limit(params.page_size)
     )
-    return result.scalars().all()
+    items = [GoalResponse.model_validate(g) for g in result.scalars().all()]
+    return Page.build(items, total, params.page, params.page_size)
 
 
 @router.post("", response_model=GoalResponse, status_code=201)
