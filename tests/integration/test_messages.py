@@ -25,12 +25,23 @@ async def test_requires_auth(client):
 async def test_empty_inbox(client, auth_headers):
     resp = await client.get(_PREFIX, headers=auth_headers)
     assert resp.status_code == 200
-    assert resp.json() == []
+    assert resp.json() == {"items": [], "total": 0, "page": 1, "page_size": 50}
+
+
+async def test_pagination_envelope(client, auth_headers):
+    await _seed(_TEST_USER_ID, 3)
+    resp = await client.get(f"{_PREFIX}?page=2&page_size=2", headers=auth_headers)
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["total"] == 3
+    assert body["page"] == 2
+    assert body["page_size"] == 2
+    assert len(body["items"]) == 1
 
 
 async def test_list_and_unread_count(client, auth_headers):
     await _seed(_TEST_USER_ID, 2)
-    msgs = (await client.get(_PREFIX, headers=auth_headers)).json()
+    msgs = (await client.get(_PREFIX, headers=auth_headers)).json()["items"]
     assert len(msgs) == 2
     assert all(m["read_at"] is None for m in msgs)
 
@@ -40,7 +51,7 @@ async def test_list_and_unread_count(client, auth_headers):
 
 async def test_mark_read(client, auth_headers):
     await _seed(_TEST_USER_ID, 1)
-    msg_id = (await client.get(_PREFIX, headers=auth_headers)).json()[0]["id"]
+    msg_id = (await client.get(_PREFIX, headers=auth_headers)).json()["items"][0]["id"]
 
     resp = await client.post(f"{_PREFIX}/{msg_id}/read", headers=auth_headers)
     assert resp.status_code == 200
@@ -61,11 +72,11 @@ async def test_mark_all_read(client, auth_headers):
 
 async def test_delete_is_hard_delete(client, auth_headers):
     await _seed(_TEST_USER_ID, 1)
-    msg_id = (await client.get(_PREFIX, headers=auth_headers)).json()[0]["id"]
+    msg_id = (await client.get(_PREFIX, headers=auth_headers)).json()["items"][0]["id"]
 
     resp = await client.delete(f"{_PREFIX}/{msg_id}", headers=auth_headers)
     assert resp.status_code == 204
-    assert (await client.get(_PREFIX, headers=auth_headers)).json() == []
+    assert (await client.get(_PREFIX, headers=auth_headers)).json()["items"] == []
 
     # Really gone — a second delete 404s.
     again = await client.delete(f"{_PREFIX}/{msg_id}", headers=auth_headers)
@@ -75,5 +86,5 @@ async def test_delete_is_hard_delete(client, auth_headers):
 async def test_per_user_isolation(client, auth_headers):
     await _seed("some-other-user", 2)
     await _seed(_TEST_USER_ID, 1)
-    msgs = (await client.get(_PREFIX, headers=auth_headers)).json()
+    msgs = (await client.get(_PREFIX, headers=auth_headers)).json()["items"]
     assert len(msgs) == 1
