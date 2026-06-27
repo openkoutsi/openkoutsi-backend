@@ -1,0 +1,46 @@
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file: .env
+    environment:
+      INIT_DB: "true"
+      DATABASE_PATH: /data/openkoutsi.db
+      FILE_STORAGE_PATH: /data/uploads
+    volumes:
+      - backend_data:/data
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  bridge:
+    build:
+      context: strava_bridge
+      dockerfile: Dockerfile
+    env_file: strava_bridge/.env
+    environment:
+      DATABASE_PATH: /data/bridge.db
+    volumes:
+      - bridge_data:/data
+    ports:
+      - "8084:8084"
+    restart: unless-stopped
+
+  wahoo_bridge:
+    build:
+      context: wahoo_bridge
+      dockerfile: Dockerfile
+    env_file: wahoo_bridge/.env
+    environment:
+      DATABASE_PATH: /data/bridge.db
+    volumes:
+      - wahoo_bridge_data:/data
+    ports:
+      - "8085:8085"
+    restart: unless-stopped
+
+volumes:
+  backend_data:
+  bridge_data:
+  wahoo_bridge_data:
