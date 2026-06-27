@@ -34,7 +34,7 @@ Most cycling coaching tools are cloud-only SaaS. openkoutsi is different: you ru
 - **Activity labels & notes** — tag activities as "race" or "commute" and add free-text notes (included in AI analysis context)
 - **AI coaching analysis** — per-activity analysis and plan support with OpenAI-compatible backends
 - **Koutsi daily feedback** — dashboard card with LLM-generated daily training status covering load trends, recovery state, plan adherence, and goal progress; auto-triggers after uploads/syncs when enabled
-- **API v2** — token-scoped (no team slug in any path), no trailing slashes on collection roots, a shared pagination envelope, analytics consolidated under `/api/metrics`, and `PATCH /api/athlete` for partial updates
+- **API v2** — token-scoped (no team slug in any path), no trailing slashes on collection roots, a shared pagination envelope across all collections (activities, goals, plans, workouts, admin lists), analytics consolidated under `/api/metrics`, and `PATCH /api/athlete` for partial updates
 - **Privacy-first** — export your data and delete your account at any time
 - **Cycling-themed 404 page** — localized "Wrong Turn!" not-found page with cycling flavour
 

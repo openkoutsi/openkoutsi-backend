@@ -4,13 +4,14 @@ from datetime import datetime, time, timedelta, timezone
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.deps import get_ctx_and_session
 from backend.app.db.registry import get_registry_session
 from backend.app.models.registry_orm import ProviderConnection
 from backend.app.models.user_orm import Athlete, WahooWorkoutUpload, WorkoutDefinition
+from backend.app.schemas.pagination import Page, PageParams, paginate_params
 from backend.app.schemas.workouts import (
     ExportFormatInfo,
     WahooPushRequest,
@@ -83,16 +84,27 @@ async def list_export_formats():
     ]
 
 
-@router.get("", response_model=list[WorkoutDefinitionResponse])
-async def list_workouts(ctx_session=Depends(get_ctx_and_session)):
+@router.get("", response_model=Page[WorkoutDefinitionResponse],
+            operation_id="listWorkouts", summary="List workout definitions")
+async def list_workouts(
+    ctx_session=Depends(get_ctx_and_session),
+    params: PageParams = Depends(paginate_params),
+):
     ctx, session = ctx_session
     athlete = await _get_athlete(ctx.user_id, session)
+    total = (await session.execute(
+        select(func.count()).select_from(WorkoutDefinition)
+        .where(WorkoutDefinition.athlete_id == athlete.id)
+    )).scalar_one()
     result = await session.execute(
         select(WorkoutDefinition)
         .where(WorkoutDefinition.athlete_id == athlete.id)
         .order_by(WorkoutDefinition.created_at.desc())
+        .offset(params.offset)
+        .limit(params.page_size)
     )
-    return result.scalars().all()
+    items = [WorkoutDefinitionResponse.model_validate(w) for w in result.scalars().all()]
+    return Page.build(items, total, params.page, params.page_size)
 
 
 @router.post("", response_model=WorkoutDefinitionResponse, status_code=201)

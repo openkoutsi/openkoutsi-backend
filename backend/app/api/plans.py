@@ -2,7 +2,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,6 +25,7 @@ from backend.app.services.llm_plan_generator import generate_plan_llm, generate_
 from backend.app.services.llm_workout_generator import (
     generate_workout_definition_llm, WorkoutGenerationError,
 )
+from backend.app.schemas.pagination import Page, PageParams, paginate_params
 
 router = APIRouter(prefix="/plans", tags=["plans"])
 
@@ -45,18 +46,27 @@ async def _get_athlete(global_user_id: str, session: AsyncSession) -> Athlete:
     return athlete
 
 
-@router.get("", response_model=list[TrainingPlanResponse])
-async def list_plans(ctx_session=Depends(get_ctx_and_session)):
+@router.get("", response_model=Page[TrainingPlanResponse],
+            operation_id="listPlans", summary="List training plans")
+async def list_plans(
+    ctx_session=Depends(get_ctx_and_session),
+    params: PageParams = Depends(paginate_params),
+):
     ctx, session = ctx_session
     athlete = await _get_athlete(ctx.user_id, session)
+    total = (await session.execute(
+        select(func.count()).select_from(TrainingPlan).where(TrainingPlan.athlete_id == athlete.id)
+    )).scalar_one()
     result = await session.execute(
         select(TrainingPlan)
         .where(TrainingPlan.athlete_id == athlete.id)
         .options(selectinload(TrainingPlan.workouts))
         .order_by(TrainingPlan.created_at.desc())
+        .offset(params.offset)
+        .limit(params.page_size)
     )
-    plans = result.scalars().all()
-    return [TrainingPlanResponse.model_validate(p) for p in plans]
+    items = [TrainingPlanResponse.model_validate(p) for p in result.scalars().all()]
+    return Page.build(items, total, params.page, params.page_size)
 
 
 @router.post("", response_model=TrainingPlanResponse, status_code=201)
