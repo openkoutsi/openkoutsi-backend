@@ -1,0 +1,11 @@
+[project]
+name = "strava-bridge"
+version = "0.1.0"
+description = "Strava webhook bridge for openkoutsi"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi[standard]",
+    "sqlalchemy[asyncio]>=2.0",
+    "aiosqlite",
+    "pydantic-settings",
+]

@@ -1,0 +1,33 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+.coverage
+*.py,cover
+
+# Virtual environments
+.venv
+
+# My own FIT files
+testdata/
+test.json
+data/
+
+# Database files
+*.db*
+
+# Env files
+.env
+
+# VSCode settings
+.vscode/
+
+# Uploads
+uploads/
+
+.context/
+memory/
+.audits/

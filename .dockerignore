@@ -1,0 +1,27 @@
+# Other services (each has its own build context)
+strava_bridge/
+wahoo_bridge/
+
+# Python
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/.venv/
+
+# Runtime data
+*.db
+*.db-shm
+*.db-wal
+uploads/
+
+# Secrets and local config
+.env
+
+# Dev/docs
+.git/
+tests/
+testdata/
+systemd/
+*.md
+TODO.md
+plan.md
