@@ -1,4 +1,14 @@
+"""Alembic env for per-user DBs.
+
+Usage:
+    USER_ID=<user-uuid> alembic -c backend/alembic-user.ini upgrade head
+
+The USER_ID environment variable selects which user DB to migrate.
+All user DBs share the same schema version.
+"""
+
 import asyncio
+import os
 from logging.config import fileConfig
 
 from alembic import context
@@ -7,22 +17,24 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from backend.app.core.config import settings
-
-# Import all models so Alembic sees their metadata
-import backend.app.models.team_orm  # noqa: F401 — populate Base.metadata
-from backend.app.db.base import Base
+import backend.app.models.message_orm  # noqa: F401 — populate UserBase.metadata
+import backend.app.models.user_orm  # noqa: F401 — populate UserBase.metadata
+from backend.app.db.base import UserBase
 
 config = context.config
 
-# Override sqlalchemy.url from settings so env vars are respected
+user_id = os.environ.get("USER_ID") or config.get_main_option("user_id", "")
+if not user_id:
+    raise RuntimeError("Set USER_ID environment variable to specify which user DB to migrate")
+
 config.set_main_option(
-    "sqlalchemy.url", f"sqlite+aiosqlite:///{settings.database_path}"
+    "sqlalchemy.url", f"sqlite+aiosqlite:///{settings.user_db_path(user_id)}"
 )
 
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-target_metadata = Base.metadata
+target_metadata = UserBase.metadata
 
 
 def run_migrations_offline() -> None:

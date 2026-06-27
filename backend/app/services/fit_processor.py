@@ -18,7 +18,7 @@ from openkoutsi.training_math import (
     compute_power_bests,
     compute_distance_bests,
 )
-from backend.app.models.team_orm import (
+from backend.app.models.user_orm import (
     Activity,
     ActivityDistanceBest,
     ActivityInterval,

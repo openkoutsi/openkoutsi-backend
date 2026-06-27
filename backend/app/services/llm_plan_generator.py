@@ -5,7 +5,7 @@ Uses any OpenAI-compatible chat completions API (Ollama, OpenAI, Mistral, etc.)
 via httpx. No additional dependencies required.
 
 LLM settings are resolved with the same priority as the chat proxy:
-  athlete app_settings → team settings → global env vars (LLM_BASE_URL / LLM_API_KEY / LLM_MODEL)
+  athlete app_settings → instance settings → global env vars (LLM_BASE_URL / LLM_API_KEY / LLM_MODEL)
 """
 
 from __future__ import annotations
@@ -18,8 +18,8 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models.registry_orm import Team
-from ..models.team_orm import TrainingPlan, PlannedWorkout, Athlete, DailyMetric
+from ..models.registry_orm import InstanceSettings
+from ..models.user_orm import TrainingPlan, PlannedWorkout, Athlete, DailyMetric
 from ..schemas.plans import PlanConfig
 from .llm_client import call_llm, extract_json, resolve_llm_config
 
@@ -158,8 +158,7 @@ async def generate_plan_weeks_llm(
     num_weeks: int,
     goal: Optional[str],
     session: AsyncSession,
-    team: Team | None = None,
-    team_id: str = "",
+    instance: InstanceSettings | None = None,
     user_id: str = "",
 ) -> list[list[dict]]:
     """Call the LLM and return parsed weeks (list of weeks, each a list of day dicts).
@@ -167,7 +166,7 @@ async def generate_plan_weeks_llm(
     Persistence-free so callers can build PlannedWorkout rows for either a new or
     an existing plan.
     """
-    base_url, model, api_key = _resolve_llm_config(athlete, team, team_id, user_id)
+    base_url, model, api_key = _resolve_llm_config(athlete, instance, user_id)
 
     # Fetch athlete's latest CTL for context
     ctl: Optional[float] = None
@@ -206,8 +205,7 @@ async def generate_plan_llm(
     num_weeks: int,
     goal: Optional[str],
     session: AsyncSession,
-    team: Team | None = None,
-    team_id: str = "",
+    instance: InstanceSettings | None = None,
     user_id: str = "",
 ) -> TrainingPlan:
     """Generate a TrainingPlan using an LLM via OpenAI-compatible API."""
@@ -218,8 +216,7 @@ async def generate_plan_llm(
         num_weeks=num_weeks,
         goal=goal,
         session=session,
-        team=team,
-        team_id=team_id,
+        instance=instance,
         user_id=user_id,
     )
 

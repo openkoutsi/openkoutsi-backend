@@ -7,7 +7,7 @@ from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.models.team_orm import TrainingPlan, PlannedWorkout
+from backend.app.models.user_orm import TrainingPlan, PlannedWorkout
 from openkoutsi.plan_schema import PlanConfig
 from openkoutsi.plan_builder import week_template, build_week_from_config
 

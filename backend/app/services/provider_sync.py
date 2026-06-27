@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.core.config import settings
 from backend.app.core.file_encryption import encrypt_file
 from backend.app.models.registry_orm import ProviderConnection
-from backend.app.models.team_orm import (
+from backend.app.models.user_orm import (
     Activity,
     ActivityDistanceBest,
     ActivityInterval,
@@ -60,15 +60,15 @@ _DUPLICATE_WINDOW = timedelta(minutes=5)
 # Sentinel: _fill_from_source uses this to know FIT hasn't been fetched yet
 _NOTFETCHED = object()
 
-# Per-(team_id, athlete_id) lock that serialises the dedup-window-query +
+# Per-(user_id, athlete_id) lock that serialises the dedup-window-query +
 # create/attach operation. Prevents the race condition where two concurrent
 # syncs both see "no existing activity" and each create a new one for the
 # same real-world workout.
 _activity_creation_locks: dict[tuple[str, str], asyncio.Lock] = {}
 
 
-def _get_activity_lock(team_id: str, athlete_id: str) -> asyncio.Lock:
-    key = (team_id, athlete_id)
+def _get_activity_lock(user_id: str, athlete_id: str) -> asyncio.Lock:
+    key = (user_id, athlete_id)
     if key not in _activity_creation_locks:
         _activity_creation_locks[key] = asyncio.Lock()
     return _activity_creation_locks[key]
@@ -154,7 +154,7 @@ async def sync_provider_activities(
     connection: ProviderConnection,
     session: AsyncSession,
     *,
-    team_id: str,
+    user_id: str,
     access_token: str | None = None,
 ) -> tuple[int, date | None]:
     """
@@ -251,7 +251,7 @@ async def sync_provider_activities(
             # READ COMMITTED isolation (and SQLite WAL mode) another session
             # that acquires the lock after the flush but before the commit will
             # still see an empty dedup window and create a duplicate.
-            async with _get_activity_lock(team_id, athlete.id):
+            async with _get_activity_lock(user_id, athlete.id):
                 # ── Activity within the time window? ──────────────────────
                 if norm.start_time is not None:
                     act_result = await session.execute(
@@ -312,7 +312,7 @@ async def sync_provider_activities(
                             access_token,
                             athlete,
                             session,
-                            team_id=team_id,
+                            user_id=user_id,
                             prefetched_fit=prefetched_fit,
                         )
                         count += 1
@@ -365,7 +365,7 @@ async def sync_provider_activities(
             # FIT download and stream processing happen outside the lock —
             # they are slow I/O operations that don't need to be serialised.
             await _populate_activity(
-                activity, src, norm, client, access_token, athlete, session, team_id=team_id
+                activity, src, norm, client, access_token, athlete, session, user_id=user_id
             )
             count += 1
 
@@ -386,7 +386,7 @@ async def sync_provider_activities(
 
                 activity.analysis_status = "pending"
                 await session.commit()
-                asyncio.create_task(analyze_activity_bg(activity.id, athlete.id, team_id))
+                asyncio.create_task(analyze_activity_bg(activity.id, athlete.id, user_id))
 
         page += 1
 
@@ -405,11 +405,11 @@ async def _populate_activity(
     athlete: Athlete,
     session: AsyncSession,
     *,
-    team_id: str,
+    user_id: str,
     prefetched_fit=_NOTFETCHED,
 ) -> None:
     """Populate a new Activity's metrics, streams and bests from src's data."""
-    await _fill_from_source(activity, src, norm, client, access_token, athlete, session, team_id=team_id, prefetched_fit=prefetched_fit)
+    await _fill_from_source(activity, src, norm, client, access_token, athlete, session, user_id=user_id, prefetched_fit=prefetched_fit)
 
 
 async def _repopulate_activity(
@@ -421,7 +421,7 @@ async def _repopulate_activity(
     athlete: Athlete,
     session: AsyncSession,
     *,
-    team_id: str,
+    user_id: str,
     prefetched_fit=_NOTFETCHED,
 ) -> None:
     """Re-populate an existing Activity's metrics with data from a higher-priority source.
@@ -453,7 +453,7 @@ async def _repopulate_activity(
         access_token,
         athlete,
         session,
-        team_id=team_id,
+        user_id=user_id,
         prefetched_fit=prefetched_fit,
     )
 
@@ -467,7 +467,7 @@ async def _fill_from_source(
     athlete: Athlete,
     session: AsyncSession,
     *,
-    team_id: str,
+    user_id: str,
     prefetched_fit=_NOTFETCHED,
 ) -> None:
     """Core import logic: try FIT first, fall back to stream API.
@@ -487,7 +487,7 @@ async def _fill_from_source(
         fit_bytes = prefetched_fit  # type: ignore[assignment]
 
     if fit_bytes is not None:
-        storage_dir = settings.team_fit_dir(team_id, athlete.global_user_id)
+        storage_dir = settings.user_fit_dir(athlete.global_user_id)
         storage_dir.mkdir(parents=True, exist_ok=True)
         fit_path = storage_dir / f"{activity.id}.fit"
         fit_path.write_bytes(fit_bytes)
@@ -500,7 +500,7 @@ async def _fill_from_source(
 
         encrypted = False
         try:
-            encrypt_file(fit_path, team_id, athlete.global_user_id)
+            encrypt_file(fit_path, athlete.global_user_id)
             encrypted = True
         except Exception:
             log.warning("FIT encryption failed for activity %s", activity.id)

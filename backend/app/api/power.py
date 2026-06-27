@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.deps import get_ctx_and_session
-from backend.app.models.team_orm import Activity, ActivityPowerBest, Athlete, WeightLog
+from backend.app.models.user_orm import Activity, ActivityPowerBest, Athlete, WeightLog
 from backend.app.schemas.power import AllTimePowerBestsResponse, FtpEstimateResponse, PowerBestEntry
 from openkoutsi.training_math import (
     CP_FIT_DURATIONS,
@@ -16,7 +16,7 @@ from openkoutsi.training_math import (
     estimate_ftp_simple,
 )
 
-router = APIRouter(prefix="/power", tags=["power"])
+router = APIRouter(prefix="/metrics", tags=["metrics"])
 
 TOP_N = 3
 
@@ -29,7 +29,8 @@ async def _get_athlete(global_user_id: str, session: AsyncSession) -> Athlete:
     return athlete
 
 
-@router.get("/bests", response_model=AllTimePowerBestsResponse)
+@router.get("/bests/power", response_model=AllTimePowerBestsResponse,
+            operation_id="getPowerBests", summary="All-time power bests")
 async def get_power_bests(
     days: Optional[int] = Query(None, ge=1, description="Restrict to bests from the past N days. Omit for all-time."),
     ctx_session=Depends(get_ctx_and_session),
@@ -109,7 +110,8 @@ async def get_power_bests(
     return AllTimePowerBestsResponse(bests=entries)
 
 
-@router.get("/ftp-estimate", response_model=FtpEstimateResponse)
+@router.get("/ftp", response_model=FtpEstimateResponse,
+            operation_id="getFtpEstimate", summary="Current FTP estimate")
 async def get_ftp_estimate(
     days: Optional[int] = Query(None, ge=1, description="Estimate from bests in the past N days. Omit for all-time."),
     ctx_session=Depends(get_ctx_and_session),

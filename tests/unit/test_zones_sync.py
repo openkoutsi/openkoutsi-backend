@@ -9,7 +9,7 @@ import httpx
 import pytest
 
 from backend.app.models.registry_orm import ProviderConnection
-from backend.app.models.team_orm import Athlete
+from backend.app.models.user_orm import Athlete
 from backend.app.services.providers.base import ZoneData
 from backend.app.services.providers.strava import StravaProviderClient, _normalize_strava_zones
 from backend.app.services.providers.wahoo import _normalize_wahoo_zones

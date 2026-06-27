@@ -24,7 +24,7 @@ _GIF  = b"GIF89a"
 
 class TestGetAthlete:
     async def test_returns_profile_after_registration(self, client, auth_headers):
-        resp = await client.get("/api/athlete/", headers=auth_headers)
+        resp = await client.get("/api/athlete", headers=auth_headers)
         assert resp.status_code == 200
         data = resp.json()
         assert "id" in data
@@ -34,13 +34,13 @@ class TestGetAthlete:
         assert data["connected_providers"] == []
 
     async def test_unauthenticated_returns_401(self, client):
-        resp = await client.get("/api/athlete/")
+        resp = await client.get("/api/athlete")
         assert resp.status_code == 401
 
 
 class TestUpdateAthlete:
     async def test_set_ftp_records_test_history(self, client, auth_headers):
-        resp = await client.put("/api/athlete/", json={"ftp": 280}, headers=auth_headers)
+        resp = await client.patch("/api/athlete", json={"ftp": 280}, headers=auth_headers)
         assert resp.status_code == 200
         data = resp.json()
         assert data["ftp"] == 280
@@ -49,8 +49,8 @@ class TestUpdateAthlete:
         assert data["ftp_tests"][0]["method"] == "manual"
 
     async def test_ftp_test_method_recorded_when_provided(self, client, auth_headers):
-        resp = await client.put(
-            "/api/athlete/",
+        resp = await client.patch(
+            "/api/athlete",
             json={"ftp": 265, "ftp_test_method": "20min"},
             headers=auth_headers,
         )
@@ -59,16 +59,16 @@ class TestUpdateAthlete:
         assert data["ftp_tests"][-1]["method"] == "20min"
 
     async def test_invalid_ftp_test_method_rejected(self, client, auth_headers):
-        resp = await client.put(
-            "/api/athlete/",
+        resp = await client.patch(
+            "/api/athlete",
             json={"ftp": 265, "ftp_test_method": "xyz"},
             headers=auth_headers,
         )
         assert resp.status_code == 422
 
     async def test_ftp_test_method_ignored_without_ftp(self, client, auth_headers):
-        resp = await client.put(
-            "/api/athlete/",
+        resp = await client.patch(
+            "/api/athlete",
             json={"max_hr": 190, "ftp_test_method": "cp"},
             headers=auth_headers,
         )
@@ -76,16 +76,16 @@ class TestUpdateAthlete:
         assert resp.json()["ftp_tests"] == []
 
     async def test_updating_ftp_twice_preserves_history(self, client, auth_headers):
-        await client.put("/api/athlete/", json={"ftp": 250}, headers=auth_headers)
-        resp = await client.put("/api/athlete/", json={"ftp": 280}, headers=auth_headers)
+        await client.patch("/api/athlete", json={"ftp": 250}, headers=auth_headers)
+        resp = await client.patch("/api/athlete", json={"ftp": 280}, headers=auth_headers)
         assert resp.status_code == 200
         data = resp.json()
         assert data["ftp"] == 280
         assert len(data["ftp_tests"]) == 2
 
     async def test_partial_update_leaves_other_fields_unchanged(self, client, auth_headers):
-        await client.put("/api/athlete/", json={"ftp": 300, "max_hr": 185}, headers=auth_headers)
-        resp = await client.put("/api/athlete/", json={"name": "Test Rider"}, headers=auth_headers)
+        await client.patch("/api/athlete", json={"ftp": 300, "max_hr": 185}, headers=auth_headers)
+        resp = await client.patch("/api/athlete", json={"name": "Test Rider"}, headers=auth_headers)
         assert resp.status_code == 200
         data = resp.json()
         assert data["name"] == "Test Rider"
@@ -97,19 +97,19 @@ class TestUpdateAthlete:
             {"low": 0, "high": 130, "name": "Z1"},
             {"low": 130, "high": 155, "name": "Z2"},
         ]
-        resp = await client.put("/api/athlete/", json={"hr_zones": zones}, headers=auth_headers)
+        resp = await client.patch("/api/athlete", json={"hr_zones": zones}, headers=auth_headers)
         assert resp.status_code == 200
         assert len(resp.json()["hr_zones"]) == 2
 
     async def test_unauthenticated_returns_401(self, client):
-        resp = await client.put("/api/athlete/", json={"ftp": 300})
+        resp = await client.patch("/api/athlete", json={"ftp": 300})
         assert resp.status_code == 401
 
 
 class TestPatchAthlete:
     async def test_patch_partial_update(self, client, auth_headers):
-        await client.put("/api/athlete/", json={"ftp": 300, "max_hr": 185}, headers=auth_headers)
-        resp = await client.patch("/api/athlete/", json={"name": "Patched Rider"}, headers=auth_headers)
+        await client.patch("/api/athlete", json={"ftp": 300, "max_hr": 185}, headers=auth_headers)
+        resp = await client.patch("/api/athlete", json={"name": "Patched Rider"}, headers=auth_headers)
         assert resp.status_code == 200
         data = resp.json()
         assert data["name"] == "Patched Rider"
@@ -117,7 +117,7 @@ class TestPatchAthlete:
         assert data["max_hr"] == 185
 
     async def test_patch_unauthenticated_returns_401(self, client):
-        resp = await client.patch("/api/athlete/", json={"ftp": 300})
+        resp = await client.patch("/api/athlete", json={"ftp": 300})
         assert resp.status_code == 401
 
 
@@ -131,8 +131,8 @@ class TestLlmApiKeyHandling:
 
     async def test_saving_key_does_not_return_plaintext(self, client, auth_headers):
         with self._patch_enc_key():
-            resp = await client.put(
-                "/api/athlete/",
+            resp = await client.patch(
+                "/api/athlete",
                 json={"app_settings": {"llm_base_url": "http://localhost:11434/v1", "llm_api_key": "sk-secret"}},
                 headers=auth_headers,
             )
@@ -144,8 +144,8 @@ class TestLlmApiKeyHandling:
 
     async def test_key_set_indicator_is_true_after_saving(self, client, auth_headers):
         with self._patch_enc_key():
-            resp = await client.put(
-                "/api/athlete/",
+            resp = await client.patch(
+                "/api/athlete",
                 json={"app_settings": {"llm_base_url": "http://localhost:11434/v1", "llm_api_key": "sk-secret"}},
                 headers=auth_headers,
             )
@@ -153,39 +153,39 @@ class TestLlmApiKeyHandling:
 
     async def test_get_athlete_never_returns_encrypted_key(self, client, auth_headers):
         with self._patch_enc_key():
-            await client.put(
-                "/api/athlete/",
+            await client.patch(
+                "/api/athlete",
                 json={"app_settings": {"llm_api_key": "sk-secret"}},
                 headers=auth_headers,
             )
-            resp = await client.get("/api/athlete/", headers=auth_headers)
+            resp = await client.get("/api/athlete", headers=auth_headers)
         settings = resp.json()["app_settings"]
         assert "llm_api_key" not in settings
         assert "llm_api_key_enc" not in settings
 
     async def test_clearing_key_sets_indicator_to_false(self, client, auth_headers):
         with self._patch_enc_key():
-            await client.put(
-                "/api/athlete/",
+            await client.patch(
+                "/api/athlete",
                 json={"app_settings": {"llm_api_key": "sk-secret"}},
                 headers=auth_headers,
             )
-            resp = await client.put(
-                "/api/athlete/",
+            resp = await client.patch(
+                "/api/athlete",
                 json={"app_settings": {"llm_api_key": None}},
                 headers=auth_headers,
             )
         assert resp.json()["app_settings"]["llm_api_key_set"] is False
 
     async def test_no_key_indicator_is_false_by_default(self, client, auth_headers):
-        resp = await client.get("/api/athlete/", headers=auth_headers)
+        resp = await client.get("/api/athlete", headers=auth_headers)
         assert resp.json()["app_settings"].get("llm_api_key_set") is False
 
     async def test_saving_key_without_encryption_key_returns_503(self, client, auth_headers):
         from backend.app.core import config
         with patch.object(config.settings, "encryption_key", None):
-            resp = await client.put(
-                "/api/athlete/",
+            resp = await client.patch(
+                "/api/athlete",
                 json={"app_settings": {"llm_api_key": "sk-secret"}},
                 headers=auth_headers,
             )
@@ -199,8 +199,8 @@ class TestExportAthlete:
         assert "application/zip" in resp.headers["content-type"]
 
     async def test_export_zip_contains_profile_json(self, client, auth_headers):
-        await client.put(
-            "/api/athlete/",
+        await client.patch(
+            "/api/athlete",
             json={"ftp": 280, "name": "Test Rider"},
             headers=auth_headers,
         )
@@ -218,7 +218,7 @@ class TestExportAthlete:
     async def test_export_zip_contains_activities_json(self, client, auth_headers):
         for i in range(2):
             await client.post(
-                "/api/activities/",
+                "/api/activities",
                 json={
                     "sport_type": "Ride",
                     "start_time": f"2025-06-0{i + 1}T10:00:00Z",
@@ -253,7 +253,7 @@ class TestExportAthlete:
         """Exported zip contains valid (decrypted) FIT bytes even when files are encrypted at rest."""
         from backend.app.core import config as cfg
         from backend.app.core.file_encryption import encrypt_file
-        from backend.app.models.team_orm import Activity, Athlete
+        from backend.app.models.user_orm import Activity, Athlete
 
         test_key = Fernet.generate_key().decode()
 
@@ -266,7 +266,7 @@ class TestExportAthlete:
         assert upload_resp.status_code == 201
         activity_id = upload_resp.json()["id"]
 
-        from backend.app.models.team_orm import ActivitySource
+        from backend.app.models.user_orm import ActivitySource
         act_result = await session.execute(select(Activity).where(Activity.id == activity_id))
         activity = act_result.scalar_one()
         src_result = await session.execute(
@@ -305,7 +305,7 @@ def avatar_dir(tmp_path):
     """Redirect avatar storage to a temp directory for the duration of the test."""
     d = tmp_path / "avatars"
     with patch("backend.app.api.athlete.settings") as mock_settings:
-        mock_settings.team_avatar_dir.return_value = d
+        mock_settings.user_avatar_dir.return_value = d
         mock_settings.frontend_url = ""
         yield d
 
@@ -314,7 +314,7 @@ def avatar_dir(tmp_path):
 
 class TestAvatar:
     async def test_avatar_url_is_null_by_default(self, client, auth_headers):
-        resp = await client.get("/api/athlete/", headers=auth_headers)
+        resp = await client.get("/api/athlete", headers=auth_headers)
         assert resp.status_code == 200
         assert resp.json()["avatar_url"] is None
 
@@ -388,7 +388,7 @@ class TestAvatar:
             headers=auth_headers,
             files={"file": ("photo.jpg", _JPEG + b"image-data", "image/jpeg")},
         )
-        athlete_id = (await client.get("/api/athlete/", headers=auth_headers)).json()["id"]
+        athlete_id = (await client.get("/api/athlete", headers=auth_headers)).json()["id"]
         resp = await client.get(f"/api/athlete/{athlete_id}/avatar", headers=auth_headers)
         assert resp.status_code == 200
 
@@ -399,7 +399,7 @@ class TestAvatar:
             headers=auth_headers,
             files={"file": ("photo.jpg", image_bytes, "image/jpeg")},
         )
-        athlete_id = (await client.get("/api/athlete/", headers=auth_headers)).json()["id"]
+        athlete_id = (await client.get("/api/athlete", headers=auth_headers)).json()["id"]
         resp = await client.get(f"/api/athlete/{athlete_id}/avatar", headers=auth_headers)
         assert resp.status_code == 200
         assert resp.content == image_bytes
@@ -409,7 +409,7 @@ class TestAvatar:
         assert resp.status_code == 404
 
     async def test_get_avatar_when_none_set_returns_404(self, client, auth_headers):
-        athlete_id = (await client.get("/api/athlete/", headers=auth_headers)).json()["id"]
+        athlete_id = (await client.get("/api/athlete", headers=auth_headers)).json()["id"]
         resp = await client.get(f"/api/athlete/{athlete_id}/avatar", headers=auth_headers)
         assert resp.status_code == 404
 
@@ -457,14 +457,14 @@ class TestAvatar:
         assert len(files) == 1
         assert files[0].suffix == ".png"
 
-    async def test_avatar_url_includes_athlete_id(self, client, auth_headers, avatar_dir):
-        athlete_id = (await client.get("/api/athlete/", headers=auth_headers)).json()["id"]
+    async def test_avatar_url_includes_user_id(self, client, auth_headers, avatar_dir):
+        user_id = (await client.get("/api/athlete", headers=auth_headers)).json()["user_id"]
         resp = await client.post(
             "/api/athlete/avatar",
             headers=auth_headers,
             files={"file": ("photo.jpg", _JPEG + b"bytes", "image/jpeg")},
         )
-        assert athlete_id in resp.json()["avatar_url"]
+        assert user_id in resp.json()["avatar_url"]
 
 
 class TestTrainingStatus:
@@ -508,7 +508,7 @@ class TestTrainingStatus:
 
     async def test_get_training_status_after_analysis(self, client, auth_headers, session):
         from datetime import date
-        from backend.app.models.team_orm import Athlete
+        from backend.app.models.user_orm import Athlete
         from sqlalchemy import select
 
         result = await session.execute(
@@ -532,7 +532,7 @@ class TestTrainingStatus:
     ):
         from datetime import date, timedelta
         from unittest.mock import AsyncMock
-        from backend.app.models.team_orm import Athlete
+        from backend.app.models.user_orm import Athlete
         from sqlalchemy import select
 
         result = await session.execute(
@@ -554,7 +554,7 @@ class TestTrainingStatus:
         assert resp.json()["status"] == "pending"
 
     async def test_pending_with_null_updated_at_resets_to_error(self, client, auth_headers, session):
-        from backend.app.models.team_orm import Athlete
+        from backend.app.models.user_orm import Athlete
 
         result = await session.execute(
             select(Athlete).where(Athlete.global_user_id == "test-user-00000000")
@@ -570,7 +570,7 @@ class TestTrainingStatus:
 
     async def test_pending_older_than_timeout_resets_to_error(self, client, auth_headers, session):
         from datetime import timedelta, timezone
-        from backend.app.models.team_orm import Athlete
+        from backend.app.models.user_orm import Athlete
 
         result = await session.execute(
             select(Athlete).where(Athlete.global_user_id == "test-user-00000000")

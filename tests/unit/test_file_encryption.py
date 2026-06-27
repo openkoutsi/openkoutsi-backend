@@ -25,8 +25,8 @@ class TestEncryptDecryptRoundtrip:
 
         with _patch_key():
             from backend.app.core.file_encryption import decrypt_file, encrypt_file
-            encrypt_file(f, _TEAM_ID, _USER_ID)
-            result = decrypt_file(f, _TEAM_ID, _USER_ID)
+            encrypt_file(f, _USER_ID)
+            result = decrypt_file(f, _USER_ID)
 
         assert result == original
 
@@ -37,7 +37,7 @@ class TestEncryptDecryptRoundtrip:
 
         with _patch_key():
             from backend.app.core.file_encryption import encrypt_file
-            encrypt_file(f, _TEAM_ID, _USER_ID)
+            encrypt_file(f, _USER_ID)
 
         assert f.read_bytes() != original
 
@@ -51,8 +51,8 @@ class TestEncryptDecryptRoundtrip:
 
         with _patch_key():
             from backend.app.core.file_encryption import encrypt_file
-            encrypt_file(fa, _TEAM_ID, "user-a")
-            encrypt_file(fb, _TEAM_ID, "user-b")
+            encrypt_file(fa, "user-a")
+            encrypt_file(fb, "user-b")
 
         assert fa.read_bytes() != fb.read_bytes()
 
@@ -65,9 +65,9 @@ class TestEncryptDecryptRoundtrip:
 
         with _patch_key():
             from backend.app.core.file_encryption import decrypt_file, encrypt_file
-            encrypt_file(f, _TEAM_ID, "user-a")
+            encrypt_file(f, "user-a")
             with pytest.raises(InvalidToken):
-                decrypt_file(f, _TEAM_ID, "user-b")
+                decrypt_file(f, "user-b")
 
     def test_missing_encryption_key_raises_runtime_error(self, tmp_path: Path):
         f = tmp_path / "test.fit"
@@ -76,15 +76,15 @@ class TestEncryptDecryptRoundtrip:
         with _patch_key(key=None):
             from backend.app.core.file_encryption import encrypt_file
             with pytest.raises(RuntimeError, match="ENCRYPTION_KEY"):
-                encrypt_file(f, _TEAM_ID, _USER_ID)
+                encrypt_file(f, _USER_ID)
 
     def test_same_user_key_is_deterministic(self, tmp_path: Path):
         """Deriving the key twice for the same user yields the same Fernet instance."""
-        from backend.app.core.file_encryption import _derive_fit_fernet
+        from backend.app.core.file_encryption import _derive_subkey_fernet
 
         with _patch_key():
-            k1 = _derive_fit_fernet(_TEAM_ID, "user-xyz")
-            k2 = _derive_fit_fernet(_TEAM_ID, "user-xyz")
+            k1 = _derive_subkey_fernet("user-xyz", "fit-file")
+            k2 = _derive_subkey_fernet("user-xyz", "fit-file")
 
         ciphertext = k1.encrypt(b"hello")
         assert k2.decrypt(ciphertext) == b"hello"
@@ -97,8 +97,8 @@ class TestEncryptDecryptSecret:
         with _patch_key():
             from backend.app.core.file_encryption import decrypt_secret, encrypt_secret
 
-            token = encrypt_secret("sk-mysecretkey", _TEAM_ID, _USER_ID)
-            result = decrypt_secret(token, _TEAM_ID, _USER_ID)
+            token = encrypt_secret("sk-mysecretkey", _USER_ID)
+            result = decrypt_secret(token, _USER_ID)
 
         assert result == "sk-mysecretkey"
 
@@ -106,7 +106,7 @@ class TestEncryptDecryptSecret:
         with _patch_key():
             from backend.app.core.file_encryption import encrypt_secret
 
-            token = encrypt_secret("hunter2", _TEAM_ID, _USER_ID)
+            token = encrypt_secret("hunter2", _USER_ID)
 
         assert "hunter2" not in token
 
@@ -114,8 +114,8 @@ class TestEncryptDecryptSecret:
         with _patch_key():
             from backend.app.core.file_encryption import encrypt_secret
 
-            t1 = encrypt_secret("same-key", _TEAM_ID, "user-a")
-            t2 = encrypt_secret("same-key", _TEAM_ID, "user-b")
+            t1 = encrypt_secret("same-key", "user-a")
+            t2 = encrypt_secret("same-key", "user-b")
 
         assert t1 != t2
 
@@ -125,20 +125,17 @@ class TestEncryptDecryptSecret:
         with _patch_key():
             from backend.app.core.file_encryption import decrypt_secret, encrypt_secret
 
-            token = encrypt_secret("secret", _TEAM_ID, "user-a")
+            token = encrypt_secret("secret", "user-a")
             with pytest.raises(InvalidToken):
-                decrypt_secret(token, _TEAM_ID, "user-b")
+                decrypt_secret(token, "user-b")
 
     def test_secrets_key_is_independent_from_fit_file_key(self):
         """The LLM-key derivation uses a different HKDF info string."""
         with _patch_key():
-            from backend.app.core.file_encryption import (
-                _derive_fit_fernet,
-                _derive_secret_fernet,
-            )
+            from backend.app.core.file_encryption import _derive_subkey_fernet
 
-            fit_key = _derive_fit_fernet(_TEAM_ID, "user-x")
-            sec_key = _derive_secret_fernet(_TEAM_ID, "user-x")
+            fit_key = _derive_subkey_fernet("user-x", "fit-file")
+            sec_key = _derive_subkey_fernet("user-x", "user-secret")
 
         ciphertext = fit_key.encrypt(b"data")
         with pytest.raises(Exception):
@@ -149,4 +146,4 @@ class TestEncryptDecryptSecret:
             from backend.app.core.file_encryption import encrypt_secret
 
             with pytest.raises(RuntimeError, match="ENCRYPTION_KEY"):
-                encrypt_secret("value", _TEAM_ID, _USER_ID)
+                encrypt_secret("value", _USER_ID)

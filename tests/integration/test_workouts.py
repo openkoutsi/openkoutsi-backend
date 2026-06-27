@@ -50,25 +50,25 @@ class TestListExportFormats:
 
 class TestListWorkouts:
     async def test_empty_for_new_athlete(self, client, auth_headers):
-        resp = await client.get("/api/workouts/", headers=auth_headers)
+        resp = await client.get("/api/workouts", headers=auth_headers)
         assert resp.status_code == 200
         assert resp.json() == []
 
     async def test_returns_created_workout(self, client, auth_headers):
-        await client.post("/api/workouts/", json=_WORKOUT_BODY, headers=auth_headers)
-        resp = await client.get("/api/workouts/", headers=auth_headers)
+        await client.post("/api/workouts", json=_WORKOUT_BODY, headers=auth_headers)
+        resp = await client.get("/api/workouts", headers=auth_headers)
         assert resp.status_code == 200
         assert len(resp.json()) == 1
         assert resp.json()[0]["name"] == "Threshold Session"
 
     async def test_unauthenticated_returns_401(self, client):
-        resp = await client.get("/api/workouts/")
+        resp = await client.get("/api/workouts")
         assert resp.status_code == 401
 
 
 class TestCreateWorkout:
     async def test_creates_workout_with_correct_fields(self, client, auth_headers):
-        resp = await client.post("/api/workouts/", json=_WORKOUT_BODY, headers=auth_headers)
+        resp = await client.post("/api/workouts", json=_WORKOUT_BODY, headers=auth_headers)
         assert resp.status_code == 201
         data = resp.json()
         assert data["name"] == "Threshold Session"
@@ -76,14 +76,14 @@ class TestCreateWorkout:
         assert len(data["steps"]) == 2
 
     async def test_estimated_duration_calculated(self, client, auth_headers):
-        resp = await client.post("/api/workouts/", json=_WORKOUT_BODY, headers=auth_headers)
+        resp = await client.post("/api/workouts", json=_WORKOUT_BODY, headers=auth_headers)
         assert resp.status_code == 201
         # warmup: 600s + active: 1800s = 2400s
         assert resp.json()["estimated_duration_s"] == 2400
 
     async def test_creates_workout_with_repeat_block(self, client, auth_headers):
         body = {"name": "Intervals", "steps": [_REPEAT]}
-        resp = await client.post("/api/workouts/", json=body, headers=auth_headers)
+        resp = await client.post("/api/workouts", json=body, headers=auth_headers)
         assert resp.status_code == 201
         assert len(resp.json()["steps"]) == 1
 
@@ -98,17 +98,17 @@ class TestCreateWorkout:
         mid_repeat = {"kind": "repeat", "repeat_count": 2, "steps": [inner_repeat]}
         outer_repeat = {"kind": "repeat", "repeat_count": 2, "steps": [mid_repeat]}
         body = {"name": "Deeply Nested", "steps": [outer_repeat]}
-        resp = await client.post("/api/workouts/", json=body, headers=auth_headers)
+        resp = await client.post("/api/workouts", json=body, headers=auth_headers)
         assert resp.status_code == 422
 
     async def test_unauthenticated_returns_401(self, client):
-        resp = await client.post("/api/workouts/", json=_WORKOUT_BODY)
+        resp = await client.post("/api/workouts", json=_WORKOUT_BODY)
         assert resp.status_code == 401
 
 
 class TestGetWorkout:
     async def test_returns_workout_by_id(self, client, auth_headers):
-        create_resp = await client.post("/api/workouts/", json=_WORKOUT_BODY, headers=auth_headers)
+        create_resp = await client.post("/api/workouts", json=_WORKOUT_BODY, headers=auth_headers)
         workout_id = create_resp.json()["id"]
 
         resp = await client.get(f"/api/workouts/{workout_id}", headers=auth_headers)
@@ -126,7 +126,7 @@ class TestGetWorkout:
 
 class TestUpdateWorkout:
     async def test_update_name(self, client, auth_headers):
-        create_resp = await client.post("/api/workouts/", json=_WORKOUT_BODY, headers=auth_headers)
+        create_resp = await client.post("/api/workouts", json=_WORKOUT_BODY, headers=auth_headers)
         workout_id = create_resp.json()["id"]
 
         resp = await client.put(
@@ -138,7 +138,7 @@ class TestUpdateWorkout:
         assert resp.json()["name"] == "Renamed Workout"
 
     async def test_update_steps_recalculates_duration(self, client, auth_headers):
-        create_resp = await client.post("/api/workouts/", json=_WORKOUT_BODY, headers=auth_headers)
+        create_resp = await client.post("/api/workouts", json=_WORKOUT_BODY, headers=auth_headers)
         workout_id = create_resp.json()["id"]
 
         new_step = {
@@ -165,14 +165,14 @@ class TestUpdateWorkout:
 
 class TestDeleteWorkout:
     async def test_delete_returns_204(self, client, auth_headers):
-        create_resp = await client.post("/api/workouts/", json=_WORKOUT_BODY, headers=auth_headers)
+        create_resp = await client.post("/api/workouts", json=_WORKOUT_BODY, headers=auth_headers)
         workout_id = create_resp.json()["id"]
 
         resp = await client.delete(f"/api/workouts/{workout_id}", headers=auth_headers)
         assert resp.status_code == 204
 
     async def test_deleted_workout_returns_404(self, client, auth_headers):
-        create_resp = await client.post("/api/workouts/", json=_WORKOUT_BODY, headers=auth_headers)
+        create_resp = await client.post("/api/workouts", json=_WORKOUT_BODY, headers=auth_headers)
         workout_id = create_resp.json()["id"]
         await client.delete(f"/api/workouts/{workout_id}", headers=auth_headers)
 
@@ -186,7 +186,7 @@ class TestDeleteWorkout:
 
 class TestExportWorkout:
     async def test_export_json_format(self, client, auth_headers):
-        create_resp = await client.post("/api/workouts/", json=_WORKOUT_BODY, headers=auth_headers)
+        create_resp = await client.post("/api/workouts", json=_WORKOUT_BODY, headers=auth_headers)
         workout_id = create_resp.json()["id"]
 
         resp = await client.get(f"/api/workouts/{workout_id}/export/json", headers=auth_headers)
@@ -194,7 +194,7 @@ class TestExportWorkout:
         assert resp.headers["content-type"].startswith("application/json")
 
     async def test_export_zwift_format(self, client, auth_headers):
-        create_resp = await client.post("/api/workouts/", json=_WORKOUT_BODY, headers=auth_headers)
+        create_resp = await client.post("/api/workouts", json=_WORKOUT_BODY, headers=auth_headers)
         workout_id = create_resp.json()["id"]
 
         resp = await client.get(f"/api/workouts/{workout_id}/export/zwift", headers=auth_headers)
@@ -202,7 +202,7 @@ class TestExportWorkout:
         assert "attachment" in resp.headers["content-disposition"]
 
     async def test_unknown_format_returns_404(self, client, auth_headers):
-        create_resp = await client.post("/api/workouts/", json=_WORKOUT_BODY, headers=auth_headers)
+        create_resp = await client.post("/api/workouts", json=_WORKOUT_BODY, headers=auth_headers)
         workout_id = create_resp.json()["id"]
 
         resp = await client.get(

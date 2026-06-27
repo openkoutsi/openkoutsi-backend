@@ -12,7 +12,7 @@ _START = date(2025, 6, 2)  # A Monday
 class TestCreatePlan:
     async def test_creates_rule_based_plan_with_correct_structure(self, client, auth_headers):
         resp = await client.post(
-            "/api/plans/",
+            "/api/plans",
             json={"name": "Base Build", "start_date": str(_START), "weeks": 8},
             headers=auth_headers,
         )
@@ -28,7 +28,7 @@ class TestCreatePlan:
 
     async def test_end_date_calculated_correctly(self, client, auth_headers):
         resp = await client.post(
-            "/api/plans/",
+            "/api/plans",
             json={"name": "Plan", "start_date": str(_START), "weeks": 8},
             headers=auth_headers,
         )
@@ -36,14 +36,14 @@ class TestCreatePlan:
 
     async def test_creating_second_plan_archives_first(self, client, auth_headers):
         resp1 = await client.post(
-            "/api/plans/",
+            "/api/plans",
             json={"name": "Plan 1", "start_date": str(_START), "weeks": 4},
             headers=auth_headers,
         )
         plan1_id = resp1.json()["id"]
 
         await client.post(
-            "/api/plans/",
+            "/api/plans",
             json={"name": "Plan 2", "start_date": str(_START), "weeks": 4},
             headers=auth_headers,
         )
@@ -54,7 +54,7 @@ class TestCreatePlan:
 
     async def test_llm_without_configured_url_returns_400(self, client, auth_headers):
         resp = await client.post(
-            "/api/plans/",
+            "/api/plans",
             json={
                 "name": "LLM Plan",
                 "start_date": str(_START),
@@ -73,7 +73,7 @@ class TestCreatePlan:
 
     async def test_unauthenticated_returns_401(self, client):
         resp = await client.post(
-            "/api/plans/",
+            "/api/plans",
             json={"name": "X", "start_date": str(_START)},
         )
         assert resp.status_code == 401
@@ -82,7 +82,7 @@ class TestCreatePlan:
 class TestGetPlan:
     async def test_returns_plan_with_workouts(self, client, auth_headers):
         create_resp = await client.post(
-            "/api/plans/",
+            "/api/plans",
             json={"name": "My Plan", "start_date": str(_START), "weeks": 4},
             headers=auth_headers,
         )
@@ -106,7 +106,7 @@ class TestGetPlan:
 class TestUpdatePlan:
     async def test_update_plan_name(self, client, auth_headers):
         create_resp = await client.post(
-            "/api/plans/",
+            "/api/plans",
             json={"name": "Old Name", "start_date": str(_START), "weeks": 4},
             headers=auth_headers,
         )
@@ -122,7 +122,7 @@ class TestUpdatePlan:
 
     async def test_archive_plan(self, client, auth_headers):
         create_resp = await client.post(
-            "/api/plans/",
+            "/api/plans",
             json={"name": "Active Plan", "start_date": str(_START), "weeks": 4},
             headers=auth_headers,
         )
@@ -143,7 +143,7 @@ class TestUpdatePlan:
 class TestDeletePlan:
     async def test_delete_plan_returns_204(self, client, auth_headers):
         create_resp = await client.post(
-            "/api/plans/",
+            "/api/plans",
             json={"name": "Deletable", "start_date": str(_START), "weeks": 4},
             headers=auth_headers,
         )
@@ -153,7 +153,7 @@ class TestDeletePlan:
 
     async def test_deleted_plan_returns_404(self, client, auth_headers):
         create_resp = await client.post(
-            "/api/plans/",
+            "/api/plans",
             json={"name": "Gone", "start_date": str(_START), "weeks": 4},
             headers=auth_headers,
         )
@@ -217,11 +217,11 @@ class TestLlmPlanGeneration:
 
     async def test_llm_plan_created_when_url_configured(self, client, auth_headers, session):
         from sqlalchemy import select as sa_select
-        from backend.app.models.team_orm import Athlete
+        from backend.app.models.user_orm import Athlete
 
         # Set LLM URL on athlete
-        await client.put(
-            "/api/athlete/",
+        await client.patch(
+            "/api/athlete",
             json={"app_settings": {"llm_base_url": "http://localhost:11434/v1",
                                    "llm_model": "llama3.2"}},
             headers=auth_headers,
@@ -230,7 +230,7 @@ class TestLlmPlanGeneration:
         mock_http = await self._mock_llm_call(_make_llm_plan_json(4))
 
         with patch("httpx.AsyncClient", return_value=mock_http):
-            resp = await client.post("/api/plans/", json=_LLM_REQUEST_BODY, headers=auth_headers)
+            resp = await client.post("/api/plans", json=_LLM_REQUEST_BODY, headers=auth_headers)
 
         assert resp.status_code == 201
         data = resp.json()
@@ -238,8 +238,8 @@ class TestLlmPlanGeneration:
         assert len(data["workouts"]) == 28  # 4 weeks × 7 days
 
     async def test_llm_plan_retries_on_parse_failure(self, client, auth_headers):
-        await client.put(
-            "/api/athlete/",
+        await client.patch(
+            "/api/athlete",
             json={"app_settings": {"llm_base_url": "http://localhost:11434/v1",
                                    "llm_model": "llama3.2"}},
             headers=auth_headers,
@@ -260,14 +260,14 @@ class TestLlmPlanGeneration:
         mock_http.__aexit__ = AsyncMock(return_value=False)
 
         with patch("httpx.AsyncClient", return_value=mock_http):
-            resp = await client.post("/api/plans/", json=_LLM_REQUEST_BODY, headers=auth_headers)
+            resp = await client.post("/api/plans", json=_LLM_REQUEST_BODY, headers=auth_headers)
 
         assert resp.status_code == 201
         assert resp.json()["generation_method"] == "llm"
 
     async def test_llm_plan_fails_gracefully_on_double_parse_error(self, client, auth_headers):
-        await client.put(
-            "/api/athlete/",
+        await client.patch(
+            "/api/athlete",
             json={"app_settings": {"llm_base_url": "http://localhost:11434/v1",
                                    "llm_model": "llama3.2"}},
             headers=auth_headers,
@@ -283,7 +283,7 @@ class TestLlmPlanGeneration:
         mock_http.__aexit__ = AsyncMock(return_value=False)
 
         with patch("httpx.AsyncClient", return_value=mock_http):
-            resp = await client.post("/api/plans/", json=_LLM_REQUEST_BODY, headers=auth_headers)
+            resp = await client.post("/api/plans", json=_LLM_REQUEST_BODY, headers=auth_headers)
 
         # API returns 4xx/5xx when both LLM attempts produce unparseable JSON
         assert resp.status_code >= 400
@@ -319,7 +319,7 @@ class TestLlmPlanGeneration:
 class TestSkipWorkout:
     async def _create_plan_and_get_workout(self, client, auth_headers):
         resp = await client.post(
-            "/api/plans/",
+            "/api/plans",
             json={"name": "Skip Test Plan", "start_date": str(_START), "weeks": 1},
             headers=auth_headers,
         )
@@ -387,7 +387,7 @@ class TestSkipWorkout:
 
     async def test_skip_already_completed_workout_returns_409(self, client, auth_headers, session):
         from sqlalchemy import select
-        from backend.app.models.team_orm import PlannedWorkout, Activity, Athlete
+        from backend.app.models.user_orm import PlannedWorkout, Activity, Athlete
 
         plan_id, workout_id = await self._create_plan_and_get_workout(client, auth_headers)
 
@@ -428,7 +428,7 @@ class TestSkipWorkout:
 
 async def _create_plan(client, auth_headers, *, name="Edit Plan", weeks=4):
     resp = await client.post(
-        "/api/plans/",
+        "/api/plans",
         json={"name": name, "start_date": str(_START), "weeks": weeks, "goal": "Original goal"},
         headers=auth_headers,
     )
@@ -440,7 +440,7 @@ async def _mark_completed(session, workout_id: str):
     """Attach a dummy activity to a planned workout to mark it completed."""
     import uuid
     from sqlalchemy import select
-    from backend.app.models.team_orm import PlannedWorkout, Activity, Athlete
+    from backend.app.models.user_orm import PlannedWorkout, Activity, Athlete
 
     athlete = (await session.execute(select(Athlete))).scalar_one()
     activity = Activity(

@@ -7,7 +7,7 @@ LLM-config resolution, the HTTP call (with SSRF protection) and the JSON
 extraction logic live in one place.
 
 LLM settings are resolved with the same priority everywhere:
-  athlete app_settings → team settings → global env vars
+  athlete app_settings → instance settings → global env vars
   (LLM_BASE_URL / LLM_API_KEY / LLM_MODEL)
 """
 
@@ -20,8 +20,8 @@ import httpx
 
 from ..core.config import settings
 from ..core.ssrf import check_url_safe
-from ..models.registry_orm import Team
-from ..models.team_orm import Athlete
+from ..models.registry_orm import InstanceSettings
+from ..models.user_orm import Athlete
 
 log = logging.getLogger(__name__)
 
@@ -38,27 +38,26 @@ def extract_json(text: str) -> str:
 
 def resolve_llm_config(
     athlete: Athlete,
-    team: Team | None,
-    team_id: str,
+    instance: InstanceSettings | None,
     user_id: str,
 ) -> tuple[str, str, str | None]:
-    """Return *(base_url, model, api_key)* using athlete → team → global priority."""
+    """Return *(base_url, model, api_key)* using athlete → instance → global priority."""
     athlete_settings = athlete.app_settings or {}
 
     base_url = (athlete_settings.get("llm_base_url") or "").strip()
-    if not base_url and team and team.llm_base_url:
-        base_url = team.llm_base_url.strip()
+    if not base_url and instance and instance.llm_base_url:
+        base_url = instance.llm_base_url.strip()
     if not base_url:
         base_url = (settings.llm_base_url or "").strip()
 
     if not base_url:
         raise ValueError(
-            "LLM not configured. Set a base URL in Settings → AI / LLM or ask your team admin."
+            "LLM not configured. Set a base URL in Settings → AI / LLM or ask your administrator."
         )
 
     model = (athlete_settings.get("llm_model") or "").strip()
-    if not model and team and team.llm_model:
-        model = team.llm_model.strip()
+    if not model and instance and instance.llm_model:
+        model = instance.llm_model.strip()
     if not model:
         model = (settings.llm_model or "llama3.2").strip()
 
@@ -68,19 +67,19 @@ def resolve_llm_config(
     if enc_key:
         try:
             from ..core.file_encryption import decrypt_secret
-            api_key = decrypt_secret(str(enc_key), team_id, user_id)
+            api_key = decrypt_secret(str(enc_key), user_id)
         except Exception as exc:
             log.error("Failed to decrypt athlete LLM API key for user %s: %s", user_id, exc)
             raise ValueError(
                 "Failed to decrypt the stored LLM API key. Try re-entering it in Settings → AI / LLM."
             ) from exc
 
-    if api_key is None and team and team.llm_api_key_enc:
+    if api_key is None and instance and instance.llm_api_key_enc:
         try:
-            from ..core.file_encryption import decrypt_team_secret
-            api_key = decrypt_team_secret(str(team.llm_api_key_enc), team_id)
+            from ..core.file_encryption import decrypt_instance_secret
+            api_key = decrypt_instance_secret(str(instance.llm_api_key_enc))
         except Exception as exc:
-            log.error("Failed to decrypt team LLM API key for team %s: %s", team_id, exc)
+            log.error("Failed to decrypt instance LLM API key: %s", exc)
 
     return base_url, model, api_key
 

@@ -54,13 +54,18 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.core.auth import TeamContext
+from backend.app.core.auth import UserContext
 from backend.app.core.config import settings
 from backend.app.core.deps import get_ctx_and_session
 from backend.app.core.ssrf import check_url_safe
 from backend.app.db.registry import get_registry_session
-from backend.app.models.registry_orm import Team
-from backend.app.models.team_orm import Athlete
+from backend.app.models.registry_orm import InstanceSettings
+from backend.app.models.user_orm import Athlete
+
+
+async def _load_instance_settings(registry_session: AsyncSession) -> InstanceSettings | None:
+    result = await registry_session.execute(select(InstanceSettings).limit(1))
+    return result.scalar_one_or_none()
 
 log = logging.getLogger(__name__)
 
@@ -108,31 +113,30 @@ async def test_llm_connection(
     ctx_session=Depends(get_ctx_and_session),
     registry_session: AsyncSession = Depends(get_registry_session),
 ):
-    """Test the team's configured LLM connection. Admin-only.
+    """Test the instance's configured LLM connection. Admin-only.
 
-    Calls GET {base_url}/models on the team's saved LLM config and checks
+    Calls GET {base_url}/models on the instance's saved LLM config and checks
     whether the configured model appears in the response.
     """
     ctx, _ = ctx_session
     if not ctx.is_admin:
         raise HTTPException(status_code=403, detail="Admin access required")
 
-    team_result = await registry_session.execute(select(Team).where(Team.id == ctx.team_id))
-    team = team_result.scalar_one_or_none()
+    instance = await _load_instance_settings(registry_session)
 
-    base_url = (team.llm_base_url.strip() if team and team.llm_base_url else None) or (settings.llm_base_url or "").strip()
-    model = (team.llm_model.strip() if team and team.llm_model else None) or (settings.llm_model or "").strip()
+    base_url = (instance.llm_base_url.strip() if instance and instance.llm_base_url else None) or (settings.llm_base_url or "").strip()
+    model = (instance.llm_model.strip() if instance and instance.llm_model else None) or (settings.llm_model or "").strip()
 
     if not base_url:
         raise HTTPException(status_code=400, detail="No LLM base URL configured. Save a base URL first.")
 
     api_key: str | None = None
-    if team and team.llm_api_key_enc:
+    if instance and instance.llm_api_key_enc:
         try:
-            from backend.app.core.file_encryption import decrypt_team_secret
-            api_key = decrypt_team_secret(str(team.llm_api_key_enc), ctx.team_id)
+            from backend.app.core.file_encryption import decrypt_instance_secret
+            api_key = decrypt_instance_secret(str(instance.llm_api_key_enc))
         except Exception as exc:
-            log.warning("Could not decrypt team LLM API key for test: %s", exc)
+            log.warning("Could not decrypt instance LLM API key for test: %s", exc)
 
     models_url = f"{base_url.rstrip('/')}/models"
     try:
@@ -191,20 +195,19 @@ async def test_llm_connection(
 
 async def _get_llm_config(
     athlete: Athlete,
-    team_id: str,
     user_id: str,
-    team: Team | None,
+    instance: InstanceSettings | None,
 ) -> tuple[str, str, str | None]:
     """Return *(base_url, model, api_key)* for this athlete.
 
-    Priority: athlete app_settings → team settings → global env vars.
+    Priority: athlete app_settings → instance settings → global env vars.
     """
     athlete_settings = athlete.app_settings or {}
 
-    # Determine base_url: athlete > team > global
+    # Determine base_url: athlete > instance > global
     base_url = (athlete_settings.get("llm_base_url") or "").strip()
-    if not base_url and team and team.llm_base_url:
-        base_url = team.llm_base_url.strip()
+    if not base_url and instance and instance.llm_base_url:
+        base_url = instance.llm_base_url.strip()
     if not base_url:
         base_url = (settings.llm_base_url or "").strip()
 
@@ -214,10 +217,10 @@ async def _get_llm_config(
             detail="LLM not configured. Set a base URL in Settings → AI / LLM.",
         )
 
-    # Determine model: athlete > team > global
+    # Determine model: athlete > instance > global
     model = (athlete_settings.get("llm_model") or "").strip()
-    if not model and team and team.llm_model:
-        model = team.llm_model.strip()
+    if not model and instance and instance.llm_model:
+        model = instance.llm_model.strip()
     if not model:
         model = (settings.llm_model or "llama3.2").strip()
 
@@ -237,7 +240,7 @@ async def _get_llm_config(
     if enc_key:
         try:
             from backend.app.core.file_encryption import decrypt_secret
-            api_key = decrypt_secret(str(enc_key), team_id, user_id)
+            api_key = decrypt_secret(str(enc_key), user_id)
         except Exception as exc:
             log.error("Failed to decrypt athlete LLM API key for user %s: %s", user_id, exc)
             raise HTTPException(
@@ -246,13 +249,13 @@ async def _get_llm_config(
                 "Try re-entering your key in Settings → AI / LLM.",
             )
 
-    # Fall back to team API key
-    if api_key is None and team and team.llm_api_key_enc:
+    # Fall back to the instance API key
+    if api_key is None and instance and instance.llm_api_key_enc:
         try:
-            from backend.app.core.file_encryption import decrypt_team_secret
-            api_key = decrypt_team_secret(str(team.llm_api_key_enc), team_id)
+            from backend.app.core.file_encryption import decrypt_instance_secret
+            api_key = decrypt_instance_secret(str(instance.llm_api_key_enc))
         except Exception as exc:
-            log.error("Failed to decrypt team LLM API key for team %s: %s", team_id, exc)
+            log.error("Failed to decrypt instance LLM API key: %s", exc)
 
     return base_url, model, api_key
 
@@ -274,10 +277,9 @@ async def llm_chat(
     if athlete is None:
         raise HTTPException(status_code=404, detail="Athlete profile not found")
 
-    team_result = await registry_session.execute(select(Team).where(Team.id == ctx.team_id))
-    team = team_result.scalar_one_or_none()
+    instance = await _load_instance_settings(registry_session)
 
-    base_url, model, api_key = await _get_llm_config(athlete, ctx.team_id, ctx.user_id, team)
+    base_url, model, api_key = await _get_llm_config(athlete, ctx.user_id, instance)
     upstream_url = f"{base_url.rstrip('/')}/chat/completions"
 
     check_url_safe(upstream_url)

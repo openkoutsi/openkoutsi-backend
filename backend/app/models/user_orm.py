@@ -17,7 +17,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from backend.app.db.base import TeamBase
+from backend.app.db.base import UserBase
 
 
 def _uuid() -> str:
@@ -28,7 +28,7 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class Athlete(TeamBase):
+class Athlete(UserBase):
     __tablename__ = "athletes"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
@@ -75,7 +75,7 @@ class Athlete(TeamBase):
     )
 
 
-class WeightLog(TeamBase):
+class WeightLog(UserBase):
     __tablename__ = "weight_log"
     __table_args__ = (UniqueConstraint("athlete_id", "effective_date"),)
 
@@ -90,7 +90,7 @@ class WeightLog(TeamBase):
     athlete: Mapped["Athlete"] = relationship("Athlete", back_populates="weight_log")
 
 
-class Activity(TeamBase):
+class Activity(UserBase):
     __tablename__ = "activities"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
@@ -146,7 +146,7 @@ class Activity(TeamBase):
         return any(s.fit_file_path for s in self.sources)
 
 
-class ActivitySource(TeamBase):
+class ActivitySource(UserBase):
     """Tracks which providers have contributed data to a single Activity."""
 
     __tablename__ = "activity_sources"
@@ -168,7 +168,7 @@ class ActivitySource(TeamBase):
     activity: Mapped["Activity"] = relationship("Activity", back_populates="sources", lazy="selectin")
 
 
-class ActivityStream(TeamBase):
+class ActivityStream(UserBase):
     __tablename__ = "activity_streams"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
@@ -181,7 +181,7 @@ class ActivityStream(TeamBase):
     activity: Mapped["Activity"] = relationship("Activity", back_populates="streams")
 
 
-class ActivityPowerBest(TeamBase):
+class ActivityPowerBest(UserBase):
     __tablename__ = "activity_power_bests"
     __table_args__ = (UniqueConstraint("activity_id", "duration_s"),)
 
@@ -201,7 +201,7 @@ class ActivityPowerBest(TeamBase):
     activity: Mapped["Activity"] = relationship("Activity", back_populates="power_bests")
 
 
-class ActivityDistanceBest(TeamBase):
+class ActivityDistanceBest(UserBase):
     __tablename__ = "activity_distance_bests"
     __table_args__ = (UniqueConstraint("activity_id", "distance_m"),)
 
@@ -221,7 +221,7 @@ class ActivityDistanceBest(TeamBase):
     activity: Mapped["Activity"] = relationship("Activity", back_populates="distance_bests")
 
 
-class ActivityInterval(TeamBase):
+class ActivityInterval(UserBase):
     __tablename__ = "activity_intervals"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
@@ -241,7 +241,7 @@ class ActivityInterval(TeamBase):
     activity: Mapped["Activity"] = relationship("Activity", back_populates="intervals")
 
 
-class DailyMetric(TeamBase):
+class DailyMetric(UserBase):
     __tablename__ = "daily_metrics"
 
     athlete_id: Mapped[str] = mapped_column(
@@ -256,7 +256,7 @@ class DailyMetric(TeamBase):
     athlete: Mapped["Athlete"] = relationship("Athlete", back_populates="daily_metrics")
 
 
-class Goal(TeamBase):
+class Goal(UserBase):
     __tablename__ = "goals"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
@@ -276,7 +276,7 @@ class Goal(TeamBase):
     athlete: Mapped["Athlete"] = relationship("Athlete", back_populates="goals")
 
 
-class TrainingPlan(TeamBase):
+class TrainingPlan(UserBase):
     __tablename__ = "training_plans"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
@@ -299,7 +299,7 @@ class TrainingPlan(TeamBase):
     )
 
 
-class PlannedWorkout(TeamBase):
+class PlannedWorkout(UserBase):
     __tablename__ = "planned_workouts"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
@@ -323,7 +323,7 @@ class PlannedWorkout(TeamBase):
     plan: Mapped["TrainingPlan"] = relationship("TrainingPlan", back_populates="workouts")
 
 
-class WorkoutDefinition(TeamBase):
+class WorkoutDefinition(UserBase):
     __tablename__ = "workout_definitions"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
@@ -346,7 +346,7 @@ class WorkoutDefinition(TeamBase):
     )
 
 
-class WahooWorkoutUpload(TeamBase):
+class WahooWorkoutUpload(UserBase):
     """Tracks structured workouts pushed to Wahoo so re-pushes update in place.
 
     The ``external_id`` is deterministic per workout definition, letting Wahoo

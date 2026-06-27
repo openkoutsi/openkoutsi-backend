@@ -6,10 +6,9 @@ from sqlalchemy import select
 from backend.app.core.auth import hash_password
 from backend.app.db.user_session import get_user_session_factory, init_user_db
 from backend.app.models.message_orm import Message
-from backend.app.models.registry_orm import TeamMembership, User
+from backend.app.models.registry_orm import User
 from backend.app.services import notifications
 
-_TEST_TEAM_ID = "test-team-00000000"
 _TEST_USER_ID = "test-user-00000000"
 
 
@@ -19,29 +18,30 @@ async def _mailbox(user_id: str):
         return (await session.execute(select(Message))).scalars().all()
 
 
-async def test_notify_superadmin_routes_to_reserved_mailbox():
-    await notifications.notify_superadmin(
-        notifications.TEAM_REQUEST, {"team_name": "Acme"}
+async def test_notify_user_routes_to_mailbox():
+    await notifications.notify_user(
+        _TEST_USER_ID, notifications.INVITE_USED, {"username": "x"}
     )
-    msgs = await _mailbox(notifications.SUPERADMIN_MAILBOX)
+    msgs = await _mailbox(_TEST_USER_ID)
     assert len(msgs) == 1
-    assert msgs[0].type == "team_request"
-    assert msgs[0].data["team_name"] == "Acme"
+    assert msgs[0].type == "invite_used"
+    assert msgs[0].data["username"] == "x"
 
 
-async def test_notify_team_admins_only_targets_admins(registry_session):
-    # Seed a non-admin member alongside the seeded admin (test-user).
+async def test_notify_admins_only_targets_admins(registry_session):
+    # Seed a non-admin user alongside the seeded admin (test-user).
     registry_session.add(
-        User(id="plain-user", username="plain", password_hash=hash_password("Password1234"))
-    )
-    await registry_session.flush()
-    registry_session.add(
-        TeamMembership(team_id=_TEST_TEAM_ID, user_id="plain-user", roles=json.dumps(["user"]))
+        User(
+            id="plain-user",
+            username="plain",
+            password_hash=hash_password("Password1234"),
+            roles=json.dumps(["user"]),
+        )
     )
     await registry_session.commit()
 
-    await notifications.notify_team_admins(
-        registry_session, _TEST_TEAM_ID, notifications.INVITE_USED, {"username": "x"}
+    await notifications.notify_admins(
+        registry_session, notifications.INVITE_USED, {"username": "x"}
     )
 
     assert len(await _mailbox(_TEST_USER_ID)) == 1

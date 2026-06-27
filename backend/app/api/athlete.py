@@ -10,14 +10,13 @@ from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.core.auth import TeamContext, get_current_user
 from backend.app.core.config import settings
 from backend.app.core.deps import get_ctx_and_session
 from backend.app.core.file_encryption import decrypt_file
 from backend.app.db.registry import get_registry_session
 from backend.app.api.consent import CURRENT_CONSENT_VERSION
-from backend.app.models.registry_orm import DataConsent, ProviderConnection, User
-from backend.app.models.team_orm import Activity, Athlete, WeightLog
+from backend.app.models.registry_orm import ProviderConnection, User
+from backend.app.models.user_orm import Activity, Athlete, WeightLog
 from backend.app.schemas.athlete import AthleteResponse, AthleteUpdate, TrainingStatusBody, TrainingStatusResponse
 
 _MAX_AVATAR_BYTES = 5 * 1024 * 1024  # 5 MB
@@ -63,10 +62,10 @@ def _safe_app_settings(athlete: Athlete) -> dict:
 
 
 def _athlete_response(
-    athlete: Athlete, connected_providers: list[str], team_id: str, consent_accepted: bool = False
+    athlete: Athlete, connected_providers: list[str], consent_accepted: bool = False
 ) -> AthleteResponse:
     avatar_url = (
-        f"{settings.api_url}/api/public/teams/{team_id}/avatar/{athlete.id}"
+        f"{settings.api_url}/api/public/users/{athlete.global_user_id}/avatar"
         if athlete.avatar_path
         else None
     )
@@ -100,20 +99,18 @@ async def _get_connected_providers(
     return [c.provider for c in result.scalars().all()]
 
 
-async def _get_consent_accepted(
-    user_id: str, team_id: str, registry_session: AsyncSession
-) -> bool:
-    result = await registry_session.execute(
-        select(DataConsent).where(
-            DataConsent.user_id == user_id,
-            DataConsent.team_id == team_id,
-        )
+async def _get_consent_accepted(user_id: str, registry_session: AsyncSession) -> bool:
+    result = await registry_session.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    return (
+        user is not None
+        and user.consented_at is not None
+        and user.consent_version == CURRENT_CONSENT_VERSION
     )
-    consent = result.scalar_one_or_none()
-    return consent is not None and consent.consent_version == CURRENT_CONSENT_VERSION
 
 
-@router.get("/", response_model=AthleteResponse)
+@router.get("", response_model=AthleteResponse,
+            operation_id="getAthlete", summary="Get current athlete")
 async def get_athlete(
     ctx_session=Depends(get_ctx_and_session),
     registry_session: AsyncSession = Depends(get_registry_session),
@@ -121,12 +118,12 @@ async def get_athlete(
     ctx, session = ctx_session
     athlete = await _get_athlete(ctx.user_id, session)
     providers = await _get_connected_providers(ctx.user_id, registry_session)
-    consent_ok = await _get_consent_accepted(ctx.user_id, ctx.team_id, registry_session)
-    return _athlete_response(athlete, providers, ctx.team_id, consent_accepted=consent_ok)
+    consent_ok = await _get_consent_accepted(ctx.user_id, registry_session)
+    return _athlete_response(athlete, providers, consent_accepted=consent_ok)
 
 
-@router.put("/", response_model=AthleteResponse)
-@router.patch("/", response_model=AthleteResponse)
+@router.patch("", response_model=AthleteResponse,
+              operation_id="updateAthlete", summary="Update current athlete")
 async def update_athlete(
     body: AthleteUpdate,
     ctx_session=Depends(get_ctx_and_session),
@@ -192,7 +189,7 @@ async def update_athlete(
                 try:
                     from backend.app.core.file_encryption import encrypt_secret
                     new_settings["llm_api_key_enc"] = encrypt_secret(
-                        str(raw_key), ctx.team_id, ctx.user_id
+                        str(raw_key), ctx.user_id
                     )
                 except RuntimeError as exc:
                     raise HTTPException(
@@ -211,11 +208,13 @@ async def update_athlete(
     await session.commit()
     await session.refresh(athlete)
     providers = await _get_connected_providers(ctx.user_id, registry_session)
-    consent_ok = await _get_consent_accepted(ctx.user_id, ctx.team_id, registry_session)
-    return _athlete_response(athlete, providers, ctx.team_id, consent_accepted=consent_ok)
+    consent_ok = await _get_consent_accepted(ctx.user_id, registry_session)
+    return _athlete_response(athlete, providers, consent_accepted=consent_ok)
 
 
-@router.post("/avatar", response_model=AthleteResponse)
+@router.put("/avatar", response_model=AthleteResponse,
+            operation_id="setAvatar", summary="Upload/replace own avatar")
+@router.post("/avatar", response_model=AthleteResponse, include_in_schema=False)
 async def upload_avatar(
     file: UploadFile = File(...),
     ctx_session=Depends(get_ctx_and_session),
@@ -236,7 +235,7 @@ async def upload_avatar(
     ext = _CONTENT_TYPE_TO_EXT[detected_type]
     athlete = await _get_athlete(ctx.user_id, session)
 
-    avatar_dir = settings.team_avatar_dir(ctx.team_id)
+    avatar_dir = settings.user_avatar_dir(ctx.user_id)
     avatar_dir.mkdir(parents=True, exist_ok=True)
     dest = avatar_dir / f"{ctx.user_id}.{ext}"
 
@@ -251,11 +250,12 @@ async def upload_avatar(
     await session.commit()
     await session.refresh(athlete)
     providers = await _get_connected_providers(ctx.user_id, registry_session)
-    consent_ok = await _get_consent_accepted(ctx.user_id, ctx.team_id, registry_session)
-    return _athlete_response(athlete, providers, ctx.team_id, consent_accepted=consent_ok)
+    consent_ok = await _get_consent_accepted(ctx.user_id, registry_session)
+    return _athlete_response(athlete, providers, consent_accepted=consent_ok)
 
 
-@router.delete("/avatar", response_model=AthleteResponse)
+@router.delete("/avatar", response_model=AthleteResponse,
+               operation_id="deleteAvatar", summary="Delete own avatar")
 async def delete_avatar(
     ctx_session=Depends(get_ctx_and_session),
     registry_session: AsyncSession = Depends(get_registry_session),
@@ -269,11 +269,12 @@ async def delete_avatar(
         await session.commit()
         await session.refresh(athlete)
     providers = await _get_connected_providers(ctx.user_id, registry_session)
-    consent_ok = await _get_consent_accepted(ctx.user_id, ctx.team_id, registry_session)
-    return _athlete_response(athlete, providers, ctx.team_id, consent_accepted=consent_ok)
+    consent_ok = await _get_consent_accepted(ctx.user_id, registry_session)
+    return _athlete_response(athlete, providers, consent_accepted=consent_ok)
 
 
-@router.get("/{athlete_id}/avatar")
+@router.get("/{athlete_id}/avatar",
+            operation_id="getAthleteAvatar", summary="Get an athlete's avatar (auth)")
 async def get_avatar(
     athlete_id: str,
     ctx_session=Depends(get_ctx_and_session),
@@ -292,7 +293,8 @@ async def get_avatar(
 _PENDING_TIMEOUT_MINUTES = 30
 
 
-@router.get("/training-status", response_model=TrainingStatusResponse)
+@router.get("/training-status", response_model=TrainingStatusResponse,
+            operation_id="getTrainingStatus", summary="Get training-status feedback")
 async def get_training_status(
     ctx_session=Depends(get_ctx_and_session),
 ):
@@ -333,7 +335,7 @@ async def get_training_status(
         athlete.training_status_updated_at = now_utc
         await session.commit()
         from backend.app.services.llm_training_status_analyzer import analyze_training_status_bg
-        asyncio.create_task(analyze_training_status_bg(athlete.id, ctx.team_id))
+        asyncio.create_task(analyze_training_status_bg(athlete.id, ctx.user_id))
 
     return TrainingStatusResponse(
         status=athlete.training_status_status,
@@ -342,7 +344,8 @@ async def get_training_status(
     )
 
 
-@router.post("/training-status", status_code=202)
+@router.post("/training-status", status_code=202,
+             operation_id="triggerTrainingStatus", summary="Trigger training-status analysis")
 async def trigger_training_status(
     body: TrainingStatusBody = TrainingStatusBody(),
     ctx_session=Depends(get_ctx_and_session),
@@ -360,11 +363,12 @@ async def trigger_training_status(
     await session.commit()
 
     from backend.app.services.llm_training_status_analyzer import analyze_training_status_bg
-    asyncio.create_task(analyze_training_status_bg(athlete.id, ctx.team_id, body.locale))
+    asyncio.create_task(analyze_training_status_bg(athlete.id, ctx.user_id, body.locale))
     return {"status": "pending"}
 
 
-@router.get("/weight-log")
+@router.get("/weight-log",
+            operation_id="getWeightLog", summary="Get the athlete's weight log")
 async def get_weight_log(ctx_session=Depends(get_ctx_and_session)):
     ctx, session = ctx_session
     athlete = await _get_athlete(ctx.user_id, session)
@@ -377,7 +381,8 @@ async def get_weight_log(ctx_session=Depends(get_ctx_and_session)):
     return [{"date": e.effective_date.isoformat(), "weight_kg": e.weight_kg} for e in entries]
 
 
-@router.get("/export")
+@router.get("/export",
+            operation_id="exportAthlete", summary="Export all athlete data as a zip")
 async def export_athlete(
     ctx_session=Depends(get_ctx_and_session),
     registry_session: AsyncSession = Depends(get_registry_session),
@@ -449,7 +454,7 @@ async def export_athlete(
                     if src.fit_file_encrypted:
                         zf.writestr(
                             f"fit_files/{a.id}.fit",
-                            decrypt_file(fit_path, ctx.team_id, ctx.user_id),
+                            decrypt_file(fit_path, ctx.user_id),
                         )
                     else:
                         zf.write(fit_path, f"fit_files/{a.id}.fit")

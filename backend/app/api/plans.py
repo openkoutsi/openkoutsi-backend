@@ -8,11 +8,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.deps import get_ctx_and_session
 from backend.app.db.registry import get_registry_session
-from backend.app.models.registry_orm import Team
-from backend.app.models.team_orm import (
+from backend.app.models.registry_orm import InstanceSettings
+from backend.app.models.user_orm import (
     Athlete, TrainingPlan, PlannedWorkout, WorkoutDefinition,
 )
-from backend.app.models.team_orm import Activity
+from backend.app.models.user_orm import Activity
 from backend.app.schemas.plans import (
     TrainingPlanCreate, TrainingPlanUpdate, TrainingPlanResponse,
     LinkActivityRequest, PlannedWorkoutResponse, SkipWorkoutRequest,
@@ -45,7 +45,7 @@ async def _get_athlete(global_user_id: str, session: AsyncSession) -> Athlete:
     return athlete
 
 
-@router.get("/", response_model=list[TrainingPlanResponse])
+@router.get("", response_model=list[TrainingPlanResponse])
 async def list_plans(ctx_session=Depends(get_ctx_and_session)):
     ctx, session = ctx_session
     athlete = await _get_athlete(ctx.user_id, session)
@@ -59,7 +59,7 @@ async def list_plans(ctx_session=Depends(get_ctx_and_session)):
     return [TrainingPlanResponse.model_validate(p) for p in plans]
 
 
-@router.post("/", response_model=TrainingPlanResponse, status_code=201)
+@router.post("", response_model=TrainingPlanResponse, status_code=201)
 async def create_plan(
     body: TrainingPlanCreate,
     ctx_session=Depends(get_ctx_and_session),
@@ -111,8 +111,8 @@ async def create_plan(
     elif body.use_llm:
         if not body.config:
             raise HTTPException(400, "A plan config (training days and types) is required for LLM generation")
-        team_result = await registry_session.execute(select(Team).where(Team.id == ctx.team_id))
-        team = team_result.scalar_one_or_none()
+        instance_result = await registry_session.execute(select(InstanceSettings).limit(1))
+        instance = instance_result.scalar_one_or_none()
         try:
             plan = await generate_plan_llm(
                 athlete=athlete,
@@ -122,8 +122,7 @@ async def create_plan(
                 num_weeks=body.weeks,
                 goal=body.goal,
                 session=session,
-                team=team,
-                team_id=ctx.team_id,
+                instance=instance,
                 user_id=ctx.user_id,
             )
         except ValueError as exc:
@@ -482,8 +481,8 @@ async def regenerate_plan(
     elif body.use_llm:
         if not body.config:
             raise HTTPException(400, "A plan config (training days and types) is required for LLM generation")
-        team_result = await registry_session.execute(select(Team).where(Team.id == ctx.team_id))
-        team = team_result.scalar_one_or_none()
+        instance_result = await registry_session.execute(select(InstanceSettings).limit(1))
+        instance = instance_result.scalar_one_or_none()
         try:
             weeks_data = await generate_plan_weeks_llm(
                 athlete=athlete,
@@ -491,8 +490,7 @@ async def regenerate_plan(
                 num_weeks=num_weeks,
                 goal=goal,
                 session=session,
-                team=team,
-                team_id=ctx.team_id,
+                instance=instance,
                 user_id=ctx.user_id,
             )
         except ValueError as exc:
@@ -567,8 +565,8 @@ async def generate_upcoming_workouts(
     if body.end and body.end < window_end:
         window_end = body.end
 
-    team_result = await registry_session.execute(select(Team).where(Team.id == ctx.team_id))
-    team = team_result.scalar_one_or_none()
+    instance_result = await registry_session.execute(select(InstanceSettings).limit(1))
+    instance = instance_result.scalar_one_or_none()
 
     # Select in-window planned workouts, ordered by date.
     selected: list[tuple[PlannedWorkout, date]] = []
@@ -613,8 +611,7 @@ async def generate_upcoming_workouts(
                 athlete=athlete,
                 planned_workout=pw,
                 session=session,
-                team=team,
-                team_id=ctx.team_id,
+                instance=instance,
                 user_id=ctx.user_id,
             )
         except ValueError as exc:

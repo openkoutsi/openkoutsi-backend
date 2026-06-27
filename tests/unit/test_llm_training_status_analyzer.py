@@ -3,7 +3,7 @@ from datetime import date, datetime
 from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
-from backend.app.models.team_orm import Athlete, PlannedWorkout, TrainingPlan
+from backend.app.models.user_orm import Athlete, PlannedWorkout, TrainingPlan
 from backend.app.services.llm_training_status_analyzer import _build_status_prompt
 
 

@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 from sqlalchemy import select
 
-from backend.app.models.team_orm import Activity, ActivitySource, Athlete, DailyMetric
+from backend.app.models.user_orm import Activity, ActivitySource, Athlete, DailyMetric
 from backend.app.services.metrics_engine import catch_up_metrics, recalculate_from
 
 # EMA decay constants (same as production)

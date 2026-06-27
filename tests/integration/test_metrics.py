@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from sqlalchemy import select
 
-from backend.app.models.team_orm import Activity, ActivityStream, DailyMetric, Athlete
+from backend.app.models.user_orm import Activity, ActivityStream, DailyMetric, Athlete
 
 
 class TestGetFitness:
@@ -19,7 +19,7 @@ class TestGetFitness:
 
     async def test_returns_inserted_metrics(self, client, auth_headers, session):
         # Get the athlete ID
-        ath_resp = await client.get("/api/athlete/", headers=auth_headers)
+        ath_resp = await client.get("/api/athlete", headers=auth_headers)
         athlete_id = ath_resp.json()["id"]
         today = date.today()
 
@@ -42,7 +42,7 @@ class TestGetFitness:
         assert data[0]["atl"] == 40.0
 
     async def test_days_filter_limits_results(self, client, auth_headers, session):
-        ath_resp = await client.get("/api/athlete/", headers=auth_headers)
+        ath_resp = await client.get("/api/athlete", headers=auth_headers)
         athlete_id = ath_resp.json()["id"]
         today = date.today()
 
@@ -75,7 +75,7 @@ class TestGetFitnessCurrent:
         assert "form" in data
 
     async def test_form_label_computed_from_tsb(self, client, auth_headers, session):
-        ath_resp = await client.get("/api/athlete/", headers=auth_headers)
+        ath_resp = await client.get("/api/athlete", headers=auth_headers)
         athlete_id = ath_resp.json()["id"]
         today = date.today()
 
@@ -90,7 +90,7 @@ class TestGetFitnessCurrent:
         assert resp.json()["form"] == "peak"
 
     async def test_tired_form_label(self, client, auth_headers, session):
-        ath_resp = await client.get("/api/athlete/", headers=auth_headers)
+        ath_resp = await client.get("/api/athlete", headers=auth_headers)
         athlete_id = ath_resp.json()["id"]
         today = date.today()
 
@@ -110,7 +110,7 @@ class TestGetFitnessCurrent:
 
 class TestCatchUp:
     async def test_creates_today_metric_when_missing(self, client, auth_headers, session):
-        ath_resp = await client.get("/api/athlete/", headers=auth_headers)
+        ath_resp = await client.get("/api/athlete", headers=auth_headers)
         athlete_id = ath_resp.json()["id"]
         today = date.today()
 
@@ -131,7 +131,7 @@ class TestCatchUp:
         assert resp2.json()["date"] == str(today)
 
     async def test_returns_not_updated_when_already_current(self, client, auth_headers, session):
-        ath_resp = await client.get("/api/athlete/", headers=auth_headers)
+        ath_resp = await client.get("/api/athlete", headers=auth_headers)
         athlete_id = ath_resp.json()["id"]
         today = date.today()
 
@@ -164,19 +164,19 @@ class TestRecalculate:
     async def test_bg_full_recalculate_updates_tss(self, client, auth_headers, session):
         """Call _bg_full_recalculate directly with the test session to verify it updates TSS."""
         from backend.app.api.metrics import _bg_full_recalculate
-        from tests.conftest import _TEST_TEAM_ID
+        from tests.conftest import _TEST_USER_ID
 
-        ath_resp = await client.get("/api/athlete/", headers=auth_headers)
+        ath_resp = await client.get("/api/athlete", headers=auth_headers)
         athlete_id = ath_resp.json()["id"]
 
         # Set FTP on athlete
-        await client.put("/api/athlete/", json={"ftp": 250}, headers=auth_headers)
+        await client.patch("/api/athlete", json={"ftp": 250}, headers=auth_headers)
 
         # Create a processed activity with a recent date (within 180-day lookback window)
         from datetime import date, timedelta
         recent_date = (date.today() - timedelta(days=7)).isoformat() + "T10:00:00Z"
         act_resp = await client.post(
-            "/api/activities/",
+            "/api/activities",
             json={"sport_type": "Ride", "start_time": recent_date, "duration_s": 3600},
             headers=auth_headers,
         )
@@ -199,8 +199,8 @@ class TestRecalculate:
         async def _test_factory():
             yield session
 
-        with patch("backend.app.api.metrics.get_team_session_factory", return_value=lambda: _test_factory()):
-            await _bg_full_recalculate(_TEST_TEAM_ID, athlete_id)
+        with patch("backend.app.api.metrics.get_user_session_factory", return_value=lambda: _test_factory()):
+            await _bg_full_recalculate(_TEST_USER_ID, athlete_id)
 
         await session.refresh(activity)
         assert activity.tss is not None
@@ -211,7 +211,7 @@ class TestRecalculate:
 class TestActivitySummary:
     async def _add_activity(self, client, auth_headers, sport_type, start_time, duration_s, distance_m):
         resp = await client.post(
-            "/api/activities/",
+            "/api/activities",
             json={
                 "sport_type": sport_type,
                 "start_time": start_time,
@@ -285,7 +285,7 @@ class TestActivitySummary:
 class TestZonesEndpoint:
     async def _create_activity_with_streams(self, client, auth_headers, session, hr_data=None, power_data=None):
         resp = await client.post(
-            "/api/activities/",
+            "/api/activities",
             json={"sport_type": "Ride", "start_time": "2025-04-01T08:00:00Z", "duration_s": 3600},
             headers=auth_headers,
         )
@@ -299,8 +299,8 @@ class TestZonesEndpoint:
 
     async def test_zones_with_power_stream(self, client, auth_headers, session):
         # Configure power zones on athlete
-        await client.put(
-            "/api/athlete/",
+        await client.patch(
+            "/api/athlete",
             json={"ftp": 250, "power_zones": [
                 {"name": "Z1", "low": 0, "high": 150},
                 {"name": "Z2", "low": 151, "high": 210},
@@ -319,8 +319,8 @@ class TestZonesEndpoint:
         assert sum(data["power"].values()) == 180  # 3 * 60 power values
 
     async def test_zones_with_hr_stream(self, client, auth_headers, session):
-        await client.put(
-            "/api/athlete/",
+        await client.patch(
+            "/api/athlete",
             json={"hr_zones": [
                 {"name": "Z1", "low": 0, "high": 120},
                 {"name": "Z2", "low": 121, "high": 150},
@@ -345,8 +345,8 @@ class TestZonesEndpoint:
         assert resp.status_code == 400
 
     async def test_nonexistent_activity_returns_404(self, client, auth_headers):
-        await client.put(
-            "/api/athlete/",
+        await client.patch(
+            "/api/athlete",
             json={"power_zones": [{"name": "Z1", "low": 0, "high": 300}]},
             headers=auth_headers,
         )
@@ -362,12 +362,12 @@ class TestZonesEndpoint:
 
 class TestFtpHistory:
     async def test_empty_when_no_ftp_tests(self, client, auth_headers):
-        resp = await client.get("/api/metrics/ftp-history", headers=auth_headers)
+        resp = await client.get("/api/metrics/ftp/history", headers=auth_headers)
         assert resp.status_code == 200
         assert resp.json() == []
 
     async def test_returns_ftp_tests(self, client, auth_headers, session):
-        ath_resp = await client.get("/api/athlete/", headers=auth_headers)
+        ath_resp = await client.get("/api/athlete", headers=auth_headers)
         athlete_id = ath_resp.json()["id"]
 
         act_result = await session.execute(select(Athlete).where(Athlete.id == athlete_id))
@@ -378,13 +378,13 @@ class TestFtpHistory:
         ]
         await session.commit()
 
-        resp = await client.get("/api/metrics/ftp-history", headers=auth_headers)
+        resp = await client.get("/api/metrics/ftp/history", headers=auth_headers)
         assert resp.status_code == 200
         data = resp.json()
         assert len(data) == 2
 
     async def test_unauthenticated_returns_401(self, client):
-        resp = await client.get("/api/metrics/ftp-history")
+        resp = await client.get("/api/metrics/ftp/history")
         assert resp.status_code == 401
 
 
@@ -392,7 +392,7 @@ class TestFtpHistory:
 
 class TestFitnessDateRange:
     async def test_start_and_end_filter(self, client, auth_headers, session):
-        ath_resp = await client.get("/api/athlete/", headers=auth_headers)
+        ath_resp = await client.get("/api/athlete", headers=auth_headers)
         athlete_id = ath_resp.json()["id"]
         today = date.today()
 
@@ -412,7 +412,7 @@ class TestFitnessDateRange:
         assert data[0]["ctl"] == 50.0
 
     async def test_current_falls_back_to_latest_when_no_today_metric(self, client, auth_headers, session):
-        ath_resp = await client.get("/api/athlete/", headers=auth_headers)
+        ath_resp = await client.get("/api/athlete", headers=auth_headers)
         athlete_id = ath_resp.json()["id"]
         yesterday = date.today() - timedelta(days=1)
 

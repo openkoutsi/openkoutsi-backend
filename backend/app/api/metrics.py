@@ -6,8 +6,8 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.deps import get_ctx_and_session
-from backend.app.db.team_session import get_team_session_factory
-from backend.app.models.team_orm import Activity, ActivityStream, Athlete, DailyMetric
+from backend.app.db.user_session import get_user_session_factory
+from backend.app.models.user_orm import Activity, ActivityStream, Athlete, DailyMetric
 from backend.app.schemas.metrics import (
     ActivitySummaryResponse,
     FitnessCurrentResponse,
@@ -164,7 +164,7 @@ async def get_zones(
     return result
 
 
-@router.get("/ftp-history")
+@router.get("/ftp/history", operation_id="getFtpHistory", summary="FTP history")
 async def get_ftp_history(ctx_session=Depends(get_ctx_and_session)):
     ctx, session = ctx_session
     athlete = await _get_athlete(ctx.user_id, session)
@@ -193,22 +193,22 @@ async def recalculate_all(
     """
     ctx, session = ctx_session
     athlete = await _get_athlete(ctx.user_id, session)
-    background_tasks.add_task(_bg_full_recalculate, ctx.team_id, athlete.id)
+    background_tasks.add_task(_bg_full_recalculate, ctx.user_id, athlete.id)
     return {"status": "recalculation started"}
 
 
 _RECALCULATE_LOOKBACK_DAYS = 180
 
 
-async def _bg_full_recalculate(team_id: str, athlete_id: str) -> None:
+async def _bg_full_recalculate(user_id: str, athlete_id: str) -> None:
     from sqlalchemy import delete
     from openkoutsi.training_math import normalized_power, calculate_tss, compute_power_bests, compute_distance_bests
     from backend.app.services.metrics_engine import recalculate_from
-    from backend.app.models.team_orm import ActivityDistanceBest, ActivityPowerBest
+    from backend.app.models.user_orm import ActivityDistanceBest, ActivityPowerBest
 
     lookback_date = date.today() - timedelta(days=_RECALCULATE_LOOKBACK_DAYS)
 
-    async with get_team_session_factory(team_id)() as session:
+    async with get_user_session_factory(user_id)() as session:
         athlete_result = await session.execute(
             select(Athlete).where(Athlete.id == athlete_id)
         )

@@ -1,7 +1,7 @@
 """Field-level encryption for sensitive database columns.
 
 Registry DB columns (provider tokens) use the master ENCRYPTION_KEY directly.
-Team DB columns use a per-team key set via set_team_encryption_context().
+Per-user DB columns use a per-user key set via set_user_encryption_context().
 
 Generate a key:
     python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
@@ -16,16 +16,16 @@ from typing import Any
 from sqlalchemy import String
 from sqlalchemy.types import TypeDecorator
 
-# Per-request context variable holding the current team's derived key bytes.
+# Per-request context variable holding the current user's derived key bytes.
 # Set by get_ctx_and_session before yielding to route handlers.
-_team_key_var: ContextVar[bytes | None] = ContextVar("_team_key", default=None)
+_user_key_var: ContextVar[bytes | None] = ContextVar("_user_key", default=None)
 
 
-def set_team_encryption_context(team_id: str) -> None:
-    """Derive and store the team key in the current async context."""
+def set_user_encryption_context(user_id: str) -> None:
+    """Derive and store the user key in the current async context."""
     from backend.app.core.config import settings
     if not settings.encryption_key:
-        _team_key_var.set(None)
+        _user_key_var.set(None)
         return
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.kdf.hkdf import HKDF
@@ -34,9 +34,9 @@ def set_team_encryption_context(team_id: str) -> None:
         algorithm=hashes.SHA256(),
         length=32,
         salt=None,
-        info=f"team-key:{team_id}".encode(),
+        info=f"user-key:{user_id}".encode(),
     )
-    _team_key_var.set(hkdf.derive(raw_master))
+    _user_key_var.set(hkdf.derive(raw_master))
 
 
 def _get_registry_fernet():
@@ -48,9 +48,9 @@ def _get_registry_fernet():
     return Fernet(settings.encryption_key.encode())
 
 
-def _get_team_fernet():
-    """Fernet using the current team key — for team DB columns."""
-    key_bytes = _team_key_var.get()
+def _get_user_fernet():
+    """Fernet using the current user key — for per-user DB columns."""
+    key_bytes = _user_key_var.get()
     if key_bytes is None:
         return None
     from cryptography.fernet import Fernet
@@ -86,10 +86,10 @@ class EncryptedString(TypeDecorator):
             return value
 
 
-class TeamEncryptedString(TypeDecorator):
-    """String column encrypted with the current team's derived key.
+class UserEncryptedString(TypeDecorator):
+    """String column encrypted with the current user's derived key.
 
-    Used in team DB columns. Requires set_team_encryption_context() to be
+    Used in per-user DB columns. Requires set_user_encryption_context() to be
     called before any DB operation within the request lifecycle.
     """
 
@@ -99,7 +99,7 @@ class TeamEncryptedString(TypeDecorator):
     def process_bind_param(self, value: Any, dialect: Any) -> str | None:
         if value is None:
             return None
-        fernet = _get_team_fernet()
+        fernet = _get_user_fernet()
         if fernet is None:
             return value
         return fernet.encrypt(value.encode()).decode()
@@ -107,7 +107,7 @@ class TeamEncryptedString(TypeDecorator):
     def process_result_value(self, value: Any, dialect: Any) -> str | None:
         if value is None:
             return None
-        fernet = _get_team_fernet()
+        fernet = _get_user_fernet()
         if fernet is None:
             return value
         try:

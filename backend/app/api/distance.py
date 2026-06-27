@@ -5,11 +5,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.deps import get_ctx_and_session
-from backend.app.models.team_orm import Activity, ActivityDistanceBest, Athlete
+from backend.app.models.user_orm import Activity, ActivityDistanceBest, Athlete
 from backend.app.schemas.distance import AllTimeDistanceBestsResponse, DistanceBestEntry
 from openkoutsi.training_math import DISTANCE_BEST_DISTANCES
 
-router = APIRouter(prefix="/distance", tags=["distance"])
+router = APIRouter(prefix="/metrics", tags=["metrics"])
 
 TOP_N = 3
 
@@ -22,7 +22,8 @@ async def _get_athlete(global_user_id: str, session: AsyncSession) -> Athlete:
     return athlete
 
 
-@router.get("/bests", response_model=AllTimeDistanceBestsResponse)
+@router.get("/bests/distance", response_model=AllTimeDistanceBestsResponse,
+            operation_id="getDistanceBests", summary="All-time distance bests")
 async def get_distance_bests(
     include_virtual: bool = False,
     ctx_session=Depends(get_ctx_and_session),

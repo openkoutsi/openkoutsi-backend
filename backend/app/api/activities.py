@@ -15,8 +15,8 @@ from backend.app.core.auth import get_current_user
 from backend.app.core.config import settings
 from backend.app.core.deps import get_ctx_and_session
 from backend.app.core.file_encryption import decrypt_file, encrypt_file
-from backend.app.db.team_session import get_team_session_factory
-from backend.app.models.team_orm import (
+from backend.app.db.user_session import get_user_session_factory
+from backend.app.models.user_orm import (
     Activity,
     ActivityDistanceBest,
     ActivityInterval,
@@ -65,16 +65,16 @@ async def _get_athlete(global_user_id: str, session: AsyncSession) -> Athlete:
     return athlete
 
 
-def _maybe_auto_analyze(activity_id: str, athlete: Athlete, team_id: str) -> bool:
+def _maybe_auto_analyze(activity_id: str, athlete: Athlete, user_id: str) -> bool:
     app_settings = athlete.app_settings or {}
     if app_settings.get("auto_analyze"):
         from backend.app.services.llm_activity_analyzer import analyze_activity_bg
-        asyncio.create_task(analyze_activity_bg(activity_id, athlete.id, team_id))
+        asyncio.create_task(analyze_activity_bg(activity_id, athlete.id, user_id))
         return True
     return False
 
 
-def _maybe_auto_training_status(athlete: Athlete, team_id: str) -> bool:
+def _maybe_auto_training_status(athlete: Athlete, user_id: str) -> bool:
     """Marks athlete as pending for training status analysis if eligible.
 
     Returns True if the status was set to pending; caller must commit the
@@ -92,9 +92,9 @@ def _maybe_auto_training_status(athlete: Athlete, team_id: str) -> bool:
 
 async def _bg_process_and_recalculate(
     file_path: str, athlete_id: str, activity_id: str,
-    team_id: str, global_user_id: str,
+    user_id: str, global_user_id: str,
 ) -> None:
-    async with get_team_session_factory(team_id)() as session:
+    async with get_user_session_factory(user_id)() as session:
         athlete_result = await session.execute(
             select(Athlete).where(Athlete.id == athlete_id)
         )
@@ -189,7 +189,7 @@ async def _bg_process_and_recalculate(
             )
 
             try:
-                encrypt_file(Path(file_path), team_id, global_user_id)
+                encrypt_file(Path(file_path), user_id)
                 upload_src.fit_file_encrypted = True
             except Exception:
                 log.warning(
@@ -198,14 +198,14 @@ async def _bg_process_and_recalculate(
                     exc_info=True,
                 )
 
-            if _maybe_auto_analyze(target_act.id, athlete, team_id):
+            if _maybe_auto_analyze(target_act.id, athlete, user_id):
                 target_act.analysis_status = "pending"
 
-            needs_status = _maybe_auto_training_status(athlete, team_id)
+            needs_status = _maybe_auto_training_status(athlete, user_id)
             await session.commit()
             if needs_status:
                 from backend.app.services.llm_training_status_analyzer import analyze_training_status_bg
-                asyncio.create_task(analyze_training_status_bg(athlete.id, team_id))
+                asyncio.create_task(analyze_training_status_bg(athlete.id, user_id))
             await find_and_link_workout(session, athlete_id, target_act)
             await recalculate_from(athlete_id, start_date, session)
 
@@ -223,13 +223,13 @@ async def _bg_process_and_recalculate(
             raise
 
 
-async def _bg_recalculate(athlete_id: str, from_date: date, team_id: str) -> None:
-    async with get_team_session_factory(team_id)() as session:
+async def _bg_recalculate(athlete_id: str, from_date: date, user_id: str) -> None:
+    async with get_user_session_factory(user_id)() as session:
         await recalculate_from(athlete_id, from_date, session)
 
 
 async def _bg_attach_fit_and_reprocess(
-    file_path: str, activity_id: str, team_id: str, global_user_id: str,
+    file_path: str, activity_id: str, user_id: str, global_user_id: str,
 ) -> None:
     """After attaching a user-uploaded FIT to an existing synced activity,
     replace its intervals with lap data from the device file."""
@@ -240,9 +240,9 @@ async def _bg_attach_fit_and_reprocess(
         auto_interval_s, build_auto_intervals, compute_interval_stats,
     )
     from backend.app.core.file_encryption import encrypt_file
-    from backend.app.models.team_orm import ActivityStream
+    from backend.app.models.user_orm import ActivityStream
 
-    async with get_team_session_factory(team_id)() as session:
+    async with get_user_session_factory(user_id)() as session:
         act_result = await session.execute(select(Activity).where(Activity.id == activity_id))
         activity = act_result.scalar_one_or_none()
         if activity is None:
@@ -285,7 +285,7 @@ async def _bg_attach_fit_and_reprocess(
                 )
             )
             upload_src = src_result.scalar_one()
-            encrypt_file(Path(file_path), team_id, global_user_id)
+            encrypt_file(Path(file_path), user_id)
             upload_src.fit_file_encrypted = True
         except Exception:
             log.warning("Failed to encrypt attached FIT file %s", file_path, exc_info=True)
@@ -304,7 +304,7 @@ async def upload_activity(
     ctx, session = ctx_session
     athlete = await _get_athlete(ctx.user_id, session)
 
-    storage_dir = settings.team_fit_dir(ctx.team_id, ctx.user_id)
+    storage_dir = settings.user_fit_dir(ctx.user_id)
     storage_dir.mkdir(parents=True, exist_ok=True)
     file_path = storage_dir / f"{uuid.uuid4()}.fit"
 
@@ -357,7 +357,7 @@ async def upload_activity(
             await session.commit()
             background_tasks.add_task(
                 _bg_attach_fit_and_reprocess,
-                str(file_path), duplicate.id, ctx.team_id, ctx.user_id,
+                str(file_path), duplicate.id, ctx.user_id, ctx.user_id,
             )
             return ActivityResponse.model_validate(duplicate)
 
@@ -380,13 +380,14 @@ async def upload_activity(
 
     background_tasks.add_task(
         _bg_process_and_recalculate,
-        str(file_path), athlete.id, activity.id, ctx.team_id, ctx.user_id,
+        str(file_path), athlete.id, activity.id, ctx.user_id, ctx.user_id,
     )
 
     return ActivityResponse.model_validate(activity)
 
 
-@router.post("/", response_model=ActivityResponse, status_code=201)
+@router.post("", response_model=ActivityResponse, status_code=201,
+             operation_id="createActivity", summary="Create a manual activity")
 async def create_manual_activity(
     payload: ManualActivityCreate,
     background_tasks: BackgroundTasks,
@@ -434,12 +435,13 @@ async def create_manual_activity(
             if hasattr(payload.start_time, "date")
             else payload.start_time
         )
-        background_tasks.add_task(_bg_recalculate, athlete.id, start_date, ctx.team_id)
+        background_tasks.add_task(_bg_recalculate, athlete.id, start_date, ctx.user_id)
 
     return ActivityResponse.model_validate(activity)
 
 
-@router.get("/", response_model=ActivityListResponse)
+@router.get("", response_model=ActivityListResponse,
+            operation_id="listActivities", summary="List activities")
 async def list_activities(
     q: Optional[str] = Query(None, description="Fuzzy search on activity name"),
     start: Optional[date] = Query(None),
@@ -608,7 +610,7 @@ async def download_fit_file(
 
     best = min(fit_sources, key=lambda s: _source_priority(s.provider, True))
     fit_path = Path(best.fit_file_path).resolve()
-    expected_dir = settings.team_fit_dir(ctx.team_id, ctx.user_id).resolve()
+    expected_dir = settings.user_fit_dir(ctx.user_id).resolve()
     if not fit_path.is_relative_to(expected_dir):
         raise HTTPException(status_code=403, detail="Forbidden")
     if not fit_path.exists():
@@ -621,7 +623,7 @@ async def download_fit_file(
     filename = f"{safe_name}.fit"
 
     if best.fit_file_encrypted:
-        content = decrypt_file(fit_path, ctx.team_id, ctx.user_id)
+        content = decrypt_file(fit_path, ctx.user_id)
         return Response(
             content=content,
             media_type="application/octet-stream",
@@ -724,10 +726,10 @@ async def reprocess_activity(
     if fit_sources:
         best = min(fit_sources, key=lambda s: _source_priority(s.provider, True))
         fit_path = Path(best.fit_file_path).resolve()
-        expected_dir = settings.team_fit_dir(ctx.team_id, ctx.user_id).resolve()
+        expected_dir = settings.user_fit_dir(ctx.user_id).resolve()
         if fit_path.is_relative_to(expected_dir) and fit_path.exists():
             if best.fit_file_encrypted:
-                fileish = io.BytesIO(decrypt_file(fit_path, ctx.team_id, ctx.user_id))
+                fileish = io.BytesIO(decrypt_file(fit_path, ctx.user_id))
             else:
                 fileish = str(fit_path)
 
@@ -876,7 +878,7 @@ async def delete_activity(
     await session.commit()
 
     if start_date:
-        background_tasks.add_task(_bg_recalculate, athlete.id, start_date, ctx.team_id)
+        background_tasks.add_task(_bg_recalculate, athlete.id, start_date, ctx.user_id)
 
 
 @router.post("/{activity_id}/analyze", status_code=202)
@@ -904,7 +906,7 @@ async def trigger_analysis(
     await session.commit()
 
     background_tasks.add_task(
-        analyze_activity_bg, activity_id, athlete.id, ctx.team_id, body.locale
+        analyze_activity_bg, activity_id, athlete.id, ctx.user_id, body.locale
     )
     return {"status": "pending"}
 

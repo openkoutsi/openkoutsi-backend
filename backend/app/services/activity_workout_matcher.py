@@ -7,7 +7,7 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.models.team_orm import Activity, PlannedWorkout, TrainingPlan
+from backend.app.models.user_orm import Activity, PlannedWorkout, TrainingPlan
 from openkoutsi.sport_matching import sports_match
 
 _TSS_THRESHOLD = 0.60
