@@ -12,12 +12,10 @@ Most cycling coaching tools are cloud-only SaaS. openkoutsi is different: you ru
 
 ## Features
 
-- **Multi-team support** — isolated teams with separate databases/storage; users can belong to multiple teams
-- **Invite-only signup + team requests** — setup wizard creates the first team/admin; later team creation requests can be approved via superadmin
-- **Self-serve join requests** — prospective members can request to join a team from the login page; admins approve or reject from the Admin → Join requests tab
-- **Admin & superadmin inbox** — in-app messages notify admins about events (new team requests, used invites, join requests); each user has an isolated per-user message store, deletions are permanent, and the design leaves a hook for future email/push delivery
-- **Admin dashboard** — manage members, invitations, join requests, password resets, and per-team LLM settings
-- **Coach access** — coaches can view athlete profiles and activity lists inside their team
+- **Single instance, per-user data** — one deployment; every user's athlete profile and all training data live in their own isolated SQLite database
+- **Invite-only signup** — the setup wizard creates the first administrator; further accounts are created by registering with an instance-wide invite issued by an admin
+- **Admin inbox** — in-app messages notify admins about events (e.g. used invites); each user has an isolated per-user message store, deletions are permanent, and the design leaves a hook for future email/push delivery
+- **Admin dashboard** — manage users, invitations, password resets, and instance-wide LLM settings
 - **FIT file ingestion** — upload activities directly with automatic TSS, normalized power, and zone distribution analysis
 - **Workout categorization** — automatic Coggan-style zone classification with manual override
 - **Strava + Wahoo sync** — OAuth integrations with history import and webhook updates through bridge services
@@ -36,7 +34,7 @@ Most cycling coaching tools are cloud-only SaaS. openkoutsi is different: you ru
 - **Activity labels & notes** — tag activities as "race" or "commute" and add free-text notes (included in AI analysis context)
 - **AI coaching analysis** — per-activity analysis and plan support with OpenAI-compatible backends
 - **Koutsi daily feedback** — dashboard card with LLM-generated daily training status covering load trends, recovery state, plan adherence, and goal progress; auto-triggers after uploads/syncs when enabled
-- **PATCH support on `/api/athlete/`** — athlete profile endpoint now accepts both `PUT` and `PATCH` for partial updates
+- **API v2** — token-scoped (no team slug in any path), no trailing slashes on collection roots, a shared pagination envelope, analytics consolidated under `/api/metrics`, and `PATCH /api/athlete` for partial updates
 - **Privacy-first** — export your data and delete your account at any time
 - **Cycling-themed 404 page** — localized "Wrong Turn!" not-found page with cycling flavour
 
@@ -47,9 +45,9 @@ Most cycling coaching tools are cloud-only SaaS. openkoutsi is different: you ru
 │  FastAPI backend (Python · SQLAlchemy · Alembic)                  │
 │  (the Next.js frontend lives in openkoutsi/openkoutsi-web)        │
 │                                                                    │
-│  data/registry.db                 global users + team registry     │
-│  data/teams/{id}/team.db          per-team athletic data           │
-│  data/teams/{id}/uploads/         encrypted FIT files              │
+│  data/registry.db                 users, invitations, settings      │
+│  data/users/{id}/user.db          per-user athlete + training data   │
+│  data/users/{id}/uploads/         encrypted FIT files               │
 └────────────────────────────────────────────────────────────────────┘
                  ↕ polls for events
        ┌──────────────────────────────┐     ┌──────────────────────────────┐
@@ -140,9 +138,6 @@ LLM_BASE_URL=
 LLM_API_KEY=
 LLM_MODEL=
 LLM_ALLOWED_SERVERS=
-
-# Optional: enables /superadmin for approving pending teams
-SUPERADMIN_SECRET=
 ```
 
 The web frontend has its own configuration (`NEXT_PUBLIC_API_URL`, etc.) — see the [openkoutsi-web](https://github.com/openkoutsi/openkoutsi-web) repository.
@@ -150,7 +145,7 @@ The web frontend has its own configuration (`NEXT_PUBLIC_API_URL`, etc.) — see
 ## Integrations
 
 - **Strava:** configure Strava app credentials in `.env` and deploy `strava_bridge/` to a public HTTPS URL.
-- **Wahoo:** configure Wahoo credentials in `.env` and deploy `wahoo_bridge/` to a public HTTPS URL. Pushing structured workouts to Wahoo requires the `plans_read`, `plans_write`, and `workouts_write` scopes; users connected before this feature must reconnect Wahoo to grant them. The "Generate workouts" plan action needs a server-reachable LLM (resolved athlete → team → global) to synthesize the structured workouts; uploading the generated workouts to Wahoo is then done individually from the Workouts tab.
+- **Wahoo:** configure Wahoo credentials in `.env` and deploy `wahoo_bridge/` to a public HTTPS URL. Pushing structured workouts to Wahoo requires the `plans_read`, `plans_write`, and `workouts_write` scopes; users connected before this feature must reconnect Wahoo to grant them. The "Generate workouts" plan action needs a server-reachable LLM (resolved athlete → instance → global) to synthesize the structured workouts; uploading the generated workouts to Wahoo is then done individually from the Workouts tab.
 
 Detailed production setup, reverse proxy examples, systemd units, bridge registration steps, and GitHub Actions automated deployment are in [DEPLOY.md](DEPLOY.md).
 
