@@ -15,7 +15,7 @@ from jose import jwt
 from sqlalchemy import select
 
 from backend.app.core.config import settings
-from backend.app.models.team_orm import Activity, ActivitySource, Athlete
+from backend.app.models.user_orm import Activity, ActivitySource, Athlete
 from backend.app.models.registry_orm import ProviderConnection
 
 # Fixed IDs from conftest.py
@@ -59,7 +59,7 @@ async def _add_activity(
 
 
 def _make_session_cm(session):
-    """Return a team_id → session factory mock for get_team_session_factory patches."""
+    """Return a team_id → session factory mock for get_user_session_factory patches."""
     class _CM:
         def __call__(self):
             return self
@@ -367,7 +367,7 @@ class TestDisconnect:
 
         with (
             patch.object(StravaProviderClient, "deauthorize", new_callable=AsyncMock),
-            patch("backend.app.db.team_session.get_team_session_factory", _make_session_cm(session)),
+            patch("backend.app.db.user_session.get_user_session_factory", _make_session_cm(session)),
         ):
             resp = await client.delete(
                 "/api/integrations/strava/disconnect?delete_data=true",
@@ -417,7 +417,7 @@ class TestDisconnect:
 
         with (
             patch.object(StravaProviderClient, "deauthorize", new_callable=AsyncMock),
-            patch("backend.app.db.team_session.get_team_session_factory", _make_session_cm(session)),
+            patch("backend.app.db.user_session.get_user_session_factory", _make_session_cm(session)),
         ):
             resp = await client.delete(
                 "/api/integrations/strava/disconnect?delete_data=true",

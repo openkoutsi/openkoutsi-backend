@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from sqlalchemy import select
 
-from backend.app.models.team_orm import (
+from backend.app.models.user_orm import (
     Athlete, PlannedWorkout, TrainingPlan, WahooWorkoutUpload, WorkoutDefinition,
 )
 

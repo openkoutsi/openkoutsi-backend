@@ -19,7 +19,7 @@ async def _get_athlete(global_user_id: str, session: AsyncSession) -> Athlete:
     return athlete
 
 
-@router.get("/", response_model=list[GoalResponse])
+@router.get("", response_model=list[GoalResponse])
 async def list_goals(ctx_session=Depends(get_ctx_and_session)):
     ctx, session = ctx_session
     athlete = await _get_athlete(ctx.user_id, session)
@@ -31,7 +31,7 @@ async def list_goals(ctx_session=Depends(get_ctx_and_session)):
     return result.scalars().all()
 
 
-@router.post("/", response_model=GoalResponse, status_code=201)
+@router.post("", response_model=GoalResponse, status_code=201)
 async def create_goal(
     body: GoalCreate,
     ctx_session=Depends(get_ctx_and_session),

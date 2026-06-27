@@ -83,7 +83,7 @@ async def list_export_formats():
     ]
 
 
-@router.get("/", response_model=list[WorkoutDefinitionResponse])
+@router.get("", response_model=list[WorkoutDefinitionResponse])
 async def list_workouts(ctx_session=Depends(get_ctx_and_session)):
     ctx, session = ctx_session
     athlete = await _get_athlete(ctx.user_id, session)
@@ -95,7 +95,7 @@ async def list_workouts(ctx_session=Depends(get_ctx_and_session)):
     return result.scalars().all()
 
 
-@router.post("/", response_model=WorkoutDefinitionResponse, status_code=201)
+@router.post("", response_model=WorkoutDefinitionResponse, status_code=201)
 async def create_workout(
     body: WorkoutDefinitionCreate,
     ctx_session=Depends(get_ctx_and_session),

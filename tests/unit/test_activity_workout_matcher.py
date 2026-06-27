@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 from datetime import datetime, timezone
 
 from backend.app.services.activity_workout_matcher import _matches
-from backend.app.models.team_orm import Activity, PlannedWorkout
+from backend.app.models.user_orm import Activity, PlannedWorkout
 
 
 def _activity(**kwargs) -> Activity:

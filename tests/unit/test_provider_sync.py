@@ -12,8 +12,8 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from backend.app.db.base import TeamBase
-from backend.app.models.team_orm import Activity, ActivitySource, Athlete
+from backend.app.db.base import UserBase
+from backend.app.models.user_orm import Activity, ActivitySource, Athlete
 from backend.app.models.registry_orm import ProviderConnection
 from backend.app.services.provider_sync import ensure_fresh_token, sync_provider_activities
 from backend.app.services.providers.base import NormalizedActivity
@@ -242,7 +242,7 @@ class TestSyncProviderActivities:
 
         with patch("backend.app.services.provider_sync.PROVIDERS", {"strava": mock_cls}):
             count, earliest = await sync_provider_activities(
-                athlete, conn, session, team_id=_TEAM_ID, access_token=_ACCESS_TOKEN
+                athlete, conn, session, user_id=_TEAM_ID, access_token=_ACCESS_TOKEN
             )
 
         assert count == 1
@@ -281,7 +281,7 @@ class TestSyncProviderActivities:
 
         with patch("backend.app.services.provider_sync.PROVIDERS", {"strava": mock_cls}):
             count, earliest = await sync_provider_activities(
-                athlete, conn, session, team_id=_TEAM_ID, access_token=_ACCESS_TOKEN
+                athlete, conn, session, user_id=_TEAM_ID, access_token=_ACCESS_TOKEN
             )
 
         assert count == 0
@@ -305,7 +305,7 @@ class TestSyncProviderActivities:
 
         with patch("backend.app.services.provider_sync.PROVIDERS", {"strava": strava_cls}):
             await sync_provider_activities(
-                athlete, strava_conn, session, team_id=_TEAM_ID, access_token=_ACCESS_TOKEN
+                athlete, strava_conn, session, user_id=_TEAM_ID, access_token=_ACCESS_TOKEN
             )
 
         # Sync Wahoo — same start_time, should attach to existing Activity
@@ -317,7 +317,7 @@ class TestSyncProviderActivities:
 
         with patch("backend.app.services.provider_sync.PROVIDERS", {"wahoo": wahoo_cls}):
             await sync_provider_activities(
-                athlete, wahoo_conn, session, team_id=_TEAM_ID, access_token=_ACCESS_TOKEN
+                athlete, wahoo_conn, session, user_id=_TEAM_ID, access_token=_ACCESS_TOKEN
             )
 
         # Exactly ONE Activity, TWO ActivitySources
@@ -349,7 +349,7 @@ class TestSyncProviderActivities:
 
         with patch("backend.app.services.provider_sync.PROVIDERS", {"strava": strava_cls}):
             await sync_provider_activities(
-                athlete, strava_conn, session, team_id=_TEAM_ID, access_token=_ACCESS_TOKEN
+                athlete, strava_conn, session, user_id=_TEAM_ID, access_token=_ACCESS_TOKEN
             )
 
         # Capture Strava-derived TSS
@@ -391,7 +391,7 @@ class TestSyncProviderActivities:
             patch("backend.app.services.provider_sync.encrypt_file"),
         ):
             wahoo_count, _ = await sync_provider_activities(
-                athlete, wahoo_conn, session, team_id=_TEAM_ID, access_token=_ACCESS_TOKEN
+                athlete, wahoo_conn, session, user_id=_TEAM_ID, access_token=_ACCESS_TOKEN
             )
 
         assert wahoo_count == 1
@@ -444,7 +444,7 @@ class TestSyncProviderActivities:
             patch("backend.app.services.provider_sync.encrypt_file"),
         ):
             await sync_provider_activities(
-                athlete, wahoo_conn, session, team_id=_TEAM_ID, access_token=_ACCESS_TOKEN
+                athlete, wahoo_conn, session, user_id=_TEAM_ID, access_token=_ACCESS_TOKEN
             )
 
         acts = (await session.execute(select(Activity).where(Activity.athlete_id == athlete.id))).scalars().all()
@@ -460,7 +460,7 @@ class TestSyncProviderActivities:
 
         with patch("backend.app.services.provider_sync.PROVIDERS", {"strava": strava_cls}):
             strava_count, _ = await sync_provider_activities(
-                athlete, strava_conn, session, team_id=_TEAM_ID, access_token=_ACCESS_TOKEN
+                athlete, strava_conn, session, user_id=_TEAM_ID, access_token=_ACCESS_TOKEN
             )
 
         assert strava_count == 0  # Strava source added but not counted as a new/updated activity
@@ -493,7 +493,7 @@ class TestSyncProviderActivities:
 
         with patch("backend.app.services.provider_sync.PROVIDERS", {"wahoo": wahoo_cls}):
             await sync_provider_activities(
-                athlete, wahoo_conn, session, team_id=_TEAM_ID, access_token=_ACCESS_TOKEN
+                athlete, wahoo_conn, session, user_id=_TEAM_ID, access_token=_ACCESS_TOKEN
             )
 
         acts = (await session.execute(select(Activity).where(Activity.athlete_id == athlete.id))).scalars().all()
@@ -509,7 +509,7 @@ class TestSyncProviderActivities:
 
         with patch("backend.app.services.provider_sync.PROVIDERS", {"strava": strava_cls}):
             strava_count, _ = await sync_provider_activities(
-                athlete, strava_conn, session, team_id=_TEAM_ID, access_token=_ACCESS_TOKEN
+                athlete, strava_conn, session, user_id=_TEAM_ID, access_token=_ACCESS_TOKEN
             )
 
         assert strava_count == 1  # repopulated
@@ -540,14 +540,14 @@ class TestSyncProviderActivities:
 
         with patch("backend.app.services.provider_sync.PROVIDERS", {"strava": mock_cls}):
             count, earliest = await sync_provider_activities(
-                athlete, conn, session, team_id=_TEAM_ID, access_token=_ACCESS_TOKEN
+                athlete, conn, session, user_id=_TEAM_ID, access_token=_ACCESS_TOKEN
             )
 
         assert count == 3
         assert earliest == date(2024, 6, 1)
 
     async def test_stream_data_persisted_with_activity(self, session):
-        from backend.app.models.team_orm import ActivityStream
+        from backend.app.models.user_orm import ActivityStream
 
         athlete = await _make_athlete(session, user_id="user-8")
         conn = _make_connection(athlete)
@@ -562,7 +562,7 @@ class TestSyncProviderActivities:
 
         with patch("backend.app.services.provider_sync.PROVIDERS", {"strava": mock_cls}):
             count, _ = await sync_provider_activities(
-                athlete, conn, session, team_id=_TEAM_ID, access_token=_ACCESS_TOKEN
+                athlete, conn, session, user_id=_TEAM_ID, access_token=_ACCESS_TOKEN
             )
 
         assert count == 1
@@ -583,7 +583,7 @@ class TestSyncProviderActivities:
 
         with patch("backend.app.services.provider_sync.PROVIDERS", {}):
             count, earliest = await sync_provider_activities(
-                athlete, conn, session, team_id=_TEAM_ID, access_token=_ACCESS_TOKEN
+                athlete, conn, session, user_id=_TEAM_ID, access_token=_ACCESS_TOKEN
             )
 
         assert count == 0
@@ -613,7 +613,7 @@ class TestSyncProviderActivities:
 
         with patch("backend.app.services.provider_sync.PROVIDERS", {"strava": mock_cls}):
             count, _ = await sync_provider_activities(
-                athlete, conn, session, team_id=_TEAM_ID, access_token=_ACCESS_TOKEN
+                athlete, conn, session, user_id=_TEAM_ID, access_token=_ACCESS_TOKEN
             )
 
         assert count == 3
@@ -638,7 +638,7 @@ class TestSyncProviderActivities:
 
         with patch("backend.app.services.provider_sync.PROVIDERS", {"strava": mock_cls}):
             await sync_provider_activities(
-                athlete, conn, session, team_id=_TEAM_ID, access_token=_ACCESS_TOKEN
+                athlete, conn, session, user_id=_TEAM_ID, access_token=_ACCESS_TOKEN
             )
 
         act = (await session.execute(
@@ -685,7 +685,7 @@ class TestSyncProviderActivities:
             patch("backend.app.services.provider_sync.encrypt_file"),
         ):
             await sync_provider_activities(
-                athlete, conn, session, team_id=_TEAM_ID, access_token=_ACCESS_TOKEN
+                athlete, conn, session, user_id=_TEAM_ID, access_token=_ACCESS_TOKEN
             )
 
         act = (await session.execute(
@@ -709,7 +709,7 @@ class TestSyncProviderActivities:
 
         with patch("backend.app.services.provider_sync.PROVIDERS", {"strava": mock_cls}):
             await sync_provider_activities(
-                athlete, conn, session, team_id=_TEAM_ID, access_token=_ACCESS_TOKEN
+                athlete, conn, session, user_id=_TEAM_ID, access_token=_ACCESS_TOKEN
             )
 
         act = (await session.execute(
@@ -761,7 +761,7 @@ class TestDeduplicationRaceCondition:
             connect_args={"timeout": 10},
         )
         async with eng.begin() as conn:
-            await conn.run_sync(TeamBase.metadata.create_all)
+            await conn.run_sync(UserBase.metadata.create_all)
         yield eng
         await eng.dispose()
 

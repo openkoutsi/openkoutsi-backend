@@ -15,7 +15,7 @@ from backend.app.services.llm_workout_generator import (
     _parse_steps,
 )
 from backend.app.api.plans import _planned_date
-from backend.app.models.team_orm import PlannedWorkout
+from backend.app.models.user_orm import PlannedWorkout
 
 
 def _valid_steps_json() -> str:

@@ -12,7 +12,7 @@ import httpx
 from sqlalchemy import select
 
 from backend.app.models.registry_orm import ProviderConnection
-from backend.app.models.team_orm import WahooWorkoutUpload
+from backend.app.models.user_orm import WahooWorkoutUpload
 from backend.app.services.providers.wahoo import WahooClient
 
 _TEST_USER_ID = "test-user-00000000"
@@ -44,7 +44,7 @@ async def _add_wahoo_connection(registry_session):
 
 
 async def _create_workout(client, auth_headers) -> str:
-    resp = await client.post("/api/workouts/", json=_WORKOUT_BODY, headers=auth_headers)
+    resp = await client.post("/api/workouts", json=_WORKOUT_BODY, headers=auth_headers)
     assert resp.status_code == 201
     return resp.json()["id"]
 

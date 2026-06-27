@@ -20,11 +20,11 @@ import pytest
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-import backend.app.models.team_orm  # noqa: F401 — populate TeamBase.metadata
+import backend.app.models.user_orm  # noqa: F401 — populate UserBase.metadata
 import backend.app.models.registry_orm  # noqa: F401 — populate RegistryBase.metadata
-from backend.app.db.base import RegistryBase, TeamBase, _set_wal_mode
-from backend.app.models.registry_orm import Team, User
-from backend.app.models.team_orm import Athlete
+from backend.app.db.base import RegistryBase, UserBase, _set_wal_mode
+from backend.app.models.registry_orm import User
+from backend.app.models.user_orm import Athlete
 
 
 def _team_engine(db_path):
@@ -58,7 +58,7 @@ class TestTeamDbConcurrency:
         """50 concurrent coroutines each insert a unique Athlete; none must fail."""
         engine = _team_engine(str(tmp_path / "team.db"))
         async with engine.begin() as conn:
-            await conn.run_sync(TeamBase.metadata.create_all)
+            await conn.run_sync(UserBase.metadata.create_all)
 
         factory = async_sessionmaker(engine, expire_on_commit=False)
         n = 50
@@ -84,7 +84,7 @@ class TestTeamDbConcurrency:
         """Writes and reads running concurrently must not deadlock or lock."""
         engine = _team_engine(str(tmp_path / "team_rw.db"))
         async with engine.begin() as conn:
-            await conn.run_sync(TeamBase.metadata.create_all)
+            await conn.run_sync(UserBase.metadata.create_all)
 
         factory = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -110,7 +110,7 @@ class TestTeamDbConcurrency:
         """A slow write transaction must not cause others to fail — they queue instead."""
         engine = _team_engine(str(tmp_path / "team_slow.db"))
         async with engine.begin() as conn:
-            await conn.run_sync(TeamBase.metadata.create_all)
+            await conn.run_sync(UserBase.metadata.create_all)
 
         factory = async_sessionmaker(engine, expire_on_commit=False)
         results: list[str] = []
@@ -149,8 +149,8 @@ class TestTeamDbConcurrency:
 
 
 class TestRegistryDbConcurrency:
-    async def test_concurrent_team_inserts_succeed(self, tmp_path):
-        """30 concurrent coroutines each insert a unique Team; none must fail."""
+    async def test_concurrent_user_inserts_succeed(self, tmp_path):
+        """30 concurrent coroutines each insert a unique User; none must fail."""
         engine = _registry_engine(str(tmp_path / "registry.db"))
         async with engine.begin() as conn:
             await conn.run_sync(RegistryBase.metadata.create_all)
@@ -158,20 +158,20 @@ class TestRegistryDbConcurrency:
         factory = async_sessionmaker(engine, expire_on_commit=False)
         n = 30
 
-        async def insert_team(i: int):
+        async def insert_user(i: int):
             async with factory() as session:
-                session.add(Team(
+                session.add(User(
                     id=str(uuid.uuid4()),
-                    slug=f"team-{i}-{uuid.uuid4().hex[:8]}",
-                    name=f"Team {i}",
-                    status="active",
+                    username=f"user-{i}-{uuid.uuid4().hex[:8]}",
+                    password_hash="x",
+                    roles='["user"]',
                 ))
                 await session.commit()
 
-        await asyncio.gather(*[insert_team(i) for i in range(n)])
+        await asyncio.gather(*[insert_user(i) for i in range(n)])
 
         async with factory() as session:
-            count = (await session.execute(text("SELECT COUNT(*) FROM teams"))).scalar()
+            count = (await session.execute(text("SELECT COUNT(*) FROM users"))).scalar()
 
         await engine.dispose()
         assert count == n

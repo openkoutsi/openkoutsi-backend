@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from sqlalchemy import select
 
-from backend.app.models.registry_orm import ProviderConnection, TeamMembership
-from backend.app.models.team_orm import Activity, ActivitySource, Athlete
+from backend.app.models.registry_orm import ProviderConnection
+from backend.app.models.user_orm import Activity, ActivitySource, Athlete
 from backend.app.services.wahoo_sync import process_wahoo_webhook
 
 # Payload matching the real-world Wahoo webhook structure observed in production:
@@ -83,7 +83,7 @@ async def _seed_athlete_and_conn(team_session, registry_session):
     await team_session.flush()
 
     # SQLite does not enforce FK constraints by default, so we can insert
-    # ProviderConnection and TeamMembership without creating User/Team rows.
+    # ProviderConnection without creating a User row.
     conn = ProviderConnection(
         user_id=_GLOBAL_USER_ID,
         provider="wahoo",
@@ -92,13 +92,6 @@ async def _seed_athlete_and_conn(team_session, registry_session):
         refresh_token="refresh-tok",
     )
     registry_session.add(conn)
-
-    membership = TeamMembership(
-        team_id=_TEAM_ID,
-        user_id=_GLOBAL_USER_ID,
-        roles='["user"]',
-    )
-    registry_session.add(membership)
     await registry_session.flush()
 
     return athlete, conn
@@ -118,7 +111,7 @@ async def test_process_wahoo_webhook_nested_workout_creates_activity(session, re
             new=_make_session_cm(registry_session),
         ),
         patch(
-            "backend.app.db.team_session.get_team_session_factory",
+            "backend.app.db.user_session.get_user_session_factory",
             return_value=_make_session_cm(session),
         ),
         patch(

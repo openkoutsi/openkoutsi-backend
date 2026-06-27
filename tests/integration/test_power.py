@@ -1,5 +1,5 @@
 """
-Integration tests for /api/power/bests endpoint.
+Integration tests for /api/metrics/bests/power endpoint.
 """
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -7,14 +7,14 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select
 
-from backend.app.models.team_orm import Activity, ActivityPowerBest, ActivitySource, ActivityStream, Athlete
+from backend.app.models.user_orm import Activity, ActivityPowerBest, ActivitySource, ActivityStream, Athlete
 
 TESTDATA = Path(__file__).parent.parent.parent / "testdata"
 SAMPLE_FIT = TESTDATA / "Zwift_Aerobic_Foundation_Forge.fit"
 
 
 async def _get_athlete(client, auth_headers, session) -> Athlete:
-    resp = await client.get("/api/athlete/", headers=auth_headers)
+    resp = await client.get("/api/athlete", headers=auth_headers)
     athlete_id = resp.json()["id"]
     result = await session.execute(select(Athlete).where(Athlete.id == athlete_id))
     return result.scalar_one()
@@ -63,12 +63,12 @@ async def _insert_activity_with_power(
 
 class TestGetPowerBestsEmpty:
     async def test_empty_for_new_athlete(self, client, auth_headers):
-        resp = await client.get("/api/power/bests", headers=auth_headers)
+        resp = await client.get("/api/metrics/bests/power", headers=auth_headers)
         assert resp.status_code == 200
         assert resp.json() == {"bests": []}
 
     async def test_unauthenticated_returns_401(self, client):
-        resp = await client.get("/api/power/bests")
+        resp = await client.get("/api/metrics/bests/power")
         assert resp.status_code == 401
 
     async def test_no_power_stream_activity_produces_no_bests(
@@ -76,7 +76,7 @@ class TestGetPowerBestsEmpty:
     ):
         """Manual activity without a power stream should not produce any bests."""
         await client.post(
-            "/api/activities/",
+            "/api/activities",
             json={
                 "sport_type": "Ride",
                 "start_time": "2025-06-01T10:00:00Z",
@@ -84,7 +84,7 @@ class TestGetPowerBestsEmpty:
             },
             headers=auth_headers,
         )
-        resp = await client.get("/api/power/bests", headers=auth_headers)
+        resp = await client.get("/api/metrics/bests/power", headers=auth_headers)
         assert resp.status_code == 200
         assert resp.json()["bests"] == []
 
@@ -98,7 +98,7 @@ class TestGetPowerBestsSingleActivity:
         stream = [250.0] * 60
         await _insert_activity_with_power(session, athlete, stream, "2025-06-01T10:00:00+00:00")
 
-        resp = await client.get("/api/power/bests", headers=auth_headers)
+        resp = await client.get("/api/metrics/bests/power", headers=auth_headers)
         assert resp.status_code == 200
         bests = resp.json()["bests"]
         assert len(bests) > 0
@@ -120,7 +120,7 @@ class TestGetPowerBestsSingleActivity:
         stream = [200.0] * 30
         await _insert_activity_with_power(session, athlete, stream, "2025-06-02T10:00:00+00:00")
 
-        resp = await client.get("/api/power/bests", headers=auth_headers)
+        resp = await client.get("/api/metrics/bests/power", headers=auth_headers)
         bests = resp.json()["bests"]
         for entry in bests:
             assert entry["duration_s"] <= 30, (
@@ -133,7 +133,7 @@ class TestGetPowerBestsSingleActivity:
             session, athlete, [300.0] * 60, "2025-06-03T10:00:00+00:00"
         )
 
-        resp = await client.get("/api/power/bests", headers=auth_headers)
+        resp = await client.get("/api/metrics/bests/power", headers=auth_headers)
         bests = resp.json()["bests"]
         assert len(bests) > 0
         for entry in bests:
@@ -148,7 +148,7 @@ class TestGetPowerBestsSingleActivity:
             session, athlete, [250.0] * 120, "2025-06-04T10:00:00+00:00"
         )
 
-        resp = await client.get("/api/power/bests", headers=auth_headers)
+        resp = await client.get("/api/metrics/bests/power", headers=auth_headers)
         bests = resp.json()["bests"]
         durations = [e["duration_s"] for e in bests]
         assert durations == sorted(durations), "bests must be sorted by duration_s"
@@ -167,7 +167,7 @@ class TestGetPowerBestsMultipleActivities:
                 f"2025-06-0{i + 1}T10:00:00+00:00",
             )
 
-        resp = await client.get("/api/power/bests", headers=auth_headers)
+        resp = await client.get("/api/metrics/bests/power", headers=auth_headers)
         bests = resp.json()["bests"]
 
         sixty_s = [e for e in bests if e["duration_s"] == 60]
@@ -191,7 +191,7 @@ class TestGetPowerBestsMultipleActivities:
                 f"2025-07-0{i + 1}T10:00:00+00:00",
             )
 
-        resp = await client.get("/api/power/bests", headers=auth_headers)
+        resp = await client.get("/api/metrics/bests/power", headers=auth_headers)
         sixty_s = [e for e in resp.json()["bests"] if e["duration_s"] == 60]
         assert len(sixty_s) == 3
         assert max(e["rank"] for e in sixty_s) == 3
@@ -208,7 +208,7 @@ class TestPowerBestsDaysFilter:
             session, athlete, [300.0] * 60, recent.isoformat()
         )
 
-        resp = await client.get("/api/power/bests?days=30", headers=auth_headers)
+        resp = await client.get("/api/metrics/bests/power?days=30", headers=auth_headers)
         assert resp.status_code == 200
         assert len(resp.json()["bests"]) > 0
 
@@ -220,7 +220,7 @@ class TestPowerBestsDaysFilter:
             session, athlete, [300.0] * 60, old.isoformat()
         )
 
-        resp = await client.get("/api/power/bests?days=30", headers=auth_headers)
+        resp = await client.get("/api/metrics/bests/power?days=30", headers=auth_headers)
         assert resp.status_code == 200
         assert resp.json()["bests"] == []
 
@@ -231,8 +231,8 @@ class TestPowerBestsDaysFilter:
             session, athlete, [300.0] * 60, old.isoformat()
         )
 
-        all_resp = await client.get("/api/power/bests", headers=auth_headers)
-        filtered_resp = await client.get("/api/power/bests?days=30", headers=auth_headers)
+        all_resp = await client.get("/api/metrics/bests/power", headers=auth_headers)
+        filtered_resp = await client.get("/api/metrics/bests/power?days=30", headers=auth_headers)
 
         assert len(all_resp.json()["bests"]) > 0
         assert filtered_resp.json()["bests"] == []
@@ -245,14 +245,14 @@ class TestPowerBestsDaysFilter:
         await _insert_activity_with_power(session, athlete, [400.0] * 60, old.isoformat())
         await _insert_activity_with_power(session, athlete, [250.0] * 60, recent.isoformat())
 
-        resp = await client.get("/api/power/bests?days=90", headers=auth_headers)
+        resp = await client.get("/api/metrics/bests/power?days=90", headers=auth_headers)
         bests = resp.json()["bests"]
         sixty_s = [e for e in bests if e["duration_s"] == 60]
         assert len(sixty_s) == 1
         assert sixty_s[0]["power_w"] == pytest.approx(250.0, abs=0.1)
 
     async def test_days_must_be_at_least_1(self, client, auth_headers):
-        resp = await client.get("/api/power/bests?days=0", headers=auth_headers)
+        resp = await client.get("/api/metrics/bests/power?days=0", headers=auth_headers)
         assert resp.status_code == 422
 
 
@@ -291,7 +291,7 @@ class TestPowerBestsFromFitFile:
 
         await process_fit_file(upload_src.fit_file_path, athlete, activity, session)
 
-        resp = await client.get("/api/power/bests", headers=auth_headers)
+        resp = await client.get("/api/metrics/bests/power", headers=auth_headers)
         assert resp.status_code == 200
         bests = resp.json()["bests"]
 
@@ -307,7 +307,7 @@ class TestPowerBestsFromFitFile:
 
 class TestGetFtpEstimate:
     async def test_empty_for_new_athlete(self, client, auth_headers):
-        resp = await client.get("/api/power/ftp-estimate", headers=auth_headers)
+        resp = await client.get("/api/metrics/ftp", headers=auth_headers)
         assert resp.status_code == 200
         body = resp.json()
         assert body["ftp_simple"] is None
@@ -316,7 +316,7 @@ class TestGetFtpEstimate:
         assert body["cp_available"] is False
 
     async def test_unauthenticated_returns_401(self, client):
-        resp = await client.get("/api/power/ftp-estimate")
+        resp = await client.get("/api/metrics/ftp")
         assert resp.status_code == 401
 
     async def test_both_methods_available_with_long_stream(
@@ -328,7 +328,7 @@ class TestGetFtpEstimate:
             session, athlete, [250.0] * 1300, "2025-06-01T10:00:00+00:00"
         )
 
-        resp = await client.get("/api/power/ftp-estimate", headers=auth_headers)
+        resp = await client.get("/api/metrics/ftp", headers=auth_headers)
         assert resp.status_code == 200
         body = resp.json()
         assert body["simple_available"] is True
@@ -347,7 +347,7 @@ class TestGetFtpEstimate:
             session, athlete, [250.0] * 500, "2025-06-02T10:00:00+00:00"
         )
 
-        resp = await client.get("/api/power/ftp-estimate", headers=auth_headers)
+        resp = await client.get("/api/metrics/ftp", headers=auth_headers)
         body = resp.json()
         assert body["simple_available"] is False
         assert body["ftp_simple"] is None
@@ -363,7 +363,7 @@ class TestGetFtpEstimate:
             session, athlete, [250.0] * 130, "2025-06-03T10:00:00+00:00"
         )
 
-        resp = await client.get("/api/power/ftp-estimate", headers=auth_headers)
+        resp = await client.get("/api/metrics/ftp", headers=auth_headers)
         body = resp.json()
         assert body["simple_available"] is False
         assert body["cp_available"] is False
@@ -377,7 +377,7 @@ class TestGetFtpEstimate:
             session, athlete, [250.0] * 1300, old.isoformat()
         )
 
-        resp = await client.get("/api/power/ftp-estimate?days=90", headers=auth_headers)
+        resp = await client.get("/api/metrics/ftp?days=90", headers=auth_headers)
         body = resp.json()
         assert body["simple_available"] is False
         assert body["cp_available"] is False

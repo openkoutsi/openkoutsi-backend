@@ -391,7 +391,7 @@ class TestAnalyzeActivityBg:
                 yield chunk
 
         with (
-            patch("backend.app.services.llm_activity_analyzer.get_team_session_factory",
+            patch("backend.app.services.llm_activity_analyzer.get_user_session_factory",
                   return_value=lambda: _factory()),
             patch("backend.app.services.llm_activity_analyzer._stream_analysis",
                   side_effect=_canned_stream),
@@ -438,7 +438,7 @@ class TestAnalyzeActivityBg:
             yield  # make it an async generator
 
         with (
-            patch("backend.app.services.llm_activity_analyzer.get_team_session_factory",
+            patch("backend.app.services.llm_activity_analyzer.get_user_session_factory",
                   return_value=lambda: _factory()),
             patch("backend.app.services.llm_activity_analyzer._stream_analysis",
                   side_effect=_failing_stream),

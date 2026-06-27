@@ -1,5 +1,5 @@
 """
-Integration tests for /api/distance/bests endpoint.
+Integration tests for /api/metrics/bests/distance endpoint.
 """
 from datetime import datetime, timezone
 from pathlib import Path
@@ -7,14 +7,14 @@ from pathlib import Path
 import pytest
 from sqlalchemy import select
 
-from backend.app.models.team_orm import Activity, ActivityDistanceBest, ActivitySource, ActivityStream, Athlete
+from backend.app.models.user_orm import Activity, ActivityDistanceBest, ActivitySource, ActivityStream, Athlete
 
 TESTDATA = Path(__file__).parent.parent.parent / "testdata"
 SAMPLE_FIT = TESTDATA / "Zwift_Aerobic_Foundation_Forge.fit"
 
 
 async def _get_athlete(client, auth_headers, session) -> Athlete:
-    resp = await client.get("/api/athlete/", headers=auth_headers)
+    resp = await client.get("/api/athlete", headers=auth_headers)
     athlete_id = resp.json()["id"]
     result = await session.execute(select(Athlete).where(Athlete.id == athlete_id))
     return result.scalar_one()
@@ -63,12 +63,12 @@ async def _insert_activity_with_speed(
 
 class TestGetDistanceBestsEmpty:
     async def test_empty_for_new_athlete(self, client, auth_headers):
-        resp = await client.get("/api/distance/bests", headers=auth_headers)
+        resp = await client.get("/api/metrics/bests/distance", headers=auth_headers)
         assert resp.status_code == 200
         assert resp.json() == {"bests": []}
 
     async def test_unauthenticated_returns_401(self, client):
-        resp = await client.get("/api/distance/bests")
+        resp = await client.get("/api/metrics/bests/distance")
         assert resp.status_code == 401
 
     async def test_no_speed_stream_activity_produces_no_bests(
@@ -76,7 +76,7 @@ class TestGetDistanceBestsEmpty:
     ):
         """Manual activity without a speed stream should not produce any bests."""
         await client.post(
-            "/api/activities/",
+            "/api/activities",
             json={
                 "sport_type": "Ride",
                 "start_time": "2025-06-01T10:00:00Z",
@@ -84,7 +84,7 @@ class TestGetDistanceBestsEmpty:
             },
             headers=auth_headers,
         )
-        resp = await client.get("/api/distance/bests", headers=auth_headers)
+        resp = await client.get("/api/metrics/bests/distance", headers=auth_headers)
         assert resp.status_code == 200
         assert resp.json()["bests"] == []
 
@@ -98,7 +98,7 @@ class TestGetDistanceBestsSingleActivity:
         stream = [5.0] * 300
         await _insert_activity_with_speed(session, athlete, stream, "2025-06-01T10:00:00+00:00")
 
-        resp = await client.get("/api/distance/bests", headers=auth_headers)
+        resp = await client.get("/api/metrics/bests/distance", headers=auth_headers)
         assert resp.status_code == 200
         bests = resp.json()["bests"]
         assert len(bests) > 0
@@ -120,7 +120,7 @@ class TestGetDistanceBestsSingleActivity:
         stream = [5.0] * 300
         await _insert_activity_with_speed(session, athlete, stream, "2025-06-02T10:00:00+00:00")
 
-        resp = await client.get("/api/distance/bests", headers=auth_headers)
+        resp = await client.get("/api/metrics/bests/distance", headers=auth_headers)
         bests = resp.json()["bests"]
         for entry in bests:
             assert entry["distance_m"] <= 1000, (
@@ -133,7 +133,7 @@ class TestGetDistanceBestsSingleActivity:
             session, athlete, [5.0] * 300, "2025-06-03T10:00:00+00:00"
         )
 
-        resp = await client.get("/api/distance/bests", headers=auth_headers)
+        resp = await client.get("/api/metrics/bests/distance", headers=auth_headers)
         bests = resp.json()["bests"]
         assert len(bests) > 0
         for entry in bests:
@@ -149,7 +149,7 @@ class TestGetDistanceBestsSingleActivity:
             session, athlete, [5.0] * 2500, "2025-06-04T10:00:00+00:00"
         )
 
-        resp = await client.get("/api/distance/bests", headers=auth_headers)
+        resp = await client.get("/api/metrics/bests/distance", headers=auth_headers)
         bests = resp.json()["bests"]
         distances = [e["distance_m"] for e in bests]
         assert distances == sorted(distances), "bests must be sorted by distance_m"
@@ -169,7 +169,7 @@ class TestGetDistanceBestsMultipleActivities:
                 f"2025-06-0{i + 1}T10:00:00+00:00",
             )
 
-        resp = await client.get("/api/distance/bests", headers=auth_headers)
+        resp = await client.get("/api/metrics/bests/distance", headers=auth_headers)
         bests = resp.json()["bests"]
 
         one_km = [e for e in bests if e["distance_m"] == 1000]
@@ -194,7 +194,7 @@ class TestGetDistanceBestsMultipleActivities:
                 f"2025-07-0{i + 1}T10:00:00+00:00",
             )
 
-        resp = await client.get("/api/distance/bests", headers=auth_headers)
+        resp = await client.get("/api/metrics/bests/distance", headers=auth_headers)
         one_km = [e for e in resp.json()["bests"] if e["distance_m"] == 1000]
         assert len(one_km) == 3
         assert max(e["rank"] for e in one_km) == 3
@@ -211,7 +211,7 @@ class TestGetDistanceBestsMultipleActivities:
                 f"2025-08-0{i + 1}T10:00:00+00:00",
             )
 
-        resp = await client.get("/api/distance/bests", headers=auth_headers)
+        resp = await client.get("/api/metrics/bests/distance", headers=auth_headers)
         one_km = [e for e in resp.json()["bests"] if e["distance_m"] == 1000]
         times = [e["time_s"] for e in one_km]
         assert times == sorted(times), "times must be ordered fastest-first"
@@ -262,7 +262,7 @@ class TestDistanceBestsFromFitFile:
 
         # If distance bests were created, verify they appear in the API response
         if bests:
-            resp = await client.get("/api/distance/bests", headers=auth_headers)
+            resp = await client.get("/api/metrics/bests/distance", headers=auth_headers)
             assert resp.status_code == 200
             api_bests = resp.json()["bests"]
             assert len(api_bests) > 0

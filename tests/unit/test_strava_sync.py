@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from backend.app.services.strava_sync import process_webhook_event, _process_event_for_team
+from backend.app.services.strava_sync import process_webhook_event, _process_event_for_user
 
 
 # ── Fixtures / helpers ────────────────────────────────────────────────────────
@@ -92,13 +92,13 @@ class TestProcessWebhookEventGuards:
 
         with (
             patch("backend.app.db.registry._RegistrySessionLocal", return_value=_reg_ctx()),
-            patch("backend.app.db.team_session.get_team_session_factory") as mock_factory,
+            patch("backend.app.db.user_session.get_user_session_factory") as mock_factory,
         ):
             await process_webhook_event(event)
             mock_factory.assert_not_called()
 
 
-# ── _process_event_for_team: create ──────────────────────────────────────────
+# ── _process_event_for_user: create ──────────────────────────────────────────
 
 class TestProcessEventCreate:
     async def _run_create(self, existing_activity=None, already_imported=False):
@@ -133,7 +133,7 @@ class TestProcessEventCreate:
             patch("backend.app.services.strava_sync._repopulate_activity", new_callable=AsyncMock),
             patch("httpx.AsyncClient", return_value=mock_http),
         ):
-            await _process_event_for_team(
+            await _process_event_for_user(
                 "create", "99", {"object_id": 99, "object_type": "activity"},
                 athlete, conn, "access-token-xxx", "team-1", session,
             )
@@ -150,7 +150,7 @@ class TestProcessEventCreate:
         assert not session.flush.called
 
 
-# ── _process_event_for_team: delete ──────────────────────────────────────────
+# ── _process_event_for_user: delete ──────────────────────────────────────────
 
 class TestProcessEventDelete:
     async def test_delete_removes_source_and_activity(self):
@@ -174,7 +174,7 @@ class TestProcessEventDelete:
         session.execute = AsyncMock(side_effect=[src_result, remaining_result])
 
         with patch("backend.app.services.metrics_engine.recalculate_from", new_callable=AsyncMock):
-            await _process_event_for_team(
+            await _process_event_for_user(
                 "delete", "99", {"object_id": 99, "object_type": "activity", "updates": {}},
                 athlete, conn, "token", "team-1", session,
             )
@@ -202,7 +202,7 @@ class TestProcessEventDelete:
         session.execute = AsyncMock(side_effect=[src_result, remaining_result])
 
         with patch("backend.app.services.metrics_engine.recalculate_from", new_callable=AsyncMock):
-            await _process_event_for_team(
+            await _process_event_for_user(
                 "delete", "99", {"object_id": 99, "object_type": "activity", "updates": {}},
                 athlete, conn, "token", "team-1", session,
             )
@@ -221,7 +221,7 @@ class TestProcessEventDelete:
 
         session.execute = AsyncMock(return_value=src_result)
 
-        await _process_event_for_team(
+        await _process_event_for_user(
             "delete", "99", {"object_id": 99, "object_type": "activity", "updates": {}},
             athlete, conn, "token", "team-1", session,
         )
@@ -229,7 +229,7 @@ class TestProcessEventDelete:
         session.delete.assert_not_called()
 
 
-# ── _process_event_for_team: update ──────────────────────────────────────────
+# ── _process_event_for_user: update ──────────────────────────────────────────
 
 class TestProcessEventUpdate:
     async def test_update_sets_name_and_sport_type(self):
@@ -249,7 +249,7 @@ class TestProcessEventUpdate:
         payload = {"object_id": 99, "object_type": "activity",
                    "updates": {"title": "Evening Ride", "sport_type": "VirtualRide"}}
 
-        await _process_event_for_team(
+        await _process_event_for_user(
             "update", "99", payload, athlete, conn, "token", "team-1", session,
         )
 
@@ -264,7 +264,7 @@ class TestProcessEventUpdate:
         session.commit = AsyncMock()
 
         payload = {"object_id": 99, "object_type": "activity", "updates": {}}
-        await _process_event_for_team(
+        await _process_event_for_user(
             "update", "99", payload, athlete, conn, "token", "team-1", session,
         )
 
@@ -283,7 +283,7 @@ class TestProcessEventUpdate:
         payload = {"object_id": 99, "object_type": "activity",
                    "updates": {"title": "New name"}}
 
-        await _process_event_for_team(
+        await _process_event_for_user(
             "update", "99", payload, athlete, conn, "token", "team-1", session,
         )
 

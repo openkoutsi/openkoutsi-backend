@@ -2,36 +2,25 @@
   "openapi": "3.1.0",
   "info": {
     "title": "openkoutsi API",
-    "version": "1.0.0"
+    "version": "2.0.0"
   },
   "paths": {
-    "/api/teams/{slug}/auth/login": {
+    "/api/auth/login": {
       "post": {
         "tags": [
           "auth"
         ],
-        "summary": "Login",
-        "operationId": "login_api_teams__slug__auth_login_post",
-        "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Slug"
-            }
-          }
-        ],
+        "summary": "Log in",
+        "operationId": "login",
         "requestBody": {
-          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/LoginRequest"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -57,33 +46,22 @@
         }
       }
     },
-    "/api/teams/{slug}/auth/register": {
+    "/api/auth/register": {
       "post": {
         "tags": [
           "auth"
         ],
-        "summary": "Register",
-        "operationId": "register_api_teams__slug__auth_register_post",
-        "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Slug"
-            }
-          }
-        ],
+        "summary": "Register with an invite token",
+        "operationId": "register",
         "requestBody": {
-          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/RegisterRequest"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "201": {
@@ -109,23 +87,14 @@
         }
       }
     },
-    "/api/teams/{slug}/auth/refresh": {
+    "/api/auth/refresh": {
       "post": {
         "tags": [
           "auth"
         ],
-        "summary": "Refresh",
-        "operationId": "refresh_api_teams__slug__auth_refresh_post",
+        "summary": "Refresh access token",
+        "operationId": "refreshToken",
         "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Slug"
-            }
-          },
           {
             "name": "refresh_token",
             "in": "cookie",
@@ -167,73 +136,36 @@
         }
       }
     },
-    "/api/teams/{slug}/auth/logout": {
+    "/api/auth/logout": {
       "post": {
         "tags": [
           "auth"
         ],
-        "summary": "Logout",
-        "operationId": "logout_api_teams__slug__auth_logout_post",
-        "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Slug"
-            }
-          }
-        ],
+        "summary": "Log out",
+        "operationId": "logout",
         "responses": {
           "204": {
             "description": "Successful Response"
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
           }
         }
       }
     },
-    "/api/teams/{slug}/auth/account": {
+    "/api/auth/account": {
       "delete": {
         "tags": [
           "auth"
         ],
-        "summary": "Delete Account",
-        "operationId": "delete_account_api_teams__slug__auth_account_delete",
-        "security": [
-          {
-            "OAuth2PasswordBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Slug"
-            }
-          }
-        ],
+        "summary": "Delete the current account",
+        "operationId": "deleteAccount",
         "requestBody": {
-          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/DeleteAccountRequest"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "204": {
@@ -249,36 +181,30 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
       }
     },
-    "/api/teams/{slug}/auth/reset-password": {
+    "/api/auth/reset-password": {
       "post": {
         "tags": [
           "auth"
         ],
-        "summary": "Reset Password",
-        "operationId": "reset_password_api_teams__slug__auth_reset_password_post",
-        "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Slug"
-            }
-          }
-        ],
+        "summary": "Reset password with a token",
+        "operationId": "resetPassword",
         "requestBody": {
-          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/ResetPasswordRequest"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "204": {
@@ -302,8 +228,8 @@
         "tags": [
           "setup"
         ],
-        "summary": "Setup Status",
-        "operationId": "setup_status_api_setup_status_get",
+        "summary": "Whether first-run setup is needed",
+        "operationId": "getSetupStatus",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -323,9 +249,9 @@
         "tags": [
           "setup"
         ],
-        "summary": "First Run Setup",
-        "description": "Create the first team and admin user. Returns 409 if any team already exists.",
-        "operationId": "first_run_setup_api_setup_post",
+        "summary": "Create the first admin user",
+        "description": "Create the first instance administrator. Returns 409 if any user already exists.",
+        "operationId": "firstRunSetup",
         "requestBody": {
           "content": {
             "application/json": {
@@ -360,523 +286,13 @@
         }
       }
     },
-    "/api/teams": {
-      "post": {
-        "tags": [
-          "signup"
-        ],
-        "summary": "Create Team",
-        "description": "Self-serve team creation. New teams start in 'pending' status and require\nsuperadmin approval before members can log in.",
-        "operationId": "create_team_api_teams_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/TeamSignupRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "201": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TeamSignupResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/superadmin/teams": {
+    "/api/admin/users": {
       "get": {
         "tags": [
-          "superadmin"
+          "admin"
         ],
-        "summary": "List Teams",
-        "operationId": "list_teams_api_superadmin_teams_get",
-        "parameters": [
-          {
-            "name": "x-superadmin-secret",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Superadmin-Secret"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/SuperadminTeamResponse"
-                  },
-                  "title": "Response List Teams Api Superadmin Teams Get"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/superadmin/users": {
-      "get": {
-        "tags": [
-          "superadmin"
-        ],
-        "summary": "List Users",
-        "operationId": "list_users_api_superadmin_users_get",
-        "parameters": [
-          {
-            "name": "x-superadmin-secret",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Superadmin-Secret"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/SuperadminUserResponse"
-                  },
-                  "title": "Response List Users Api Superadmin Users Get"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/superadmin/teams/{team_id}/approve": {
-      "post": {
-        "tags": [
-          "superadmin"
-        ],
-        "summary": "Approve Team",
-        "operationId": "approve_team_api_superadmin_teams__team_id__approve_post",
-        "parameters": [
-          {
-            "name": "team_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Team Id"
-            }
-          },
-          {
-            "name": "x-superadmin-secret",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Superadmin-Secret"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SuperadminTeamResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/superadmin/teams/{team_id}": {
-      "delete": {
-        "tags": [
-          "superadmin"
-        ],
-        "summary": "Delete Team",
-        "operationId": "delete_team_api_superadmin_teams__team_id__delete",
-        "parameters": [
-          {
-            "name": "team_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Team Id"
-            }
-          },
-          {
-            "name": "x-superadmin-secret",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Superadmin-Secret"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Successful Response"
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/superadmin/messages": {
-      "get": {
-        "tags": [
-          "superadmin"
-        ],
-        "summary": "List Superadmin Messages",
-        "operationId": "list_superadmin_messages_api_superadmin_messages_get",
-        "parameters": [
-          {
-            "name": "x-superadmin-secret",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Superadmin-Secret"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/MessageResponse"
-                  },
-                  "title": "Response List Superadmin Messages Api Superadmin Messages Get"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/superadmin/messages/unread-count": {
-      "get": {
-        "tags": [
-          "superadmin"
-        ],
-        "summary": "Superadmin Unread Count",
-        "operationId": "superadmin_unread_count_api_superadmin_messages_unread_count_get",
-        "parameters": [
-          {
-            "name": "x-superadmin-secret",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Superadmin-Secret"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/UnreadCountResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/superadmin/messages/read-all": {
-      "post": {
-        "tags": [
-          "superadmin"
-        ],
-        "summary": "Superadmin Mark All Read",
-        "operationId": "superadmin_mark_all_read_api_superadmin_messages_read_all_post",
-        "parameters": [
-          {
-            "name": "x-superadmin-secret",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Superadmin-Secret"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Successful Response"
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/superadmin/messages/{message_id}/read": {
-      "post": {
-        "tags": [
-          "superadmin"
-        ],
-        "summary": "Superadmin Mark Read",
-        "operationId": "superadmin_mark_read_api_superadmin_messages__message_id__read_post",
-        "parameters": [
-          {
-            "name": "message_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Message Id"
-            }
-          },
-          {
-            "name": "x-superadmin-secret",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Superadmin-Secret"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/MessageResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/superadmin/messages/{message_id}": {
-      "delete": {
-        "tags": [
-          "superadmin"
-        ],
-        "summary": "Superadmin Delete Message",
-        "operationId": "superadmin_delete_message_api_superadmin_messages__message_id__delete",
-        "parameters": [
-          {
-            "name": "message_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Message Id"
-            }
-          },
-          {
-            "name": "x-superadmin-secret",
-            "in": "header",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "X-Superadmin-Secret"
-            }
-          }
-        ],
-        "responses": {
-          "204": {
-            "description": "Successful Response"
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/teams/{slug}/members": {
-      "get": {
-        "tags": [
-          "teams"
-        ],
-        "summary": "List Members",
-        "operationId": "list_members_api_teams__slug__members_get",
+        "summary": "List users",
+        "operationId": "listUsers",
         "security": [
           {
             "OAuth2PasswordBearer": []
@@ -884,12 +300,26 @@
         ],
         "parameters": [
           {
-            "name": "slug",
-            "in": "path",
-            "required": true,
+            "name": "page",
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": "string",
-              "title": "Slug"
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Page Size"
             }
           }
         ],
@@ -899,11 +329,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/MemberResponse"
-                  },
-                  "title": "Response List Members Api Teams  Slug  Members Get"
+                  "$ref": "#/components/schemas/Page_UserResponse_"
                 }
               }
             }
@@ -921,28 +347,19 @@
         }
       }
     },
-    "/api/teams/{slug}/members/{user_id}/roles": {
+    "/api/admin/users/{user_id}/roles": {
       "patch": {
         "tags": [
-          "teams"
+          "admin"
         ],
-        "summary": "Update Member Roles",
-        "operationId": "update_member_roles_api_teams__slug__members__user_id__roles_patch",
+        "summary": "Update a user's roles",
+        "operationId": "updateUserRoles",
         "security": [
           {
             "OAuth2PasswordBearer": []
           }
         ],
         "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Slug"
-            }
-          },
           {
             "name": "user_id",
             "in": "path",
@@ -958,7 +375,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/MemberRolesUpdate"
+                "$ref": "#/components/schemas/UserRolesUpdate"
               }
             }
           }
@@ -969,7 +386,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/MemberResponse"
+                  "$ref": "#/components/schemas/UserResponse"
                 }
               }
             }
@@ -987,28 +404,19 @@
         }
       }
     },
-    "/api/teams/{slug}/members/{user_id}": {
+    "/api/admin/users/{user_id}": {
       "delete": {
         "tags": [
-          "teams"
+          "admin"
         ],
-        "summary": "Remove Member",
-        "operationId": "remove_member_api_teams__slug__members__user_id__delete",
+        "summary": "Delete a user",
+        "operationId": "deleteUser",
         "security": [
           {
             "OAuth2PasswordBearer": []
           }
         ],
         "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Slug"
-            }
-          },
           {
             "name": "user_id",
             "in": "path",
@@ -1036,28 +444,19 @@
         }
       }
     },
-    "/api/teams/{slug}/members/{user_id}/password-reset": {
+    "/api/admin/users/{user_id}/password-reset": {
       "post": {
         "tags": [
-          "teams"
+          "admin"
         ],
-        "summary": "Generate Member Password Reset",
-        "operationId": "generate_member_password_reset_api_teams__slug__members__user_id__password_reset_post",
+        "summary": "Generate a password-reset link for a user",
+        "operationId": "createUserPasswordResetLink",
         "security": [
           {
             "OAuth2PasswordBearer": []
           }
         ],
         "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Slug"
-            }
-          },
           {
             "name": "user_id",
             "in": "path",
@@ -1092,27 +491,16 @@
         }
       }
     },
-    "/api/teams/{slug}/invitations": {
+    "/api/admin/invitations": {
       "post": {
         "tags": [
-          "teams"
+          "admin"
         ],
-        "summary": "Create Invitation",
-        "operationId": "create_invitation_api_teams__slug__invitations_post",
+        "summary": "Create an invitation",
+        "operationId": "createInvitation",
         "security": [
           {
             "OAuth2PasswordBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Slug"
-            }
           }
         ],
         "requestBody": {
@@ -1150,10 +538,10 @@
       },
       "get": {
         "tags": [
-          "teams"
+          "admin"
         ],
-        "summary": "List Invitations",
-        "operationId": "list_invitations_api_teams__slug__invitations_get",
+        "summary": "List invitations",
+        "operationId": "listInvitations",
         "security": [
           {
             "OAuth2PasswordBearer": []
@@ -1161,12 +549,26 @@
         ],
         "parameters": [
           {
-            "name": "slug",
-            "in": "path",
-            "required": true,
+            "name": "page",
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": "string",
-              "title": "Slug"
+              "type": "integer",
+              "minimum": 1,
+              "default": 1,
+              "title": "Page"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 200,
+              "minimum": 1,
+              "default": 50,
+              "title": "Page Size"
             }
           }
         ],
@@ -1176,11 +578,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/InvitationResponse"
-                  },
-                  "title": "Response List Invitations Api Teams  Slug  Invitations Get"
+                  "$ref": "#/components/schemas/Page_InvitationResponse_"
                 }
               }
             }
@@ -1198,28 +596,19 @@
         }
       }
     },
-    "/api/teams/{slug}/invitations/{invitation_id}": {
+    "/api/admin/invitations/{invitation_id}": {
       "delete": {
         "tags": [
-          "teams"
+          "admin"
         ],
-        "summary": "Revoke Invitation",
-        "operationId": "revoke_invitation_api_teams__slug__invitations__invitation_id__delete",
+        "summary": "Revoke an invitation",
+        "operationId": "revokeInvitation",
         "security": [
           {
             "OAuth2PasswordBearer": []
           }
         ],
         "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Slug"
-            }
-          },
           {
             "name": "invitation_id",
             "in": "path",
@@ -1247,122 +636,20 @@
         }
       }
     },
-    "/api/teams/{slug}/settings": {
+    "/api/admin/settings": {
       "get": {
         "tags": [
-          "teams"
+          "admin"
         ],
-        "summary": "Get Team Settings",
-        "operationId": "get_team_settings_api_teams__slug__settings_get",
-        "security": [
-          {
-            "OAuth2PasswordBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Slug"
-            }
-          }
-        ],
+        "summary": "Get instance settings",
+        "operationId": "getInstanceSettings",
         "responses": {
           "200": {
             "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/TeamSettingsResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "patch": {
-        "tags": [
-          "teams"
-        ],
-        "summary": "Update Team Settings",
-        "operationId": "update_team_settings_api_teams__slug__settings_patch",
-        "security": [
-          {
-            "OAuth2PasswordBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Slug"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/TeamSettingsPatch"
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/TeamSettingsResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/athlete/": {
-      "get": {
-        "tags": [
-          "athlete"
-        ],
-        "summary": "Get Athlete",
-        "operationId": "get_athlete_api_athlete__get",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AthleteResponse"
+                  "$ref": "#/components/schemas/InstanceSettingsResponse"
                 }
               }
             }
@@ -1374,17 +661,17 @@
           }
         ]
       },
-      "put": {
+      "patch": {
         "tags": [
-          "athlete"
+          "admin"
         ],
-        "summary": "Update Athlete",
-        "operationId": "update_athlete_api_athlete__put",
+        "summary": "Update instance settings",
+        "operationId": "updateInstanceSettings",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/AthleteUpdate"
+                "$ref": "#/components/schemas/InstanceSettingsPatch"
               }
             }
           },
@@ -1396,7 +683,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AthleteResponse"
+                  "$ref": "#/components/schemas/InstanceSettingsResponse"
                 }
               }
             }
@@ -1417,13 +704,39 @@
             "OAuth2PasswordBearer": []
           }
         ]
+      }
+    },
+    "/api/athlete": {
+      "get": {
+        "tags": [
+          "athlete"
+        ],
+        "summary": "Get current athlete",
+        "operationId": "getAthlete",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AthleteResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
       },
       "patch": {
         "tags": [
           "athlete"
         ],
-        "summary": "Update Athlete",
-        "operationId": "update_athlete_api_athlete__patch",
+        "summary": "Update current athlete",
+        "operationId": "updateAthlete",
         "requestBody": {
           "content": {
             "application/json": {
@@ -1464,17 +777,17 @@
       }
     },
     "/api/athlete/avatar": {
-      "post": {
+      "put": {
         "tags": [
           "athlete"
         ],
-        "summary": "Upload Avatar",
-        "operationId": "upload_avatar_api_athlete_avatar_post",
+        "summary": "Upload/replace own avatar",
+        "operationId": "setAvatar",
         "requestBody": {
           "content": {
             "multipart/form-data": {
               "schema": {
-                "$ref": "#/components/schemas/Body_upload_avatar_api_athlete_avatar_post"
+                "$ref": "#/components/schemas/Body_setAvatar"
               }
             }
           },
@@ -1512,8 +825,8 @@
         "tags": [
           "athlete"
         ],
-        "summary": "Delete Avatar",
-        "operationId": "delete_avatar_api_athlete_avatar_delete",
+        "summary": "Delete own avatar",
+        "operationId": "deleteAvatar",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -1538,8 +851,8 @@
         "tags": [
           "athlete"
         ],
-        "summary": "Get Avatar",
-        "operationId": "get_avatar_api_athlete__athlete_id__avatar_get",
+        "summary": "Get an athlete's avatar (auth)",
+        "operationId": "getAthleteAvatar",
         "security": [
           {
             "OAuth2PasswordBearer": []
@@ -1583,8 +896,8 @@
         "tags": [
           "athlete"
         ],
-        "summary": "Get Training Status",
-        "operationId": "get_training_status_api_athlete_training_status_get",
+        "summary": "Get training-status feedback",
+        "operationId": "getTrainingStatus",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -1607,8 +920,8 @@
         "tags": [
           "athlete"
         ],
-        "summary": "Trigger Training Status",
-        "operationId": "trigger_training_status_api_athlete_training_status_post",
+        "summary": "Trigger training-status analysis",
+        "operationId": "triggerTrainingStatus",
         "requestBody": {
           "content": {
             "application/json": {
@@ -1651,8 +964,8 @@
         "tags": [
           "athlete"
         ],
-        "summary": "Get Weight Log",
-        "operationId": "get_weight_log_api_athlete_weight_log_get",
+        "summary": "Get the athlete's weight log",
+        "operationId": "getWeightLog",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -1675,8 +988,8 @@
         "tags": [
           "athlete"
         ],
-        "summary": "Export Athlete",
-        "operationId": "export_athlete_api_athlete_export_get",
+        "summary": "Export all athlete data as a zip",
+        "operationId": "exportAthlete",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -1740,13 +1053,13 @@
         ]
       }
     },
-    "/api/activities/": {
+    "/api/activities": {
       "post": {
         "tags": [
           "activities"
         ],
-        "summary": "Create Manual Activity",
-        "operationId": "create_manual_activity_api_activities__post",
+        "summary": "Create a manual activity",
+        "operationId": "createActivity",
         "security": [
           {
             "OAuth2PasswordBearer": []
@@ -1789,8 +1102,8 @@
         "tags": [
           "activities"
         ],
-        "summary": "List Activities",
-        "operationId": "list_activities_api_activities__get",
+        "summary": "List activities",
+        "operationId": "listActivities",
         "security": [
           {
             "OAuth2PasswordBearer": []
@@ -2624,7 +1937,7 @@
           "integrations"
         ],
         "summary": "Sync",
-        "description": "Trigger a full history import from the given provider in the background.\n\nSyncs to all teams the user belongs to.",
+        "description": "Trigger a full history import from the given provider in the background.\n\nImports the full history into the user's own DB.",
         "operationId": "sync_api_integrations__provider__sync_post",
         "security": [
           {
@@ -3019,13 +2332,13 @@
         }
       }
     },
-    "/api/metrics/ftp-history": {
+    "/api/metrics/ftp/history": {
       "get": {
         "tags": [
           "metrics"
         ],
-        "summary": "Get Ftp History",
-        "operationId": "get_ftp_history_api_metrics_ftp_history_get",
+        "summary": "FTP history",
+        "operationId": "getFtpHistory",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -3093,13 +2406,178 @@
         ]
       }
     },
-    "/api/goals/": {
+    "/api/metrics/bests/distance": {
+      "get": {
+        "tags": [
+          "metrics"
+        ],
+        "summary": "All-time distance bests",
+        "description": "Return the top-3 all-time best times for each standard distance,\nordered by (distance_m asc, rank asc).  Distances with no data are omitted.\n\nBy default only real (non-virtual) rides are included. Pass\ninclude_virtual=true to include all ride types.",
+        "operationId": "getDistanceBests",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "include_virtual",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "default": false,
+              "title": "Include Virtual"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AllTimeDistanceBestsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/metrics/bests/power": {
+      "get": {
+        "tags": [
+          "metrics"
+        ],
+        "summary": "All-time power bests",
+        "description": "Return the top-3 best average power for each standard duration,\nordered by (duration_s asc, rank asc).  Durations with no data are omitted.\nPass ?days=90/180/365 to restrict to a rolling window; omit for all-time.",
+        "operationId": "getPowerBests",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Restrict to bests from the past N days. Omit for all-time.",
+              "title": "Days"
+            },
+            "description": "Restrict to bests from the past N days. Omit for all-time."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AllTimePowerBestsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/metrics/ftp": {
+      "get": {
+        "tags": [
+          "metrics"
+        ],
+        "summary": "Current FTP estimate",
+        "description": "Estimate FTP from the athlete's power curve using two methods:\n\n- Simple: 95% of the 20-minute (1200s) best power.\n- Critical Power: linear work\u2013time fit over the 2\u201320 minute bests (CP).\n\nBoth estimates use the rank-1 (single best) power per duration.  Pass\n?days=90/180/365 to estimate from a rolling window; omit for all-time.",
+        "operationId": "getFtpEstimate",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Estimate from bests in the past N days. Omit for all-time.",
+              "title": "Days"
+            },
+            "description": "Estimate from bests in the past N days. Omit for all-time."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FtpEstimateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/goals": {
       "get": {
         "tags": [
           "goals"
         ],
         "summary": "List Goals",
-        "operationId": "list_goals_api_goals__get",
+        "operationId": "list_goals_api_goals_get",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -3110,7 +2588,7 @@
                     "$ref": "#/components/schemas/GoalResponse"
                   },
                   "type": "array",
-                  "title": "Response List Goals Api Goals  Get"
+                  "title": "Response List Goals Api Goals Get"
                 }
               }
             }
@@ -3127,7 +2605,7 @@
           "goals"
         ],
         "summary": "Create Goal",
-        "operationId": "create_goal_api_goals__post",
+        "operationId": "create_goal_api_goals_post",
         "requestBody": {
           "content": {
             "application/json": {
@@ -3262,178 +2740,13 @@
         }
       }
     },
-    "/api/distance/bests": {
-      "get": {
-        "tags": [
-          "distance"
-        ],
-        "summary": "Get Distance Bests",
-        "description": "Return the top-3 all-time best times for each standard distance,\nordered by (distance_m asc, rank asc).  Distances with no data are omitted.\n\nBy default only real (non-virtual) rides are included. Pass\ninclude_virtual=true to include all ride types.",
-        "operationId": "get_distance_bests_api_distance_bests_get",
-        "security": [
-          {
-            "OAuth2PasswordBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "include_virtual",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "boolean",
-              "default": false,
-              "title": "Include Virtual"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AllTimeDistanceBestsResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/power/bests": {
-      "get": {
-        "tags": [
-          "power"
-        ],
-        "summary": "Get Power Bests",
-        "description": "Return the top-3 best average power for each standard duration,\nordered by (duration_s asc, rank asc).  Durations with no data are omitted.\nPass ?days=90/180/365 to restrict to a rolling window; omit for all-time.",
-        "operationId": "get_power_bests_api_power_bests_get",
-        "security": [
-          {
-            "OAuth2PasswordBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "days",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 1
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Restrict to bests from the past N days. Omit for all-time.",
-              "title": "Days"
-            },
-            "description": "Restrict to bests from the past N days. Omit for all-time."
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AllTimePowerBestsResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/power/ftp-estimate": {
-      "get": {
-        "tags": [
-          "power"
-        ],
-        "summary": "Get Ftp Estimate",
-        "description": "Estimate FTP from the athlete's power curve using two methods:\n\n- Simple: 95% of the 20-minute (1200s) best power.\n- Critical Power: linear work\u2013time fit over the 2\u201320 minute bests (CP).\n\nBoth estimates use the rank-1 (single best) power per duration.  Pass\n?days=90/180/365 to estimate from a rolling window; omit for all-time.",
-        "operationId": "get_ftp_estimate_api_power_ftp_estimate_get",
-        "security": [
-          {
-            "OAuth2PasswordBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "days",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "integer",
-                  "minimum": 1
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "Estimate from bests in the past N days. Omit for all-time.",
-              "title": "Days"
-            },
-            "description": "Estimate from bests in the past N days. Omit for all-time."
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/FtpEstimateResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/plans/": {
+    "/api/plans": {
       "get": {
         "tags": [
           "plans"
         ],
         "summary": "List Plans",
-        "operationId": "list_plans_api_plans__get",
+        "operationId": "list_plans_api_plans_get",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -3444,7 +2757,7 @@
                     "$ref": "#/components/schemas/TrainingPlanResponse"
                   },
                   "type": "array",
-                  "title": "Response List Plans Api Plans  Get"
+                  "title": "Response List Plans Api Plans Get"
                 }
               }
             }
@@ -3461,7 +2774,7 @@
           "plans"
         ],
         "summary": "Create Plan",
-        "operationId": "create_plan_api_plans__post",
+        "operationId": "create_plan_api_plans_post",
         "requestBody": {
           "content": {
             "application/json": {
@@ -3867,6 +3180,292 @@
         }
       }
     },
+    "/api/plans/{plan_id}/workouts": {
+      "post": {
+        "tags": [
+          "plans"
+        ],
+        "summary": "Add Workout",
+        "operationId": "add_workout_api_plans__plan_id__workouts_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Plan Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlannedWorkoutCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlannedWorkoutResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/plans/{plan_id}/workouts/{workout_id}": {
+      "put": {
+        "tags": [
+          "plans"
+        ],
+        "summary": "Update Workout",
+        "operationId": "update_workout_api_plans__plan_id__workouts__workout_id__put",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Plan Id"
+            }
+          },
+          {
+            "name": "workout_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Workout Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlannedWorkoutUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlannedWorkoutResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "plans"
+        ],
+        "summary": "Delete Workout",
+        "operationId": "delete_workout_api_plans__plan_id__workouts__workout_id__delete",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Plan Id"
+            }
+          },
+          {
+            "name": "workout_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Workout Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/plans/{plan_id}/regenerate": {
+      "post": {
+        "tags": [
+          "plans"
+        ],
+        "summary": "Regenerate Plan",
+        "description": "Replace a plan's workouts, preserving any already linked to a completed activity.",
+        "operationId": "regenerate_plan_api_plans__plan_id__regenerate_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Plan Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegeneratePlanRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrainingPlanResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/plans/{plan_id}/generate-upcoming/workouts": {
+      "post": {
+        "tags": [
+          "plans"
+        ],
+        "summary": "Generate Upcoming Workouts",
+        "description": "Synthesize structured workouts for the plan's upcoming days (no upload).\n\nFor each planned workout falling within the upcoming-week window (today\u2192+6;\nrest days and unstructured rows excluded), ensure a structured\n``WorkoutDefinition`` exists \u2014 generating one via the LLM and caching it on\n``PlannedWorkout.workout_definition_id`` when missing. The generated workouts\nshow up in the Workouts tab, where they can be reviewed, edited, and uploaded\nindividually. Returns a per-workout summary.",
+        "operationId": "generate_upcoming_workouts_api_plans__plan_id__generate_upcoming_workouts_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Plan Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GenerateUpcomingWorkoutsRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GenerateUpcomingWorkoutsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/llm/servers": {
       "get": {
         "tags": [
@@ -3898,7 +3497,7 @@
           "llm"
         ],
         "summary": "Test Llm Connection",
-        "description": "Test the team's configured LLM connection. Admin-only.\n\nCalls GET {base_url}/models on the team's saved LLM config and checks\nwhether the configured model appears in the response.",
+        "description": "Test the instance's configured LLM connection. Admin-only.\n\nCalls GET {base_url}/models on the instance's saved LLM config and checks\nwhether the configured model appears in the response.",
         "operationId": "test_llm_connection_api_llm_test_connection_post",
         "responses": {
           "200": {
@@ -3964,200 +3563,22 @@
         ]
       }
     },
-    "/api/members/{member_user_id}/athlete": {
-      "get": {
-        "tags": [
-          "members"
-        ],
-        "summary": "Get Member Athlete",
-        "description": "Return the athlete profile of any team member (coach/admin only).",
-        "operationId": "get_member_athlete_api_members__member_user_id__athlete_get",
-        "security": [
-          {
-            "OAuth2PasswordBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "member_user_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Member User Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/AthleteResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/members/{member_user_id}/activities": {
-      "get": {
-        "tags": [
-          "members"
-        ],
-        "summary": "List Member Activities",
-        "description": "List activities for any team member (coach/admin only).",
-        "operationId": "list_member_activities_api_members__member_user_id__activities_get",
-        "security": [
-          {
-            "OAuth2PasswordBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "member_user_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Member User Id"
-            }
-          },
-          {
-            "name": "start",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "format": "date"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Start"
-            }
-          },
-          {
-            "name": "end",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string",
-                  "format": "date"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "End"
-            }
-          },
-          {
-            "name": "sport_type",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Sport Type"
-            }
-          },
-          {
-            "name": "page",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "minimum": 1,
-              "default": 1,
-              "title": "Page"
-            }
-          },
-          {
-            "name": "page_size",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "integer",
-              "maximum": 100,
-              "minimum": 1,
-              "default": 20,
-              "title": "Page Size"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ActivityListResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/public/teams/{team_id}/avatar/{athlete_id}": {
+    "/api/public/users/{user_id}/avatar": {
       "get": {
         "tags": [
           "public"
         ],
-        "summary": "Get Avatar",
-        "description": "Serve an athlete's avatar image without requiring authentication.\n\nThe team_id + athlete_id pair acts as the opaque reference. No sensitive\ndata is exposed \u2014 only the image file itself is returned.",
-        "operationId": "get_avatar_api_public_teams__team_id__avatar__athlete_id__get",
+        "summary": "Get a user's avatar (no auth)",
+        "description": "Serve a user's avatar image without requiring authentication.\n\nThe user_id acts as the opaque reference. No sensitive data is exposed \u2014\nonly the image file itself is returned.",
+        "operationId": "getPublicUserAvatar",
         "parameters": [
           {
-            "name": "team_id",
+            "name": "user_id",
             "in": "path",
             "required": true,
             "schema": {
               "type": "string",
-              "title": "Team Id"
-            }
-          },
-          {
-            "name": "athlete_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Athlete Id"
+              "title": "User Id"
             }
           }
         ],
@@ -4208,13 +3629,13 @@
         }
       }
     },
-    "/api/workouts/": {
+    "/api/workouts": {
       "get": {
         "tags": [
           "workouts"
         ],
         "summary": "List Workouts",
-        "operationId": "list_workouts_api_workouts__get",
+        "operationId": "list_workouts_api_workouts_get",
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -4225,7 +3646,7 @@
                     "$ref": "#/components/schemas/WorkoutDefinitionResponse"
                   },
                   "type": "array",
-                  "title": "Response List Workouts Api Workouts  Get"
+                  "title": "Response List Workouts Api Workouts Get"
                 }
               }
             }
@@ -4242,7 +3663,7 @@
           "workouts"
         ],
         "summary": "Create Workout",
-        "operationId": "create_workout_api_workouts__post",
+        "operationId": "create_workout_api_workouts_post",
         "requestBody": {
           "content": {
             "application/json": {
@@ -4534,38 +3955,22 @@
         }
       }
     },
-    "/api/teams/{slug}/consent": {
+    "/api/consent": {
       "post": {
         "tags": [
           "consent"
         ],
-        "summary": "Record Consent",
-        "operationId": "record_consent_api_teams__slug__consent_post",
-        "security": [
-          {
-            "OAuth2PasswordBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Slug"
-            }
-          }
-        ],
+        "summary": "Record data-processing consent",
+        "operationId": "recordConsent",
         "requestBody": {
-          "required": true,
           "content": {
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/ConsentRequest"
               }
             }
-          }
+          },
+          "required": true
         },
         "responses": {
           "200": {
@@ -4588,7 +3993,12 @@
               }
             }
           }
-        }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
       }
     },
     "/api/health": {
@@ -4769,229 +4179,6 @@
         }
       }
     },
-    "/api/teams/{slug}/join-requests": {
-      "post": {
-        "tags": [
-          "join-requests"
-        ],
-        "summary": "Create Join Request",
-        "operationId": "create_join_request_api_teams__slug__join_requests_post",
-        "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Slug"
-            }
-          }
-        ],
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/JoinRequestCreate"
-              }
-            }
-          }
-        },
-        "responses": {
-          "201": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JoinRequestResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      },
-      "get": {
-        "tags": [
-          "join-requests"
-        ],
-        "summary": "List Join Requests",
-        "operationId": "list_join_requests_api_teams__slug__join_requests_get",
-        "security": [
-          {
-            "OAuth2PasswordBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Slug"
-            }
-          },
-          {
-            "name": "status",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "default": "pending",
-              "title": "Status"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/JoinRequestResponse"
-                  },
-                  "title": "Response List Join Requests Api Teams  Slug  Join Requests Get"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/teams/{slug}/join-requests/{request_id}/approve": {
-      "post": {
-        "tags": [
-          "join-requests"
-        ],
-        "summary": "Approve Join Request",
-        "operationId": "approve_join_request_api_teams__slug__join_requests__request_id__approve_post",
-        "security": [
-          {
-            "OAuth2PasswordBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Slug"
-            }
-          },
-          {
-            "name": "request_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Request Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JoinRequestResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/teams/{slug}/join-requests/{request_id}/reject": {
-      "post": {
-        "tags": [
-          "join-requests"
-        ],
-        "summary": "Reject Join Request",
-        "operationId": "reject_join_request_api_teams__slug__join_requests__request_id__reject_post",
-        "security": [
-          {
-            "OAuth2PasswordBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "slug",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Slug"
-            }
-          },
-          {
-            "name": "request_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Request Id"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/JoinRequestResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/version": {
       "get": {
         "summary": "Get Version",
@@ -5002,63 +4189,6 @@
             "content": {
               "application/json": {
                 "schema": {}
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/plans/{plan_id}/generate-upcoming/workouts": {
-      "post": {
-        "tags": [
-          "plans"
-        ],
-        "summary": "Generate Upcoming Workouts",
-        "operationId": "generate_upcoming_workouts_api_plans__plan_id__generate_upcoming_workouts_post",
-        "security": [
-          {
-            "OAuth2PasswordBearer": []
-          }
-        ],
-        "parameters": [
-          {
-            "name": "plan_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Plan Id"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/GenerateUpcomingWorkoutsRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GenerateUpcomingWorkoutsResponse"
-                }
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
               }
             }
           }
@@ -6028,6 +5158,20 @@
         "type": "object",
         "title": "AthleteUpdate"
       },
+      "Body_setAvatar": {
+        "properties": {
+          "file": {
+            "type": "string",
+            "contentMediaType": "application/octet-stream",
+            "title": "File"
+          }
+        },
+        "type": "object",
+        "required": [
+          "file"
+        ],
+        "title": "Body_setAvatar"
+      },
       "Body_upload_activity_api_activities_upload_post": {
         "properties": {
           "file": {
@@ -6041,20 +5185,6 @@
           "file"
         ],
         "title": "Body_upload_activity_api_activities_upload_post"
-      },
-      "Body_upload_avatar_api_athlete_avatar_post": {
-        "properties": {
-          "file": {
-            "type": "string",
-            "contentMediaType": "application/octet-stream",
-            "title": "File"
-          }
-        },
-        "type": "object",
-        "required": [
-          "file"
-        ],
-        "title": "Body_upload_avatar_api_athlete_avatar_post"
       },
       "ChatMessage": {
         "properties": {
@@ -6535,7 +5665,8 @@
           }
         },
         "type": "object",
-        "title": "GenerateUpcomingWorkoutsRequest"
+        "title": "GenerateUpcomingWorkoutsRequest",
+        "description": "Optional explicit date range (within the upcoming-week window) and refresh flag."
       },
       "GenerateUpcomingWorkoutsResponse": {
         "properties": {
@@ -6818,6 +5949,110 @@
         "type": "object",
         "title": "HTTPValidationError"
       },
+      "InstanceSettingsPatch": {
+        "properties": {
+          "llm_base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Base Url"
+          },
+          "llm_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Model"
+          },
+          "llm_api_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Api Key"
+          },
+          "clear_llm_api_key": {
+            "type": "boolean",
+            "title": "Clear Llm Api Key",
+            "default": false
+          },
+          "llm_analysis_context": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Analysis Context"
+          }
+        },
+        "type": "object",
+        "title": "InstanceSettingsPatch"
+      },
+      "InstanceSettingsResponse": {
+        "properties": {
+          "llm_base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Base Url"
+          },
+          "llm_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Model"
+          },
+          "llm_api_key_set": {
+            "type": "boolean",
+            "title": "Llm Api Key Set"
+          },
+          "llm_analysis_context": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Analysis Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "llm_base_url",
+          "llm_model",
+          "llm_api_key_set",
+          "llm_analysis_context"
+        ],
+        "title": "InstanceSettingsResponse"
+      },
       "IntervalResponse": {
         "properties": {
           "interval_number": {
@@ -7032,102 +6267,6 @@
           "created_at"
         ],
         "title": "InvitationResponse"
-      },
-      "JoinRequestCreate": {
-        "properties": {
-          "username": {
-            "type": "string",
-            "title": "Username"
-          },
-          "password": {
-            "type": "string",
-            "title": "Password"
-          },
-          "display_name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Display Name"
-          },
-          "message": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Message"
-          }
-        },
-        "type": "object",
-        "required": [
-          "username",
-          "password"
-        ],
-        "title": "JoinRequestCreate"
-      },
-      "JoinRequestResponse": {
-        "properties": {
-          "id": {
-            "type": "string",
-            "title": "Id"
-          },
-          "team_slug": {
-            "type": "string",
-            "title": "Team Slug"
-          },
-          "username": {
-            "type": "string",
-            "title": "Username"
-          },
-          "display_name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Display Name"
-          },
-          "message": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Message"
-          },
-          "status": {
-            "type": "string",
-            "title": "Status"
-          },
-          "created_at": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Created At"
-          }
-        },
-        "type": "object",
-        "required": [
-          "id",
-          "team_slug",
-          "username",
-          "status",
-          "created_at"
-        ],
-        "title": "JoinRequestResponse"
       },
       "LinkActivityRequest": {
         "properties": {
@@ -7368,77 +6507,6 @@
         ],
         "title": "ManualActivityCreate"
       },
-      "MemberResponse": {
-        "properties": {
-          "user_id": {
-            "type": "string",
-            "title": "User Id"
-          },
-          "username": {
-            "type": "string",
-            "title": "Username"
-          },
-          "roles": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Roles"
-          },
-          "joined_at": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Joined At"
-          },
-          "consented_at": {
-            "anyOf": [
-              {
-                "type": "string",
-                "format": "date-time"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Consented At"
-          },
-          "consent_version": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Consent Version"
-          }
-        },
-        "type": "object",
-        "required": [
-          "user_id",
-          "username",
-          "roles",
-          "joined_at"
-        ],
-        "title": "MemberResponse"
-      },
-      "MemberRolesUpdate": {
-        "properties": {
-          "roles": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Roles"
-          }
-        },
-        "type": "object",
-        "required": [
-          "roles"
-        ],
-        "title": "MemberRolesUpdate"
-      },
       "MessageResponse": {
         "properties": {
           "id": {
@@ -7494,6 +6562,68 @@
           "type"
         ],
         "title": "OpenDuration"
+      },
+      "Page_InvitationResponse_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/InvitationResponse"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page"
+          },
+          "page_size": {
+            "type": "integer",
+            "title": "Page Size"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "total",
+          "page",
+          "page_size"
+        ],
+        "title": "Page[InvitationResponse]"
+      },
+      "Page_UserResponse_": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/UserResponse"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          },
+          "page": {
+            "type": "integer",
+            "title": "Page"
+          },
+          "page_size": {
+            "type": "integer",
+            "title": "Page Size"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "total",
+          "page",
+          "page_size"
+        ],
+        "title": "Page[UserResponse]"
       },
       "PasswordResetLinkResponse": {
         "properties": {
@@ -7569,6 +6699,63 @@
           "day_configs"
         ],
         "title": "PlanConfig"
+      },
+      "PlannedWorkoutCreate": {
+        "properties": {
+          "week_number": {
+            "type": "integer",
+            "title": "Week Number"
+          },
+          "day_of_week": {
+            "type": "integer",
+            "title": "Day Of Week"
+          },
+          "workout_type": {
+            "type": "string",
+            "title": "Workout Type"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "duration_min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Min"
+          },
+          "target_tss": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Tss"
+          }
+        },
+        "type": "object",
+        "required": [
+          "week_number",
+          "day_of_week",
+          "workout_type"
+        ],
+        "title": "PlannedWorkoutCreate",
+        "description": "A new planned workout added to an existing plan."
       },
       "PlannedWorkoutResponse": {
         "properties": {
@@ -7658,6 +6845,79 @@
         ],
         "title": "PlannedWorkoutResponse"
       },
+      "PlannedWorkoutUpdate": {
+        "properties": {
+          "workout_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workout Type"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "duration_min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Min"
+          },
+          "target_tss": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Tss"
+          },
+          "day_of_week": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Day Of Week"
+          },
+          "week_number": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Week Number"
+          }
+        },
+        "type": "object",
+        "title": "PlannedWorkoutUpdate",
+        "description": "Editable fields of a single planned workout."
+      },
       "PowerBestEntry": {
         "properties": {
           "duration_s": {
@@ -7745,6 +7005,67 @@
           "high"
         ],
         "title": "RangeSpec"
+      },
+      "RegeneratePlanRequest": {
+        "properties": {
+          "config": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlanConfig"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "use_llm": {
+            "type": "boolean",
+            "title": "Use Llm",
+            "default": false
+          },
+          "weeks": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weeks"
+          },
+          "goal": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Goal"
+          },
+          "llm_weeks": {
+            "anyOf": [
+              {
+                "items": {
+                  "items": {
+                    "$ref": "#/components/schemas/WorkoutCreate"
+                  },
+                  "type": "array"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Weeks"
+          }
+        },
+        "type": "object",
+        "title": "RegeneratePlanRequest",
+        "description": "Re-run generation for an existing plan, preserving completed workouts."
       },
       "RegisterRequest": {
         "properties": {
@@ -7843,14 +7164,6 @@
       },
       "SetupRequest": {
         "properties": {
-          "team_name": {
-            "type": "string",
-            "title": "Team Name"
-          },
-          "slug": {
-            "type": "string",
-            "title": "Slug"
-          },
           "admin_username": {
             "type": "string",
             "title": "Admin Username"
@@ -7873,12 +7186,11 @@
         },
         "type": "object",
         "required": [
-          "team_name",
-          "slug",
           "admin_username",
           "admin_password"
         ],
-        "title": "SetupRequest"
+        "title": "SetupRequest",
+        "description": "Create the first instance administrator. No team \u2014 single-instance."
       },
       "SetupStatusResponse": {
         "properties": {
@@ -7905,319 +7217,6 @@
           "reason"
         ],
         "title": "SkipWorkoutRequest"
-      },
-      "SuperadminTeamResponse": {
-        "properties": {
-          "id": {
-            "type": "string",
-            "title": "Id"
-          },
-          "slug": {
-            "type": "string",
-            "title": "Slug"
-          },
-          "name": {
-            "type": "string",
-            "title": "Name"
-          },
-          "status": {
-            "type": "string",
-            "title": "Status"
-          },
-          "created_at": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Created At"
-          },
-          "member_count": {
-            "type": "integer",
-            "title": "Member Count"
-          },
-          "consented_count": {
-            "type": "integer",
-            "title": "Consented Count",
-            "default": 0
-          }
-        },
-        "type": "object",
-        "required": [
-          "id",
-          "slug",
-          "name",
-          "status",
-          "created_at",
-          "member_count"
-        ],
-        "title": "SuperadminTeamResponse"
-      },
-      "SuperadminUserResponse": {
-        "properties": {
-          "id": {
-            "type": "string",
-            "title": "Id"
-          },
-          "username": {
-            "type": "string",
-            "title": "Username"
-          },
-          "created_at": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Created At"
-          },
-          "teams": {
-            "items": {
-              "$ref": "#/components/schemas/SuperadminUserTeam"
-            },
-            "type": "array",
-            "title": "Teams"
-          }
-        },
-        "type": "object",
-        "required": [
-          "id",
-          "username",
-          "created_at",
-          "teams"
-        ],
-        "title": "SuperadminUserResponse"
-      },
-      "SuperadminUserTeam": {
-        "properties": {
-          "team_id": {
-            "type": "string",
-            "title": "Team Id"
-          },
-          "team_slug": {
-            "type": "string",
-            "title": "Team Slug"
-          },
-          "team_name": {
-            "type": "string",
-            "title": "Team Name"
-          },
-          "roles": {
-            "items": {
-              "type": "string"
-            },
-            "type": "array",
-            "title": "Roles"
-          },
-          "joined_at": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Joined At"
-          },
-          "consented_at": {
-            "anyOf": [
-              {
-                "type": "string",
-                "format": "date-time"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Consented At"
-          },
-          "consent_version": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Consent Version"
-          }
-        },
-        "type": "object",
-        "required": [
-          "team_id",
-          "team_slug",
-          "team_name",
-          "roles",
-          "joined_at"
-        ],
-        "title": "SuperadminUserTeam"
-      },
-      "TeamSettingsPatch": {
-        "properties": {
-          "llm_base_url": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Llm Base Url"
-          },
-          "llm_model": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Llm Model"
-          },
-          "llm_api_key": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Llm Api Key"
-          },
-          "clear_llm_api_key": {
-            "type": "boolean",
-            "title": "Clear Llm Api Key",
-            "default": false
-          },
-          "llm_analysis_context": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Llm Analysis Context"
-          }
-        },
-        "type": "object",
-        "title": "TeamSettingsPatch"
-      },
-      "TeamSettingsResponse": {
-        "properties": {
-          "llm_base_url": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Llm Base Url"
-          },
-          "llm_model": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Llm Model"
-          },
-          "llm_api_key_set": {
-            "type": "boolean",
-            "title": "Llm Api Key Set"
-          },
-          "llm_analysis_context": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Llm Analysis Context"
-          }
-        },
-        "type": "object",
-        "required": [
-          "llm_base_url",
-          "llm_model",
-          "llm_api_key_set",
-          "llm_analysis_context"
-        ],
-        "title": "TeamSettingsResponse"
-      },
-      "TeamSignupRequest": {
-        "properties": {
-          "team_name": {
-            "type": "string",
-            "title": "Team Name"
-          },
-          "slug": {
-            "type": "string",
-            "title": "Slug"
-          },
-          "admin_username": {
-            "type": "string",
-            "title": "Admin Username"
-          },
-          "admin_password": {
-            "type": "string",
-            "title": "Admin Password"
-          },
-          "admin_display_name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Admin Display Name"
-          }
-        },
-        "type": "object",
-        "required": [
-          "team_name",
-          "slug",
-          "admin_username",
-          "admin_password"
-        ],
-        "title": "TeamSignupRequest"
-      },
-      "TeamSignupResponse": {
-        "properties": {
-          "id": {
-            "type": "string",
-            "title": "Id"
-          },
-          "slug": {
-            "type": "string",
-            "title": "Slug"
-          },
-          "name": {
-            "type": "string",
-            "title": "Name"
-          },
-          "status": {
-            "type": "string",
-            "title": "Status"
-          },
-          "created_at": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Created At"
-          }
-        },
-        "type": "object",
-        "required": [
-          "id",
-          "slug",
-          "name",
-          "status",
-          "created_at"
-        ],
-        "title": "TeamSignupResponse"
       },
       "TimeDuration": {
         "properties": {
@@ -8452,6 +7451,40 @@
               }
             ],
             "title": "Name"
+          },
+          "goal": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Goal"
+          },
+          "start_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Date"
+          },
+          "weeks": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weeks"
           }
         },
         "type": "object",
@@ -8526,6 +7559,77 @@
           "count"
         ],
         "title": "UnreadCountResponse"
+      },
+      "UserResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "username": {
+            "type": "string",
+            "title": "Username"
+          },
+          "roles": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Roles"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "consented_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Consented At"
+          },
+          "consent_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Consent Version"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "username",
+          "roles",
+          "created_at"
+        ],
+        "title": "UserResponse"
+      },
+      "UserRolesUpdate": {
+        "properties": {
+          "roles": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Roles"
+          }
+        },
+        "type": "object",
+        "required": [
+          "roles"
+        ],
+        "title": "UserRolesUpdate"
       },
       "ValidationError": {
         "properties": {
@@ -9032,7 +8136,7 @@
         "flows": {
           "password": {
             "scopes": {},
-            "tokenUrl": "/api/teams/{slug}/auth/login"
+            "tokenUrl": "/api/auth/login"
           }
         }
       }

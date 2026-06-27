@@ -45,7 +45,7 @@ async def _get_athlete(global_user_id: str, session: AsyncSession) -> Athlete:
     return athlete
 
 
-@router.get("/", response_model=list[TrainingPlanResponse])
+@router.get("", response_model=list[TrainingPlanResponse])
 async def list_plans(ctx_session=Depends(get_ctx_and_session)):
     ctx, session = ctx_session
     athlete = await _get_athlete(ctx.user_id, session)
@@ -59,7 +59,7 @@ async def list_plans(ctx_session=Depends(get_ctx_and_session)):
     return [TrainingPlanResponse.model_validate(p) for p in plans]
 
 
-@router.post("/", response_model=TrainingPlanResponse, status_code=201)
+@router.post("", response_model=TrainingPlanResponse, status_code=201)
 async def create_plan(
     body: TrainingPlanCreate,
     ctx_session=Depends(get_ctx_and_session),
