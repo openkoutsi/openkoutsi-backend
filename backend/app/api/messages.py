@@ -15,6 +15,7 @@ from backend.app.core.auth import UserContext, get_current_user
 from backend.app.db.user_session import get_user_session_factory, init_user_db
 from backend.app.models.message_orm import Message
 from backend.app.schemas.messages import MessageResponse, UnreadCountResponse
+from backend.app.schemas.pagination import Page, PageParams, paginate_params
 
 router = APIRouter(prefix="/messages", tags=["messages"])
 
@@ -35,11 +36,22 @@ async def _get_message(message_id: str, session: AsyncSession) -> Message:
     return message
 
 
-@router.get("", response_model=list[MessageResponse])
-async def list_messages(ctx_session=Depends(get_user_message_session)):
+@router.get("", response_model=Page[MessageResponse],
+            operation_id="listMessages", summary="List messages")
+async def list_messages(
+    ctx_session=Depends(get_user_message_session),
+    params: PageParams = Depends(paginate_params),
+):
     _, session = ctx_session
-    result = await session.execute(select(Message).order_by(Message.created_at.desc()))
-    return result.scalars().all()
+    total = (await session.execute(select(func.count()).select_from(Message))).scalar_one()
+    result = await session.execute(
+        select(Message)
+        .order_by(Message.created_at.desc())
+        .offset(params.offset)
+        .limit(params.page_size)
+    )
+    items = [MessageResponse.model_validate(m) for m in result.scalars().all()]
+    return Page.build(items, total, params.page, params.page_size)
 
 
 @router.get("/unread-count", response_model=UnreadCountResponse)
