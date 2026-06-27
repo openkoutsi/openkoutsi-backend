@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.models.team_orm import Activity, ActivityDistanceBest, ActivityPowerBest
+from backend.app.models.user_orm import Activity, ActivityDistanceBest, ActivityPowerBest
 from openkoutsi.training_math import DISTANCE_BEST_DISTANCES, POWER_BEST_DURATIONS
 
 _WINDOWS: dict[str, timedelta | None] = {

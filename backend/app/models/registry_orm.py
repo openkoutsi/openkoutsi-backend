@@ -23,12 +23,15 @@ class User(RegistryBase):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
     username: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     password_hash: Mapped[str] = mapped_column(String, nullable=False)
+    # JSON-encoded list of roles, e.g. '["administrator"]' or '["user"]'.
+    roles: Mapped[str] = mapped_column(String, nullable=False, default='["user"]')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
-    memberships: Mapped[list["TeamMembership"]] = relationship(
-        "TeamMembership", back_populates="user", cascade="all, delete-orphan"
-    )
+    # Data-processing consent (absorbed from the former DataConsent table).
+    consented_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    consent_version: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
     reset_tokens: Mapped[list["PasswordResetToken"]] = relationship(
         "PasswordResetToken", back_populates="user", cascade="all, delete-orphan"
     )
@@ -50,50 +53,15 @@ class PasswordResetToken(RegistryBase):
     user: Mapped["User"] = relationship("User", back_populates="reset_tokens")
 
 
-class Team(RegistryBase):
-    __tablename__ = "teams"
-
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
-    slug: Mapped[str] = mapped_column(String, unique=True, nullable=False)
-    name: Mapped[str] = mapped_column(String, nullable=False)
-    # "pending" → awaiting superadmin approval; "active" → normal; "rejected" → blocked
-    status: Mapped[str] = mapped_column(String, nullable=False, default="active")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
-
-    # Optional team-level LLM overrides (override global env vars)
-    llm_base_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    llm_api_key_enc: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    llm_model: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    llm_analysis_context: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-
-    memberships: Mapped[list["TeamMembership"]] = relationship(
-        "TeamMembership", back_populates="team", cascade="all, delete-orphan"
-    )
-    invitations: Mapped[list["Invitation"]] = relationship(
-        "Invitation", back_populates="team", cascade="all, delete-orphan"
-    )
-
-
-class TeamMembership(RegistryBase):
-    __tablename__ = "team_memberships"
-    __table_args__ = (UniqueConstraint("team_id", "user_id"),)
-
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
-    team_id: Mapped[str] = mapped_column(String, ForeignKey("teams.id", ondelete="CASCADE"))
-    user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id", ondelete="CASCADE"))
-    # JSON-encoded list of roles, e.g. '["administrator","coach"]'
-    roles: Mapped[str] = mapped_column(String, nullable=False, default='["user"]')
-    joined_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
-
-    team: Mapped["Team"] = relationship("Team", back_populates="memberships")
-    user: Mapped["User"] = relationship("User", back_populates="memberships")
-
-
 class Invitation(RegistryBase):
+    """An instance-wide invitation issued by an administrator.
+
+    Onboarding is invite-only: registration requires a valid invite token.
+    """
+
     __tablename__ = "invitations"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
-    team_id: Mapped[str] = mapped_column(String, ForeignKey("teams.id", ondelete="CASCADE"))
     token_hash: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     # JSON-encoded default roles for the invitee, e.g. '["user"]'
     roles: Mapped[str] = mapped_column(String, nullable=False, default='["user"]')
@@ -108,49 +76,30 @@ class Invitation(RegistryBase):
     used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
-    team: Mapped["Team"] = relationship("Team", back_populates="invitations")
 
+class InstanceSettings(RegistryBase):
+    """Single-row table holding instance-wide settings.
 
-class JoinRequest(RegistryBase):
-    """A self-serve request from a person to join a team.
-
-    Credentials are captured up front (hashed) so that, on admin approval, the
-    user account + membership can be created without further interaction.
+    Replaces the former per-team LLM overrides; managed by an instance admin.
+    The row uses a fixed primary key so there is always at most one.
     """
 
-    __tablename__ = "join_requests"
+    __tablename__ = "instance_settings"
 
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
-    team_id: Mapped[str] = mapped_column(String, ForeignKey("teams.id", ondelete="CASCADE"))
-    username: Mapped[str] = mapped_column(String, nullable=False)
-    password_hash: Mapped[str] = mapped_column(String, nullable=False)
-    display_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    # "pending" → awaiting decision; "approved"; "rejected"
-    status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
-    decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
-    decided_by_user_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-
-
-class DataConsent(RegistryBase):
-    """Records that a user has accepted the data processing terms for a team."""
-
-    __tablename__ = "data_consents"
-    __table_args__ = (UniqueConstraint("user_id", "team_id"),)
-
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
-    user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id", ondelete="CASCADE"))
-    team_id: Mapped[str] = mapped_column(String, ForeignKey("teams.id", ondelete="CASCADE"))
-    consented_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
-    consent_version: Mapped[str] = mapped_column(String, nullable=False, default="1.0")
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    llm_base_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    llm_api_key_enc: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    llm_model: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    llm_analysis_context: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )
 
 
 class ProviderConnection(RegistryBase):
-    """OAuth connections belong to the user globally, not to a specific team.
+    """OAuth connections belong to the user globally.
 
-    A user connects Strava once; synced activities are written to all teams
-    they belong to.
+    A user connects Strava once; synced activities are written to their own DB.
     """
 
     __tablename__ = "provider_connections"

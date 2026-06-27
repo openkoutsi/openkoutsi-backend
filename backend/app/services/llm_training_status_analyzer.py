@@ -27,9 +27,9 @@ from sqlalchemy import select
 from ..core.config import settings
 from ..core.ssrf import check_url_safe
 from ..db.registry import _RegistrySessionLocal
-from ..db.team_session import get_team_session_factory
-from ..models.registry_orm import Team
-from ..models.team_orm import Activity, Athlete, DailyMetric, Goal, PlannedWorkout, TrainingPlan
+from ..db.user_session import get_user_session_factory
+from ..models.registry_orm import InstanceSettings
+from ..models.user_orm import Activity, Athlete, DailyMetric, Goal, PlannedWorkout, TrainingPlan
 from ..schemas.metrics import _tsb_to_form
 
 log = logging.getLogger(__name__)
@@ -190,7 +190,7 @@ def _build_status_prompt(
 
 async def _stream_status_analysis(
     athlete: Athlete,
-    team_id: str,
+    user_id: str,
     recent_activities: list[Activity],
     current_metric: DailyMetric | None,
     active_plan: TrainingPlan | None,
@@ -201,13 +201,13 @@ async def _stream_status_analysis(
     coaching_style: str | None = None,
 ) -> AsyncIterator[str]:
     """Yield text chunks from the LLM via streaming SSE."""
-    team: Team | None = None
+    instance: InstanceSettings | None = None
     async with _RegistrySessionLocal() as reg:
-        result = await reg.execute(select(Team).where(Team.id == team_id))
-        team = result.scalar_one_or_none()
+        result = await reg.execute(select(InstanceSettings).limit(1))
+        instance = result.scalar_one_or_none()
 
-    base_url = (team.llm_base_url.strip() if team and team.llm_base_url else None) or (settings.llm_base_url or "").strip()
-    model = (team.llm_model.strip() if team and team.llm_model else None) or (settings.llm_model or "").strip()
+    base_url = (instance.llm_base_url.strip() if instance and instance.llm_base_url else None) or (settings.llm_base_url or "").strip()
+    model = (instance.llm_model.strip() if instance and instance.llm_model else None) or (settings.llm_model or "").strip()
 
     if not base_url or not model:
         raise ValueError("LLM base URL and model must be configured in Settings → AI / LLM")
@@ -216,13 +216,13 @@ async def _stream_status_analysis(
     check_url_safe(url)
     headers: dict[str, str] = {"Content-Type": "application/json"}
 
-    if team and getattr(team, "llm_api_key_enc", None):
+    if instance and getattr(instance, "llm_api_key_enc", None):
         try:
-            from backend.app.core.file_encryption import decrypt_team_secret
-            api_key = decrypt_team_secret(str(team.llm_api_key_enc), team_id)
+            from backend.app.core.file_encryption import decrypt_instance_secret
+            api_key = decrypt_instance_secret(str(instance.llm_api_key_enc))
             headers["Authorization"] = f"Bearer {api_key}"
         except Exception:
-            log.warning("Could not decrypt team LLM API key for team %s", team_id)
+            log.warning("Could not decrypt instance LLM API key")
 
     prompt = _build_status_prompt(
         athlete, recent_activities, current_metric, active_plan,
@@ -232,7 +232,7 @@ async def _stream_status_analysis(
         {"role": "system", "content": _build_system_prompt(locale, coaching_style)},
         {"role": "user", "content": prompt},
     ]
-    analysis_context = getattr(team, "llm_analysis_context", None)
+    analysis_context = getattr(instance, "llm_analysis_context", None)
     if analysis_context and analysis_context.strip():
         messages.insert(1, {"role": "system", "content": analysis_context.strip()})
 
@@ -265,7 +265,7 @@ async def _stream_status_analysis(
 
 async def analyze_training_status_bg(
     athlete_id: str,
-    team_id: str,
+    user_id: str,
     locale: str | None = None,
 ) -> None:
     """
@@ -273,7 +273,7 @@ async def analyze_training_status_bg(
     → set final training_status_status to 'done' or 'error'.
     """
     try:
-        async with get_team_session_factory(team_id)() as session:
+        async with get_user_session_factory(user_id)() as session:
             athlete_result = await session.execute(
                 select(Athlete).where(Athlete.id == athlete_id)
             )
@@ -352,7 +352,7 @@ async def analyze_training_status_bg(
 
             try:
                 async for chunk in _stream_status_analysis(
-                    athlete, team_id,
+                    athlete, user_id,
                     recent_activities, current_metric,
                     active_plan, this_week_workouts, active_goals,
                     now, locale=resolved_locale, coaching_style=coaching_style,
@@ -388,7 +388,7 @@ async def analyze_training_status_bg(
             athlete_id,
         )
         try:
-            async with get_team_session_factory(team_id)() as recovery_session:
+            async with get_user_session_factory(user_id)() as recovery_session:
                 result = await recovery_session.execute(
                     select(Athlete).where(Athlete.id == athlete_id)
                 )

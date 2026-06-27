@@ -6,25 +6,26 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
-
-from backend.app.db.team_session import get_team_session_factory
-from backend.app.models.team_orm import Athlete
 from sqlalchemy import select
+
+from backend.app.db.user_session import get_user_session_factory
+from backend.app.models.user_orm import Athlete
 
 router = APIRouter(prefix="/public", tags=["public"])
 
 
-@router.get("/teams/{team_id}/avatar/{athlete_id}")
-async def get_avatar(team_id: str, athlete_id: str):
-    """Serve an athlete's avatar image without requiring authentication.
+@router.get("/users/{user_id}/avatar",
+            operation_id="getPublicUserAvatar", summary="Get a user's avatar (no auth)")
+async def get_avatar(user_id: str):
+    """Serve a user's avatar image without requiring authentication.
 
-    The team_id + athlete_id pair acts as the opaque reference. No sensitive
-    data is exposed — only the image file itself is returned.
+    The user_id acts as the opaque reference. No sensitive data is exposed —
+    only the image file itself is returned.
     """
     try:
-        async with get_team_session_factory(team_id)() as session:
+        async with get_user_session_factory(user_id)() as session:
             result = await session.execute(
-                select(Athlete).where(Athlete.id == athlete_id)
+                select(Athlete).where(Athlete.global_user_id == user_id)
             )
             athlete = result.scalar_one_or_none()
     except Exception:

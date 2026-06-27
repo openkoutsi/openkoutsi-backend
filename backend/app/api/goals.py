@@ -5,7 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.deps import get_ctx_and_session
-from backend.app.models.team_orm import Athlete, Goal
+from backend.app.models.user_orm import Athlete, Goal
 from backend.app.schemas.goals import GoalCreate, GoalResponse, GoalUpdate
 
 router = APIRouter(prefix="/goals", tags=["goals"])

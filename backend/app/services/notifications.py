@@ -13,17 +13,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.user_session import get_user_session_factory, init_user_db
 from backend.app.models.message_orm import Message
-from backend.app.models.registry_orm import TeamMembership
+from backend.app.models.registry_orm import User
 
 log = logging.getLogger(__name__)
 
 # ── Message types ────────────────────────────────────────────────────────────
-TEAM_REQUEST = "team_request"   # new team signup awaiting superadmin approval
 INVITE_USED = "invite_used"     # someone registered via an invite link
-JOIN_REQUEST = "join_request"   # someone asked to join a team
-
-# Reserved mailbox key for the superadmin, who has no registry user account.
-SUPERADMIN_MAILBOX = "superadmin"
 
 
 async def notify_user(user_id: str, type: str, data: dict) -> None:
@@ -35,25 +30,20 @@ async def notify_user(user_id: str, type: str, data: dict) -> None:
     await _dispatch_external(user_id, type, data)
 
 
-async def notify_superadmin(type: str, data: dict) -> None:
-    """Persist an in-app message to the superadmin mailbox."""
-    await notify_user(SUPERADMIN_MAILBOX, type, data)
-
-
-async def notify_team_admins(
-    registry_session: AsyncSession, team_id: str, type: str, data: dict
+async def notify_admins(
+    registry_session: AsyncSession, type: str, data: dict
 ) -> None:
-    """Fan out an in-app message to every administrator of a team."""
+    """Fan out an in-app message to every instance administrator."""
     result = await registry_session.execute(
-        select(TeamMembership).where(TeamMembership.team_id == team_id)
+        select(User).where(User.deleted_at.is_(None))
     )
-    for membership in result.scalars().all():
+    for user in result.scalars().all():
         try:
-            roles = json.loads(membership.roles)
+            roles = json.loads(user.roles) if user.roles else []
         except (TypeError, ValueError):
             roles = []
         if "administrator" in roles:
-            await notify_user(membership.user_id, type, data)
+            await notify_user(user.id, type, data)
 
 
 async def _dispatch_external(user_id: str, type: str, data: dict) -> None:

@@ -17,7 +17,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from backend.app.core.config import settings
-import backend.app.models.team_orm  # noqa: F401 — populate TeamBase.metadata
+import backend.app.models.user_orm  # noqa: F401 — populate TeamBase.metadata
 from backend.app.db.base import TeamBase
 
 config = context.config

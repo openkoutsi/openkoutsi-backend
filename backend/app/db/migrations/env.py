@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 from backend.app.core.config import settings
 
 # Import all models so Alembic sees their metadata
-import backend.app.models.team_orm  # noqa: F401 — populate Base.metadata
+import backend.app.models.user_orm  # noqa: F401 — populate Base.metadata
 from backend.app.db.base import Base
 
 config = context.config

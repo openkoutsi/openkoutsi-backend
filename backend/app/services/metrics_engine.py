@@ -3,7 +3,7 @@ from datetime import date, datetime, time, timedelta
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.models.team_orm import Activity, DailyMetric
+from backend.app.models.user_orm import Activity, DailyMetric
 from openkoutsi.fatigue_metrics import compute_daily_metrics
 
 # How far back to scan for stale metrics caused by deleted activities.

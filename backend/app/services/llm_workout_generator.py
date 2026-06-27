@@ -22,8 +22,8 @@ from typing import Optional
 from pydantic import TypeAdapter, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..models.registry_orm import Team
-from ..models.team_orm import Athlete, PlannedWorkout, WorkoutDefinition
+from ..models.registry_orm import InstanceSettings
+from ..models.user_orm import Athlete, PlannedWorkout, WorkoutDefinition
 from .llm_client import call_llm, extract_json, resolve_llm_config
 from openkoutsi.workout_estimator import estimate_duration_s, estimate_tss
 from openkoutsi.workout_schema import RepeatBlock, WorkoutStepOrRepeat
@@ -154,8 +154,7 @@ async def generate_workout_definition_llm(
     athlete: Athlete,
     planned_workout: PlannedWorkout,
     session: AsyncSession,
-    team: Team | None = None,
-    team_id: str = "",
+    instance: InstanceSettings | None = None,
     user_id: str = "",
     sport_type: str = "Ride",
 ) -> WorkoutDefinition:
@@ -167,7 +166,7 @@ async def generate_workout_definition_llm(
     Raises ``ValueError`` when the LLM is not configured and
     ``WorkoutGenerationError`` when the model cannot produce a valid workout.
     """
-    base_url, model, api_key = resolve_llm_config(athlete, team, team_id, user_id)
+    base_url, model, api_key = resolve_llm_config(athlete, instance, user_id)
 
     user_prompt = _build_user_prompt(planned_workout, athlete.ftp, sport_type)
 

@@ -25,9 +25,9 @@ from sqlalchemy import select
 from ..core.config import settings
 from ..core.ssrf import check_url_safe
 from ..db.registry import _RegistrySessionLocal
-from ..db.team_session import get_team_session_factory
-from ..models.registry_orm import Team
-from ..models.team_orm import Activity, Athlete, DailyMetric
+from ..db.user_session import get_user_session_factory
+from ..models.registry_orm import InstanceSettings
+from ..models.user_orm import Activity, Athlete, DailyMetric
 from .pr_detection import detect_pr_badges
 
 if TYPE_CHECKING:
@@ -198,22 +198,22 @@ def _build_prompt(
 async def _stream_analysis(
     activity: Activity,
     athlete: Athlete,
-    team_id: str,
+    user_id: str,
     fatigue: DailyMetric | None = None,
     locale: str | None = None,
     power_pr_badges: dict | None = None,
     distance_pr_badges: dict | None = None,
 ) -> AsyncIterator[str]:
     """Yield text chunks from the LLM via streaming SSE."""
-    # Fetch team for LLM config
-    team: Team | None = None
+    # Fetch instance settings for LLM config
+    instance: InstanceSettings | None = None
     async with _RegistrySessionLocal() as reg:
-        result = await reg.execute(select(Team).where(Team.id == team_id))
-        team = result.scalar_one_or_none()
+        result = await reg.execute(select(InstanceSettings).limit(1))
+        instance = result.scalar_one_or_none()
 
-    # Priority: team settings → global env vars
-    base_url = (team.llm_base_url.strip() if team and team.llm_base_url else None) or (settings.llm_base_url or "").strip()
-    model = (team.llm_model.strip() if team and team.llm_model else None) or (settings.llm_model or "").strip()
+    # Priority: instance settings → global env vars
+    base_url = (instance.llm_base_url.strip() if instance and instance.llm_base_url else None) or (settings.llm_base_url or "").strip()
+    model = (instance.llm_model.strip() if instance and instance.llm_model else None) or (settings.llm_model or "").strip()
 
     if not base_url or not model:
         raise ValueError("LLM base URL and model must be configured in Settings → AI / LLM")
@@ -222,18 +222,18 @@ async def _stream_analysis(
     check_url_safe(url)
     headers: dict[str, str] = {"Content-Type": "application/json"}
 
-    if team and getattr(team, "llm_api_key_enc", None):
+    if instance and getattr(instance, "llm_api_key_enc", None):
         try:
-            from backend.app.core.file_encryption import decrypt_team_secret
-            api_key = decrypt_team_secret(str(team.llm_api_key_enc), team_id)
+            from backend.app.core.file_encryption import decrypt_instance_secret
+            api_key = decrypt_instance_secret(str(instance.llm_api_key_enc))
             headers["Authorization"] = f"Bearer {api_key}"
         except Exception:
-            log.warning("Could not decrypt team LLM API key for team %s — proceeding without auth", team_id)
+            log.warning("Could not decrypt instance LLM API key — proceeding without auth")
 
     messages: list[dict] = [
         {"role": "system", "content": _build_system_prompt(locale)},
     ]
-    analysis_context = getattr(team, "llm_analysis_context", None)
+    analysis_context = getattr(instance, "llm_analysis_context", None)
     if analysis_context and analysis_context.strip():
         messages.append({"role": "system", "content": analysis_context.strip()})
     messages.append(
@@ -268,7 +268,7 @@ async def _stream_analysis(
 
 
 async def analyze_activity_bg(
-    activity_id: str, athlete_id: str, team_id: str, locale: str | None = None
+    activity_id: str, athlete_id: str, user_id: str, locale: str | None = None
 ) -> None:
     """
     Background task: stream LLM analysis → write chunks to DB every 500 ms
@@ -277,7 +277,7 @@ async def analyze_activity_bg(
     Lives in the service layer so it can be imported from both api/activities.py
     and services/strava_sync.py without circular dependencies.
     """
-    async with get_team_session_factory(team_id)() as session:
+    async with get_user_session_factory(user_id)() as session:
         activity_result = await session.execute(
             select(Activity).where(Activity.id == activity_id)
         )
@@ -316,7 +316,7 @@ async def analyze_activity_bg(
 
         try:
             async for chunk in _stream_analysis(
-                activity, athlete, team_id, fatigue=fatigue, locale=resolved_locale,
+                activity, athlete, user_id, fatigue=fatigue, locale=resolved_locale,
                 power_pr_badges=power_pr_badges, distance_pr_badges=distance_pr_badges,
             ):
                 buffer.append(chunk)

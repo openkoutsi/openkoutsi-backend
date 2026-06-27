@@ -5,8 +5,8 @@ Handles OAuth connect/callback, sync, and disconnect for all registered
 providers (Strava, Wahoo, …). Adding a new provider requires only registering
 it in providers/registry.py — no new router code needed.
 
-ProviderConnection records live in the registry DB (global per-user, not per-team).
-Activity data is written to every team the user belongs to on sync.
+ProviderConnection records live in the registry DB (global per-user). Activity
+data is written to the user's own DB on sync.
 """
 
 import logging
@@ -22,8 +22,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.core.config import settings
 from backend.app.core.deps import get_ctx_and_session
 from backend.app.db.registry import get_registry_session
-from backend.app.models.registry_orm import ProviderConnection, Team, TeamMembership
-from backend.app.models.team_orm import Activity, ActivitySource, Athlete
+from backend.app.models.registry_orm import ProviderConnection
+from backend.app.models.user_orm import Activity, ActivitySource, Athlete
 from backend.app.services.provider_sync import ensure_fresh_token, sync_provider_activities
 from backend.app.services.providers.registry import PROVIDERS
 
@@ -64,20 +64,20 @@ async def _get_connection(
     return conn
 
 
-def _encode_state(user_id: str, team_slug: str, provider: str) -> str:
+def _encode_state(user_id: str, provider: str) -> str:
     return jwt.encode(
-        {"sub": user_id, "team_slug": team_slug, "purpose": f"{provider}_oauth"},
+        {"sub": user_id, "purpose": f"{provider}_oauth"},
         settings.secret_key,
         algorithm="HS256",
     )
 
 
-def _decode_state(state: str, provider: str) -> tuple[str, str]:
-    """Decode a state JWT and return (user_id, team_slug). Raises JWTError on failure."""
+def _decode_state(state: str, provider: str) -> str:
+    """Decode a state JWT and return the user_id. Raises JWTError on failure."""
     payload = jwt.decode(state, settings.secret_key, algorithms=["HS256"])
     if payload.get("purpose") != f"{provider}_oauth":
         raise JWTError("wrong purpose")
-    return payload["sub"], payload.get("team_slug", "")
+    return payload["sub"]
 
 
 # ── Status ─────────────────────────────────────────────────────────────────
@@ -124,13 +124,7 @@ async def connect(
     if provider == "wahoo" and not settings.wahoo_client_id:
         raise HTTPException(status_code=501, detail="Wahoo is not configured")
 
-    # Look up team slug so the callback can redirect back to the right team
-    team_result = await registry_session.execute(
-        select(Team).where(Team.id == ctx.team_id)
-    )
-    team = team_result.scalar_one()
-
-    state = _encode_state(ctx.user_id, team.slug, provider)
+    state = _encode_state(ctx.user_id, provider)
     redirect_uri = f"{settings.api_url}/api/integrations/{provider}/callback"
     client = client_cls()
     url = client.get_oauth_url(state, redirect_uri)
@@ -152,15 +146,13 @@ async def callback(
     client_cls = _require_provider(provider)
 
     try:
-        user_id, team_slug = _decode_state(state, provider)
+        user_id = _decode_state(state, provider)
     except (JWTError, KeyError, ValueError):
         return RedirectResponse(
             url=f"{settings.frontend_url}?{provider}=error"
         )
 
-    redirect_base = (
-        f"{settings.frontend_url}/t/{team_slug}" if team_slug else settings.frontend_url
-    )
+    redirect_base = settings.frontend_url
 
     redirect_uri = f"{settings.api_url}/api/integrations/{provider}/callback"
     try:
@@ -203,7 +195,7 @@ async def sync(
 ):
     """Trigger a full history import from the given provider in the background.
 
-    Syncs to all teams the user belongs to.
+    Imports the full history into the user's own DB.
     """
     ctx, _ = ctx_session
     _require_provider(provider)
@@ -215,10 +207,10 @@ async def sync(
 
 async def _bg_provider_sync(user_id: str, provider: str) -> None:
     from backend.app.db.registry import _RegistrySessionLocal
-    from backend.app.db.team_session import get_team_session_factory
+    from backend.app.db.user_session import get_user_session_factory, init_user_db
     from backend.app.services.metrics_engine import recalculate_from
 
-    # Step 1: Refresh token once from registry, collect team membership list
+    # Step 1: Refresh the token once from the registry.
     async with _RegistrySessionLocal() as reg_session:
         conn_result = await reg_session.execute(
             select(ProviderConnection).where(
@@ -233,38 +225,29 @@ async def _bg_provider_sync(user_id: str, provider: str) -> None:
 
         access_token = await ensure_fresh_token(conn, reg_session)
 
-        mb_result = await reg_session.execute(
-            select(TeamMembership).where(TeamMembership.user_id == user_id)
-        )
-        team_ids = [m.team_id for m in mb_result.scalars().all()]
+    # Step 2: Sync into the user's own DB.
+    try:
+        await init_user_db(user_id)
+        async with get_user_session_factory(user_id)() as session:
+            athlete_result = await session.execute(
+                select(Athlete).where(Athlete.global_user_id == user_id)
+            )
+            athlete = athlete_result.scalar_one_or_none()
+            if athlete is None:
+                return
 
-    if not team_ids:
-        log.warning("User %s has no team memberships — sync dropped", user_id)
-        return
+            count, earliest = await sync_provider_activities(
+                athlete, conn, session, user_id=user_id, access_token=access_token
+            )
+            if count > 0 and earliest is not None:
+                await recalculate_from(athlete.id, earliest, session)
 
-    # Step 2: Sync to each team
-    for team_id in team_ids:
-        try:
-            async with get_team_session_factory(team_id)() as team_session:
-                athlete_result = await team_session.execute(
-                    select(Athlete).where(Athlete.global_user_id == user_id)
-                )
-                athlete = athlete_result.scalar_one_or_none()
-                if athlete is None:
-                    continue
-
-                count, earliest = await sync_provider_activities(
-                    athlete, conn, team_session, team_id=team_id, access_token=access_token
-                )
-                if count > 0 and earliest is not None:
-                    await recalculate_from(athlete.id, earliest, team_session)
-
-                log.info(
-                    "%s sync complete: %d new activities for user %s in team %s",
-                    provider, count, user_id, team_id,
-                )
-        except Exception:
-            log.exception("%s sync failed for user %s in team %s", provider, user_id, team_id)
+            log.info(
+                "%s sync complete: %d new activities for user %s",
+                provider, count, user_id,
+            )
+    except Exception:
+        log.exception("%s sync failed for user %s", provider, user_id)
 
 
 # ── Zone sync ──────────────────────────────────────────────────────────────
@@ -356,25 +339,17 @@ async def disconnect(
 
     if delete_data:
         from pathlib import Path
-        from backend.app.db.team_session import get_team_session_factory
+        from backend.app.db.user_session import get_user_session_factory
         from backend.app.services.metrics_engine import recalculate_from
 
-        mb_result = await registry_session.execute(
-            select(TeamMembership).where(TeamMembership.user_id == ctx.user_id)
-        )
-        team_ids = [m.team_id for m in mb_result.scalars().all()]
-
-        for team_id in team_ids:
-            try:
-                async with get_team_session_factory(team_id)() as team_session:
-                    athlete_result = await team_session.execute(
-                        select(Athlete).where(Athlete.global_user_id == ctx.user_id)
-                    )
-                    athlete = athlete_result.scalar_one_or_none()
-                    if athlete is None:
-                        continue
-
-                    src_result = await team_session.execute(
+        try:
+            async with get_user_session_factory(ctx.user_id)() as user_session:
+                athlete_result = await user_session.execute(
+                    select(Athlete).where(Athlete.global_user_id == ctx.user_id)
+                )
+                athlete = athlete_result.scalar_one_or_none()
+                if athlete is not None:
+                    src_result = await user_session.execute(
                         select(ActivitySource)
                         .join(Activity, ActivitySource.activity_id == Activity.id)
                         .where(
@@ -391,10 +366,10 @@ async def disconnect(
                             p = Path(src.fit_file_path)
                             if p.exists():
                                 p.unlink(missing_ok=True)
-                        await team_session.delete(src)
-                        await team_session.flush()
+                        await user_session.delete(src)
+                        await user_session.flush()
 
-                        remaining = await team_session.execute(
+                        remaining = await user_session.execute(
                             select(ActivitySource).where(ActivitySource.activity_id == act.id)
                         )
                         if remaining.scalar_one_or_none() is None:
@@ -406,15 +381,15 @@ async def disconnect(
                                 )
                                 if earliest_date is None or day < earliest_date:
                                     earliest_date = day
-                            await team_session.delete(act)
-                            await team_session.flush()
+                            await user_session.delete(act)
+                            await user_session.flush()
 
                     if earliest_date is not None:
-                        await recalculate_from(athlete.id, earliest_date, team_session)
+                        await recalculate_from(athlete.id, earliest_date, user_session)
 
-                    await team_session.commit()
-            except Exception:
-                log.exception("Failed to delete %s data for user %s in team %s", provider, ctx.user_id, team_id)
+                    await user_session.commit()
+        except Exception:
+            log.exception("Failed to delete %s data for user %s", provider, ctx.user_id)
 
     await registry_session.delete(conn)
     await registry_session.commit()

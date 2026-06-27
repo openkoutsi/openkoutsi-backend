@@ -13,8 +13,8 @@ import logging
 
 from sqlalchemy import select
 
-from backend.app.models.registry_orm import ProviderConnection, TeamMembership
-from backend.app.models.team_orm import Activity, ActivitySource, Athlete
+from backend.app.models.registry_orm import ProviderConnection
+from backend.app.models.user_orm import Activity, ActivitySource, Athlete
 from backend.app.services.provider_sync import (
     _DUPLICATE_WINDOW,
     _get_activity_lock,
@@ -46,7 +46,7 @@ async def process_wahoo_webhook(payload: dict) -> None:
     }
     """
     from backend.app.db.registry import _RegistrySessionLocal
-    from backend.app.db.team_session import get_team_session_factory
+    from backend.app.db.user_session import get_user_session_factory
 
     wahoo_user_id = str(payload.get("user", {}).get("id", ""))
     if not wahoo_user_id:
@@ -69,7 +69,7 @@ async def process_wahoo_webhook(payload: dict) -> None:
     workout_summary_for_url = workout.get("workout_summary") or workout_summary
     cdn_fit_url: str | None = (workout_summary_for_url.get("file") or {}).get("url")
 
-    # Resolve user and team memberships from registry
+    # Resolve the owning user from the registry
     async with _RegistrySessionLocal() as reg_session:
         conn_result = await reg_session.execute(
             select(ProviderConnection).where(
@@ -85,26 +85,20 @@ async def process_wahoo_webhook(payload: dict) -> None:
         user_id = conn.user_id
         access_token = await ensure_fresh_token(conn, reg_session)
 
-        mb_result = await reg_session.execute(
-            select(TeamMembership).where(TeamMembership.user_id == user_id)
-        )
-        team_ids = [m.team_id for m in mb_result.scalars().all()]
-
-    for team_id in team_ids:
-        try:
-            async with get_team_session_factory(team_id)() as session:
-                athlete_result = await session.execute(
-                    select(Athlete).where(Athlete.global_user_id == user_id)
-                )
-                athlete = athlete_result.scalar_one_or_none()
-                if athlete is None:
-                    continue
-
-                await _process_wahoo_for_team(norm, athlete, conn, access_token, team_id, session, cdn_fit_url=cdn_fit_url)
-        except Exception:
-            log.exception(
-                "Failed to process Wahoo webhook for user %s in team %s", user_id, team_id
+    try:
+        from backend.app.db.user_session import init_user_db
+        await init_user_db(user_id)
+        async with get_user_session_factory(user_id)() as session:
+            athlete_result = await session.execute(
+                select(Athlete).where(Athlete.global_user_id == user_id)
             )
+            athlete = athlete_result.scalar_one_or_none()
+            if athlete is None:
+                return
+
+            await _process_wahoo_for_user(norm, athlete, conn, access_token, user_id, session, cdn_fit_url=cdn_fit_url)
+    except Exception:
+        log.exception("Failed to process Wahoo webhook for user %s", user_id)
 
 
 async def _download_fit_cdn_first(
@@ -124,7 +118,7 @@ async def _download_fit_cdn_first(
     return await _wahoo_client.download_fit_file(access_token, external_id)
 
 
-async def _process_wahoo_for_team(norm, athlete, conn, access_token, team_id, session, *, cdn_fit_url: str | None = None) -> None:
+async def _process_wahoo_for_user(norm, athlete, conn, access_token, user_id, session, *, cdn_fit_url: str | None = None) -> None:
     from backend.app.services.metrics_engine import recalculate_from
 
     # Idempotent: skip if this (provider, external_id) is already imported
@@ -141,7 +135,7 @@ async def _process_wahoo_for_team(norm, athlete, conn, access_token, team_id, se
         log.debug("Wahoo webhook: activity %s already imported — skipping", norm.external_id)
         return
 
-    async with _get_activity_lock(team_id, athlete.id):
+    async with _get_activity_lock(user_id, athlete.id):
         # Check for existing Activity at the same time window
         existing_result = await session.execute(
             select(Activity).where(
@@ -180,7 +174,7 @@ async def _process_wahoo_for_team(norm, athlete, conn, access_token, team_id, se
             if actual_priority < _winning_priority(existing_act):
                 await _repopulate_activity(
                     existing_act, new_src, norm, _wahoo_client, access_token,
-                    athlete, session, team_id=team_id, prefetched_fit=prefetched_fit,
+                    athlete, session, user_id=user_id, prefetched_fit=prefetched_fit,
                 )
                 if existing_act.start_time:
                     start_date = (
@@ -233,7 +227,7 @@ async def _process_wahoo_for_team(norm, athlete, conn, access_token, team_id, se
         prefetched_fit_new = None
 
     await _populate_activity(
-        activity, src, norm, _wahoo_client, access_token, athlete, session, team_id=team_id,
+        activity, src, norm, _wahoo_client, access_token, athlete, session, user_id=user_id,
         prefetched_fit=prefetched_fit_new
     )
 
@@ -250,7 +244,7 @@ async def _process_wahoo_for_team(norm, athlete, conn, access_token, team_id, se
         from backend.app.services.llm_activity_analyzer import analyze_activity_bg
         activity.analysis_status = "pending"
         await session.commit()
-        asyncio.create_task(analyze_activity_bg(activity.id, athlete.id, team_id))
+        asyncio.create_task(analyze_activity_bg(activity.id, athlete.id, user_id))
 
     if app_cfg.get("auto_training_status") and athlete.training_status_status != "pending":
         from backend.app.services.llm_training_status_analyzer import analyze_training_status_bg
@@ -259,4 +253,4 @@ async def _process_wahoo_for_team(norm, athlete, conn, access_token, team_id, se
         athlete.training_status = None
         athlete.training_status_updated_at = datetime.now(timezone.utc)
         await session.commit()
-        asyncio.create_task(analyze_training_status_bg(athlete.id, team_id))
+        asyncio.create_task(analyze_training_status_bg(athlete.id, user_id))

@@ -50,29 +50,25 @@ class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
 def create_app() -> FastAPI:
     from backend.app.api.auth import router as auth_router
     from backend.app.api.setup import router as setup_router
-    from backend.app.api.signup import router as signup_router
-    from backend.app.api.superadmin import router as superadmin_router
-    from backend.app.api.teams import router as teams_router
+    from backend.app.api.admin import router as admin_router
     from backend.app.api.athlete import router as athlete_router
     from backend.app.api.activities import router as activities_router
     from backend.app.api.integrations import router as integrations_router
     from backend.app.api.metrics import router as metrics_router
-    from backend.app.api.goals import router as goals_router
     from backend.app.api.distance import router as distance_router
     from backend.app.api.power import router as power_router
+    from backend.app.api.goals import router as goals_router
     from backend.app.api.strava import router as strava_router
     from backend.app.api.wahoo import router as wahoo_router
     from backend.app.api.plans import router as plans_router
     from backend.app.api.llm import router as llm_router
-    from backend.app.api.members import router as members_router
     from backend.app.api.public import router as public_router
     from backend.app.api.workouts import router as workouts_router
     from backend.app.api.consent import router as consent_router
     from backend.app.api.health import router as health_router
     from backend.app.api.messages import router as messages_router
-    from backend.app.api.join_requests import router as join_requests_router
 
-    app = FastAPI(title="openkoutsi API", version="1.0.0", lifespan=lifespan)
+    app = FastAPI(title="openkoutsi API", version="2.0.0", lifespan=lifespan)
 
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -83,32 +79,28 @@ def create_app() -> FastAPI:
         allow_origins=[settings.frontend_url],
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
-        allow_headers=["Content-Type", "Authorization", "X-Superadmin-Secret"],
+        allow_headers=["Content-Type", "Authorization"],
     )
 
     app.include_router(auth_router, prefix="/api")
     app.include_router(setup_router, prefix="/api")
-    app.include_router(signup_router, prefix="/api")
-    app.include_router(superadmin_router, prefix="/api")
-    app.include_router(teams_router, prefix="/api")
+    app.include_router(admin_router, prefix="/api")
     app.include_router(athlete_router, prefix="/api")
     app.include_router(activities_router, prefix="/api")
     app.include_router(integrations_router, prefix="/api")
     app.include_router(metrics_router, prefix="/api")
-    app.include_router(goals_router, prefix="/api")
     app.include_router(distance_router, prefix="/api")
     app.include_router(power_router, prefix="/api")
+    app.include_router(goals_router, prefix="/api")
     app.include_router(strava_router, prefix="/api")
     app.include_router(wahoo_router, prefix="/api")
     app.include_router(plans_router, prefix="/api")
     app.include_router(llm_router, prefix="/api")
-    app.include_router(members_router, prefix="/api")
     app.include_router(public_router, prefix="/api")
     app.include_router(workouts_router, prefix="/api")
     app.include_router(consent_router, prefix="/api")
     app.include_router(health_router, prefix="/api")
     app.include_router(messages_router, prefix="/api")
-    app.include_router(join_requests_router, prefix="/api")
 
     @app.get("/api/version")
     async def get_version():

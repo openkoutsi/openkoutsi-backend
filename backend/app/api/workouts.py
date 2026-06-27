@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.core.deps import get_ctx_and_session
 from backend.app.db.registry import get_registry_session
 from backend.app.models.registry_orm import ProviderConnection
-from backend.app.models.team_orm import Athlete, WahooWorkoutUpload, WorkoutDefinition
+from backend.app.models.user_orm import Athlete, WahooWorkoutUpload, WorkoutDefinition
 from backend.app.schemas.workouts import (
     ExportFormatInfo,
     WahooPushRequest,
