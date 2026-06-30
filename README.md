@@ -147,7 +147,20 @@ The web frontend has its own configuration (`NEXT_PUBLIC_API_URL`, etc.) — see
 - **Strava:** configure Strava app credentials in `.env` and deploy `strava_bridge/` to a public HTTPS URL.
 - **Wahoo:** configure Wahoo credentials in `.env` and deploy `wahoo_bridge/` to a public HTTPS URL. Pushing structured workouts to Wahoo requires the `plans_read`, `plans_write`, and `workouts_write` scopes; users connected before this feature must reconnect Wahoo to grant them. The "Generate workouts" plan action needs a server-reachable LLM (resolved athlete → instance → global) to synthesize the structured workouts; uploading the generated workouts to Wahoo is then done individually from the Workouts tab.
 
-Detailed production setup, reverse proxy examples, systemd units, bridge registration steps, and GitHub Actions automated deployment are in [DEPLOY.md](DEPLOY.md).
+### Deployment
+
+Production runs as **containers**: CI builds and pushes the backend and both
+bridge images to GHCR (`ghcr.io/openkoutsi/openkoutsi-{backend,strava-bridge,wahoo-bridge}`),
+and the VM only *pulls* them — a systemd timer polls GHCR and recreates changed
+services (no inbound CI→VM SSH). Secrets are delivered as Docker secret files
+under `/run/secrets/`. Schema migrations run automatically on container start.
+The compose stack, reverse proxy, and infrastructure-as-code live in the
+[openkoutsi/openkoutsi-ops](https://github.com/openkoutsi/openkoutsi-ops)
+repository.
+
+Detailed production setup, the container image list, GHCR auth, bridge
+registration steps, and the legacy bare-metal/systemd path are in
+[DEPLOY.md](DEPLOY.md).
 
 ## License
 

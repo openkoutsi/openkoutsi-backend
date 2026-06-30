@@ -2,14 +2,108 @@
 
 This guide covers the **backend** (API + bridge services). The web frontend is
 deployed separately from the [openkoutsi/openkoutsi-web](https://github.com/openkoutsi/openkoutsi-web)
-repository — see its README/deploy docs for the Next.js build and systemd unit.
+repository — see its README/deploy docs for the Next.js build.
 
-## Prerequisites
-
-- Python 3.12+ with [uv](https://docs.astral.sh/uv/)
-- A reverse proxy with TLS (nginx, Caddy, etc.) for production
+Production runs as **containers** pulled from GHCR (the primary path, below).
+The bare-metal/systemd flow is kept as a [documented legacy alternative](#legacy-bare-metal-deployment).
 
 ---
+
+## Container deployment (primary)
+
+The deployment model is **build-in-CI, pull-on-VM**:
+
+- CI (`.github/workflows/build-images.yml`) builds the three images and pushes
+  them to GHCR. Pull requests build the images to verify they still build, but
+  **publishing happens only from `main`** (and manual `workflow_dispatch`).
+- The VM only *pulls* images — it never builds, holds source, or accepts an
+  inbound CI SSH key. A systemd timer polls GHCR and runs
+  `docker compose pull && docker compose up -d`, recreating only the services
+  whose image digest changed.
+
+### Images
+
+| Service       | Image                                          | Built from       |
+|---------------|------------------------------------------------|------------------|
+| Backend       | `ghcr.io/openkoutsi/openkoutsi-backend`        | this repo (`Dockerfile`)            |
+| Strava bridge | `ghcr.io/openkoutsi/openkoutsi-strava-bridge`  | this repo (`strava_bridge/`)        |
+| Wahoo bridge  | `ghcr.io/openkoutsi/openkoutsi-wahoo-bridge`   | this repo (`wahoo_bridge/`)         |
+| Web frontend  | `ghcr.io/openkoutsi/openkoutsi-web`            | [openkoutsi-web](https://github.com/openkoutsi/openkoutsi-web) |
+
+Each build pushes two tags: `latest` (the channel the VM tracks) and
+`sha-<shortsha>` (immutable, for rollback — pin a service to a prior `sha-` tag
+and `docker compose up -d` to restore it).
+
+### Compose stack, reverse proxy and infrastructure
+
+The `docker-compose.yml`, nginx + certbot, GoAccess dashboard, the `okdeploy`
+systemd timer + pull script, and the OpenTofu/cloud-init infrastructure-as-code
+(UpCloud, fresh VM, encrypted data volume) all live in the
+[openkoutsi/openkoutsi-ops](https://github.com/openkoutsi/openkoutsi-ops)
+repository. The whole environment is rebuildable from there. See its README for
+the provisioning and cutover runbook.
+
+### GHCR auth on the VM
+
+The images can be made public (no auth to pull) or pulled with a **read-only**
+GHCR token (`docker login ghcr.io` with a PAT that has only `read:packages`).
+Use a read-only token so a VM compromise cannot push images.
+
+### Secrets (Docker secrets, not `.env`)
+
+All three services read their secret fields from files under `/run/secrets/`
+(pydantic-settings `secrets_dir`). Compose mounts one file per secret, named for
+the lowercase settings field:
+
+- backend: `secret_key`, `encryption_key`, `strava_client_secret`,
+  `bridge_secret`, `wahoo_client_secret`, `wahoo_bridge_secret`
+- strava bridge: `strava_client_secret`, `bridge_secret`
+- wahoo bridge: `bridge_secret`, `wahoo_webhook_token`
+
+Non-secret config (domains, OAuth client *IDs*, `*_BRIDGE_URL`,
+`LLM_ALLOWED_SERVERS`) is passed as plain `environment:`. Secret fields are
+**never** set as environment variables in containers, so they are not exposed
+via `docker inspect` or `/proc/<pid>/environ`. Env vars still take precedence
+over file secrets, so set only one source per field.
+
+### Persistent data & encryption
+
+The sensitive SQLite databases (`registry.db`, per-user `user.db` + uploads, and
+each bridge `bridge.db`) live on named volumes bound to the VM's **encrypted**
+data device. `ENCRYPTION_KEY` (field-level column encryption) is delivered as a
+Docker secret, separate from the disk-encryption key — defense in depth.
+
+### Migrations on start
+
+The backend image is **self-applying**: its entrypoint
+(`backend/scripts/docker-entrypoint.sh`) runs the registry Alembic upgrade and
+the per-user migration loop (`backend/scripts/migrate_user_dbs.py`) against the
+mounted data volume before exec'ing uvicorn. No manual migration step is needed
+when rolling out a new image.
+
+### Build/run an image locally
+
+```bash
+docker build -t openkoutsi-backend .
+docker build -t openkoutsi-strava-bridge strava_bridge
+docker build -t openkoutsi-wahoo-bridge wahoo_bridge
+
+# Backend needs SECRET_KEY (as a file secret) and a data volume:
+mkdir -p /tmp/ok-secrets && python -c "import secrets;print(secrets.token_hex(32))" > /tmp/ok-secrets/secret_key
+docker run --rm -p 8000:8000 \
+  -v "$PWD/data:/data" -e DATA_DIR=/data \
+  -v /tmp/ok-secrets/secret_key:/run/secrets/secret_key:ro \
+  openkoutsi-backend
+curl localhost:8000/api/health   # {"status":"ok"} once migrations finish
+```
+
+---
+
+## Legacy bare-metal deployment
+
+> The sections below describe the original **bare-metal / systemd** deployment.
+> The container path above is now primary; this remains for reference and local
+> development.
 
 ## 1. Backend
 
@@ -97,7 +191,7 @@ On a fresh deployment, navigate to the frontend URL. The setup wizard will appea
 ### Run
 
 ```bash
-uv run uvicorn backend.app.main:app --host 0.0.0.0 --port 8000
+uv run uvicorn backend.main:app --host 0.0.0.0 --port 8000
 ```
 
 For production add `--workers 2` (or use gunicorn with uvicorn workers).
@@ -232,33 +326,24 @@ Check logs with `journalctl -u openkoutsi-backend@$(whoami) -f` (replace the uni
 
 ---
 
-## 7. Automated Deployment (GitHub Actions)
+## 7. Automated image builds (GitHub Actions)
 
-Pushes to `main` trigger automatic backend deployment:
+`.github/workflows/build-images.yml` builds the backend and both bridge images
+on every push to `main` and on every pull request:
 
-- **Deploy Backend** — runs when `backend/`, `openkoutsi/`, `pyproject.toml`, or `uv.lock` change
+- **Pull requests:** images are built (to verify they still build) but **not**
+  pushed.
+- **`main` / `workflow_dispatch`:** images are built and **pushed to GHCR** as
+  `latest` + `sha-<shortsha>`.
 
-The frontend has its own deploy workflow in the [openkoutsi-web](https://github.com/openkoutsi/openkoutsi-web) repository.
+It logs in to GHCR with the built-in `GITHUB_TOKEN` (`packages: write`), so no
+SSH key or VPS secret is stored in the repository — the old SSH `deploy-backend`
+workflow has been removed. The VM picks up the new `latest` images via the
+polling timer in the [openkoutsi-ops](https://github.com/openkoutsi/openkoutsi-ops)
+repository.
 
-### Required GitHub Secrets
-
-Set these under **Settings → Secrets and variables → Actions** in the repository:
-
-| Secret | Description |
-|--------|-------------|
-| `VPS_SSH_PRIVATE_KEY` | Private SSH key whose public key is in `~/.ssh/authorized_keys` on the VPS |
-| `VPS_HOST` | VPS hostname or IP address |
-| `VPS_USER` | Username on the VPS (must match the `@<user>` in the systemd service names) |
-
-### VPS prerequisite: passwordless sudo for systemctl
-
-The deployment scripts run `sudo systemctl` over SSH. The deploy user must be allowed to do so without a password prompt. Create `/etc/sudoers.d/openkoutsi-deploy` on the VPS:
-
-```
-<deploy-user> ALL=(ALL) NOPASSWD: /bin/systemctl stop openkoutsi-backend@*.service, /bin/systemctl start openkoutsi-backend@*.service, /bin/systemctl daemon-reload
-```
-
-Replace `<deploy-user>` with the actual username. Verify with `sudo visudo -c` after saving.
+The frontend has its own `build-images.yml` in the
+[openkoutsi-web](https://github.com/openkoutsi/openkoutsi-web) repository.
 
 ---
 
@@ -269,8 +354,8 @@ Replace `<deploy-user>` with the actual username. Verify with `sudo visudo -c` a
 - [ ] `DATA_DIR` points to a persistent directory (survives restarts/upgrades)
 - [ ] `FRONTEND_URL` and `API_URL` point to real domains
 - [ ] TLS termination in place for the API (and the frontend, deployed from openkoutsi-web)
-- [ ] GitHub Actions secrets set (`VPS_SSH_PRIVATE_KEY`, `VPS_HOST`, `VPS_USER`) if using automated deployment
-- [ ] VPS deploy user has passwordless sudo for systemctl (see section 7)
+- [ ] Container path: secret files present under `/run/secrets/` (see [Secrets](#secrets-docker-secrets-not-env)); the ops repo provisions these
+- [ ] Container path: GHCR pull access configured on the VM (public packages or a read-only token)
 - [ ] Completed first-run setup wizard (creates the first admin account)
 - [ ] Strava app callback domain updated to production domain (if using Strava)
 - [ ] Wahoo webhook URL registered in the developer portal (if using Wahoo)
