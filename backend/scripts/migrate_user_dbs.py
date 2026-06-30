@@ -44,8 +44,11 @@ def migrate_user(user_id: str, dry_run: bool) -> bool:
         return True
 
     env = {**os.environ, "USER_ID": user_id}
+    # Invoke alembic through the current interpreter (`python -m alembic`) rather
+    # than `uv run` so this works both locally (under `uv run`) and inside the
+    # container image, where uv is not installed but alembic is on the venv.
     result = subprocess.run(
-        ["uv", "run", "alembic", "-c", "backend/alembic-user.ini", "upgrade", "head"],
+        [sys.executable, "-m", "alembic", "-c", "backend/alembic-user.ini", "upgrade", "head"],
         cwd=str(REPO_ROOT),
         env=env,
         capture_output=True,

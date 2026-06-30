@@ -7,7 +7,13 @@ _INSECURE_DEFAULT = "changeme-set-a-real-secret-in-env"
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # In containers, secret fields are delivered as files under /run/secrets/
+    # (Docker secrets) and read by pydantic-settings; non-secret config stays in
+    # the environment. For local dev the .env workflow keeps working — env vars
+    # take precedence over file secrets, so set only one source per field.
+    model_config = SettingsConfigDict(
+        env_file=".env", secrets_dir="/run/secrets", extra="ignore"
+    )
 
     # Root data directory — contains registry.db and users/
     data_dir: str = "data"

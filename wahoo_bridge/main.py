@@ -31,7 +31,9 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env", secrets_dir="/run/secrets", extra="ignore"
+    )
 
     database_path: str = "bridge.db"
     wahoo_webhook_token: str = ""

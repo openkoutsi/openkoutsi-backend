@@ -1,0 +1,73 @@
+name: Build Images
+
+# Builds the backend and both bridge images. On pull requests the images are
+# built (to verify they still build) but NOT pushed; images are published to
+# GHCR only from `main` (and manual workflow_dispatch).
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-and-push:
+    name: Build ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: backend
+            image: ghcr.io/openkoutsi/openkoutsi-backend
+            context: .
+            dockerfile: Dockerfile
+          - name: strava-bridge
+            image: ghcr.io/openkoutsi/openkoutsi-strava-bridge
+            context: strava_bridge
+            dockerfile: strava_bridge/Dockerfile
+          - name: wahoo-bridge
+            image: ghcr.io/openkoutsi/openkoutsi-wahoo-bridge
+            context: wahoo_bridge
+            dockerfile: wahoo_bridge/Dockerfile
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Only log in when we will actually publish (not on pull requests).
+      - name: Log in to GHCR
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ matrix.image }}
+          # latest — the deploy channel the VM tracks.
+          # sha-<shortsha> — immutable, for rollback.
+          tags: |
+            type=raw,value=latest
+            type=sha,prefix=sha-
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
