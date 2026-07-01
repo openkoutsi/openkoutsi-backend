@@ -23,6 +23,11 @@ ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1
 
 COPY backend/ backend/
+# The `openkoutsi` package holds the core training/FIT logic that the backend
+# imports at runtime (e.g. `from openkoutsi.fit import ...`). It is not pip
+# installed (uv sync runs with --no-install-project), so it must be copied
+# alongside `backend/` and made importable from WORKDIR /app.
+COPY openkoutsi/ openkoutsi/
 
 # Run as a non-root user. /app/data is the default DATA_DIR; in production a
 # volume is mounted over it (DATA_DIR=/data) for the sensitive SQLite databases.
