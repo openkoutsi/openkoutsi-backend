@@ -37,7 +37,7 @@ class Settings(BaseSettings):
 
     database_path: str = "bridge.db"
     wahoo_webhook_token: str = ""
-    bridge_secret: str = "changeme"
+    wahoo_bridge_secret: str = "changeme"
 
 
 settings = Settings()
@@ -108,7 +108,7 @@ app = FastAPI(title="openkoutsi Wahoo Bridge", lifespan=lifespan)
 
 def _require_bearer(request: Request) -> None:
     auth = request.headers.get("authorization", "")
-    if auth != f"Bearer {settings.bridge_secret}":
+    if auth != f"Bearer {settings.wahoo_bridge_secret}":
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
@@ -153,7 +153,7 @@ async def receive_webhook(request: Request):
 
 @app.get("/events/pending")
 async def get_pending_events(request: Request):
-    """Return all unclaimed events. Auth: Bearer bridge_secret."""
+    """Return all unclaimed events. Auth: Bearer wahoo_bridge_secret."""
     _require_bearer(request)
     async with AsyncSessionLocal() as session:
         result = await session.execute(
@@ -177,7 +177,7 @@ async def get_pending_events(request: Request):
 
 @app.post("/events/{event_id}/claim", status_code=200)
 async def claim_event(event_id: str, request: Request):
-    """Mark an event as claimed. Auth: Bearer bridge_secret."""
+    """Mark an event as claimed. Auth: Bearer wahoo_bridge_secret."""
     _require_bearer(request)
     async with AsyncSessionLocal() as session:
         result = await session.execute(
