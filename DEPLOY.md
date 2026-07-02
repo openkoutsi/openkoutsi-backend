@@ -58,7 +58,7 @@ the lowercase settings field:
 - backend: `secret_key`, `encryption_key`, `strava_client_secret`,
   `bridge_secret`, `wahoo_client_secret`, `wahoo_bridge_secret`
 - strava bridge: `strava_client_secret`, `bridge_secret`
-- wahoo bridge: `bridge_secret`, `wahoo_webhook_token`
+- wahoo bridge: `wahoo_bridge_secret`, `wahoo_webhook_token`
 
 Non-secret config (domains, OAuth client *IDs*, `*_BRIDGE_URL`,
 `LLM_ALLOWED_SERVERS`) is passed as plain `environment:`. Secret fields are
@@ -141,7 +141,7 @@ BRIDGE_SECRET=
 WAHOO_CLIENT_ID=
 WAHOO_CLIENT_SECRET=
 WAHOO_BRIDGE_URL=                  # public URL of the Wahoo bridge, e.g. https://wahoo-bridge.your-domain
-WAHOO_BRIDGE_SECRET=               # shared secret — must match BRIDGE_SECRET in wahoo_bridge/.env
+WAHOO_BRIDGE_SECRET=               # shared secret — must match WAHOO_BRIDGE_SECRET in wahoo_bridge/.env
 
 # Server-side LLM (OpenAI-compatible) — fallback when no instance/user LLM is configured
 LLM_BASE_URL=                      # e.g. http://localhost:11434/v1 or https://api.openai.com/v1
@@ -277,8 +277,8 @@ uv sync
 Create `wahoo_bridge/.env`:
 
 ```env
-BRIDGE_SECRET=<same random string as WAHOO_BRIDGE_SECRET in main .env>   # python -c "import secrets; print(secrets.token_hex(32))"
-WAHOO_WEBHOOK_TOKEN=<token you define in the Wahoo developer portal>      # python -c "import secrets; print(secrets.token_hex(32))"
+WAHOO_BRIDGE_SECRET=<same random string as WAHOO_BRIDGE_SECRET in main .env>   # python -c "import secrets; print(secrets.token_hex(32))"
+WAHOO_WEBHOOK_TOKEN=<token you define in the Wahoo developer portal>           # python -c "import secrets; print(secrets.token_hex(32))"
 DATABASE_PATH=bridge.db
 ```
 

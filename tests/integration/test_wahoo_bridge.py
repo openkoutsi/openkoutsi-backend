@@ -82,7 +82,7 @@ def patched_bridge(bridge_db):
         patch.object(bridge_module, "engine", eng),
         patch.object(bridge_module, "AsyncSessionLocal", sessions),
         patch.object(bridge_module.settings, "wahoo_webhook_token", WEBHOOK_TOKEN),
-        patch.object(bridge_module.settings, "bridge_secret", BRIDGE_SECRET),
+        patch.object(bridge_module.settings, "wahoo_bridge_secret", BRIDGE_SECRET),
     ):
         yield eng, sessions
 
@@ -177,6 +177,30 @@ class TestBridgeWebhookEndpoint:
             result = await s.execute(select(WebhookEvent))
             events = result.scalars().all()
         assert events == []
+
+
+class TestPollingEndpointAuth:
+    """The polling endpoints authorize against wahoo_bridge_secret — the same
+    field the backend sends as WAHOO_BRIDGE_SECRET. A mismatch here is what
+    caused the 401s when the bridge validated against the strava bridge_secret."""
+
+    async def test_pending_rejects_wrong_secret(self, bridge_client, patched_bridge):
+        resp = await bridge_client.get(
+            "/events/pending",
+            headers={"Authorization": "Bearer wrong-secret"},
+        )
+        assert resp.status_code == 401
+
+    async def test_pending_rejects_missing_auth(self, bridge_client, patched_bridge):
+        resp = await bridge_client.get("/events/pending")
+        assert resp.status_code == 401
+
+    async def test_pending_accepts_wahoo_bridge_secret(self, bridge_client, patched_bridge):
+        resp = await bridge_client.get(
+            "/events/pending",
+            headers={"Authorization": f"Bearer {BRIDGE_SECRET}"},
+        )
+        assert resp.status_code == 200
 
 
 class TestPollerHappyPath:
