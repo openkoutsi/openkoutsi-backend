@@ -234,14 +234,21 @@ class WahooClient(BaseProviderClient):
             json.dumps(data, indent=2, default=str),
         )
         workouts: list[dict] = data.get("workouts", [])
+        # Filter out planned (not-yet-performed) workouts. Wahoo's /workouts
+        # endpoint returns both performed workouts and planned/structured
+        # workouts scheduled onto a device — including the ones this app itself
+        # pushes (see create_or_update_workout). Only performed workouts carry a
+        # populated workout_summary with recorded data; planned workouts have an
+        # empty/absent summary and must not be imported as activities (issue #10).
+        performed = [w for w in workouts if _is_performed_workout(w)]
         # Cache CDN FIT URLs so download_fit_file can fall back when the API endpoint returns 404.
-        for w in workouts:
+        for w in performed:
             summary = w.get("workout_summary") or {}
             file_info = summary.get("file") or {}
             url = file_info.get("url")
             if url:
                 self._fit_urls[str(w["id"])] = url
-        return [_normalize_workout(w) for w in workouts]
+        return [_normalize_workout(w) for w in performed]
 
     async def download_fit_file(
         self, access_token: str, external_id: str
@@ -436,6 +443,21 @@ class WahooClient(BaseProviderClient):
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
+
+def _is_performed_workout(workout: dict) -> bool:
+    """Whether a Wahoo /workouts entry represents an actually performed activity.
+
+    Wahoo returns both performed workouts and planned/structured workouts (ones
+    scheduled onto a device, such as those this app pushes via
+    create_or_update_workout). A performed workout has a populated
+    workout_summary carrying recorded data (duration, distance, etc.); a planned
+    workout that has not been done yet has no summary — only planning fields such
+    as plan_id. Filtering on a non-empty workout_summary keeps performed
+    activities and drops planned ones (issue #10).
+    """
+    summary = workout.get("workout_summary")
+    return isinstance(summary, dict) and len(summary) > 0
+
 
 def _normalize_wahoo_zones(thresholds: list[int]) -> list[dict]:
     """Convert Wahoo threshold list (upper bounds) to [{low, high, name}] format."""
