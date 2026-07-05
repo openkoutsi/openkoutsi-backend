@@ -51,13 +51,6 @@ class Settings(BaseSettings):
     llm_api_key: str = ""    # empty is fine for local models
     llm_model: str = ""      # e.g. "llama3.2", "gpt-4o-mini", "mistral"
 
-    # Sampling temperature for outbound LLM requests. Leave unset (the default)
-    # to omit the parameter entirely — required for thinking-enabled models
-    # (e.g. Claude with extended thinking, via Anthropic's OpenAI-compatible
-    # endpoint) that reject any temperature other than 1. Set a float such as
-    # 0.7 to force a specific value for models that support it.
-    llm_temperature: float | None = None
-
     # Comma-separated list of LLM base URLs that users are allowed to choose from.
     # When set, users can only pick from this list; the free-text URL input is hidden.
     # When empty (default), users may enter any URL (subject to SSRF guards).

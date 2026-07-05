@@ -29,15 +29,15 @@ log = logging.getLogger(__name__)
 def temperature_param(override: float | None = None) -> dict[str, float]:
     """Return a ``{"temperature": X}`` payload fragment, or ``{}`` to omit it.
 
-    Thinking-enabled models (e.g. Claude with extended thinking, reached via
-    Anthropic's OpenAI-compatible endpoint) reject any temperature other than
-    ``1``, so the parameter is left out unless a value is explicitly configured
-    via ``LLM_TEMPERATURE`` (or passed by a caller).
+    By default the ``temperature`` field is left out entirely so each model
+    applies its own default. This keeps thinking-enabled models (e.g. Claude
+    with extended thinking, reached via Anthropic's OpenAI-compatible endpoint),
+    which reject any temperature other than ``1``, working out of the box. A
+    caller may still pass an explicit value to force one.
     """
-    temp = override if override is not None else settings.llm_temperature
-    if temp is None:
+    if override is None:
         return {}
-    return {"temperature": temp}
+    return {"temperature": override}
 
 
 async def raise_for_llm_status(resp: httpx.Response, url: str) -> None:

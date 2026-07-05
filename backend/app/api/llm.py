@@ -86,9 +86,9 @@ class ChatMessage(BaseModel):
 class LlmChatRequest(BaseModel):
     messages: list[ChatMessage]
     # Optional: when omitted, the temperature parameter is left out of the
-    # upstream request entirely (falling back to LLM_TEMPERATURE if set). This
-    # keeps thinking-enabled models — which reject any temperature other than 1
-    # — working through the proxy.
+    # upstream request entirely so the model uses its own default. This keeps
+    # thinking-enabled models — which reject any temperature other than 1 —
+    # working through the proxy.
     temperature: Optional[float] = None
     stream: bool = False
     model: Optional[str] = None

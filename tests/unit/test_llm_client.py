@@ -2,35 +2,27 @@
 
 Covers the two behaviours added to make third-party LLM failures diagnosable:
 
-* ``temperature_param`` omits the ``temperature`` field unless explicitly
-  configured, so thinking-enabled models (which reject any temperature other
-  than 1) work by default.
+* ``temperature_param`` omits the ``temperature`` field unless a caller passes
+  an explicit value, so thinking-enabled models (which reject any temperature
+  other than 1) work by default.
 * ``raise_for_llm_status`` surfaces the upstream response body in the raised
   error instead of discarding it like ``httpx.Response.raise_for_status``.
 """
 import httpx
 import pytest
 
-from backend.app.services import llm_client
 from backend.app.services.llm_client import raise_for_llm_status, temperature_param
 
 
 class TestTemperatureParam:
-    def test_omitted_by_default(self, monkeypatch):
-        monkeypatch.setattr(llm_client.settings, "llm_temperature", None)
+    def test_omitted_by_default(self):
         assert temperature_param() == {}
 
-    def test_uses_configured_value(self, monkeypatch):
-        monkeypatch.setattr(llm_client.settings, "llm_temperature", 0.5)
-        assert temperature_param() == {"temperature": 0.5}
-
-    def test_explicit_override_wins(self, monkeypatch):
-        monkeypatch.setattr(llm_client.settings, "llm_temperature", 0.5)
-        assert temperature_param(0.2) == {"temperature": 0.2}
-
-    def test_override_none_falls_back_to_setting(self, monkeypatch):
-        monkeypatch.setattr(llm_client.settings, "llm_temperature", None)
+    def test_explicit_none_omitted(self):
         assert temperature_param(None) == {}
+
+    def test_explicit_value_included(self):
+        assert temperature_param(0.2) == {"temperature": 0.2}
 
 
 def _response(status_code: int, body: str) -> httpx.Response:
