@@ -17,6 +17,7 @@ Most cycling coaching tools are cloud-only SaaS. openkoutsi is different: you ru
 - **Admin inbox** — in-app messages notify admins about events (e.g. used invites); each user has an isolated per-user message store, deletions are permanent, and the design leaves a hook for future email/push delivery
 - **Admin dashboard** — manage users, invitations, password resets, and instance-wide LLM settings
 - **FIT file ingestion** — upload activities directly with automatic TSS, normalized power, and zone distribution analysis
+- **Manual activity entry** — log workouts by hand (date, duration, distance, avg/max HR, avg power, cadence, RPE/TSS) with every field optional, behaving like a `manual` data provider
 - **Workout categorization** — automatic Coggan-style zone classification with manual override
 - **Strava + Wahoo sync** — OAuth integrations with history import and webhook updates through bridge services
 - **Zone sync** — sync HR/power zones and FTP from connected providers

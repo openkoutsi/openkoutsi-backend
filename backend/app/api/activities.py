@@ -399,21 +399,28 @@ async def create_manual_activity(
     tss: Optional[float] = None
     if payload.tss is not None:
         tss = payload.tss
-    elif payload.rpe is not None:
+    elif payload.duration_s is not None and payload.rpe is not None:
+        # rpe/avg_hr derivations both need a duration to scale by.
         tss = (payload.duration_s / 3600) * (payload.rpe ** 2) * 10
-    elif payload.avg_hr is not None:
+    elif payload.duration_s is not None and payload.avg_hr is not None:
         tss, _ = calculate_tss(
             payload.duration_s, None, payload.avg_hr, None, athlete.max_hr
         )
 
+    default_name = (
+        f"{payload.sport_type} Activity" if payload.sport_type else "Manual Activity"
+    )
     activity = Activity(
         id=str(uuid.uuid4()),
         athlete_id=athlete.id,
-        name=payload.name or f"{payload.sport_type} Activity",
+        name=payload.name or default_name,
         sport_type=payload.sport_type,
         start_time=payload.start_time,
         duration_s=payload.duration_s,
         avg_hr=payload.avg_hr,
+        max_hr=payload.max_hr,
+        avg_power=payload.avg_power,
+        avg_cadence=payload.avg_cadence,
         distance_m=payload.distance_m,
         elevation_m=payload.elevation_m,
         tss=tss,
@@ -427,9 +434,11 @@ async def create_manual_activity(
     await session.commit()
     await session.refresh(activity)
 
-    await find_and_link_workout(session, athlete.id, activity)
+    # Workout matching and the fitness recalc are both keyed on the date.
+    if payload.start_time is not None:
+        await find_and_link_workout(session, athlete.id, activity)
 
-    if tss is not None:
+    if tss is not None and payload.start_time is not None:
         start_date = (
             payload.start_time.date()
             if hasattr(payload.start_time, "date")

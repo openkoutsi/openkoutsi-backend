@@ -84,13 +84,56 @@ class TestCreateManualActivity:
         assert resp.json()["tss"] is not None
         assert resp.json()["tss"] > 0
 
-    async def test_missing_required_field_returns_422(self, client, auth_headers):
+    async def test_empty_body_returns_422(self, client, auth_headers):
+        # Every field is optional, but a completely empty submission is rejected.
+        resp = await client.post("/api/activities", json={}, headers=auth_headers)
+        assert resp.status_code == 422
+
+    async def test_single_field_is_enough(self, client, auth_headers):
+        # Only a sport type, nothing else — still a valid manual activity.
         resp = await client.post(
             "/api/activities",
-            json={"sport_type": "Ride"},  # missing start_time and duration_s
+            json={"sport_type": "Run"},
             headers=auth_headers,
         )
-        assert resp.status_code == 422
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["sport_type"] == "Run"
+        assert data["duration_s"] is None
+        assert data["tss"] is None
+        assert data["status"] == "processed"
+        assert "manual" in data["sources"]
+
+    async def test_power_hr_cadence_stored(self, client, auth_headers):
+        resp = await client.post(
+            "/api/activities",
+            json={
+                "sport_type": "Ride",
+                "start_time": "2025-06-05T10:00:00Z",
+                "duration_s": 3600,
+                "avg_power": 220.0,
+                "max_hr": 178.0,
+                "avg_cadence": 88.0,
+                "distance_m": 30000.0,
+            },
+            headers=auth_headers,
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["avg_power"] == 220.0
+        assert data["max_hr"] == 178.0
+        assert data["avg_cadence"] == 88.0
+        assert data["distance_m"] == 30000.0
+
+    async def test_no_duration_gives_null_tss(self, client, auth_headers):
+        # rpe/avg_hr can't derive TSS without a duration to scale by.
+        resp = await client.post(
+            "/api/activities",
+            json={"sport_type": "Run", "avg_hr": 150.0, "rpe": 7},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 201
+        assert resp.json()["tss"] is None
 
     async def test_unauthenticated_returns_401(self, client):
         resp = await client.post(
