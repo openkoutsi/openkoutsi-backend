@@ -20,16 +20,34 @@ class AnalyzeBody(BaseModel):
 
 
 class ManualActivityCreate(BaseModel):
-    sport_type: str
-    start_time: datetime
-    duration_s: int = Field(..., gt=0)
+    """Payload for logging a workout by hand (no device recording / FIT file).
+
+    Every field is optional so users can jot down as much or as little as they
+    remember, but a completely empty submission is rejected.
+    """
+
+    sport_type: Optional[str] = None
+    start_time: Optional[datetime] = None
+    duration_s: Optional[int] = Field(None, gt=0)
     name: Optional[str] = None
-    # TSS resolution (in priority order): explicit tss > rpe > avg_hr
+    # TSS resolution (in priority order): explicit tss > rpe > avg_hr.
+    # rpe/avg_hr derivation additionally require duration_s to be set.
     tss: Optional[float] = Field(None, ge=0)
     rpe: Optional[int] = Field(None, ge=1, le=10)
     avg_hr: Optional[float] = Field(None, gt=0)
-    distance_m: Optional[float] = None
+    max_hr: Optional[float] = Field(None, gt=0)
+    avg_power: Optional[float] = Field(None, gt=0)
+    avg_cadence: Optional[float] = Field(None, ge=0)
+    distance_m: Optional[float] = Field(None, ge=0)
     elevation_m: Optional[float] = None
+
+    @model_validator(mode="after")
+    def _require_at_least_one_field(self) -> "ManualActivityCreate":
+        if not any(
+            getattr(self, field) is not None for field in type(self).model_fields
+        ):
+            raise ValueError("At least one field must be provided")
+        return self
 
 
 class IntervalResponse(BaseModel):
@@ -62,6 +80,7 @@ class ActivityResponse(BaseModel):
     normalized_power: Optional[float] = None
     avg_hr: Optional[float] = None
     max_hr: Optional[float] = None
+    avg_cadence: Optional[float] = None
     tss: Optional[float] = None
     intensity_factor: Optional[float] = None
     workout_category: Optional[str] = None
@@ -92,6 +111,7 @@ class ActivityResponse(BaseModel):
                 "normalized_power": data.normalized_power,
                 "avg_hr": data.avg_hr,
                 "max_hr": data.max_hr,
+                "avg_cadence": data.avg_cadence,
                 "tss": data.tss,
                 "intensity_factor": data.intensity_factor,
                 "workout_category": data.workout_category,
@@ -150,6 +170,7 @@ class ActivityDetailResponse(ActivityResponse):
             normalized_power=activity.normalized_power,
             avg_hr=activity.avg_hr,
             max_hr=activity.max_hr,
+            avg_cadence=activity.avg_cadence,
             tss=activity.tss,
             intensity_factor=activity.intensity_factor,
             workout_category=activity.workout_category,

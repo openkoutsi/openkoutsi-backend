@@ -4471,6 +4471,17 @@
             ],
             "title": "Max Hr"
           },
+          "avg_cadence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Cadence"
+          },
           "tss": {
             "anyOf": [
               {
@@ -4783,6 +4794,17 @@
               }
             ],
             "title": "Max Hr"
+          },
+          "avg_cadence": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Cadence"
           },
           "tss": {
             "anyOf": [
@@ -6539,17 +6561,38 @@
       "ManualActivityCreate": {
         "properties": {
           "sport_type": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Sport Type"
           },
           "start_time": {
-            "type": "string",
-            "format": "date-time",
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Start Time"
           },
           "duration_s": {
-            "type": "integer",
-            "exclusiveMinimum": 0.0,
+            "anyOf": [
+              {
+                "type": "integer",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Duration S"
           },
           "name": {
@@ -6600,10 +6643,47 @@
             ],
             "title": "Avg Hr"
           },
+          "max_hr": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Hr"
+          },
+          "avg_power": {
+            "anyOf": [
+              {
+                "type": "number",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Power"
+          },
+          "avg_cadence": {
+            "anyOf": [
+              {
+                "type": "number",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Cadence"
+          },
           "distance_m": {
             "anyOf": [
               {
-                "type": "number"
+                "type": "number",
+                "minimum": 0.0
               },
               {
                 "type": "null"
@@ -6624,12 +6704,8 @@
           }
         },
         "type": "object",
-        "required": [
-          "sport_type",
-          "start_time",
-          "duration_s"
-        ],
-        "title": "ManualActivityCreate"
+        "title": "ManualActivityCreate",
+        "description": "Payload for logging a workout by hand (no device recording / FIT file).\n\nEvery field is optional so users can jot down as much or as little as they\nremember, but a completely empty submission is rejected."
       },
       "MessageResponse": {
         "properties": {
