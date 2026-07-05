@@ -206,7 +206,7 @@ _LLM_REQUEST_BODY = {
 class TestLlmPlanGeneration:
     async def _mock_llm_call(self, raw_json: str):
         mock_resp = MagicMock()
-        mock_resp.raise_for_status = MagicMock()
+        mock_resp.is_error = False
         mock_resp.json.return_value = {"choices": [{"message": {"content": raw_json}}]}
 
         mock_http = AsyncMock()
@@ -247,11 +247,11 @@ class TestLlmPlanGeneration:
 
         # First call returns garbage, second returns valid JSON
         bad_resp = MagicMock()
-        bad_resp.raise_for_status = MagicMock()
+        bad_resp.is_error = False
         bad_resp.json.return_value = {"choices": [{"message": {"content": "not json at all"}}]}
 
         good_resp = MagicMock()
-        good_resp.raise_for_status = MagicMock()
+        good_resp.is_error = False
         good_resp.json.return_value = {"choices": [{"message": {"content": _make_llm_plan_json(4)}}]}
 
         mock_http = AsyncMock()
@@ -274,7 +274,7 @@ class TestLlmPlanGeneration:
         )
 
         bad_resp = MagicMock()
-        bad_resp.raise_for_status = MagicMock()
+        bad_resp.is_error = False
         bad_resp.json.return_value = {"choices": [{"message": {"content": "still not json"}}]}
 
         mock_http = AsyncMock()

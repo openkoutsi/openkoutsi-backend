@@ -31,6 +31,7 @@ from ..db.user_session import get_user_session_factory
 from ..models.registry_orm import InstanceSettings
 from ..models.user_orm import Activity, Athlete, DailyMetric, Goal, PlannedWorkout, TrainingPlan
 from ..schemas.metrics import _tsb_to_form
+from .llm_client import raise_for_llm_status, temperature_param
 
 log = logging.getLogger(__name__)
 
@@ -239,7 +240,7 @@ async def _stream_status_analysis(
     payload = {
         "model": model,
         "messages": messages,
-        "temperature": 0.7,
+        **temperature_param(),
         "stream": True,
     }
 
@@ -247,7 +248,7 @@ async def _stream_status_analysis(
         timeout=httpx.Timeout(300.0, connect=10.0)
     ) as client:
         async with client.stream("POST", url, json=payload, headers=headers) as resp:
-            resp.raise_for_status()
+            await raise_for_llm_status(resp, url)
             async for line in resp.aiter_lines():
                 if not line.startswith("data: "):
                     continue

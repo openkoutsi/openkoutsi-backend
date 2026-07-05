@@ -61,6 +61,7 @@ from backend.app.core.ssrf import check_url_safe
 from backend.app.db.registry import get_registry_session
 from backend.app.models.registry_orm import InstanceSettings
 from backend.app.models.user_orm import Athlete
+from backend.app.services.llm_client import temperature_param
 
 
 async def _load_instance_settings(registry_session: AsyncSession) -> InstanceSettings | None:
@@ -84,7 +85,11 @@ class ChatMessage(BaseModel):
 
 class LlmChatRequest(BaseModel):
     messages: list[ChatMessage]
-    temperature: float = 0.7
+    # Optional: when omitted, the temperature parameter is left out of the
+    # upstream request entirely (falling back to LLM_TEMPERATURE if set). This
+    # keeps thinking-enabled models — which reject any temperature other than 1
+    # — working through the proxy.
+    temperature: Optional[float] = None
     stream: bool = False
     model: Optional[str] = None
 
@@ -291,7 +296,7 @@ async def llm_chat(
     payload: dict[str, Any] = {
         "model": body.model or model,
         "messages": [{"role": m.role, "content": m.content} for m in body.messages],
-        "temperature": body.temperature,
+        **temperature_param(body.temperature),
         "stream": body.stream,
     }
 

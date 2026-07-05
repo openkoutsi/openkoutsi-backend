@@ -147,6 +147,7 @@ WAHOO_BRIDGE_SECRET=               # shared secret — must match WAHOO_BRIDGE_S
 LLM_BASE_URL=                      # e.g. http://localhost:11434/v1 or https://api.openai.com/v1
 LLM_API_KEY=
 LLM_MODEL=                         # e.g. llama3.2, gpt-4o-mini
+LLM_TEMPERATURE=                   # optional; unset omits temperature (required for thinking models, e.g. Claude extended thinking)
 
 # Optional: comma-separated list of allowed LLM base URLs users may choose from.
 # When set, users must pick from this list. Leave blank to allow any URL.

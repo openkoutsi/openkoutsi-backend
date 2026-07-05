@@ -138,7 +138,14 @@ LLM_BASE_URL=
 LLM_API_KEY=
 LLM_MODEL=
 LLM_ALLOWED_SERVERS=
+LLM_TEMPERATURE=      # optional; leave unset to omit temperature (required for thinking models)
 ```
+
+`LLM_TEMPERATURE` is left unset by default, which omits the `temperature`
+parameter from outbound requests. Thinking-enabled models (e.g. Claude with
+extended thinking, via Anthropic's OpenAI-compatible endpoint) reject any
+temperature other than `1`, so only set this to a float if your model supports
+it. Upstream errors now surface the provider's response body in the logs.
 
 The web frontend has its own configuration (`NEXT_PUBLIC_API_URL`, etc.) — see the [openkoutsi-web](https://github.com/openkoutsi/openkoutsi-web) repository.
 

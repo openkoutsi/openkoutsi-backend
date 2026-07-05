@@ -237,7 +237,7 @@ class TestStreamAnalysis:
         team = _make_mock_team()
         mock_resp = AsyncMock()
         mock_resp.aiter_lines = MagicMock(return_value=_make_streaming_lines(["Hello", " world"]))
-        mock_resp.raise_for_status = MagicMock()
+        mock_resp.is_error = False
 
         @asynccontextmanager
         async def _mock_stream(*args, **kwargs):
@@ -290,7 +290,7 @@ class TestStreamAnalysis:
 
         mock_resp = AsyncMock()
         mock_resp.aiter_lines = MagicMock(return_value=_malformed_lines())
-        mock_resp.raise_for_status = MagicMock()
+        mock_resp.is_error = False
 
         @asynccontextmanager
         async def _mock_stream(*args, **kwargs):
@@ -320,7 +320,7 @@ class TestStreamAnalysis:
 
         mock_resp = AsyncMock()
         mock_resp.aiter_lines = MagicMock(return_value=_make_streaming_lines(["ok"]))
-        mock_resp.raise_for_status = MagicMock()
+        mock_resp.is_error = False
 
         @asynccontextmanager
         async def _mock_stream(method, url, json=None, **kwargs):
