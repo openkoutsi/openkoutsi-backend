@@ -28,6 +28,7 @@ def _workout(day_of_week: int, **kwargs) -> PlannedWorkout:
     w.workout_type = kwargs.get("workout_type", "endurance")
     w.target_tss = kwargs.get("target_tss", None)
     w.completed_activity_id = kwargs.get("completed_activity_id", None)
+    w.skip_reason = kwargs.get("skip_reason", None)
     return w
 
 
@@ -76,3 +77,62 @@ class TestThisWeekWeekdayLabels:
         assert "Friday 2025-06-06 (today)" in prompt
         # Tuesday falls on the second-to-last day of the Thu..Wed block.
         assert "Tuesday 2025-06-10" in prompt
+
+
+class TestSkipReason:
+    def test_skip_reason_included_for_incomplete_workout(self):
+        plan_start = date(2025, 6, 2)
+        now = datetime(2025, 6, 4, 8, 0, tzinfo=ZoneInfo("Europe/Helsinki"))
+        workouts = [
+            _workout(1, workout_type="threshold", skip_reason="Feeling sick"),
+        ]
+        prompt = _build_status_prompt(
+            athlete=_athlete(),
+            recent_activities=[],
+            current_metric=None,
+            active_plan=_plan(plan_start),
+            this_week_workouts=workouts,
+            active_goals=[],
+            now=now,
+        )
+        assert "not completed (skipped — reason: Feeling sick)" in prompt
+
+    def test_skip_reason_omitted_when_completed(self):
+        plan_start = date(2025, 6, 2)
+        now = datetime(2025, 6, 4, 8, 0, tzinfo=ZoneInfo("Europe/Helsinki"))
+        workouts = [
+            _workout(
+                1,
+                workout_type="threshold",
+                completed_activity_id="act-1",
+                skip_reason="stale reason",
+            ),
+        ]
+        prompt = _build_status_prompt(
+            athlete=_athlete(),
+            recent_activities=[],
+            current_metric=None,
+            active_plan=_plan(plan_start),
+            this_week_workouts=workouts,
+            active_goals=[],
+            now=now,
+        )
+        assert "completed" in prompt
+        assert "skipped" not in prompt
+        assert "stale reason" not in prompt
+
+    def test_no_skip_annotation_without_reason(self):
+        plan_start = date(2025, 6, 2)
+        now = datetime(2025, 6, 4, 8, 0, tzinfo=ZoneInfo("Europe/Helsinki"))
+        workouts = [_workout(1, workout_type="threshold")]
+        prompt = _build_status_prompt(
+            athlete=_athlete(),
+            recent_activities=[],
+            current_metric=None,
+            active_plan=_plan(plan_start),
+            this_week_workouts=workouts,
+            active_goals=[],
+            now=now,
+        )
+        assert "not completed" in prompt
+        assert "skipped" not in prompt
