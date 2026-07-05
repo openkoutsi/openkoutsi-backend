@@ -65,6 +65,9 @@ The athlete still has time to complete them. Either assume they will be done lat
 or encourage the athlete to get them done — but do not criticise or flag them as missed.
 - Only workouts from previous days count as missed. If past days show incomplete sessions, \
 be direct and stern about it.
+- When an incomplete workout has a skip reason attached, take it into account. A legitimate \
+reason (illness, injury, travel, rest) should temper your criticism, while a pattern of weak \
+excuses warrants a firmer response.
 
 Before the feedback paragraphs, output a single line in the format: MOOD:<mood>
 where <mood> is one of: cheer, knowing, neutral, stern.
@@ -170,9 +173,14 @@ def _build_status_prompt(
                 today_marker = " (today)" if workout_date == today else ""
                 completed = "completed" if w.completed_activity_id else "not completed"
                 tss_str = f", target TSS {w.target_tss}" if w.target_tss else ""
+                skip_str = (
+                    f" (skipped — reason: {w.skip_reason.strip()})"
+                    if not w.completed_activity_id and w.skip_reason and w.skip_reason.strip()
+                    else ""
+                )
                 lines.append(
                     f"    {weekday_name} {workout_date.isoformat()}{today_marker}: "
-                    f"{w.workout_type or 'workout'}{tss_str} — {completed}"
+                    f"{w.workout_type or 'workout'}{tss_str} — {completed}{skip_str}"
                 )
         else:
             lines.append("  No workouts planned for this week")
