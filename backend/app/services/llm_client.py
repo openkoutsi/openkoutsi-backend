@@ -26,6 +26,43 @@ from ..models.user_orm import Athlete
 log = logging.getLogger(__name__)
 
 
+def temperature_param(override: float | None = None) -> dict[str, float]:
+    """Return a ``{"temperature": X}`` payload fragment, or ``{}`` to omit it.
+
+    By default the ``temperature`` field is left out entirely so each model
+    applies its own default. This keeps thinking-enabled models (e.g. Claude
+    with extended thinking, reached via Anthropic's OpenAI-compatible endpoint),
+    which reject any temperature other than ``1``, working out of the box. A
+    caller may still pass an explicit value to force one.
+    """
+    if override is None:
+        return {}
+    return {"temperature": override}
+
+
+async def raise_for_llm_status(resp: httpx.Response, url: str) -> None:
+    """Like ``resp.raise_for_status()`` but reads and surfaces the upstream body.
+
+    ``httpx``'s built-in ``raise_for_status`` discards the response body, which
+    is exactly where an OpenAI-compatible provider explains a 400/422 (e.g. an
+    unsupported ``temperature`` for a thinking model). For streamed responses
+    the body must be read explicitly before raising, so we always ``aread`` it
+    and include a truncated copy in the log line and the raised error.
+    """
+    if not resp.is_error:
+        return
+    try:
+        body = (await resp.aread())[:1000].decode(errors="replace")
+    except Exception:  # pragma: no cover - body already consumed / unreadable
+        body = "<response body unavailable>"
+    log.error("LLM request to %s failed: HTTP %s — %s", url, resp.status_code, body)
+    raise httpx.HTTPStatusError(
+        f"LLM request to {url} failed with status {resp.status_code}: {body}",
+        request=resp.request,
+        response=resp,
+    )
+
+
 def extract_json(text: str) -> str:
     """Strip markdown code fences if present and return the raw JSON string."""
     text = text.strip()
@@ -91,7 +128,7 @@ async def call_llm(
     api_key: str | None,
     *,
     system_prompt: str,
-    temperature: float = 0.3,
+    temperature: float | None = None,
 ) -> str:
     """Call the OpenAI-compatible chat completions endpoint, return raw text."""
     headers: dict[str, str] = {"Content-Type": "application/json"}
@@ -104,16 +141,13 @@ async def call_llm(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        "temperature": temperature,
+        **temperature_param(temperature),
     }
 
-    check_url_safe(f"{base_url.rstrip('/')}/chat/completions")
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    check_url_safe(url)
     async with httpx.AsyncClient(timeout=120.0) as client:
-        resp = await client.post(
-            f"{base_url.rstrip('/')}/chat/completions",
-            headers=headers,
-            json=payload,
-        )
-        resp.raise_for_status()
+        resp = await client.post(url, headers=headers, json=payload)
+        await raise_for_llm_status(resp, url)
 
     return resp.json()["choices"][0]["message"]["content"]

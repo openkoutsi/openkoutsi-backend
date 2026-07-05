@@ -140,6 +140,12 @@ LLM_MODEL=
 LLM_ALLOWED_SERVERS=
 ```
 
+The backend intentionally does not send a `temperature` parameter, so each
+model applies its own default. This keeps thinking-enabled models (e.g. Claude
+with extended thinking, via Anthropic's OpenAI-compatible endpoint) — which
+reject any temperature other than `1` — working out of the box. Upstream LLM
+errors surface the provider's response body in the logs.
+
 The web frontend has its own configuration (`NEXT_PUBLIC_API_URL`, etc.) — see the [openkoutsi-web](https://github.com/openkoutsi/openkoutsi-web) repository.
 
 ## Integrations

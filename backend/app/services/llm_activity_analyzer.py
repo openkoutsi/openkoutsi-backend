@@ -28,6 +28,7 @@ from ..db.registry import _RegistrySessionLocal
 from ..db.user_session import get_user_session_factory
 from ..models.registry_orm import InstanceSettings
 from ..models.user_orm import Activity, Athlete, DailyMetric
+from .llm_client import raise_for_llm_status, temperature_param
 from .pr_detection import detect_pr_badges
 
 if TYPE_CHECKING:
@@ -242,7 +243,7 @@ async def _stream_analysis(
     payload = {
         "model": model,
         "messages": messages,
-        "temperature": 0.7,
+        **temperature_param(),
         "stream": True,
     }
 
@@ -251,7 +252,7 @@ async def _stream_analysis(
         timeout=httpx.Timeout(300.0, connect=10.0)  # 5-minute read timeout
     ) as client:
         async with client.stream("POST", url, json=payload, headers=headers) as resp:
-            resp.raise_for_status()
+            await raise_for_llm_status(resp, url)
             async for line in resp.aiter_lines():
                 if not line.startswith("data: "):
                     continue

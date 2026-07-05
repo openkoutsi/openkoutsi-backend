@@ -39,7 +39,7 @@ def _workout_json() -> str:
 def _mock_llm(raw_json: str):
     """Patch httpx.AsyncClient so the LLM call returns *raw_json*."""
     resp = MagicMock()
-    resp.raise_for_status = MagicMock()
+    resp.is_error = False
     resp.json.return_value = {"choices": [{"message": {"content": raw_json}}]}
     http = AsyncMock()
     http.post = AsyncMock(return_value=resp)
