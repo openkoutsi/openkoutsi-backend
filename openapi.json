@@ -1195,6 +1195,48 @@
             }
           },
           {
+            "name": "labels",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only include activities carrying at least one of these labels (e.g. race, commute)",
+              "title": "Labels"
+            },
+            "description": "Only include activities carrying at least one of these labels (e.g. race, commute)"
+          },
+          {
+            "name": "exclude_labels",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Exclude activities carrying any of these labels (e.g. commute)",
+              "title": "Exclude Labels"
+            },
+            "description": "Exclude activities carrying any of these labels (e.g. commute)"
+          },
+          {
             "name": "min_duration",
             "in": "query",
             "required": false,

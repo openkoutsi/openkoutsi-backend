@@ -216,6 +216,70 @@ class TestListActivities:
         assert len(data["items"]) == 2
         assert data["page"] == 2
 
+    async def _make_labeled(self, client, auth_headers, day, labels):
+        resp = await client.post(
+            "/api/activities",
+            json={
+                "sport_type": "Ride",
+                "start_time": f"2025-06-{day:02d}T10:00:00Z",
+                "duration_s": 3600,
+            },
+            headers=auth_headers,
+        )
+        activity_id = resp.json()["id"]
+        await client.patch(
+            f"/api/activities/{activity_id}",
+            json={"labels": labels},
+            headers=auth_headers,
+        )
+        return activity_id
+
+    async def test_labels_filter_includes_only_matching(self, client, auth_headers):
+        await self._make_labeled(client, auth_headers, 1, ["race"])
+        await self._make_labeled(client, auth_headers, 2, ["commute"])
+        await self._make_labeled(client, auth_headers, 3, [])
+
+        resp = await client.get("/api/activities?labels=race", headers=auth_headers)
+        data = resp.json()
+        assert data["total"] == 1
+        assert data["items"][0]["labels"] == ["race"]
+
+    async def test_labels_filter_matches_any_of_several(self, client, auth_headers):
+        await self._make_labeled(client, auth_headers, 1, ["race"])
+        await self._make_labeled(client, auth_headers, 2, ["commute"])
+        await self._make_labeled(client, auth_headers, 3, [])
+
+        resp = await client.get(
+            "/api/activities?labels=race&labels=commute", headers=auth_headers
+        )
+        assert resp.json()["total"] == 2
+
+    async def test_exclude_labels_filters_out_matching(self, client, auth_headers):
+        await self._make_labeled(client, auth_headers, 1, ["race"])
+        await self._make_labeled(client, auth_headers, 2, ["commute"])
+        await self._make_labeled(client, auth_headers, 3, [])
+
+        resp = await client.get(
+            "/api/activities?exclude_labels=commute", headers=auth_headers
+        )
+        data = resp.json()
+        assert data["total"] == 2
+        assert all("commute" not in item["labels"] for item in data["items"])
+
+    async def test_labels_and_exclude_labels_combine(self, client, auth_headers):
+        await self._make_labeled(client, auth_headers, 1, ["race"])
+        await self._make_labeled(client, auth_headers, 2, ["race", "commute"])
+
+        resp = await client.get(
+            "/api/activities?labels=race&exclude_labels=commute",
+            headers=auth_headers,
+        )
+        assert resp.json()["total"] == 1
+
+    async def test_unknown_label_filter_returns_422(self, client, auth_headers):
+        resp = await client.get("/api/activities?labels=bogus", headers=auth_headers)
+        assert resp.status_code == 422
+
     async def test_unauthenticated_returns_401(self, client):
         resp = await client.get("/api/activities")
         assert resp.status_code == 401
