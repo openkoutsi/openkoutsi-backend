@@ -202,7 +202,7 @@ For production add `--workers 2` (or use gunicorn with uvicorn workers).
 
 The web frontend lives in its own repository,
 [openkoutsi/openkoutsi-web](https://github.com/openkoutsi/openkoutsi-web). Build
-and deploy it from there; point its `NEXT_PUBLIC_API_URL` at the API domain
+and deploy it from there; point its `API_URL` at the API domain
 configured below. Nothing in this repository serves frontend assets.
 
 ---
