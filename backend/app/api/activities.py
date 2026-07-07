@@ -55,6 +55,23 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/activities", tags=["activities"])
 
 
+def _has_label_clause(label: str):
+    """Correlated EXISTS: does this Activity's JSON ``labels`` array contain ``label``?
+
+    ``labels`` is a JSON list column; SQLite's ``json_each`` table-valued
+    function lets us test array membership. Activities with a NULL/empty
+    ``labels`` produce no rows and so never match.
+    """
+    entries = func.json_each(Activity.labels).table_valued("value")
+    return (
+        select(1)
+        .select_from(entries)
+        .where(entries.c.value == label)
+        .correlate(Activity)
+        .exists()
+    )
+
+
 async def _get_athlete(global_user_id: str, session: AsyncSession) -> Athlete:
     result = await session.execute(
         select(Athlete).where(Athlete.global_user_id == global_user_id)
@@ -457,6 +474,14 @@ async def list_activities(
     end: Optional[date] = Query(None),
     sport_type: Optional[str] = Query(None),
     workout_category: Optional[str] = Query(None),
+    labels: Optional[list[str]] = Query(
+        None,
+        description="Only include activities carrying at least one of these labels (e.g. race, commute)",
+    ),
+    exclude_labels: Optional[list[str]] = Query(
+        None,
+        description="Exclude activities carrying any of these labels (e.g. commute)",
+    ),
     min_duration: Optional[int] = Query(None, ge=0, description="Minimum duration in seconds"),
     max_duration: Optional[int] = Query(None, ge=0, description="Maximum duration in seconds"),
     min_distance: Optional[float] = Query(None, ge=0, description="Minimum distance in meters"),
@@ -483,6 +508,18 @@ async def list_activities(
         base_query = base_query.where(Activity.sport_type == sport_type)
     if workout_category:
         base_query = base_query.where(Activity.workout_category == workout_category)
+    if labels:
+        bad = [lbl for lbl in labels if lbl not in _VALID_LABELS]
+        if bad:
+            raise HTTPException(status_code=422, detail=f"Unknown labels: {bad}")
+        base_query = base_query.where(or_(*[_has_label_clause(lbl) for lbl in labels]))
+    if exclude_labels:
+        bad = [lbl for lbl in exclude_labels if lbl not in _VALID_LABELS]
+        if bad:
+            raise HTTPException(status_code=422, detail=f"Unknown labels: {bad}")
+        base_query = base_query.where(
+            and_(*[~_has_label_clause(lbl) for lbl in exclude_labels])
+        )
     if min_duration is not None:
         base_query = base_query.where(Activity.duration_s >= min_duration)
     if max_duration is not None:
