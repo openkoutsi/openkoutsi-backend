@@ -3,15 +3,44 @@ Public (unauthenticated) endpoints — only for assets that browsers load direct
 as image/src without an Authorization header.
 """
 from pathlib import Path
+from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.db.registry import get_registry_session
 from backend.app.db.user_session import get_user_session_factory
+from backend.app.models.registry_orm import InstanceSettings
 from backend.app.models.user_orm import Athlete
 
 router = APIRouter(prefix="/public", tags=["public"])
+
+
+class InstanceInfoResponse(BaseModel):
+    """Non-sensitive, publicly readable instance settings."""
+
+    admin_contact: Optional[str] = None
+
+
+@router.get("/instance-info", response_model=InstanceInfoResponse,
+            operation_id="getPublicInstanceInfo",
+            summary="Get public instance info (no auth)")
+async def get_instance_info(
+    session: AsyncSession = Depends(get_registry_session),
+) -> InstanceInfoResponse:
+    """Return non-sensitive instance settings readable without authentication.
+
+    Used by unauthenticated pages (e.g. password reset) that need the admin
+    contact. Only whitelisted, non-secret fields are exposed here.
+    """
+    result = await session.execute(select(InstanceSettings).limit(1))
+    instance = result.scalar_one_or_none()
+    return InstanceInfoResponse(
+        admin_contact=instance.admin_contact if instance else None
+    )
 
 
 @router.get("/users/{user_id}/avatar",

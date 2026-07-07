@@ -85,6 +85,7 @@ class InstanceSettingsResponse(BaseModel):
     llm_model: Optional[str]
     llm_api_key_set: bool
     llm_analysis_context: Optional[str]
+    admin_contact: Optional[str]
 
 
 class InstanceSettingsPatch(BaseModel):
@@ -93,3 +94,4 @@ class InstanceSettingsPatch(BaseModel):
     llm_api_key: Optional[str] = None
     clear_llm_api_key: bool = False
     llm_analysis_context: Optional[str] = None
+    admin_contact: Optional[str] = None
