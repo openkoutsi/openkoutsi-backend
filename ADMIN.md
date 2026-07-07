@@ -21,7 +21,7 @@ python -c "import secrets; print(secrets.token_hex(32))"
 
 Restart the backend after adding the variable. If `ADMIN_SECRET` is not set, the reset endpoint returns 403.
 
-Optionally, show your contact details on the "Forgot password?" page so users know how to reach you. This is configured in the web frontend via `NEXT_PUBLIC_ADMIN_CONTACT` — see the [openkoutsi-web](https://github.com/openkoutsi/openkoutsi-web) repository. It can be any string — an email address, a Slack handle, a phone number, etc. If left unset the page just shows the generic "ask your administrator" message.
+Optionally, show your contact details on the "Forgot password?" page so users know how to reach you. This is an instance setting managed from the admin dashboard (or via `PATCH /api/admin/settings` with an `admin_contact` field) and served to the unauthenticated reset page through `GET /api/public/instance-info`. It can be any string — an email address, a Slack handle, a phone number, etc. If left unset the page just shows the generic "ask your administrator" message.
 
 ### Generating a reset link
 

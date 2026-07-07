@@ -316,6 +316,7 @@ def _settings_response(instance: InstanceSettings) -> InstanceSettingsResponse:
         llm_model=instance.llm_model,
         llm_api_key_set=instance.llm_api_key_enc is not None,
         llm_analysis_context=instance.llm_analysis_context,
+        admin_contact=instance.admin_contact,
     )
 
 
@@ -344,6 +345,8 @@ async def update_instance_settings(
         instance.llm_model = body.llm_model or None
     if body.llm_analysis_context is not None:
         instance.llm_analysis_context = body.llm_analysis_context or None
+    if body.admin_contact is not None:
+        instance.admin_contact = body.admin_contact or None
 
     if body.clear_llm_api_key:
         instance.llm_api_key_enc = None

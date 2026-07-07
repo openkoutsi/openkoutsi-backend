@@ -3667,6 +3667,28 @@
         ]
       }
     },
+    "/api/public/instance-info": {
+      "get": {
+        "tags": [
+          "public"
+        ],
+        "summary": "Get public instance info (no auth)",
+        "description": "Return non-sensitive instance settings readable without authentication.\n\nUsed by unauthenticated pages (e.g. password reset) that need the admin\ncontact. Only whitelisted, non-secret fields are exposed here.",
+        "operationId": "getPublicInstanceInfo",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstanceInfoResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/public/users/{user_id}/avatar": {
       "get": {
         "tags": [
@@ -6137,6 +6159,24 @@
         "type": "object",
         "title": "HTTPValidationError"
       },
+      "InstanceInfoResponse": {
+        "properties": {
+          "admin_contact": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Admin Contact"
+          }
+        },
+        "type": "object",
+        "title": "InstanceInfoResponse",
+        "description": "Non-sensitive, publicly readable instance settings."
+      },
       "InstanceSettingsPatch": {
         "properties": {
           "llm_base_url": {
@@ -6187,6 +6227,17 @@
               }
             ],
             "title": "Llm Analysis Context"
+          },
+          "admin_contact": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Admin Contact"
           }
         },
         "type": "object",
@@ -6230,6 +6281,17 @@
               }
             ],
             "title": "Llm Analysis Context"
+          },
+          "admin_contact": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Admin Contact"
           }
         },
         "type": "object",
@@ -6237,7 +6299,8 @@
           "llm_base_url",
           "llm_model",
           "llm_api_key_set",
-          "llm_analysis_context"
+          "llm_analysis_context",
+          "admin_contact"
         ],
         "title": "InstanceSettingsResponse"
       },

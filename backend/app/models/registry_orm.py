@@ -91,6 +91,7 @@ class InstanceSettings(RegistryBase):
     llm_api_key_enc: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     llm_model: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     llm_analysis_context: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    admin_contact: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
     )
