@@ -100,7 +100,7 @@ uv run uvicorn backend.main:app --reload --port 8000
 
 # 4. Run the web UI (separate repository)
 # Follow the setup in https://github.com/openkoutsi/openkoutsi-web
-# (point its NEXT_PUBLIC_API_URL at http://localhost:8000).
+# (point its API_URL at http://localhost:8000).
 
 # 5. First-run setup
 # Open the frontend (default http://localhost:3000) and complete the setup wizard.
@@ -147,7 +147,7 @@ with extended thinking, via Anthropic's OpenAI-compatible endpoint) — which
 reject any temperature other than `1` — working out of the box. Upstream LLM
 errors surface the provider's response body in the logs.
 
-The web frontend has its own configuration (`NEXT_PUBLIC_API_URL`, etc.) — see the [openkoutsi-web](https://github.com/openkoutsi/openkoutsi-web) repository.
+The web frontend has its own configuration (`API_URL`, etc.) — see the [openkoutsi-web](https://github.com/openkoutsi/openkoutsi-web) repository.
 
 ## Integrations
 
