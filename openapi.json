@@ -3601,7 +3601,7 @@
           "llm"
         ],
         "summary": "Test Llm Connection",
-        "description": "Test the instance's configured LLM connection. Admin-only.\n\nCalls GET {base_url}/models on the instance's saved LLM config and checks\nwhether the configured model appears in the response.",
+        "description": "Test the instance's configured LLM connection. Admin-only.\n\nSends a minimal \"hello world\" chat completion to the instance's saved LLM\nconfig and confirms the model replies with a usable response.",
         "operationId": "test_llm_connection_api_llm_test_connection_post",
         "responses": {
           "200": {
@@ -6603,24 +6603,16 @@
             ],
             "title": "Model Configured"
           },
-          "models_available": {
+          "response_text": {
             "anyOf": [
               {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
+                "type": "string"
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Models Available"
-          },
-          "model_found": {
-            "type": "boolean",
-            "title": "Model Found",
-            "default": false
+            "title": "Response Text"
           },
           "http_status": {
             "anyOf": [

@@ -107,10 +107,14 @@ class LlmTestResponse(BaseModel):
     ok: bool
     base_url: Optional[str] = None
     model_configured: Optional[str] = None
-    models_available: Optional[list[str]] = None
-    model_found: bool = False
+    response_text: Optional[str] = None
     http_status: Optional[int] = None
     error: Optional[str] = None
+
+
+# A minimal prompt used to verify the LLM answers. Kept tiny so the round-trip
+# is cheap and fast regardless of the backing model.
+_TEST_PROMPT = "Reply with a short greeting to confirm you are reachable."
 
 
 @router.post("/test-connection", response_model=LlmTestResponse)
@@ -120,8 +124,8 @@ async def test_llm_connection(
 ):
     """Test the instance's configured LLM connection. Admin-only.
 
-    Calls GET {base_url}/models on the instance's saved LLM config and checks
-    whether the configured model appears in the response.
+    Sends a minimal "hello world" chat completion to the instance's saved LLM
+    config and confirms the model replies with a usable response.
     """
     ctx, _ = ctx_session
     if not ctx.is_admin:
@@ -135,6 +139,13 @@ async def test_llm_connection(
     if not base_url:
         raise HTTPException(status_code=400, detail="No LLM base URL configured. Save a base URL first.")
 
+    if not model:
+        return LlmTestResponse(
+            ok=False,
+            base_url=base_url,
+            error="No LLM model configured. Save a model first.",
+        )
+
     api_key: str | None = None
     if instance and instance.llm_api_key_enc:
         try:
@@ -143,31 +154,37 @@ async def test_llm_connection(
         except Exception as exc:
             log.warning("Could not decrypt instance LLM API key for test: %s", exc)
 
-    models_url = f"{base_url.rstrip('/')}/models"
+    chat_url = f"{base_url.rstrip('/')}/chat/completions"
     try:
-        check_url_safe(models_url)
+        check_url_safe(chat_url)
     except HTTPException as exc:
-        return LlmTestResponse(ok=False, base_url=base_url, model_configured=model or None, error=exc.detail)
+        return LlmTestResponse(ok=False, base_url=base_url, model_configured=model, error=exc.detail)
 
-    headers: dict[str, str] = {}
+    headers: dict[str, str] = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": _TEST_PROMPT}],
+        "stream": False,
+    }
+
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0)) as client:
-            resp = await client.get(models_url, headers=headers, follow_redirects=False)
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
+            resp = await client.post(chat_url, headers=headers, json=payload, follow_redirects=False)
     except httpx.ConnectError as exc:
-        return LlmTestResponse(ok=False, base_url=base_url, model_configured=model or None, error=f"Connection refused: {exc}")
+        return LlmTestResponse(ok=False, base_url=base_url, model_configured=model, error=f"Connection refused: {exc}")
     except httpx.TimeoutException:
-        return LlmTestResponse(ok=False, base_url=base_url, model_configured=model or None, error="Connection timed out")
+        return LlmTestResponse(ok=False, base_url=base_url, model_configured=model, error="Connection timed out")
     except Exception as exc:
-        return LlmTestResponse(ok=False, base_url=base_url, model_configured=model or None, error=str(exc))
+        return LlmTestResponse(ok=False, base_url=base_url, model_configured=model, error=str(exc))
 
     if resp.status_code == 401:
         return LlmTestResponse(
             ok=False,
             base_url=base_url,
-            model_configured=model or None,
+            model_configured=model,
             http_status=resp.status_code,
             error="Authentication failed — check your API key",
         )
@@ -176,25 +193,39 @@ async def test_llm_connection(
         return LlmTestResponse(
             ok=False,
             base_url=base_url,
-            model_configured=model or None,
+            model_configured=model,
             http_status=resp.status_code,
             error=f"HTTP {resp.status_code}: {snippet}",
         )
 
     try:
         data = resp.json()
-        models_available = [m["id"] for m in data.get("data", []) if isinstance(m, dict) and "id" in m]
-    except Exception:
-        models_available = []
+        reply = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError, ValueError):
+        return LlmTestResponse(
+            ok=False,
+            base_url=base_url,
+            model_configured=model,
+            http_status=resp.status_code,
+            error="The endpoint responded but the reply was not in the expected chat-completion format.",
+        )
 
-    model_found = bool(model) and model in models_available
+    reply_text = (reply or "").strip()
+    if not reply_text:
+        return LlmTestResponse(
+            ok=False,
+            base_url=base_url,
+            model_configured=model,
+            http_status=resp.status_code,
+            error="The model returned an empty response.",
+        )
 
     return LlmTestResponse(
         ok=True,
         base_url=base_url,
-        model_configured=model or None,
-        models_available=models_available,
-        model_found=model_found,
+        model_configured=model,
+        http_status=resp.status_code,
+        response_text=reply_text[:500],
     )
 
 
