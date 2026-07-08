@@ -32,6 +32,8 @@ def _mock_httpx_client(*, status_code=200, json_body=None, text="", raises=None)
     async def _cm(*args, **kwargs):
         yield client
 
+    # Expose the client so tests can inspect the outbound request.
+    _cm.client = client
     return _cm
 
 
@@ -135,3 +137,106 @@ class TestLlmTestConnection:
         data = resp.json()
         assert data["ok"] is False
         assert "timed out" in data["error"].lower()
+
+    async def test_applies_extra_headers_and_per_model_body(self, client, auth_headers):
+        # Configure a model with its own body extras and a global ZDR header.
+        resp = await client.patch(
+            "/api/admin/settings",
+            json={
+                "llm_base_url": "http://127.0.0.1:11434",
+                "llm_model": "thinker",
+                "llm_models": [{"name": "thinker", "body": {"max_tokens": 32, "reasoning_effort": "high"}}],
+                "llm_extra_headers": {"X-Wafer-ZDR": "true"},
+            },
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+
+        completion = {"choices": [{"message": {"content": "hi"}}]}
+        factory = _mock_httpx_client(json_body=completion)
+        with patch("httpx.AsyncClient", return_value=factory()):
+            resp = await client.post("/api/llm/test-connection", headers=auth_headers)
+        assert resp.json()["ok"] is True
+
+        sent = factory.client.post.call_args
+        assert sent.kwargs["headers"]["X-Wafer-ZDR"] == "true"
+        body = sent.kwargs["json"]
+        assert body["model"] == "thinker"
+        assert body["max_tokens"] == 32
+        assert body["reasoning_effort"] == "high"
+
+    async def test_model_override_picks_that_models_body(self, client, auth_headers):
+        await client.patch(
+            "/api/admin/settings",
+            json={
+                "llm_base_url": "http://127.0.0.1:11434",
+                "llm_model": "plain",
+                "llm_models": [
+                    {"name": "plain", "body": {}},
+                    {"name": "thinker", "body": {"reasoning_effort": "high"}},
+                ],
+            },
+            headers=auth_headers,
+        )
+        completion = {"choices": [{"message": {"content": "hi"}}]}
+        factory = _mock_httpx_client(json_body=completion)
+        with patch("httpx.AsyncClient", return_value=factory()):
+            resp = await client.post(
+                "/api/llm/test-connection?model=thinker", headers=auth_headers
+            )
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["model_configured"] == "thinker"
+        body = factory.client.post.call_args.kwargs["json"]
+        assert body["model"] == "thinker"
+        assert body["reasoning_effort"] == "high"
+
+
+class TestLlmModelsEndpoint:
+    async def test_lists_configured_models_and_selection(self, client, auth_headers):
+        await client.patch(
+            "/api/admin/settings",
+            json={
+                "llm_base_url": "http://127.0.0.1:11434",
+                "llm_model": "b",
+                "llm_models": [{"name": "a", "body": {}}, {"name": "b", "body": {}}],
+            },
+            headers=auth_headers,
+        )
+        resp = await client.get("/api/llm/models", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["models"] == ["a", "b"]
+        assert data["selected"] == "b"
+
+    async def test_single_legacy_model_is_offered(self, client, auth_headers):
+        await client.patch(
+            "/api/admin/settings",
+            json={"llm_base_url": "http://127.0.0.1:11434", "llm_model": "solo"},
+            headers=auth_headers,
+        )
+        resp = await client.get("/api/llm/models", headers=auth_headers)
+        data = resp.json()
+        assert data["models"] == ["solo"]
+        assert data["selected"] == "solo"
+
+    async def test_requires_auth(self, client):
+        resp = await client.get("/api/llm/models")
+        assert resp.status_code == 401
+
+
+class TestInstanceSettingsPersistModelsHeaders:
+    async def test_round_trips_models_and_headers(self, client, auth_headers):
+        resp = await client.patch(
+            "/api/admin/settings",
+            json={
+                "llm_models": [{"name": "gpt", "body": {"max_tokens": 10}}],
+                "llm_extra_headers": {"X-ZDR": "true"},
+            },
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        got = await client.get("/api/admin/settings", headers=auth_headers)
+        data = got.json()
+        assert data["llm_models"] == [{"name": "gpt", "body": {"max_tokens": 10}}]
+        assert data["llm_extra_headers"] == {"X-ZDR": "true"}

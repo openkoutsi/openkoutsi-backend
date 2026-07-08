@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, field_validator
 
@@ -80,12 +80,27 @@ class InvitationResponse(BaseModel):
 
 # ── Instance settings (instance admin) ─────────────────────────────────────
 
+class LlmModelConfig(BaseModel):
+    """A selectable model plus the extra chat-completion body params it needs."""
+    name: str
+    body: dict[str, Any] = {}
+
+    @field_validator("name")
+    @classmethod
+    def _name_not_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("Model name must not be blank")
+        return v.strip()
+
+
 class InstanceSettingsResponse(BaseModel):
     llm_base_url: Optional[str]
     llm_model: Optional[str]
     llm_api_key_set: bool
     llm_analysis_context: Optional[str]
     admin_contact: Optional[str]
+    llm_models: list[LlmModelConfig] = []
+    llm_extra_headers: dict[str, str] = {}
 
 
 class InstanceSettingsPatch(BaseModel):
@@ -95,3 +110,7 @@ class InstanceSettingsPatch(BaseModel):
     clear_llm_api_key: bool = False
     llm_analysis_context: Optional[str] = None
     admin_contact: Optional[str] = None
+    # Full-replacement lists/maps: send the complete desired state, or omit to
+    # leave unchanged.
+    llm_models: Optional[list[LlmModelConfig]] = None
+    llm_extra_headers: Optional[dict[str, str]] = None

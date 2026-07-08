@@ -24,14 +24,19 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import httpx
 from sqlalchemy import select
 
-from ..core.config import settings
 from ..core.ssrf import check_url_safe
 from ..db.registry import _RegistrySessionLocal
 from ..db.user_session import get_user_session_factory
 from ..models.registry_orm import InstanceSettings
 from ..models.user_orm import Activity, Athlete, DailyMetric, Goal, PlannedWorkout, TrainingPlan
 from ..schemas.metrics import _tsb_to_form
-from .llm_client import raise_for_llm_status, temperature_param
+from .llm_client import (
+    apply_body_extras,
+    merge_llm_headers,
+    raise_for_llm_status,
+    resolve_instance_llm,
+    temperature_param,
+)
 
 log = logging.getLogger(__name__)
 
@@ -215,23 +220,17 @@ async def _stream_status_analysis(
         result = await reg.execute(select(InstanceSettings).limit(1))
         instance = result.scalar_one_or_none()
 
-    base_url = (instance.llm_base_url.strip() if instance and instance.llm_base_url else None) or (settings.llm_base_url or "").strip()
-    model = (instance.llm_model.strip() if instance and instance.llm_model else None) or (settings.llm_model or "").strip()
+    cfg = resolve_instance_llm(instance)
 
-    if not base_url or not model:
+    if not cfg.base_url or not cfg.model:
         raise ValueError("LLM base URL and model must be configured in Settings → AI / LLM")
 
-    url = f"{base_url.rstrip('/')}/chat/completions"
+    url = f"{cfg.base_url.rstrip('/')}/chat/completions"
     check_url_safe(url)
     headers: dict[str, str] = {"Content-Type": "application/json"}
-
-    if instance and getattr(instance, "llm_api_key_enc", None):
-        try:
-            from backend.app.core.file_encryption import decrypt_instance_secret
-            api_key = decrypt_instance_secret(str(instance.llm_api_key_enc))
-            headers["Authorization"] = f"Bearer {api_key}"
-        except Exception:
-            log.warning("Could not decrypt instance LLM API key")
+    if cfg.api_key:
+        headers["Authorization"] = f"Bearer {cfg.api_key}"
+    headers = merge_llm_headers(headers, cfg.extra_headers)
 
     prompt = _build_status_prompt(
         athlete, recent_activities, current_metric, active_plan,
@@ -245,12 +244,15 @@ async def _stream_status_analysis(
     if analysis_context and analysis_context.strip():
         messages.insert(1, {"role": "system", "content": analysis_context.strip()})
 
-    payload = {
-        "model": model,
-        "messages": messages,
-        **temperature_param(),
-        "stream": True,
-    }
+    payload = apply_body_extras(
+        {
+            "model": cfg.model,
+            "messages": messages,
+            **temperature_param(),
+            "stream": True,
+        },
+        cfg.extra_body,
+    )
 
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(300.0, connect=10.0)

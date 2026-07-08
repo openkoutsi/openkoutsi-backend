@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..models.registry_orm import InstanceSettings
 from ..models.user_orm import TrainingPlan, PlannedWorkout, Athlete, DailyMetric
 from ..schemas.plans import PlanConfig
-from .llm_client import call_llm, extract_json, resolve_llm_config
+from .llm_client import ResolvedLlm, call_llm, extract_json, resolve_llm_config
 
 log = logging.getLogger(__name__)
 
@@ -145,10 +145,16 @@ def _parse_response(raw: str, num_weeks: int) -> list[list[dict]]:
     return result
 
 
-async def _call_llm(user_prompt: str, base_url: str, model: str, api_key: str | None) -> str:
+async def _call_llm(user_prompt: str, cfg: ResolvedLlm) -> str:
     """Call the chat completions endpoint with the plan-generation system prompt."""
     return await call_llm(
-        user_prompt, base_url, model, api_key, system_prompt=_SYSTEM_PROMPT
+        user_prompt,
+        cfg.base_url,
+        cfg.model,
+        cfg.api_key,
+        system_prompt=_SYSTEM_PROMPT,
+        extra_headers=cfg.extra_headers,
+        extra_body=cfg.extra_body,
     )
 
 
@@ -166,7 +172,7 @@ async def generate_plan_weeks_llm(
     Persistence-free so callers can build PlannedWorkout rows for either a new or
     an existing plan.
     """
-    base_url, model, api_key = _resolve_llm_config(athlete, instance, user_id)
+    cfg = _resolve_llm_config(athlete, instance, user_id)
 
     # Fetch athlete's latest CTL for context
     ctl: Optional[float] = None
@@ -183,7 +189,7 @@ async def generate_plan_weeks_llm(
     user_prompt = _build_user_prompt(config, goal, num_weeks, athlete.ftp, ctl)
 
     # Call LLM with one retry on parse failure
-    raw = await _call_llm(user_prompt, base_url, model, api_key)
+    raw = await _call_llm(user_prompt, cfg)
     try:
         return _parse_response(raw, num_weeks)
     except (json.JSONDecodeError, KeyError, ValueError):
@@ -193,7 +199,7 @@ async def generate_plan_weeks_llm(
             + "\n\nYour previous response could not be parsed as valid JSON matching "
             "the required schema. Respond with ONLY the JSON object, nothing else."
         )
-        raw = await _call_llm(correction, base_url, model, api_key)
+        raw = await _call_llm(correction, cfg)
         return _parse_response(raw, num_weeks)  # raises HTTP 503 if still invalid
 
 

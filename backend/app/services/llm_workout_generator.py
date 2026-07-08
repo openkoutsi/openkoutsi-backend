@@ -166,12 +166,13 @@ async def generate_workout_definition_llm(
     Raises ``ValueError`` when the LLM is not configured and
     ``WorkoutGenerationError`` when the model cannot produce a valid workout.
     """
-    base_url, model, api_key = resolve_llm_config(athlete, instance, user_id)
+    cfg = resolve_llm_config(athlete, instance, user_id)
 
     user_prompt = _build_user_prompt(planned_workout, athlete.ftp, sport_type)
 
     raw = await call_llm(
-        user_prompt, base_url, model, api_key, system_prompt=_SYSTEM_PROMPT
+        user_prompt, cfg.base_url, cfg.model, cfg.api_key, system_prompt=_SYSTEM_PROMPT,
+        extra_headers=cfg.extra_headers, extra_body=cfg.extra_body,
     )
     try:
         steps = _parse_steps(raw)
@@ -183,7 +184,8 @@ async def generate_workout_definition_llm(
             "the required schema. Respond with ONLY the JSON object, nothing else."
         )
         raw = await call_llm(
-            correction, base_url, model, api_key, system_prompt=_SYSTEM_PROMPT
+            correction, cfg.base_url, cfg.model, cfg.api_key, system_prompt=_SYSTEM_PROMPT,
+            extra_headers=cfg.extra_headers, extra_body=cfg.extra_body,
         )
         steps = _parse_steps(raw)  # raises WorkoutGenerationError if still invalid
 

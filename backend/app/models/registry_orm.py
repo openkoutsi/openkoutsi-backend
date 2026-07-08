@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import JSON, DateTime, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.app.core.encryption import EncryptedString
@@ -89,7 +89,17 @@ class InstanceSettings(RegistryBase):
     id: Mapped[int] = mapped_column(primary_key=True, default=1)
     llm_base_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     llm_api_key_enc: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Default model name (the instance-wide fallback selection). The full list
+    # of selectable models lives in ``llm_models``.
     llm_model: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Curated list of selectable models. Each entry is
+    # ``{"name": str, "body": {<extra chat-completion body params>}}`` so a
+    # thinking model can carry e.g. ``{"reasoning_effort": "high"}`` while a
+    # plain model carries none.
+    llm_models: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    # Extra HTTP headers added to every outbound LLM request (e.g. a
+    # zero-data-retention header). ``{"Header-Name": "value", ...}``.
+    llm_extra_headers: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     llm_analysis_context: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     admin_contact: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(

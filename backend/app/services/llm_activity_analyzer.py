@@ -22,13 +22,18 @@ from typing import TYPE_CHECKING, AsyncIterator
 import httpx
 from sqlalchemy import select
 
-from ..core.config import settings
 from ..core.ssrf import check_url_safe
 from ..db.registry import _RegistrySessionLocal
 from ..db.user_session import get_user_session_factory
 from ..models.registry_orm import InstanceSettings
 from ..models.user_orm import Activity, Athlete, DailyMetric
-from .llm_client import raise_for_llm_status, temperature_param
+from .llm_client import (
+    apply_body_extras,
+    merge_llm_headers,
+    raise_for_llm_status,
+    resolve_instance_llm,
+    temperature_param,
+)
 from .pr_detection import detect_pr_badges
 
 if TYPE_CHECKING:
@@ -213,23 +218,17 @@ async def _stream_analysis(
         instance = result.scalar_one_or_none()
 
     # Priority: instance settings → global env vars
-    base_url = (instance.llm_base_url.strip() if instance and instance.llm_base_url else None) or (settings.llm_base_url or "").strip()
-    model = (instance.llm_model.strip() if instance and instance.llm_model else None) or (settings.llm_model or "").strip()
+    cfg = resolve_instance_llm(instance)
 
-    if not base_url or not model:
+    if not cfg.base_url or not cfg.model:
         raise ValueError("LLM base URL and model must be configured in Settings → AI / LLM")
 
-    url = f"{base_url.rstrip('/')}/chat/completions"
+    url = f"{cfg.base_url.rstrip('/')}/chat/completions"
     check_url_safe(url)
     headers: dict[str, str] = {"Content-Type": "application/json"}
-
-    if instance and getattr(instance, "llm_api_key_enc", None):
-        try:
-            from backend.app.core.file_encryption import decrypt_instance_secret
-            api_key = decrypt_instance_secret(str(instance.llm_api_key_enc))
-            headers["Authorization"] = f"Bearer {api_key}"
-        except Exception:
-            log.warning("Could not decrypt instance LLM API key — proceeding without auth")
+    if cfg.api_key:
+        headers["Authorization"] = f"Bearer {cfg.api_key}"
+    headers = merge_llm_headers(headers, cfg.extra_headers)
 
     messages: list[dict] = [
         {"role": "system", "content": _build_system_prompt(locale)},
@@ -240,12 +239,15 @@ async def _stream_analysis(
     messages.append(
         {"role": "user", "content": _build_prompt(activity, athlete, fatigue, power_pr_badges, distance_pr_badges)}
     )
-    payload = {
-        "model": model,
-        "messages": messages,
-        **temperature_param(),
-        "stream": True,
-    }
+    payload = apply_body_extras(
+        {
+            "model": cfg.model,
+            "messages": messages,
+            **temperature_param(),
+            "stream": True,
+        },
+        cfg.extra_body,
+    )
 
     # Local models can take several minutes; use a generous but finite timeout.
     async with httpx.AsyncClient(

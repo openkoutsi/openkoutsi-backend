@@ -3595,21 +3595,21 @@
         ]
       }
     },
-    "/api/llm/test-connection": {
-      "post": {
+    "/api/llm/models": {
+      "get": {
         "tags": [
           "llm"
         ],
-        "summary": "Test Llm Connection",
-        "description": "Test the instance's configured LLM connection. Admin-only.\n\nSends a minimal \"hello world\" chat completion to the instance's saved LLM\nconfig and confirms the model replies with a usable response.",
-        "operationId": "test_llm_connection_api_llm_test_connection_post",
+        "summary": "List Llm Models",
+        "description": "Return the models this user may select and their current selection.\n\nThe list is the instance's curated models overlaid by the user's personal\nmodels. Falls back to the single configured model name when no list exists.",
+        "operationId": "list_llm_models_api_llm_models_get",
         "responses": {
           "200": {
             "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/LlmTestResponse"
+                  "$ref": "#/components/schemas/LlmModelsResponse"
                 }
               }
             }
@@ -3620,6 +3620,61 @@
             "OAuth2PasswordBearer": []
           }
         ]
+      }
+    },
+    "/api/llm/test-connection": {
+      "post": {
+        "tags": [
+          "llm"
+        ],
+        "summary": "Test Llm Connection",
+        "description": "Test the instance's configured LLM connection. Admin-only.\n\nSends a minimal \"hello world\" chat completion to the instance's saved LLM\nconfig and confirms the model replies with a usable response. Any configured\nextra headers and the selected model's body params are applied, so this also\nvalidates a zero-data-retention header or a thinking config. Pass ``model``\nto test a specific model from the configured list instead of the default.",
+        "operationId": "test_llm_connection_api_llm_test_connection_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "model",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Model"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LlmTestResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/llm/chat": {
@@ -6238,6 +6293,34 @@
               }
             ],
             "title": "Admin Contact"
+          },
+          "llm_models": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/LlmModelConfig"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Models"
+          },
+          "llm_extra_headers": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Extra Headers"
           }
         },
         "type": "object",
@@ -6292,6 +6375,22 @@
               }
             ],
             "title": "Admin Contact"
+          },
+          "llm_models": {
+            "items": {
+              "$ref": "#/components/schemas/LlmModelConfig"
+            },
+            "type": "array",
+            "title": "Llm Models",
+            "default": []
+          },
+          "llm_extra_headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Llm Extra Headers",
+            "default": {}
           }
         },
         "type": "object",
@@ -6574,6 +6673,53 @@
           "messages"
         ],
         "title": "LlmChatRequest"
+      },
+      "LlmModelConfig": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "body": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Body",
+            "default": {}
+          }
+        },
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "LlmModelConfig",
+        "description": "A selectable model plus the extra chat-completion body params it needs."
+      },
+      "LlmModelsResponse": {
+        "properties": {
+          "models": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Models"
+          },
+          "selected": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Selected"
+          }
+        },
+        "type": "object",
+        "required": [
+          "models"
+        ],
+        "title": "LlmModelsResponse"
       },
       "LlmTestResponse": {
         "properties": {

@@ -61,7 +61,13 @@ from backend.app.core.ssrf import check_url_safe
 from backend.app.db.registry import get_registry_session
 from backend.app.models.registry_orm import InstanceSettings
 from backend.app.models.user_orm import Athlete
-from backend.app.services.llm_client import temperature_param
+from backend.app.services.llm_client import (
+    apply_body_extras,
+    merge_llm_headers,
+    model_body_map,
+    resolve_instance_llm,
+    temperature_param,
+)
 
 
 async def _load_instance_settings(registry_session: AsyncSession) -> InstanceSettings | None:
@@ -103,6 +109,49 @@ async def get_allowed_servers(ctx_session=Depends(get_ctx_and_session)):
     return {"servers": settings.llm_allowed_servers_list}
 
 
+class LlmModelsResponse(BaseModel):
+    models: list[str]
+    selected: Optional[str] = None
+
+
+@router.get("/models", response_model=LlmModelsResponse)
+async def list_llm_models(
+    ctx_session=Depends(get_ctx_and_session),
+    registry_session: AsyncSession = Depends(get_registry_session),
+):
+    """Return the models this user may select and their current selection.
+
+    The list is the instance's curated models overlaid by the user's personal
+    models. Falls back to the single configured model name when no list exists.
+    """
+    ctx, session = ctx_session
+
+    result = await session.execute(select(Athlete).where(Athlete.global_user_id == ctx.user_id))
+    athlete = result.scalar_one_or_none()
+    athlete_settings = (athlete.app_settings if athlete else None) or {}
+
+    instance = await _load_instance_settings(registry_session)
+
+    bodies = {
+        **model_body_map(getattr(instance, "llm_models", None)),
+        **model_body_map(athlete_settings.get("llm_models")),
+    }
+    names = list(bodies.keys())
+
+    selected = (athlete_settings.get("llm_model") or "").strip()
+    if not selected and instance and instance.llm_model:
+        selected = instance.llm_model.strip()
+    if not selected:
+        selected = (settings.llm_model or "").strip()
+
+    # Make sure the effective selection is always offered, even if it is a lone
+    # legacy single-model configuration not present in any list.
+    if selected and selected not in names:
+        names.append(selected)
+
+    return LlmModelsResponse(models=names, selected=selected or None)
+
+
 class LlmTestResponse(BaseModel):
     ok: bool
     base_url: Optional[str] = None
@@ -120,72 +169,75 @@ _TEST_PROMPT = "Reply with a short greeting to confirm you are reachable."
 
 @router.post("/test-connection", response_model=LlmTestResponse)
 async def test_llm_connection(
+    model: Optional[str] = None,
     ctx_session=Depends(get_ctx_and_session),
     registry_session: AsyncSession = Depends(get_registry_session),
 ):
     """Test the instance's configured LLM connection. Admin-only.
 
     Sends a minimal "hello world" chat completion to the instance's saved LLM
-    config and confirms the model replies with a usable response.
+    config and confirms the model replies with a usable response. Any configured
+    extra headers and the selected model's body params are applied, so this also
+    validates a zero-data-retention header or a thinking config. Pass ``model``
+    to test a specific model from the configured list instead of the default.
     """
     ctx, _ = ctx_session
     if not ctx.is_admin:
         raise HTTPException(status_code=403, detail="Admin access required")
 
     instance = await _load_instance_settings(registry_session)
+    cfg = resolve_instance_llm(instance)
 
-    base_url = (instance.llm_base_url.strip() if instance and instance.llm_base_url else None) or (settings.llm_base_url or "").strip()
-    model = (instance.llm_model.strip() if instance and instance.llm_model else None) or (settings.llm_model or "").strip()
-
+    base_url = cfg.base_url
     if not base_url:
         raise HTTPException(status_code=400, detail="No LLM base URL configured. Save a base URL first.")
 
-    if not model:
+    # Test a specific model from the configured list, or the default.
+    selected = (model or "").strip() or cfg.model
+    if not selected:
         return LlmTestResponse(
             ok=False,
             base_url=base_url,
             error="No LLM model configured. Save a model first.",
         )
 
-    api_key: str | None = None
-    if instance and instance.llm_api_key_enc:
-        try:
-            from backend.app.core.file_encryption import decrypt_instance_secret
-            api_key = decrypt_instance_secret(str(instance.llm_api_key_enc))
-        except Exception as exc:
-            log.warning("Could not decrypt instance LLM API key for test: %s", exc)
+    bodies = model_body_map(getattr(instance, "llm_models", None)) if instance else {}
+    extra_body = bodies.get(selected, cfg.extra_body if selected == cfg.model else {})
 
     chat_url = f"{base_url.rstrip('/')}/chat/completions"
     try:
         check_url_safe(chat_url)
     except HTTPException as exc:
-        return LlmTestResponse(ok=False, base_url=base_url, model_configured=model, error=exc.detail)
+        return LlmTestResponse(ok=False, base_url=base_url, model_configured=selected, error=exc.detail)
 
-    headers: dict[str, str] = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    headers = merge_llm_headers({"Content-Type": "application/json"}, cfg.extra_headers)
+    if cfg.api_key:
+        headers["Authorization"] = f"Bearer {cfg.api_key}"
 
-    payload = {
-        "model": model,
-        "messages": [{"role": "user", "content": _TEST_PROMPT}],
-        "stream": False,
-    }
+    payload = apply_body_extras(
+        {
+            "model": selected,
+            "messages": [{"role": "user", "content": _TEST_PROMPT}],
+            "stream": False,
+        },
+        extra_body,
+    )
 
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
             resp = await client.post(chat_url, headers=headers, json=payload, follow_redirects=False)
     except httpx.ConnectError as exc:
-        return LlmTestResponse(ok=False, base_url=base_url, model_configured=model, prompt_sent=_TEST_PROMPT, error=f"Connection refused: {exc}")
+        return LlmTestResponse(ok=False, base_url=base_url, model_configured=selected, prompt_sent=_TEST_PROMPT, error=f"Connection refused: {exc}")
     except httpx.TimeoutException:
-        return LlmTestResponse(ok=False, base_url=base_url, model_configured=model, prompt_sent=_TEST_PROMPT, error="Connection timed out")
+        return LlmTestResponse(ok=False, base_url=base_url, model_configured=selected, prompt_sent=_TEST_PROMPT, error="Connection timed out")
     except Exception as exc:
-        return LlmTestResponse(ok=False, base_url=base_url, model_configured=model, prompt_sent=_TEST_PROMPT, error=str(exc))
+        return LlmTestResponse(ok=False, base_url=base_url, model_configured=selected, prompt_sent=_TEST_PROMPT, error=str(exc))
 
     if resp.status_code == 401:
         return LlmTestResponse(
             ok=False,
             base_url=base_url,
-            model_configured=model,
+            model_configured=selected,
             prompt_sent=_TEST_PROMPT,
             http_status=resp.status_code,
             error="Authentication failed — check your API key",
@@ -195,7 +247,7 @@ async def test_llm_connection(
         return LlmTestResponse(
             ok=False,
             base_url=base_url,
-            model_configured=model,
+            model_configured=selected,
             prompt_sent=_TEST_PROMPT,
             http_status=resp.status_code,
             error=f"HTTP {resp.status_code}: {snippet}",
@@ -208,7 +260,7 @@ async def test_llm_connection(
         return LlmTestResponse(
             ok=False,
             base_url=base_url,
-            model_configured=model,
+            model_configured=selected,
             prompt_sent=_TEST_PROMPT,
             http_status=resp.status_code,
             error="The endpoint responded but the reply was not in the expected chat-completion format.",
@@ -219,7 +271,7 @@ async def test_llm_connection(
         return LlmTestResponse(
             ok=False,
             base_url=base_url,
-            model_configured=model,
+            model_configured=selected,
             prompt_sent=_TEST_PROMPT,
             http_status=resp.status_code,
             error="The model returned an empty response.",
@@ -228,7 +280,7 @@ async def test_llm_connection(
     return LlmTestResponse(
         ok=True,
         base_url=base_url,
-        model_configured=model,
+        model_configured=selected,
         prompt_sent=_TEST_PROMPT,
         http_status=resp.status_code,
         response_text=reply_text[:500],
@@ -239,11 +291,19 @@ async def _get_llm_config(
     athlete: Athlete,
     user_id: str,
     instance: InstanceSettings | None,
-) -> tuple[str, str, str | None]:
-    """Return *(base_url, model, api_key)* for this athlete.
+    requested_model: str | None = None,
+):
+    """Return a :class:`ResolvedLlm` for this athlete.
 
-    Priority: athlete app_settings → instance settings → global env vars.
+    Priority: athlete app_settings → instance settings → global env vars. The
+    available model list is the instance's curated list overlaid by the
+    athlete's personal models; the selected model is ``requested_model`` (a
+    per-request override) → the athlete's saved choice → the instance default.
+    Extra headers merge instance-then-athlete, and the body extras are those
+    attached to the selected model.
     """
+    from backend.app.services.llm_client import ResolvedLlm
+
     athlete_settings = athlete.app_settings or {}
 
     # Determine base_url: athlete > instance > global
@@ -259,10 +319,20 @@ async def _get_llm_config(
             detail="LLM not configured. Set a base URL in Settings → AI / LLM.",
         )
 
-    # Determine model: athlete > instance > global
-    model = (athlete_settings.get("llm_model") or "").strip()
+    # Available models: instance list overlaid by the athlete's personal list.
+    bodies = {
+        **model_body_map(getattr(instance, "llm_models", None)),
+        **model_body_map(athlete_settings.get("llm_models")),
+    }
+
+    # Determine model: request override > athlete > instance > first listed > global
+    model = (requested_model or "").strip()
+    if not model:
+        model = (athlete_settings.get("llm_model") or "").strip()
     if not model and instance and instance.llm_model:
         model = instance.llm_model.strip()
+    if not model and bodies:
+        model = next(iter(bodies))
     if not model:
         model = (settings.llm_model or "llama3.2").strip()
 
@@ -299,7 +369,19 @@ async def _get_llm_config(
         except Exception as exc:
             log.error("Failed to decrypt instance LLM API key: %s", exc)
 
-    return base_url, model, api_key
+    extra_headers = merge_llm_headers(
+        {},
+        getattr(instance, "llm_extra_headers", None),
+        athlete_settings.get("llm_extra_headers"),
+    )
+
+    return ResolvedLlm(
+        base_url=base_url,
+        model=model,
+        api_key=api_key,
+        extra_headers=extra_headers,
+        extra_body=bodies.get(model, {}),
+    )
 
 
 # ── Endpoint ───────────────────────────────────────────────────────────────
@@ -321,21 +403,24 @@ async def llm_chat(
 
     instance = await _load_instance_settings(registry_session)
 
-    base_url, model, api_key = await _get_llm_config(athlete, ctx.user_id, instance)
-    upstream_url = f"{base_url.rstrip('/')}/chat/completions"
+    cfg = await _get_llm_config(athlete, ctx.user_id, instance, requested_model=body.model)
+    upstream_url = f"{cfg.base_url.rstrip('/')}/chat/completions"
 
     check_url_safe(upstream_url)
 
-    headers: dict[str, str] = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
+    headers = merge_llm_headers({"Content-Type": "application/json"}, cfg.extra_headers)
+    if cfg.api_key:
+        headers["Authorization"] = f"Bearer {cfg.api_key}"
 
-    payload: dict[str, Any] = {
-        "model": body.model or model,
-        "messages": [{"role": m.role, "content": m.content} for m in body.messages],
-        **temperature_param(body.temperature),
-        "stream": body.stream,
-    }
+    payload: dict[str, Any] = apply_body_extras(
+        {
+            "model": cfg.model,
+            "messages": [{"role": m.role, "content": m.content} for m in body.messages],
+            **temperature_param(body.temperature),
+            "stream": body.stream,
+        },
+        cfg.extra_body,
+    )
 
     transport = httpx.AsyncHTTPTransport(retries=0)
 

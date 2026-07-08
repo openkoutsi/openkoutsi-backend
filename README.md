@@ -147,6 +147,21 @@ with extended thinking, via Anthropic's OpenAI-compatible endpoint) — which
 reject any temperature other than `1` — working out of the box. Upstream LLM
 errors surface the provider's response body in the logs.
 
+Admins can also configure, per instance (Settings → AI / LLM):
+
+- **Several selectable models** — each with its own extra chat-completion body
+  params (e.g. `max_tokens` or a thinking/`reasoning_effort` config). Users pick
+  one as their saved default; the selected model's body params are applied to
+  their requests. Users may also add their own personal models.
+- **Extra request headers** — arbitrary headers added to every outbound LLM
+  request (e.g. a provider's zero-data-retention header). Instance headers apply
+  to everyone; a user's personal headers override on matching keys.
+
+The connection test (Settings → AI / LLM → *Test connection*) sends a small
+"hello world" message using the configured headers and the selected model's body
+params and confirms a reply comes back — so it also validates ZDR headers and a
+thinking config, not just reachability.
+
 The web frontend has its own configuration (`API_URL`, etc.) — see the [openkoutsi-web](https://github.com/openkoutsi/openkoutsi-web) repository.
 
 ## Integrations
