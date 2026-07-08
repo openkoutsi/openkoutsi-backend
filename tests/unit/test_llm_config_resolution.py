@@ -149,3 +149,13 @@ class TestResolveLlmConfigPresetKeys:
             _athlete(llm_model="anthropic", llm_base_url="http://my-own/v1"), inst, "user-1",
         )
         assert cfg.base_url == "http://my-own/v1"
+
+    def test_falls_back_to_env_api_key(self):
+        # No preset/athlete/instance key: the server-side default (LLM_API_KEY)
+        # is used.
+        inst = _instance(llm_api_key_enc=None)
+        with patch("backend.app.services.llm_client.settings") as mock_settings:
+            mock_settings.llm_api_key = "env-default-key"
+            mock_settings.llm_model = ""
+            cfg = resolve_llm(instance=inst)
+        assert cfg.api_key == "env-default-key"

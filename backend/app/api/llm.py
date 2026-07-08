@@ -148,9 +148,14 @@ async def list_llm_models(
         for name, entry in presets.items()
     ]
 
+    # Mirror resolve_llm's selection order so `selected` reflects the model that
+    # would actually be used: saved choice → instance default → first preset →
+    # global env default.
     selected = (athlete_settings.get("llm_model") or "").strip()
     if not selected and instance and instance.llm_model:
         selected = instance.llm_model.strip()
+    if not selected and presets:
+        selected = next(iter(presets))
     if not selected:
         selected = (settings.llm_model or "").strip()
 
@@ -323,8 +328,9 @@ async def _get_llm_config(
         )
 
     # Defense-in-depth: re-check the resolved server against the allow-list.
+    # Normalise a trailing slash on both sides so it can't cause a false 403.
     allowed = settings.llm_allowed_servers_list
-    if allowed and cfg.base_url not in allowed:
+    if allowed and cfg.base_url.rstrip("/") not in {a.rstrip("/") for a in allowed}:
         raise HTTPException(
             status_code=403,
             detail="The configured LLM server is not in the server's allowed list. "

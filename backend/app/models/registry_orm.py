@@ -92,10 +92,16 @@ class InstanceSettings(RegistryBase):
     # Default model name (the instance-wide fallback selection). The full list
     # of selectable models lives in ``llm_models``.
     llm_model: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    # Curated list of selectable models. Each entry is
-    # ``{"name": str, "body": {<extra chat-completion body params>}}`` so a
-    # thinking model can carry e.g. ``{"reasoning_effort": "high"}`` while a
-    # plain model carries none.
+    # Curated list of selectable presets. Each entry is a self-contained (or
+    # partial) connection; missing fields fall back to the instance-level
+    # ``llm_*`` columns above:
+    #   ``{"name": str,            # stable identifier / selection value
+    #      "label": str | None,    # human-friendly display name
+    #      "base_url": str | None,
+    #      "model": str | None,    # upstream model id (defaults to name)
+    #      "api_key_enc": str | None,  # encrypted per-preset key
+    #      "headers": {<extra request headers>},
+    #      "body": {<extra chat-completion body params>}}``
     llm_models: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     # Extra HTTP headers added to every outbound LLM request (e.g. a
     # zero-data-retention header). ``{"Header-Name": "value", ...}``.

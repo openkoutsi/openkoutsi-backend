@@ -181,6 +181,9 @@ def resolve_llm(
         api_key = _try_decrypt(decrypt_secret, str(athlete_settings["llm_api_key_enc"]), user_id)
     if api_key is None and instance and instance.llm_api_key_enc:
         api_key = _try_decrypt(decrypt_instance_secret, str(instance.llm_api_key_enc))
+    # Final fallback: the server-side default key (env LLM_API_KEY).
+    if api_key is None and settings.llm_api_key:
+        api_key = settings.llm_api_key
 
     # ── headers: instance → instance preset → athlete preset → athlete ─────
     extra_headers = merge_llm_headers(

@@ -154,9 +154,11 @@ Admins can also configure, per instance (Settings → AI / LLM):
   body params (e.g. `max_tokens` or a thinking/`reasoning_effort` config). This
   lets an admin offer distinct providers (Anthropic, Mistral, …) as presets.
   Any omitted field falls back to the instance-level default below. Users pick a
-  preset as their saved default (by its display name); its base URL, model, key,
-  headers and body are used for their requests. Users may also add their own
-  personal presets.
+  preset as their saved default — the dropdown shows each preset's display name,
+  but the selection is stored by its stable identifier, so renaming a display
+  name never breaks existing selections. The chosen preset's base URL, model,
+  key, headers and body are used for their requests. Users may also add their
+  own personal presets.
 - **Extra request headers** — arbitrary headers added to every outbound LLM
   request (e.g. a provider's zero-data-retention header). Instance headers apply
   to everyone; a preset's and a user's personal headers layer on top.

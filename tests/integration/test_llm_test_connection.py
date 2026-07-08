@@ -216,6 +216,21 @@ class TestLlmModelsEndpoint:
         ]
         assert data["selected"] == "b"
 
+    async def test_selected_falls_back_to_first_preset(self, client, auth_headers):
+        # No default llm_model saved, but presets exist: selected should be the
+        # first preset (matching resolve_llm), not null.
+        await client.patch(
+            "/api/admin/settings",
+            json={
+                "llm_base_url": "http://127.0.0.1:11434",
+                "llm_model": "",
+                "llm_models": [{"name": "first"}, {"name": "second"}],
+            },
+            headers=auth_headers,
+        )
+        resp = await client.get("/api/llm/models", headers=auth_headers)
+        assert resp.json()["selected"] == "first"
+
     async def test_single_legacy_model_is_offered(self, client, auth_headers):
         await client.patch(
             "/api/admin/settings",
