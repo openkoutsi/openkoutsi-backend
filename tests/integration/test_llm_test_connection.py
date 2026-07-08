@@ -75,6 +75,8 @@ class TestLlmTestConnection:
         data = resp.json()
         assert data["ok"] is True
         assert data["model_configured"] == "test-model"
+        # The prompt actually sent is echoed back so the UI can show it.
+        assert data["prompt_sent"] and "greeting" in data["prompt_sent"].lower()
         assert data["response_text"] == "Hello! I'm here."
         assert data["http_status"] == 200
         # The old model-listing fields are gone.

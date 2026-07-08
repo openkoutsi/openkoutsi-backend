@@ -107,6 +107,7 @@ class LlmTestResponse(BaseModel):
     ok: bool
     base_url: Optional[str] = None
     model_configured: Optional[str] = None
+    prompt_sent: Optional[str] = None
     response_text: Optional[str] = None
     http_status: Optional[int] = None
     error: Optional[str] = None
@@ -174,17 +175,18 @@ async def test_llm_connection(
         async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
             resp = await client.post(chat_url, headers=headers, json=payload, follow_redirects=False)
     except httpx.ConnectError as exc:
-        return LlmTestResponse(ok=False, base_url=base_url, model_configured=model, error=f"Connection refused: {exc}")
+        return LlmTestResponse(ok=False, base_url=base_url, model_configured=model, prompt_sent=_TEST_PROMPT, error=f"Connection refused: {exc}")
     except httpx.TimeoutException:
-        return LlmTestResponse(ok=False, base_url=base_url, model_configured=model, error="Connection timed out")
+        return LlmTestResponse(ok=False, base_url=base_url, model_configured=model, prompt_sent=_TEST_PROMPT, error="Connection timed out")
     except Exception as exc:
-        return LlmTestResponse(ok=False, base_url=base_url, model_configured=model, error=str(exc))
+        return LlmTestResponse(ok=False, base_url=base_url, model_configured=model, prompt_sent=_TEST_PROMPT, error=str(exc))
 
     if resp.status_code == 401:
         return LlmTestResponse(
             ok=False,
             base_url=base_url,
             model_configured=model,
+            prompt_sent=_TEST_PROMPT,
             http_status=resp.status_code,
             error="Authentication failed — check your API key",
         )
@@ -194,6 +196,7 @@ async def test_llm_connection(
             ok=False,
             base_url=base_url,
             model_configured=model,
+            prompt_sent=_TEST_PROMPT,
             http_status=resp.status_code,
             error=f"HTTP {resp.status_code}: {snippet}",
         )
@@ -206,6 +209,7 @@ async def test_llm_connection(
             ok=False,
             base_url=base_url,
             model_configured=model,
+            prompt_sent=_TEST_PROMPT,
             http_status=resp.status_code,
             error="The endpoint responded but the reply was not in the expected chat-completion format.",
         )
@@ -216,6 +220,7 @@ async def test_llm_connection(
             ok=False,
             base_url=base_url,
             model_configured=model,
+            prompt_sent=_TEST_PROMPT,
             http_status=resp.status_code,
             error="The model returned an empty response.",
         )
@@ -224,6 +229,7 @@ async def test_llm_connection(
         ok=True,
         base_url=base_url,
         model_configured=model,
+        prompt_sent=_TEST_PROMPT,
         http_status=resp.status_code,
         response_text=reply_text[:500],
     )

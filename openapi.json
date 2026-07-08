@@ -6603,6 +6603,17 @@
             ],
             "title": "Model Configured"
           },
+          "prompt_sent": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Prompt Sent"
+          },
           "response_text": {
             "anyOf": [
               {
