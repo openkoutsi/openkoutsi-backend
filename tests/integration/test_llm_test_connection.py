@@ -199,14 +199,21 @@ class TestLlmModelsEndpoint:
             json={
                 "llm_base_url": "http://127.0.0.1:11434",
                 "llm_model": "b",
-                "llm_models": [{"name": "a", "body": {}}, {"name": "b", "body": {}}],
+                "llm_models": [
+                    {"name": "a", "label": "Model A"},
+                    {"name": "b"},
+                ],
             },
             headers=auth_headers,
         )
         resp = await client.get("/api/llm/models", headers=auth_headers)
         assert resp.status_code == 200
         data = resp.json()
-        assert data["models"] == ["a", "b"]
+        # Options carry a display label (falling back to the name).
+        assert data["models"] == [
+            {"name": "a", "label": "Model A"},
+            {"name": "b", "label": "b"},
+        ]
         assert data["selected"] == "b"
 
     async def test_single_legacy_model_is_offered(self, client, auth_headers):
@@ -217,7 +224,7 @@ class TestLlmModelsEndpoint:
         )
         resp = await client.get("/api/llm/models", headers=auth_headers)
         data = resp.json()
-        assert data["models"] == ["solo"]
+        assert data["models"] == [{"name": "solo", "label": "solo"}]
         assert data["selected"] == "solo"
 
     async def test_requires_auth(self, client):
@@ -238,5 +245,63 @@ class TestInstanceSettingsPersistModelsHeaders:
         assert resp.status_code == 200
         got = await client.get("/api/admin/settings", headers=auth_headers)
         data = got.json()
-        assert data["llm_models"] == [{"name": "gpt", "body": {"max_tokens": 10}}]
+        assert data["llm_models"] == [{
+            "name": "gpt",
+            "label": None,
+            "base_url": None,
+            "model": None,
+            "api_key_set": False,
+            "headers": {},
+            "body": {"max_tokens": 10},
+        }]
         assert data["llm_extra_headers"] == {"X-ZDR": "true"}
+
+    async def test_full_preset_and_key_lifecycle(self, client, auth_headers):
+        from cryptography.fernet import Fernet
+
+        from backend.app.core import config
+
+        with patch.object(config.settings, "encryption_key", Fernet.generate_key().decode()):
+            # A preset carries its own base URL, model id, headers, body and key.
+            resp = await client.patch(
+                "/api/admin/settings",
+                json={
+                    "llm_models": [{
+                        "name": "Anthropic (US)",
+                        "base_url": "https://api.anthropic.com/v1",
+                        "model": "claude-x",
+                        "api_key": "sk-secret",
+                        "headers": {"anthropic-version": "2023-06-01"},
+                        "body": {"max_tokens": 1024},
+                    }],
+                },
+                headers=auth_headers,
+            )
+            assert resp.status_code == 200
+            preset = resp.json()["llm_models"][0]
+            assert preset["base_url"] == "https://api.anthropic.com/v1"
+            assert preset["model"] == "claude-x"
+            assert preset["api_key_set"] is True
+            # The encrypted key is never returned.
+            assert "api_key" not in preset and "api_key_enc" not in preset
+
+            # Editing another field without resending the key preserves it.
+            resp = await client.patch(
+                "/api/admin/settings",
+                json={"llm_models": [{
+                    "name": "Anthropic (US)",
+                    "base_url": "https://api.anthropic.com/v1",
+                    "model": "claude-y",
+                }]},
+                headers=auth_headers,
+            )
+            assert resp.json()["llm_models"][0]["api_key_set"] is True
+            assert resp.json()["llm_models"][0]["model"] == "claude-y"
+
+            # Clearing removes the key.
+            resp = await client.patch(
+                "/api/admin/settings",
+                json={"llm_models": [{"name": "Anthropic (US)", "api_key_clear": True}]},
+                headers=auth_headers,
+            )
+            assert resp.json()["llm_models"][0]["api_key_set"] is False

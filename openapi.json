@@ -3601,7 +3601,7 @@
           "llm"
         ],
         "summary": "List Llm Models",
-        "description": "Return the models this user may select and their current selection.\n\nThe list is the instance's curated models overlaid by the user's personal\nmodels. Falls back to the single configured model name when no list exists.",
+        "description": "Return the presets this user may select and their current selection.\n\nEach option carries the stable ``name`` (the selection value) and a\nhuman-friendly ``label`` for display. The list is the instance's presets\noverlaid by the user's personal presets; falls back to the single configured\nmodel name when no presets exist.",
         "operationId": "list_llm_models_api_llm_models_get",
         "responses": {
           "200": {
@@ -6298,7 +6298,7 @@
             "anyOf": [
               {
                 "items": {
-                  "$ref": "#/components/schemas/LlmModelConfig"
+                  "$ref": "#/components/schemas/LlmModelConfigIn"
                 },
                 "type": "array"
               },
@@ -6378,7 +6378,7 @@
           },
           "llm_models": {
             "items": {
-              "$ref": "#/components/schemas/LlmModelConfig"
+              "$ref": "#/components/schemas/LlmModelConfigOut"
             },
             "type": "array",
             "title": "Llm Models",
@@ -6674,11 +6674,68 @@
         ],
         "title": "LlmChatRequest"
       },
-      "LlmModelConfig": {
+      "LlmModelConfigIn": {
         "properties": {
           "name": {
             "type": "string",
             "title": "Name"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Url"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "api_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Key"
+          },
+          "api_key_clear": {
+            "type": "boolean",
+            "title": "Api Key Clear",
+            "default": false
+          },
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Headers",
+            "default": {}
           },
           "body": {
             "additionalProperties": true,
@@ -6691,14 +6748,98 @@
         "required": [
           "name"
         ],
-        "title": "LlmModelConfig",
-        "description": "A selectable model plus the extra chat-completion body params it needs."
+        "title": "LlmModelConfigIn",
+        "description": "A selectable model *preset* \u2014 a full or partial connection.\n\nAny of ``base_url`` / ``model`` / ``api_key`` / ``headers`` / ``body`` may\nbe given; missing pieces fall back to the instance-level defaults. This lets\nan admin offer distinct providers (Anthropic, Mistral, \u2026) as presets that a\nuser picks between. ``api_key`` is write-only; omit it to keep the stored\nkey, or set ``api_key_clear`` to remove it. ``name`` is the stable internal\nidentifier (what a user's selection is stored as); ``label`` is the\nhuman-friendly name shown to users (defaults to ``name``)."
+      },
+      "LlmModelConfigOut": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Url"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "api_key_set": {
+            "type": "boolean",
+            "title": "Api Key Set",
+            "default": false
+          },
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Headers",
+            "default": {}
+          },
+          "body": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Body",
+            "default": {}
+          }
+        },
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "LlmModelConfigOut",
+        "description": "A selectable model preset as returned to the admin (no secret leaked)."
+      },
+      "LlmModelOption": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "label"
+        ],
+        "title": "LlmModelOption"
       },
       "LlmModelsResponse": {
         "properties": {
           "models": {
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/LlmModelOption"
             },
             "type": "array",
             "title": "Models"

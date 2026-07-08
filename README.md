@@ -149,13 +149,17 @@ errors surface the provider's response body in the logs.
 
 Admins can also configure, per instance (Settings → AI / LLM):
 
-- **Several selectable models** — each with its own extra chat-completion body
-  params (e.g. `max_tokens` or a thinking/`reasoning_effort` config). Users pick
-  one as their saved default; the selected model's body params are applied to
-  their requests. Users may also add their own personal models.
+- **Several selectable presets** — each a full connection: display name, stable
+  identifier, base URL, model id, API key, headers and extra chat-completion
+  body params (e.g. `max_tokens` or a thinking/`reasoning_effort` config). This
+  lets an admin offer distinct providers (Anthropic, Mistral, …) as presets.
+  Any omitted field falls back to the instance-level default below. Users pick a
+  preset as their saved default (by its display name); its base URL, model, key,
+  headers and body are used for their requests. Users may also add their own
+  personal presets.
 - **Extra request headers** — arbitrary headers added to every outbound LLM
   request (e.g. a provider's zero-data-retention header). Instance headers apply
-  to everyone; a user's personal headers override on matching keys.
+  to everyone; a preset's and a user's personal headers layer on top.
 
 The connection test (Settings → AI / LLM → *Test connection*) sends a small
 "hello world" message using the configured headers and the selected model's body

@@ -64,8 +64,8 @@ from backend.app.models.user_orm import Athlete
 from backend.app.services.llm_client import (
     apply_body_extras,
     merge_llm_headers,
-    model_body_map,
-    resolve_instance_llm,
+    preset_map,
+    resolve_llm,
     temperature_param,
 )
 
@@ -109,8 +109,13 @@ async def get_allowed_servers(ctx_session=Depends(get_ctx_and_session)):
     return {"servers": settings.llm_allowed_servers_list}
 
 
+class LlmModelOption(BaseModel):
+    name: str  # stable identifier / selection value
+    label: str  # human-friendly display name
+
+
 class LlmModelsResponse(BaseModel):
-    models: list[str]
+    models: list[LlmModelOption]
     selected: Optional[str] = None
 
 
@@ -119,10 +124,12 @@ async def list_llm_models(
     ctx_session=Depends(get_ctx_and_session),
     registry_session: AsyncSession = Depends(get_registry_session),
 ):
-    """Return the models this user may select and their current selection.
+    """Return the presets this user may select and their current selection.
 
-    The list is the instance's curated models overlaid by the user's personal
-    models. Falls back to the single configured model name when no list exists.
+    Each option carries the stable ``name`` (the selection value) and a
+    human-friendly ``label`` for display. The list is the instance's presets
+    overlaid by the user's personal presets; falls back to the single configured
+    model name when no presets exist.
     """
     ctx, session = ctx_session
 
@@ -132,11 +139,14 @@ async def list_llm_models(
 
     instance = await _load_instance_settings(registry_session)
 
-    bodies = {
-        **model_body_map(getattr(instance, "llm_models", None)),
-        **model_body_map(athlete_settings.get("llm_models")),
+    presets: dict[str, dict] = {
+        **preset_map(getattr(instance, "llm_models", None)),
+        **preset_map(athlete_settings.get("llm_models")),
     }
-    names = list(bodies.keys())
+    options: list[LlmModelOption] = [
+        LlmModelOption(name=name, label=str(entry.get("label") or name))
+        for name, entry in presets.items()
+    ]
 
     selected = (athlete_settings.get("llm_model") or "").strip()
     if not selected and instance and instance.llm_model:
@@ -145,11 +155,11 @@ async def list_llm_models(
         selected = (settings.llm_model or "").strip()
 
     # Make sure the effective selection is always offered, even if it is a lone
-    # legacy single-model configuration not present in any list.
-    if selected and selected not in names:
-        names.append(selected)
+    # legacy single-model configuration not present in any preset list.
+    if selected and selected not in presets:
+        options.append(LlmModelOption(name=selected, label=selected))
 
-    return LlmModelsResponse(models=names, selected=selected or None)
+    return LlmModelsResponse(models=options, selected=selected or None)
 
 
 class LlmTestResponse(BaseModel):
@@ -186,23 +196,20 @@ async def test_llm_connection(
         raise HTTPException(status_code=403, detail="Admin access required")
 
     instance = await _load_instance_settings(registry_session)
-    cfg = resolve_instance_llm(instance)
+    # Resolve the selected preset (its own base URL, model, key, headers, body).
+    cfg = resolve_llm(instance=instance, requested_model=model)
 
     base_url = cfg.base_url
     if not base_url:
         raise HTTPException(status_code=400, detail="No LLM base URL configured. Save a base URL first.")
 
-    # Test a specific model from the configured list, or the default.
-    selected = (model or "").strip() or cfg.model
+    selected = cfg.model
     if not selected:
         return LlmTestResponse(
             ok=False,
             base_url=base_url,
             error="No LLM model configured. Save a model first.",
         )
-
-    bodies = model_body_map(getattr(instance, "llm_models", None)) if instance else {}
-    extra_body = bodies.get(selected, cfg.extra_body if selected == cfg.model else {})
 
     chat_url = f"{base_url.rstrip('/')}/chat/completions"
     try:
@@ -220,7 +227,7 @@ async def test_llm_connection(
             "messages": [{"role": "user", "content": _TEST_PROMPT}],
             "stream": False,
         },
-        extra_body,
+        cfg.extra_body,
     )
 
     try:
@@ -295,93 +302,36 @@ async def _get_llm_config(
 ):
     """Return a :class:`ResolvedLlm` for this athlete.
 
-    Priority: athlete app_settings → instance settings → global env vars. The
-    available model list is the instance's curated list overlaid by the
-    athlete's personal models; the selected model is ``requested_model`` (a
-    per-request override) → the athlete's saved choice → the instance default.
-    Extra headers merge instance-then-athlete, and the body extras are those
-    attached to the selected model.
+    Selection resolves ``requested_model`` (per-request override) → the athlete's
+    saved model → the instance default; a selected preset supplies its own base
+    URL, model id, API key, headers and body params. Raises ``HTTPException``
+    (400/403) on the two API-facing failures: no base URL, or a resolved server
+    outside the admin allow-list.
     """
-    from backend.app.services.llm_client import ResolvedLlm
+    cfg = resolve_llm(
+        instance=instance,
+        athlete_settings=athlete.app_settings or {},
+        user_id=user_id,
+        requested_model=requested_model,
+        default_model="llama3.2",
+    )
 
-    athlete_settings = athlete.app_settings or {}
-
-    # Determine base_url: athlete > instance > global
-    base_url = (athlete_settings.get("llm_base_url") or "").strip()
-    if not base_url and instance and instance.llm_base_url:
-        base_url = instance.llm_base_url.strip()
-    if not base_url:
-        base_url = (settings.llm_base_url or "").strip()
-
-    if not base_url:
+    if not cfg.base_url:
         raise HTTPException(
             status_code=400,
             detail="LLM not configured. Set a base URL in Settings → AI / LLM.",
         )
 
-    # Available models: instance list overlaid by the athlete's personal list.
-    bodies = {
-        **model_body_map(getattr(instance, "llm_models", None)),
-        **model_body_map(athlete_settings.get("llm_models")),
-    }
-
-    # Determine model: request override > athlete > instance > first listed > global
-    model = (requested_model or "").strip()
-    if not model:
-        model = (athlete_settings.get("llm_model") or "").strip()
-    if not model and instance and instance.llm_model:
-        model = instance.llm_model.strip()
-    if not model and bodies:
-        model = next(iter(bodies))
-    if not model:
-        model = (settings.llm_model or "llama3.2").strip()
-
-    # Defense-in-depth: re-check against the allow-list at use time.
+    # Defense-in-depth: re-check the resolved server against the allow-list.
     allowed = settings.llm_allowed_servers_list
-    if allowed and base_url not in allowed:
+    if allowed and cfg.base_url not in allowed:
         raise HTTPException(
             status_code=403,
             detail="The configured LLM server is not in the server's allowed list. "
             "Update your LLM settings to use an allowed server.",
         )
 
-    api_key: str | None = None
-
-    # Check athlete's personal API key first
-    enc_key = athlete_settings.get("llm_api_key_enc")
-    if enc_key:
-        try:
-            from backend.app.core.file_encryption import decrypt_secret
-            api_key = decrypt_secret(str(enc_key), user_id)
-        except Exception as exc:
-            log.error("Failed to decrypt athlete LLM API key for user %s: %s", user_id, exc)
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to decrypt the stored LLM API key. "
-                "Try re-entering your key in Settings → AI / LLM.",
-            )
-
-    # Fall back to the instance API key
-    if api_key is None and instance and instance.llm_api_key_enc:
-        try:
-            from backend.app.core.file_encryption import decrypt_instance_secret
-            api_key = decrypt_instance_secret(str(instance.llm_api_key_enc))
-        except Exception as exc:
-            log.error("Failed to decrypt instance LLM API key: %s", exc)
-
-    extra_headers = merge_llm_headers(
-        {},
-        getattr(instance, "llm_extra_headers", None),
-        athlete_settings.get("llm_extra_headers"),
-    )
-
-    return ResolvedLlm(
-        base_url=base_url,
-        model=model,
-        api_key=api_key,
-        extra_headers=extra_headers,
-        extra_body=bodies.get(model, {}),
-    )
+    return cfg
 
 
 # ── Endpoint ───────────────────────────────────────────────────────────────

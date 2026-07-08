@@ -33,6 +33,8 @@ from backend.app.schemas.admin import (
     InstanceSettingsResponse,
     InvitationCreate,
     InvitationResponse,
+    LlmModelConfigIn,
+    LlmModelConfigOut,
     PasswordResetLinkResponse,
     UserResponse,
     UserRolesUpdate,
@@ -310,6 +312,68 @@ async def _get_or_create_settings(session: AsyncSession) -> InstanceSettings:
     return instance
 
 
+def _build_presets(
+    incoming: list[LlmModelConfigIn],
+    existing: list | None,
+) -> list[dict]:
+    """Build the stored preset list, encrypting/preserving per-preset API keys.
+
+    ``llm_models`` is a full-replacement list. For each preset: a supplied
+    ``api_key`` is encrypted; ``api_key_clear`` drops it; otherwise the key
+    stored for a preset with the same name is preserved so editing other fields
+    doesn't require re-entering the key.
+    """
+    prior = {
+        str(e.get("name", "")): e
+        for e in (existing or [])
+        if isinstance(e, dict) and e.get("name")
+    }
+    out: list[dict] = []
+    for m in incoming:
+        entry: dict = {"name": m.name}
+        if m.label and m.label.strip():
+            entry["label"] = m.label.strip()
+        if m.base_url and m.base_url.strip():
+            entry["base_url"] = m.base_url.strip()
+        if m.model and m.model.strip():
+            entry["model"] = m.model.strip()
+        headers = {k: v for k, v in (m.headers or {}).items() if k.strip()}
+        if headers:
+            entry["headers"] = headers
+        if m.body:
+            entry["body"] = m.body
+
+        if m.api_key_clear:
+            pass  # explicitly drop any stored key
+        elif m.api_key:
+            if not settings.encryption_key:
+                raise HTTPException(
+                    status_code=400,
+                    detail="ENCRYPTION_KEY not set — cannot store encrypted API key",
+                )
+            entry["api_key_enc"] = encrypt_instance_secret(m.api_key)
+        else:
+            prev = prior.get(m.name)
+            if prev and prev.get("api_key_enc"):
+                entry["api_key_enc"] = prev["api_key_enc"]
+
+        out.append(entry)
+    return out
+
+
+def _preset_out(entry: dict) -> LlmModelConfigOut:
+    """Map a stored preset entry to its API form, hiding the encrypted key."""
+    return LlmModelConfigOut(
+        name=str(entry.get("name", "")),
+        label=entry.get("label"),
+        base_url=entry.get("base_url"),
+        model=entry.get("model"),
+        api_key_set=bool(entry.get("api_key_enc")),
+        headers=entry.get("headers") or {},
+        body=entry.get("body") or {},
+    )
+
+
 def _settings_response(instance: InstanceSettings) -> InstanceSettingsResponse:
     return InstanceSettingsResponse(
         llm_base_url=instance.llm_base_url,
@@ -317,7 +381,7 @@ def _settings_response(instance: InstanceSettings) -> InstanceSettingsResponse:
         llm_api_key_set=instance.llm_api_key_enc is not None,
         llm_analysis_context=instance.llm_analysis_context,
         admin_contact=instance.admin_contact,
-        llm_models=instance.llm_models or [],
+        llm_models=[_preset_out(e) for e in (instance.llm_models or []) if isinstance(e, dict)],
         llm_extra_headers=instance.llm_extra_headers or {},
     )
 
@@ -350,7 +414,7 @@ async def update_instance_settings(
     if body.admin_contact is not None:
         instance.admin_contact = body.admin_contact or None
     if body.llm_models is not None:
-        instance.llm_models = [m.model_dump() for m in body.llm_models] or None
+        instance.llm_models = _build_presets(body.llm_models, instance.llm_models) or None
     if body.llm_extra_headers is not None:
         instance.llm_extra_headers = {k: v for k, v in body.llm_extra_headers.items() if k.strip()} or None
 
