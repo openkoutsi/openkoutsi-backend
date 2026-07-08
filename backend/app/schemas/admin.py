@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, field_validator
 
@@ -80,12 +80,53 @@ class InvitationResponse(BaseModel):
 
 # ── Instance settings (instance admin) ─────────────────────────────────────
 
+class LlmModelConfigIn(BaseModel):
+    """A selectable model *preset* — a full or partial connection.
+
+    Any of ``base_url`` / ``model`` / ``api_key`` / ``headers`` / ``body`` may
+    be given; missing pieces fall back to the instance-level defaults. This lets
+    an admin offer distinct providers (Anthropic, Mistral, …) as presets that a
+    user picks between. ``api_key`` is write-only; omit it to keep the stored
+    key, or set ``api_key_clear`` to remove it. ``name`` is the stable internal
+    identifier (what a user's selection is stored as); ``label`` is the
+    human-friendly name shown to users (defaults to ``name``).
+    """
+    name: str
+    label: Optional[str] = None
+    base_url: Optional[str] = None
+    model: Optional[str] = None
+    api_key: Optional[str] = None
+    api_key_clear: bool = False
+    headers: dict[str, str] = {}
+    body: dict[str, Any] = {}
+
+    @field_validator("name")
+    @classmethod
+    def _name_not_blank(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("Model name must not be blank")
+        return v.strip()
+
+
+class LlmModelConfigOut(BaseModel):
+    """A selectable model preset as returned to the admin (no secret leaked)."""
+    name: str
+    label: Optional[str] = None
+    base_url: Optional[str] = None
+    model: Optional[str] = None
+    api_key_set: bool = False
+    headers: dict[str, str] = {}
+    body: dict[str, Any] = {}
+
+
 class InstanceSettingsResponse(BaseModel):
     llm_base_url: Optional[str]
     llm_model: Optional[str]
     llm_api_key_set: bool
     llm_analysis_context: Optional[str]
     admin_contact: Optional[str]
+    llm_models: list[LlmModelConfigOut] = []
+    llm_extra_headers: dict[str, str] = {}
 
 
 class InstanceSettingsPatch(BaseModel):
@@ -95,3 +136,7 @@ class InstanceSettingsPatch(BaseModel):
     clear_llm_api_key: bool = False
     llm_analysis_context: Optional[str] = None
     admin_contact: Optional[str] = None
+    # Full-replacement lists/maps: send the complete desired state, or omit to
+    # leave unchanged.
+    llm_models: Optional[list[LlmModelConfigIn]] = None
+    llm_extra_headers: Optional[dict[str, str]] = None

@@ -3595,21 +3595,21 @@
         ]
       }
     },
-    "/api/llm/test-connection": {
-      "post": {
+    "/api/llm/models": {
+      "get": {
         "tags": [
           "llm"
         ],
-        "summary": "Test Llm Connection",
-        "description": "Test the instance's configured LLM connection. Admin-only.\n\nCalls GET {base_url}/models on the instance's saved LLM config and checks\nwhether the configured model appears in the response.",
-        "operationId": "test_llm_connection_api_llm_test_connection_post",
+        "summary": "List Llm Models",
+        "description": "Return the presets this user may select and their current selection.\n\nEach option carries the stable ``name`` (the selection value) and a\nhuman-friendly ``label`` for display. The list is the instance's presets\noverlaid by the user's personal presets; falls back to the single configured\nmodel name when no presets exist.",
+        "operationId": "list_llm_models_api_llm_models_get",
         "responses": {
           "200": {
             "description": "Successful Response",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/LlmTestResponse"
+                  "$ref": "#/components/schemas/LlmModelsResponse"
                 }
               }
             }
@@ -3620,6 +3620,61 @@
             "OAuth2PasswordBearer": []
           }
         ]
+      }
+    },
+    "/api/llm/test-connection": {
+      "post": {
+        "tags": [
+          "llm"
+        ],
+        "summary": "Test Llm Connection",
+        "description": "Test the instance's configured LLM connection. Admin-only.\n\nSends a minimal \"hello world\" chat completion to the instance's saved LLM\nconfig and confirms the model replies with a usable response. Any configured\nextra headers and the selected model's body params are applied, so this also\nvalidates a zero-data-retention header or a thinking config. Pass ``model``\nto test a specific model from the configured list instead of the default.",
+        "operationId": "test_llm_connection_api_llm_test_connection_post",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "model",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Model"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LlmTestResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
       }
     },
     "/api/llm/chat": {
@@ -6238,6 +6293,34 @@
               }
             ],
             "title": "Admin Contact"
+          },
+          "llm_models": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/LlmModelConfigIn"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Models"
+          },
+          "llm_extra_headers": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Extra Headers"
           }
         },
         "type": "object",
@@ -6292,6 +6375,22 @@
               }
             ],
             "title": "Admin Contact"
+          },
+          "llm_models": {
+            "items": {
+              "$ref": "#/components/schemas/LlmModelConfigOut"
+            },
+            "type": "array",
+            "title": "Llm Models",
+            "default": []
+          },
+          "llm_extra_headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Llm Extra Headers",
+            "default": {}
           }
         },
         "type": "object",
@@ -6575,6 +6674,194 @@
         ],
         "title": "LlmChatRequest"
       },
+      "LlmModelConfigIn": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Url"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "api_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Key"
+          },
+          "api_key_clear": {
+            "type": "boolean",
+            "title": "Api Key Clear",
+            "default": false
+          },
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Headers",
+            "default": {}
+          },
+          "body": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Body",
+            "default": {}
+          }
+        },
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "LlmModelConfigIn",
+        "description": "A selectable model *preset* \u2014 a full or partial connection.\n\nAny of ``base_url`` / ``model`` / ``api_key`` / ``headers`` / ``body`` may\nbe given; missing pieces fall back to the instance-level defaults. This lets\nan admin offer distinct providers (Anthropic, Mistral, \u2026) as presets that a\nuser picks between. ``api_key`` is write-only; omit it to keep the stored\nkey, or set ``api_key_clear`` to remove it. ``name`` is the stable internal\nidentifier (what a user's selection is stored as); ``label`` is the\nhuman-friendly name shown to users (defaults to ``name``)."
+      },
+      "LlmModelConfigOut": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label"
+          },
+          "base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Url"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "api_key_set": {
+            "type": "boolean",
+            "title": "Api Key Set",
+            "default": false
+          },
+          "headers": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Headers",
+            "default": {}
+          },
+          "body": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Body",
+            "default": {}
+          }
+        },
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "LlmModelConfigOut",
+        "description": "A selectable model preset as returned to the admin (no secret leaked)."
+      },
+      "LlmModelOption": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "label": {
+            "type": "string",
+            "title": "Label"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "label"
+        ],
+        "title": "LlmModelOption"
+      },
+      "LlmModelsResponse": {
+        "properties": {
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/LlmModelOption"
+            },
+            "type": "array",
+            "title": "Models"
+          },
+          "selected": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Selected"
+          }
+        },
+        "type": "object",
+        "required": [
+          "models"
+        ],
+        "title": "LlmModelsResponse"
+      },
       "LlmTestResponse": {
         "properties": {
           "ok": {
@@ -6603,24 +6890,27 @@
             ],
             "title": "Model Configured"
           },
-          "models_available": {
+          "prompt_sent": {
             "anyOf": [
               {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
+                "type": "string"
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Models Available"
+            "title": "Prompt Sent"
           },
-          "model_found": {
-            "type": "boolean",
-            "title": "Model Found",
-            "default": false
+          "response_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Response Text"
           },
           "http_status": {
             "anyOf": [

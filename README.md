@@ -147,6 +147,27 @@ with extended thinking, via Anthropic's OpenAI-compatible endpoint) — which
 reject any temperature other than `1` — working out of the box. Upstream LLM
 errors surface the provider's response body in the logs.
 
+Admins can also configure, per instance (Settings → AI / LLM):
+
+- **Several selectable presets** — each a full connection: display name, stable
+  identifier, base URL, model id, API key, headers and extra chat-completion
+  body params (e.g. `max_tokens` or a thinking/`reasoning_effort` config). This
+  lets an admin offer distinct providers (Anthropic, Mistral, …) as presets.
+  Any omitted field falls back to the instance-level default below. Users pick a
+  preset as their saved default — the dropdown shows each preset's display name,
+  but the selection is stored by its stable identifier, so renaming a display
+  name never breaks existing selections. The chosen preset's base URL, model,
+  key, headers and body are used for their requests. Users may also add their
+  own personal presets.
+- **Extra request headers** — arbitrary headers added to every outbound LLM
+  request (e.g. a provider's zero-data-retention header). Instance headers apply
+  to everyone; a preset's and a user's personal headers layer on top.
+
+The connection test (Settings → AI / LLM → *Test connection*) sends a small
+"hello world" message using the configured headers and the selected model's body
+params and confirms a reply comes back — so it also validates ZDR headers and a
+thinking config, not just reachability.
+
 The web frontend has its own configuration (`API_URL`, etc.) — see the [openkoutsi-web](https://github.com/openkoutsi/openkoutsi-web) repository.
 
 ## Integrations
