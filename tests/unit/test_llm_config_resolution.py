@@ -171,9 +171,9 @@ class TestNoMixingRule:
         assert cfg.key_source == "none"
         dec.assert_not_called()
 
-    def test_requested_model_override_respected_in_byok(self):
-        # A per-request override (e.g. chat body.model) must win over the saved
-        # model even in BYOK mode, without pulling in an instance preset name.
+    def test_requested_model_ignored_in_byok(self):
+        # Per-request model selection is not supported in BYOK mode: the saved
+        # model is used, and never an instance preset name.
         inst = _instance(llm_models=[{"name": "inst", "base_url": "https://inst/v1"}])
         cfg = resolve_llm_config(
             _athlete(llm_base_url="http://my-own/v1", llm_model="saved-model"),
@@ -181,7 +181,7 @@ class TestNoMixingRule:
         )
         assert cfg.source == "user"
         assert cfg.base_url == "http://my-own/v1"
-        assert cfg.model == "override-model"
+        assert cfg.model == "saved-model"
 
     def test_byok_base_url_without_model_raises_no_model(self):
         inst = _instance(llm_models=[])

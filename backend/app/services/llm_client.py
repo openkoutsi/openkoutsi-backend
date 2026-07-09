@@ -216,9 +216,10 @@ def resolve_llm(
         if byok_from_preset:
             model = str(ath_p.get("model") or name).strip()
         else:
-            # Respect a per-request override, else the athlete's saved model.
-            # (Never `name`, which may have fallen through to an instance preset.)
-            model = (requested_model or "").strip() or (athlete_settings.get("llm_model") or "").strip()
+            # BYOK uses the athlete's saved model. Per-request model selection is
+            # not supported here (and never `name`, which may have fallen through
+            # to an instance preset).
+            model = (athlete_settings.get("llm_model") or "").strip()
 
         api_key: str | None = None
         key_source: KeySource = "none"
