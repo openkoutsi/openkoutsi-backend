@@ -1,0 +1,12 @@
+# promptfoo local artifacts
+.promptfoo/
+output/
+*.eval.json
+promptfoo-errors.log
+
+# python
+__pycache__/
+*.pyc
+
+# stray data dir if the backend config is imported from here
+/data/

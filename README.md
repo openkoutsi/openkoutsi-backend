@@ -194,6 +194,16 @@ Detailed production setup, the container image list, GHCR auth, bridge
 registration steps, and the legacy bare-metal/systemd path are in
 [DEPLOY.md](DEPLOY.md).
 
+## Evaluating LLM providers/models
+
+[`llm-eval/`](llm-eval/) is a standalone [promptfoo](https://www.promptfoo.dev/)
+project for comparing LLM providers/models on prompts that mirror the four places
+the platform calls an LLM (plan generation, workout synthesis, activity analysis,
+training-status). It imports the real prompt builders so the eval never drifts
+from production, grades the JSON families objectively and the prose ones via a
+side-by-side web UI, and is not wired into the app or CI. See
+[llm-eval/README.md](llm-eval/README.md).
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
