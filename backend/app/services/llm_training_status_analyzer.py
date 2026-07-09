@@ -33,7 +33,7 @@ from .llm_client import (
     apply_body_extras,
     merge_llm_headers,
     raise_for_llm_status,
-    resolve_instance_llm,
+    resolve_llm_config,
     temperature_param,
 )
 
@@ -224,12 +224,14 @@ async def _stream_status_analysis(
         result = await reg.execute(select(InstanceSettings).limit(1))
         instance = result.scalar_one_or_none()
 
-    cfg = resolve_instance_llm(instance)
+    # Resolve the athlete's effective LLM config, exactly like the chat proxy:
+    # their own BYOK server if configured, else their selected instance preset
+    # (``app_settings["llm_model"]``), else the instance default (first preset).
+    # BYOK calls resolve to ``source == "user"`` and are skipped by usage
+    # recording (the hoster pays nothing for them).
+    cfg = resolve_llm_config(athlete, instance, user_id)
     if usage_out is not None:
         usage_out["cfg"] = cfg
-
-    if not cfg.base_url or not cfg.model:
-        raise ValueError("LLM base URL and model must be configured in Settings → AI / LLM")
 
     url = f"{cfg.base_url.rstrip('/')}/chat/completions"
     check_url_safe(url)

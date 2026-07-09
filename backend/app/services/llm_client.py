@@ -279,8 +279,8 @@ def resolve_llm(
 def resolve_instance_llm(instance: InstanceSettings | None) -> ResolvedLlm:
     """Instance-only resolution (the instance's preset list; first = default).
 
-    Used by admin diagnostics and the automated analysers, which are not tied
-    to a particular athlete's personal LLM overrides.
+    Used by admin diagnostics that are not tied to a particular athlete's
+    personal LLM overrides.
     """
     return resolve_llm(instance=instance)
 

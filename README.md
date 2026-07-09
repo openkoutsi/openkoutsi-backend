@@ -159,7 +159,10 @@ base URL, model id, API key, headers and extra chat-completion body params (e.g.
 distinct providers (Anthropic, Mistral, …) as presets. **The first preset in the
 list is the instance default.** Users pick a preset — the dropdown shows each
 preset's display name, but the selection is stored by its stable identifier, so
-renaming a display name never breaks existing selections.
+renaming a display name never breaks existing selections. A user's selected
+preset (or BYOK server) is honoured everywhere an LLM is called on their behalf —
+the chat proxy **and** the background analysers (activity analysis, training
+status) — falling back to the instance default only when they haven't chosen one.
 
 **Bring your own LLM (BYOK).** Any user can instead point openkoutsi at their
 own OpenAI-compatible endpoint under Settings → AI / LLM (base URL + model +
