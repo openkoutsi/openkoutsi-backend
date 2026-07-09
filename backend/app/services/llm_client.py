@@ -14,12 +14,12 @@ No-mixing rule (BYOK)
 ---------------------
 As soon as the athlete configures their *own* base URL (the single
 ``llm_base_url`` field, or an athlete-level preset with a ``base_url``),
-resolution uses **only** athlete-level values (model, key, headers) plus the
-env *default model* — instance base URL, instance presets, the instance API
-key and instance headers are ignored entirely. This guarantees the instance's
-(or the hoster's) API key can never be sent to a user-chosen server. The
-resulting :class:`ResolvedLlm` carries a ``source``/``key_source`` signal so
-callers (and issue #9's gating) can tell where the config came from.
+resolution uses **only** athlete-level values (model, key, headers) — instance
+presets, the instance API key and instance headers are ignored entirely. This
+guarantees the instance's (or the hoster's) API key can never be sent to a
+user-chosen server. The resulting :class:`ResolvedLlm` carries a
+``source``/``key_source`` signal so callers (and issue #9's gating) can tell
+where the config came from.
 """
 
 from __future__ import annotations
@@ -52,6 +52,7 @@ class LlmConfigError(ValueError):
 
     Codes:
       * ``no_base_url`` — nothing resolves to a base URL (→ HTTP 400).
+      * ``no_model`` — a base URL but no model id (→ HTTP 400).
       * ``server_not_allowed`` — a BYOK URL is outside ``LLM_ALLOWED_SERVERS``
         (→ HTTP 403).
       * ``instance_fallback_disabled`` — the user has no own config and the
@@ -66,6 +67,7 @@ class LlmConfigError(ValueError):
 # HTTP status each :class:`LlmConfigError` code maps to (used by API layers).
 LLM_ERROR_STATUS: dict[str, int] = {
     "no_base_url": 400,
+    "no_model": 400,
     "server_not_allowed": 403,
     "instance_fallback_disabled": 403,
 }
@@ -214,7 +216,9 @@ def resolve_llm(
         if byok_from_preset:
             model = str(ath_p.get("model") or name).strip()
         else:
-            model = (athlete_settings.get("llm_model") or "").strip()
+            # Respect a per-request override, else the athlete's saved model.
+            # (Never `name`, which may have fallen through to an instance preset.)
+            model = (requested_model or "").strip() or (athlete_settings.get("llm_model") or "").strip()
 
         api_key: str | None = None
         key_source: KeySource = "none"
@@ -344,6 +348,8 @@ def resolve_llm_config(
       config, raise ``LlmConfigError("instance_fallback_disabled")`` instead of
       falling back to the instance/env config.
     * no resolvable base URL → ``LlmConfigError("no_base_url")``.
+    * a base URL but no model → ``LlmConfigError("no_model")`` (so a BYOK user who
+      forgot the model gets a clear 400 instead of an opaque upstream 502).
     * when the base URL is user-chosen (``source == "user"``) and an allow-list
       is configured, the URL must be on it, else
       ``LlmConfigError("server_not_allowed")``. The allow-list only ever
@@ -366,6 +372,12 @@ def resolve_llm_config(
         raise LlmConfigError(
             "no_base_url",
             "LLM not configured. Set a base URL in Settings → AI / LLM or ask your administrator.",
+        )
+
+    if not cfg.model:
+        raise LlmConfigError(
+            "no_model",
+            "No LLM model configured. Set a model in Settings → AI / LLM or ask your administrator.",
         )
 
     if cfg.source == "user":

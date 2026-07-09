@@ -143,10 +143,6 @@ WAHOO_CLIENT_SECRET=
 WAHOO_BRIDGE_URL=                  # public URL of the Wahoo bridge, e.g. https://wahoo-bridge.your-domain
 WAHOO_BRIDGE_SECRET=               # shared secret — must match WAHOO_BRIDGE_SECRET in wahoo_bridge/.env
 
-# LLM (OpenAI-compatible). There are no server-side LLM env defaults: all
-# connections are presets — configured instance-wide by an admin under
-# Settings → AI / LLM (first preset = default), or per-user via BYOK.
-
 # Optional: comma-separated allow-list of LLM base URLs users may bring (BYOK).
 # When set, BYOK URLs are restricted to this list (at save and use time). Leave
 # blank to allow any URL (SSRF guards still apply).

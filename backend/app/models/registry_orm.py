@@ -89,8 +89,8 @@ class InstanceSettings(RegistryBase):
     id: Mapped[int] = mapped_column(primary_key=True, default=1)
     # Curated list of selectable presets — the instance's entire LLM config.
     # The **first entry is the instance default** selection. Each entry is a
-    # self-contained (or partial) connection; missing fields fall back to the
-    # global env vars (``LLM_BASE_URL`` / ``LLM_API_KEY`` / ``LLM_MODEL``):
+    # self-contained connection (there are no instance single-config or env-var
+    # fallbacks; an omitted field is simply absent):
     #   ``{"name": str,            # stable identifier / selection value
     #      "label": str | None,    # human-friendly display name
     #      "base_url": str | None,

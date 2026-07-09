@@ -163,11 +163,31 @@ class TestNoMixingRule:
             "backend.app.core.file_encryption.decrypt_instance_secret",
             return_value="sk-instance",
         ) as dec:
-            cfg = resolve_llm_config(_athlete(llm_base_url="http://my-own/v1"), inst, "user-1")
+            cfg = resolve_llm_config(
+                _athlete(llm_base_url="http://my-own/v1", llm_model="m"), inst, "user-1"
+            )
         assert cfg.base_url == "http://my-own/v1"
         assert cfg.api_key is None
         assert cfg.key_source == "none"
         dec.assert_not_called()
+
+    def test_requested_model_override_respected_in_byok(self):
+        # A per-request override (e.g. chat body.model) must win over the saved
+        # model even in BYOK mode, without pulling in an instance preset name.
+        inst = _instance(llm_models=[{"name": "inst", "base_url": "https://inst/v1"}])
+        cfg = resolve_llm_config(
+            _athlete(llm_base_url="http://my-own/v1", llm_model="saved-model"),
+            inst, "user-1", requested_model="override-model",
+        )
+        assert cfg.source == "user"
+        assert cfg.base_url == "http://my-own/v1"
+        assert cfg.model == "override-model"
+
+    def test_byok_base_url_without_model_raises_no_model(self):
+        inst = _instance(llm_models=[])
+        with pytest.raises(LlmConfigError) as exc:
+            resolve_llm_config(_athlete(llm_base_url="http://my-own/v1"), inst, "user-1")
+        assert exc.value.code == "no_model"
 
     def test_user_own_key_is_used(self):
         inst = _instance(llm_models=[{"name": "inst", "base_url": "https://inst/v1"}])
@@ -176,7 +196,7 @@ class TestNoMixingRule:
             return_value="sk-user",
         ) as dec:
             cfg = resolve_llm_config(
-                _athlete(llm_base_url="http://my-own/v1", llm_api_key_enc="UENC"),
+                _athlete(llm_base_url="http://my-own/v1", llm_model="m", llm_api_key_enc="UENC"),
                 inst, "user-1",
             )
         assert cfg.api_key == "sk-user"
@@ -189,7 +209,9 @@ class TestUseTimeAllowlist:
         inst = _instance(llm_models=[])
         with patch("backend.app.services.llm_client.settings") as ms:
             ms.llm_allowed_servers_list = ["http://my-own/v1"]
-            cfg = resolve_llm_config(_athlete(llm_base_url="http://my-own/v1"), inst, "user-1")
+            cfg = resolve_llm_config(
+                _athlete(llm_base_url="http://my-own/v1", llm_model="m"), inst, "user-1"
+            )
         assert cfg.base_url == "http://my-own/v1"
 
     def test_user_url_off_allowlist_is_rejected(self):
@@ -197,7 +219,9 @@ class TestUseTimeAllowlist:
         with patch("backend.app.services.llm_client.settings") as ms:
             ms.llm_allowed_servers_list = ["http://allowed/v1"]
             with pytest.raises(LlmConfigError) as exc:
-                resolve_llm_config(_athlete(llm_base_url="http://blocked/v1"), inst, "user-1")
+                resolve_llm_config(
+                    _athlete(llm_base_url="http://blocked/v1", llm_model="m"), inst, "user-1"
+                )
         assert exc.value.code == "server_not_allowed"
 
     def test_allowlist_does_not_restrict_instance_config(self):
@@ -226,7 +250,7 @@ class TestInstanceFallbackHook:
     def test_user_config_passes_with_fallback_disabled(self):
         inst = _instance(llm_models=[{"name": "m", "base_url": "http://instance/v1"}])
         cfg = resolve_llm_config(
-            _athlete(llm_base_url="http://my-own/v1"), inst, "user-1",
+            _athlete(llm_base_url="http://my-own/v1", llm_model="m"), inst, "user-1",
             allow_instance_fallback=False,
         )
         assert cfg.base_url == "http://my-own/v1"
