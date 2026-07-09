@@ -1,0 +1,131 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
+#
+# LLM provider/model evaluation for openkoutsi.
+#
+# One dispatching prompt (prompts/build.py) renders every family's prompt via
+# the *real* backend builders, so what each model sees matches production. Each
+# test row is a {family, scenario} pair with the objective assert for that
+# family. Run with the project venv's Python so `backend`/`openkoutsi` import:
+#
+#   cd llm-eval
+#   export PROMPTFOO_PYTHON=../.venv/bin/python   # created by `uv sync` in repo root
+#   export ANTHROPIC_API_KEY=...                  # + OPENAI_API_KEY etc. as needed
+#   npx --yes promptfoo@latest eval
+#   npx --yes promptfoo@latest view               # side-by-side outputs for human rating
+#
+# See README.md for details.
+
+description: openkoutsi LLM provider/model comparison
+
+prompts:
+  - id: file://prompts/build.py:build
+    label: openkoutsi
+
+# ── Model roster ─────────────────────────────────────────────────────────────
+# Every model is called through its OpenAI-compatible /chat/completions endpoint
+# — the same path backend/app/services/llm_client.py:call_llm uses, and the same
+# way BYOK works in the app. Add/remove rows freely; keys come from env vars.
+# Pricing (per 1M tokens, input/output) is noted for reference only.
+providers:
+  # Anthropic (OpenAI-compatible endpoint). Reasoning models reject a non-1
+  # temperature, so — like the app — we send none. Pricing via the claude-api skill.
+  - id: openai:chat:claude-opus-4-8        # $5 / $25
+    label: opus-4.8
+    config:
+      apiBaseUrl: https://api.anthropic.com/v1
+      apiKeyEnvar: ANTHROPIC_API_KEY
+      max_tokens: 8192
+  - id: openai:chat:claude-sonnet-5        # $3 / $15 ($2/$10 intro through 2026-08-31)
+    label: sonnet-5
+    config:
+      apiBaseUrl: https://api.anthropic.com/v1
+      apiKeyEnvar: ANTHROPIC_API_KEY
+      max_tokens: 8192
+  - id: openai:chat:claude-haiku-4-5       # $1 / $5
+    label: haiku-4.5
+    config:
+      apiBaseUrl: https://api.anthropic.com/v1
+      apiKeyEnvar: ANTHROPIC_API_KEY
+      max_tokens: 8192
+
+  # ── Fill in and uncomment to add more providers ────────────────────────────
+  # - id: openai:chat:claude-fable-5       # $10 / $50 — most capable
+  #   label: fable-5
+  #   config: {apiBaseUrl: https://api.anthropic.com/v1, apiKeyEnvar: ANTHROPIC_API_KEY, max_tokens: 8192}
+  # - id: openai:chat:gpt-5                 # OpenAI — set the model id you have access to
+  #   label: gpt-5
+  #   config: {apiKeyEnvar: OPENAI_API_KEY, max_tokens: 8192}
+  # - id: openai:chat:gemini-2.5-pro        # Google's OpenAI-compatible endpoint
+  #   label: gemini-2.5-pro
+  #   config: {apiBaseUrl: https://generativelanguage.googleapis.com/v1beta/openai, apiKeyEnvar: GEMINI_API_KEY, max_tokens: 8192}
+  # - id: openai:chat:llama3.1              # Local Ollama / vLLM (OpenAI-compatible)
+  #   label: local-llama3.1
+  #   config: {apiBaseUrl: http://localhost:11434/v1, apiKey: ollama, max_tokens: 8192}
+
+# ── Optional automated first-pass grader for the prose families ──────────────
+# Uncomment to also score coaching quality with an LLM judge (costs extra tokens).
+# defaultTest is left empty; per-test asserts below carry the objective checks.
+
+tests:
+  # Family 1 — training-plan generation (JSON, fully objective)
+  - description: "plan / beginner base build (4 wk)"
+    vars: {family: plan, scenario: beginner_base_build}
+    assert:
+      - type: python
+        value: file://asserts/checks.py:plan
+  - description: "plan / race prep gran fondo (8 wk, taper)"
+    vars: {family: plan, scenario: race_prep_gran_fondo}
+    assert:
+      - type: python
+        value: file://asserts/checks.py:plan
+
+  # Family 2 — structured workout synthesis (JSON, fully objective)
+  - description: "workout / VO2max intervals"
+    vars: {family: workout, scenario: vo2max_intervals}
+    assert:
+      - type: python
+        value: file://asserts/checks.py:workout
+  - description: "workout / long endurance ride"
+    vars: {family: workout, scenario: endurance_long_ride}
+    assert:
+      - type: python
+        value: file://asserts/checks.py:workout
+  - description: "workout / sweetspot over-unders (nested-repeat temptation)"
+    vars: {family: workout, scenario: sweetspot_over_unders}
+    assert:
+      - type: python
+        value: file://asserts/checks.py:workout
+
+  # Family 3 — activity analysis (prose + MOOD; format objective, quality subjective)
+  - description: "activity / PR hard ride"
+    vars: {family: activity, scenario: pr_hard_ride}
+    assert:
+      - type: python
+        value: file://asserts/checks.py:mood_prose
+      # - type: llm-rubric   # optional automated quality pass
+      #   value: >-
+      #     Coaching feedback that addresses this ride's actual numbers, gives 1-2
+      #     specific next-session recommendations, and whose tone matches its MOOD line.
+  - description: "activity / recovery ride (Finnish locale)"
+    vars: {family: activity, scenario: recovery_ride_finnish}
+    assert:
+      - type: python
+        value: file://asserts/checks.py:mood_prose
+      # - type: llm-rubric
+      #   value: The feedback is written in Finnish and matches its MOOD line.
+
+  # Family 4 — daily training-status (prose + MOOD; format objective, quality subjective)
+  - description: "status / on track (friendly)"
+    vars: {family: status, scenario: on_track_friendly}
+    assert:
+      - type: python
+        value: file://asserts/checks.py:mood_prose
+  - description: "status / missed sessions (stern, adherence rules)"
+    vars: {family: status, scenario: missed_sessions_stern}
+    assert:
+      - type: python
+        value: file://asserts/checks.py:mood_prose
+      # - type: llm-rubric
+      #   value: >-
+      #     Correctly treats today's not-yet-done workout as not missed, is direct
+      #     about the earlier missed session, and tempers the one with a skip reason.
