@@ -12,6 +12,7 @@ from starlette.requests import Request as StarletteRequest
 from backend.app.core.config import settings
 from backend.app.core.limiter import limiter
 from backend.app.db.registry import init_registry_db
+from backend.app.db.usage import init_usage_db
 
 log = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ async def lifespan(app: FastAPI):
     from backend.app.api.wahoo import wahoo_bridge_poller
 
     await init_registry_db()
+    await init_usage_db()
 
     strava_poller = asyncio.create_task(strava_bridge_poller())
     wahoo_poller = asyncio.create_task(wahoo_bridge_poller())

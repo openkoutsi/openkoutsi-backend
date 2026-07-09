@@ -249,13 +249,19 @@ async def _process_event_for_user(
             await recalculate_from(athlete.id, start_date, session)
 
         app_cfg = athlete.app_settings or {}
-        if app_cfg.get("auto_analyze"):
+        # Issue #9: skip instance-paid auto hooks for denied users on a gated
+        # instance (only pay the registry lookup when a hook is actually enabled).
+        llm_ok = True
+        if app_cfg.get("auto_analyze") or app_cfg.get("auto_training_status"):
+            from backend.app.services.llm_access import auto_analysis_allowed
+            llm_ok = await auto_analysis_allowed(user_id, athlete)
+        if llm_ok and app_cfg.get("auto_analyze"):
             from backend.app.services.llm_activity_analyzer import analyze_activity_bg
             activity.analysis_status = "pending"
             await session.commit()
             asyncio.create_task(analyze_activity_bg(activity.id, athlete.id, user_id))
 
-        if app_cfg.get("auto_training_status") and athlete.training_status_status != "pending":
+        if llm_ok and app_cfg.get("auto_training_status") and athlete.training_status_status != "pending":
             from backend.app.services.llm_training_status_analyzer import analyze_training_status_bg
             athlete.training_status_status = "pending"
             athlete.training_status = None

@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import JSON, DateTime, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.app.core.encryption import EncryptedString
@@ -101,6 +101,54 @@ class InstanceSettings(RegistryBase):
     llm_models: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     llm_analysis_context: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     admin_contact: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Opt-in gate (issue #9): when true, only users with an active LLM-access
+    # entitlement may use the instance's LLM credentials. Everyone else can still
+    # use LLM features via BYOK, or gets a machine-readable "subscription
+    # required" error. Defaults to off — behaviour is unchanged until flipped.
+    llm_requires_subscription: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )
+
+
+class LlmEntitlement(RegistryBase):
+    """Per-user "LLM access" entitlement (issue #9).
+
+    A table rather than a role: entitlements carry expiry, provenance and audit
+    fields that a plain role JSON list can't, and the table is an idempotent
+    upsert target for a future payment handler (#16). Roles keep meaning
+    *permissions*; entitlements mean *commercial state*.
+
+    Phase 1 grants are ``source="manual"`` (admin console). Phase 2 will use a
+    free-form payment-provider slug (``stripe``, ``paddle``, …) — not an enum.
+
+    Entitled predicate::
+
+        status == "active" and starts_at <= now and (expires_at is None or expires_at > now)
+    """
+
+    __tablename__ = "llm_entitlements"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(
+        String, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False
+    )
+    status: Mapped[str] = mapped_column(String, nullable=False, default="active")
+    source: Mapped[str] = mapped_column(String, nullable=False, default="manual")
+    granted_by_user_id: Mapped[Optional[str]] = mapped_column(
+        String, ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    starts_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=_now
+    )
+    expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    external_ref: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
     )

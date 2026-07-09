@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.registry_orm import InstanceSettings
 from ..models.user_orm import Athlete, PlannedWorkout, WorkoutDefinition
+from .llm_access import record_llm_usage
 from .llm_client import call_llm, extract_json, resolve_llm_config
 from openkoutsi.workout_estimator import estimate_duration_s, estimate_tss
 from openkoutsi.workout_schema import RepeatBlock, WorkoutStepOrRepeat
@@ -157,23 +158,29 @@ async def generate_workout_definition_llm(
     instance: InstanceSettings | None = None,
     user_id: str = "",
     sport_type: str = "Ride",
+    allow_instance_fallback: bool = True,
 ) -> WorkoutDefinition:
     """Synthesize and persist a structured ``WorkoutDefinition`` for a planned workout.
 
     The returned definition is linked back onto ``planned_workout.workout_definition_id``
     (the row is flushed, not committed — the caller owns the transaction).
 
-    Raises ``ValueError`` when the LLM is not configured and
-    ``WorkoutGenerationError`` when the model cannot produce a valid workout.
+    ``allow_instance_fallback=False`` (issue #9, BYOK-mode on a gated instance)
+    forbids falling back to the instance credentials. Raises ``ValueError`` when
+    the LLM is not configured and ``WorkoutGenerationError`` when the model
+    cannot produce a valid workout.
     """
-    cfg = resolve_llm_config(athlete, instance, user_id)
+    cfg = resolve_llm_config(
+        athlete, instance, user_id, allow_instance_fallback=allow_instance_fallback
+    )
 
     user_prompt = _build_user_prompt(planned_workout, athlete.ftp, sport_type)
 
-    raw = await call_llm(
+    raw, usage = await call_llm(
         user_prompt, cfg.base_url, cfg.model, cfg.api_key, system_prompt=_SYSTEM_PROMPT,
         extra_headers=cfg.extra_headers, extra_body=cfg.extra_body,
     )
+    await record_llm_usage(user_id=user_id, feature="workout_generate", cfg=cfg, usage=usage)
     try:
         steps = _parse_steps(raw)
     except WorkoutGenerationError:
@@ -183,10 +190,11 @@ async def generate_workout_definition_llm(
             + "\n\nYour previous response could not be parsed as valid JSON matching "
             "the required schema. Respond with ONLY the JSON object, nothing else."
         )
-        raw = await call_llm(
+        raw, usage = await call_llm(
             correction, cfg.base_url, cfg.model, cfg.api_key, system_prompt=_SYSTEM_PROMPT,
             extra_headers=cfg.extra_headers, extra_body=cfg.extra_body,
         )
+        await record_llm_usage(user_id=user_id, feature="workout_generate", cfg=cfg, usage=usage)
         steps = _parse_steps(raw)  # raises WorkoutGenerationError if still invalid
 
     name = (planned_workout.workout_type or "Workout").replace("-", " ").title()

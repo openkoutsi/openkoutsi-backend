@@ -28,6 +28,7 @@ from ..db.user_session import get_user_session_factory
 from ..models.registry_orm import InstanceSettings
 from ..models.user_orm import Activity, Athlete, DailyMetric, Goal, PlannedWorkout, TrainingPlan
 from ..schemas.metrics import _tsb_to_form
+from .llm_access import record_llm_usage, usage_from_sse_data
 from .llm_client import (
     apply_body_extras,
     merge_llm_headers,
@@ -211,14 +212,21 @@ async def _stream_status_analysis(
     now: datetime,
     locale: str | None = None,
     coaching_style: str | None = None,
+    usage_out: dict | None = None,
 ) -> AsyncIterator[str]:
-    """Yield text chunks from the LLM via streaming SSE."""
+    """Yield text chunks from the LLM via streaming SSE.
+
+    When ``usage_out`` is provided it is populated with ``{"cfg", "usage"}`` so
+    the caller can record the instance-paid token usage (issue #9).
+    """
     instance: InstanceSettings | None = None
     async with _RegistrySessionLocal() as reg:
         result = await reg.execute(select(InstanceSettings).limit(1))
         instance = result.scalar_one_or_none()
 
     cfg = resolve_instance_llm(instance)
+    if usage_out is not None:
+        usage_out["cfg"] = cfg
 
     if not cfg.base_url or not cfg.model:
         raise ValueError("LLM base URL and model must be configured in Settings → AI / LLM")
@@ -242,20 +250,29 @@ async def _stream_status_analysis(
     if analysis_context and analysis_context.strip():
         messages.insert(1, {"role": "system", "content": analysis_context.strip()})
 
-    payload = apply_body_extras(
-        {
+    def _payload(include_usage: bool) -> dict:
+        base: dict = {
             "model": cfg.model,
             "messages": messages,
             **temperature_param(),
             "stream": True,
-        },
-        cfg.extra_body,
-    )
+        }
+        if include_usage:
+            base["stream_options"] = {"include_usage": True}
+        return apply_body_extras(base, cfg.extra_body)
 
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(300.0, connect=10.0)
     ) as client:
-        async with client.stream("POST", url, json=payload, headers=headers) as resp:
+        # Ask for a trailing usage chunk; retry once without it if the upstream
+        # rejects stream_options (Ollama-family tolerance).
+        cm = client.stream("POST", url, json=_payload(True), headers=headers)
+        resp = await cm.__aenter__()
+        if getattr(resp, "is_error", False):
+            await cm.__aexit__(None, None, None)
+            cm = client.stream("POST", url, json=_payload(False), headers=headers)
+            resp = await cm.__aenter__()
+        try:
             await raise_for_llm_status(resp, url)
             async for line in resp.aiter_lines():
                 if not line.startswith("data: "):
@@ -263,6 +280,10 @@ async def _stream_status_analysis(
                 data = line[6:]
                 if data.strip() == "[DONE]":
                     break
+                if usage_out is not None:
+                    usage = usage_from_sse_data(data)
+                    if usage is not None:
+                        usage_out["usage"] = usage
                 try:
                     chunk = json.loads(data)
                     content = chunk["choices"][0]["delta"].get("content", "")
@@ -270,6 +291,8 @@ async def _stream_status_analysis(
                         yield content
                 except (json.JSONDecodeError, KeyError, IndexError):
                     continue
+        finally:
+            await cm.__aexit__(None, None, None)
 
 
 async def analyze_training_status_bg(
@@ -358,6 +381,8 @@ async def analyze_training_status_bg(
             buffer: list[str] = []
             last_flush = time.monotonic()
             accumulated = ""
+            usage_out: dict = {}
+            started = time.monotonic()
 
             try:
                 async for chunk in _stream_status_analysis(
@@ -365,6 +390,7 @@ async def analyze_training_status_bg(
                     recent_activities, current_metric,
                     active_plan, this_week_workouts, active_goals,
                     now, locale=resolved_locale, coaching_style=coaching_style,
+                    usage_out=usage_out,
                 ):
                     buffer.append(chunk)
                     if time.monotonic() - last_flush >= 0.5:
@@ -388,6 +414,17 @@ async def analyze_training_status_bg(
                 athlete.training_status_date = today
                 athlete.training_status_updated_at = datetime.now(timezone.utc)
                 await session.commit()
+            finally:
+                # Record instance-paid token usage (issue #9). Fire-and-forget.
+                cfg = usage_out.get("cfg")
+                if cfg is not None:
+                    await record_llm_usage(
+                        user_id=user_id,
+                        feature="training_status",
+                        cfg=cfg,
+                        usage=usage_out.get("usage"),
+                        duration_ms=int((time.monotonic() - started) * 1000),
+                    )
 
     except Exception:
         # Session acquisition or early DB query failed — open a fresh session to

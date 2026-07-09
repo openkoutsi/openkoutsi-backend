@@ -137,6 +137,10 @@ WAHOO_BRIDGE_SECRET=
 # Optional: restrict which LLM base URLs users may bring (BYOK). Comma-separated;
 # empty = users may bring any URL (subject to SSRF guards).
 LLM_ALLOWED_SERVERS=
+
+# Optional: path to the dedicated LLM-usage database (per-call token accounting
+# for instance-paid calls). Empty = <DATA_DIR>/llm_usage.db.
+LLM_USAGE_DB=
 ```
 
 There are no server-side LLM env-var defaults: all LLM connections are defined
@@ -171,6 +175,22 @@ connection* on the user BYOK card (`POST /api/llm/test-my-connection`) — send 
 small "hello world" message using the configured headers and the selected
 model's body params and confirm a reply comes back, so they also validate ZDR
 headers and a thinking config, not just reachability.
+
+**LLM subscription gating + usage tracking (opt-in).** An admin can flip
+`llm_requires_subscription` (Settings → AI / LLM) to require an "LLM access"
+entitlement to use the *instance's* LLM credentials. It defaults **off**, so
+self-hosted behaviour is unchanged until an admin turns it on. When on, users
+without an entitlement can still use every LLM feature via BYOK, or receive a
+machine-readable `llm_subscription_required` 403 the frontend turns into an
+upsell. Admins grant/revoke entitlements per user in the admin console
+(`PUT /api/admin/users/{id}/llm-entitlement`); `GET /api/llm/access` is the
+frontend's source of truth for a user's state. Independently, every
+**instance-paid** LLM call's token usage (input and output counted separately,
+plus the provider and model) is recorded in a **separate** database
+(`LLM_USAGE_DB`, default `data/llm_usage.db`) so the hoster can compute average
+cost per user over any period via `GET /api/admin/llm-usage/summary`
+(day/week/month buckets). BYOK calls are never recorded — the user pays their
+own provider.
 
 The web frontend has its own configuration (`API_URL`, etc.) — see the [openkoutsi-web](https://github.com/openkoutsi/openkoutsi-web) repository.
 

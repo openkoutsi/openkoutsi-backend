@@ -11,8 +11,8 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import func, select
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.auth import UserContext, get_current_user
@@ -20,10 +20,13 @@ from backend.app.core.config import settings
 from backend.app.core.file_encryption import encrypt_instance_secret
 from backend.app.core.limiter import limiter
 from backend.app.db.registry import get_registry_session
+from backend.app.db.usage import get_usage_session
 from backend.app.db.user_session import delete_user_db
+from backend.app.models.usage_orm import LlmUsage
 from backend.app.models.registry_orm import (
     InstanceSettings,
     Invitation,
+    LlmEntitlement,
     PasswordResetToken,
     ProviderConnection,
     User,
@@ -33,12 +36,17 @@ from backend.app.schemas.admin import (
     InstanceSettingsResponse,
     InvitationCreate,
     InvitationResponse,
+    LlmEntitlementSummary,
+    LlmEntitlementUpdate,
     LlmModelConfigIn,
     LlmModelConfigOut,
+    LlmUsageBucket,
+    LlmUsageSummaryResponse,
     PasswordResetLinkResponse,
     UserResponse,
     UserRolesUpdate,
 )
+from backend.app.services.llm_access import is_entitled
 from backend.app.schemas.pagination import Page, PageParams, paginate_params
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -61,7 +69,21 @@ def _roles_of(user: User) -> list[str]:
         return []
 
 
-def _user_response(user: User) -> UserResponse:
+def _entitlement_summary(ent: LlmEntitlement | None) -> LlmEntitlementSummary | None:
+    if ent is None:
+        return None
+    return LlmEntitlementSummary(
+        status=ent.status,
+        active=is_entitled(ent),
+        source=ent.source,
+        starts_at=ent.starts_at,
+        expires_at=ent.expires_at,
+        notes=ent.notes,
+        updated_at=ent.updated_at,
+    )
+
+
+def _user_response(user: User, entitlement: LlmEntitlement | None = None) -> UserResponse:
     return UserResponse(
         id=user.id,
         username=user.username,
@@ -69,6 +91,7 @@ def _user_response(user: User) -> UserResponse:
         created_at=user.created_at,
         consented_at=user.consented_at,
         consent_version=user.consent_version,
+        llm_entitlement=_entitlement_summary(entitlement),
     )
 
 
@@ -91,7 +114,19 @@ async def list_users(
         .offset(params.offset)
         .limit(params.page_size)
     )
-    items = [_user_response(u) for u in result.scalars().all()]
+    users = list(result.scalars().all())
+
+    # Bulk-load entitlements for this page in one query (no N+1, issue #9).
+    ent_by_user: dict[str, LlmEntitlement] = {}
+    if users:
+        ent_result = await session.execute(
+            select(LlmEntitlement).where(
+                LlmEntitlement.user_id.in_([u.id for u in users])
+            )
+        )
+        ent_by_user = {e.user_id: e for e in ent_result.scalars().all()}
+
+    items = [_user_response(u, ent_by_user.get(u.id)) for u in users]
     return Page.build(items, total, params.page, params.page_size)
 
 
@@ -379,6 +414,7 @@ def _settings_response(instance: InstanceSettings) -> InstanceSettingsResponse:
         llm_analysis_context=instance.llm_analysis_context,
         admin_contact=instance.admin_contact,
         llm_models=[_preset_out(e) for e in (instance.llm_models or []) if isinstance(e, dict)],
+        llm_requires_subscription=bool(instance.llm_requires_subscription),
     )
 
 
@@ -407,7 +443,168 @@ async def update_instance_settings(
         instance.admin_contact = body.admin_contact or None
     if body.llm_models is not None:
         instance.llm_models = _build_presets(body.llm_models, instance.llm_models) or None
+    if body.llm_requires_subscription is not None:
+        instance.llm_requires_subscription = bool(body.llm_requires_subscription)
 
     await session.commit()
     await session.refresh(instance)
     return _settings_response(instance)
+
+
+# ── LLM entitlements + usage stats (instance admin, issue #9) ───────────────
+
+
+@router.put("/users/{user_id}/llm-entitlement", response_model=UserResponse,
+            operation_id="setUserLlmEntitlement",
+            summary="Grant or revoke a user's LLM-access entitlement")
+async def set_llm_entitlement(
+    user_id: str,
+    body: LlmEntitlementUpdate,
+    ctx: UserContext = Depends(require_admin),
+    session: AsyncSession = Depends(get_registry_session),
+):
+    """Upsert a user's manual LLM-access entitlement (Phase 1).
+
+    Idempotent: one row per user. Records ``source="manual"`` and the granting
+    admin. Passing ``status="revoked"`` revokes access without deleting the row
+    (keeping its audit trail).
+    """
+    user = (
+        await session.execute(
+            select(User).where(User.id == user_id, User.deleted_at.is_(None))
+        )
+    ).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    ent = (
+        await session.execute(
+            select(LlmEntitlement).where(LlmEntitlement.user_id == user_id)
+        )
+    ).scalar_one_or_none()
+
+    now = datetime.now(timezone.utc)
+    if ent is None:
+        ent = LlmEntitlement(
+            user_id=user_id,
+            status=body.status,
+            source="manual",
+            granted_by_user_id=ctx.user_id,
+            starts_at=now,
+            expires_at=body.expires_at,
+            notes=body.notes,
+        )
+        session.add(ent)
+    else:
+        ent.status = body.status
+        ent.source = "manual"
+        ent.granted_by_user_id = ctx.user_id
+        ent.expires_at = body.expires_at
+        if body.notes is not None:
+            ent.notes = body.notes
+
+    await session.commit()
+    await session.refresh(ent)
+    await session.refresh(user)
+    return _user_response(user, ent)
+
+
+# SQLite strftime formats for the time-bucketed group_by values.
+_USAGE_TIME_BUCKETS = {
+    "day": "%Y-%m-%d",
+    "week": "%Y-W%W",
+    "month": "%Y-%m",
+}
+
+
+def _parse_usage_dt(raw: str | None):
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw)
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid date/time '{raw}' — use ISO format (YYYY-MM-DD).",
+        )
+
+
+@router.get("/llm-usage/summary", response_model=LlmUsageSummaryResponse,
+            operation_id="getLlmUsageSummary", summary="Aggregate instance-paid LLM usage")
+async def llm_usage_summary(
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = Query(None, alias="to"),
+    group_by: str = Query("day"),
+    user_id: str | None = Query(None),
+    _: UserContext = Depends(require_admin),
+    usage_session: AsyncSession = Depends(get_usage_session),
+):
+    """Aggregate the dedicated usage DB (instance-paid calls only; issue #9).
+
+    ``group_by`` is one of ``user | provider | feature | day | week | month``.
+    Input and output tokens are summed **separately** (never merged), plus a
+    convenience total and an ``unknown_usage_calls`` count. Combine ``user_id``
+    with ``group_by=month`` for "tokens per user per month" — the original
+    "average LLM cost per user" question. Every row is instance-paid; BYOK calls
+    are never recorded, so no filter is needed.
+    """
+    if group_by in _USAGE_TIME_BUCKETS:
+        key_expr = func.strftime(_USAGE_TIME_BUCKETS[group_by], LlmUsage.created_at)
+    elif group_by == "user":
+        key_expr = LlmUsage.user_id
+    elif group_by == "provider":
+        key_expr = LlmUsage.provider
+    elif group_by == "feature":
+        key_expr = LlmUsage.feature
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail="group_by must be one of user, provider, feature, day, week, month.",
+        )
+
+    unknown = func.sum(
+        case(
+            (
+                and_(
+                    LlmUsage.prompt_tokens.is_(None),
+                    LlmUsage.completion_tokens.is_(None),
+                ),
+                1,
+            ),
+            else_=0,
+        )
+    )
+
+    stmt = select(
+        key_expr.label("bucket"),
+        func.count().label("calls"),
+        func.coalesce(func.sum(LlmUsage.prompt_tokens), 0),
+        func.coalesce(func.sum(LlmUsage.completion_tokens), 0),
+        func.coalesce(func.sum(LlmUsage.total_tokens), 0),
+        unknown,
+    )
+
+    from_dt = _parse_usage_dt(from_)
+    to_dt = _parse_usage_dt(to)
+    if from_dt is not None:
+        stmt = stmt.where(LlmUsage.created_at >= from_dt)
+    if to_dt is not None:
+        stmt = stmt.where(LlmUsage.created_at <= to_dt)
+    if user_id:
+        stmt = stmt.where(LlmUsage.user_id == user_id)
+
+    stmt = stmt.group_by(key_expr).order_by(key_expr)
+
+    rows = (await usage_session.execute(stmt)).all()
+    buckets = [
+        LlmUsageBucket(
+            key=row[0],
+            calls=row[1],
+            prompt_tokens=int(row[2] or 0),
+            completion_tokens=int(row[3] or 0),
+            total_tokens=int(row[4] or 0),
+            unknown_usage_calls=int(row[5] or 0),
+        )
+        for row in rows
+    ]
+    return LlmUsageSummaryResponse(group_by=group_by, from_=from_, to=to, buckets=buckets)

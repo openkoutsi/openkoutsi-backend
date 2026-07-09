@@ -58,6 +58,12 @@ class Settings(BaseSettings):
             return []
         return [s.strip() for s in self.llm_allowed_servers.split(",") if s.strip()]
 
+    # Path to the dedicated LLM-usage database (append-only per-call token
+    # accounting for instance-paid calls; issue #9). Kept in its own SQLite file
+    # so its unbounded, high-volume rows can be pruned/rotated independently of
+    # the registry DB. Leave empty to default to ``<data_dir>/llm_usage.db``.
+    llm_usage_db: str = ""
+
     # Field-level encryption key for sensitive DB columns (Fernet/base64-urlsafe, 32 bytes).
     # Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
     # Leave empty in development to disable encryption (tokens stored as plaintext).
@@ -68,6 +74,16 @@ class Settings(BaseSettings):
     @property
     def registry_db_path(self) -> str:
         return str(Path(self.data_dir) / "registry.db")
+
+    @property
+    def llm_usage_db_path(self) -> str:
+        """Filesystem path of the dedicated LLM-usage database.
+
+        Configurable via ``LLM_USAGE_DB``; defaults to ``<data_dir>/llm_usage.db``.
+        """
+        if self.llm_usage_db:
+            return self.llm_usage_db
+        return str(Path(self.data_dir) / "llm_usage.db")
 
     def user_data_dir(self, user_id: str) -> Path:
         return Path(self.data_dir) / "users" / user_id

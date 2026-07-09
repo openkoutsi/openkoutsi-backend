@@ -403,8 +403,14 @@ async def call_llm(
     temperature: float | None = None,
     extra_headers: dict[str, str] | None = None,
     extra_body: dict[str, Any] | None = None,
-) -> str:
-    """Call the OpenAI-compatible chat completions endpoint, return raw text."""
+) -> tuple[str, dict[str, Any] | None]:
+    """Call the OpenAI-compatible chat completions endpoint.
+
+    Returns ``(text, usage)`` where ``usage`` is the response's ``usage`` object
+    (``{"prompt_tokens", "completion_tokens", "total_tokens"}``) or ``None`` when
+    the upstream omits it. ``call_llm`` stays transport-only — the caller decides
+    whether to record the usage (issue #9), since only instance-paid calls count.
+    """
     headers: dict[str, str] = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -428,4 +434,6 @@ async def call_llm(
         resp = await client.post(url, headers=headers, json=payload)
         await raise_for_llm_status(resp, url)
 
-    return resp.json()["choices"][0]["message"]["content"]
+    data = resp.json()
+    usage = data.get("usage") if isinstance(data, dict) else None
+    return data["choices"][0]["message"]["content"], usage

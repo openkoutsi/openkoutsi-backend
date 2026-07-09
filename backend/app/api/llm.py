@@ -45,6 +45,7 @@ only) via an out-of-band policy.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Optional
 
 import httpx
@@ -63,6 +64,15 @@ from backend.app.core.ssrf import check_url_safe
 from backend.app.db.registry import get_registry_session
 from backend.app.models.registry_orm import InstanceSettings
 from backend.app.models.user_orm import Athlete
+from backend.app.services.llm_access import (
+    LlmAccess,
+    check_llm_access,
+    get_entitlement,
+    is_entitled,
+    record_llm_usage,
+    subscription_required_error,
+    usage_from_sse_data,
+)
 from backend.app.services.llm_client import (
     LLM_ERROR_STATUS,
     LlmConfigError,
@@ -169,6 +179,54 @@ async def list_llm_models(
         options.append(LlmModelOption(name=selected, label=selected))
 
     return LlmModelsResponse(models=options, selected=selected or None)
+
+
+class LlmEntitlementSummary(BaseModel):
+    status: str
+    expires_at: Optional[str] = None
+
+
+class LlmAccessResponse(BaseModel):
+    """The frontend's single source of truth for LLM access state (issue #9).
+
+    ``gated`` reflects the instance switch; ``mode`` is how the caller is (or
+    would be) served: ``ungated`` (gate off), ``byok`` (own LLM), ``entitled``
+    (active entitlement), or ``none`` (gated, no BYOK, no entitlement → the
+    upsell). ``entitlement`` echoes the caller's own entitlement row if any.
+    """
+
+    gated: bool
+    mode: str
+    entitlement: Optional[LlmEntitlementSummary] = None
+
+
+@router.get("/access", response_model=LlmAccessResponse)
+async def get_llm_access(
+    ctx_session=Depends(get_ctx_and_session),
+    registry_session: AsyncSession = Depends(get_registry_session),
+):
+    """Report whether the caller may use LLM features, and by which route."""
+    ctx, session = ctx_session
+
+    result = await session.execute(select(Athlete).where(Athlete.global_user_id == ctx.user_id))
+    athlete = result.scalar_one_or_none()
+
+    instance = await _load_instance_settings(registry_session)
+    access = await check_llm_access(ctx, athlete, instance, registry_session)
+
+    ent = await get_entitlement(ctx.user_id, registry_session)
+    ent_summary: Optional[LlmEntitlementSummary] = None
+    if ent is not None:
+        ent_summary = LlmEntitlementSummary(
+            status="active" if is_entitled(ent) else ent.status,
+            expires_at=ent.expires_at.isoformat() if ent.expires_at else None,
+        )
+
+    return LlmAccessResponse(
+        gated=bool(getattr(instance, "llm_requires_subscription", False)),
+        mode=access.mode,
+        entitlement=ent_summary,
+    )
 
 
 class LlmTestResponse(BaseModel):
@@ -382,8 +440,20 @@ async def llm_chat(
 
     instance = await _load_instance_settings(registry_session)
 
+    # Issue #9 gate: on a gated instance, deny non-entitled users without BYOK.
+    access = await check_llm_access(ctx, athlete, instance, registry_session)
+    if not access.allowed:
+        raise subscription_required_error()
+
     try:
-        cfg = resolve_llm_config(athlete, instance, ctx.user_id, requested_model=body.model)
+        cfg = resolve_llm_config(
+            athlete,
+            instance,
+            ctx.user_id,
+            requested_model=body.model,
+            # In BYOK mode the instance credentials must never be touched.
+            allow_instance_fallback=(access.mode != "byok"),
+        )
     except LlmConfigError as exc:
         raise _http_from_llm_config_error(exc)
     upstream_url = f"{cfg.base_url.rstrip('/')}/chat/completions"
@@ -394,17 +464,22 @@ async def llm_chat(
     if cfg.api_key:
         headers["Authorization"] = f"Bearer {cfg.api_key}"
 
-    payload: dict[str, Any] = apply_body_extras(
-        {
+    def _build_payload(include_usage: bool) -> dict[str, Any]:
+        base: dict[str, Any] = {
             "model": cfg.model,
             "messages": [{"role": m.role, "content": m.content} for m in body.messages],
             **temperature_param(body.temperature),
             "stream": body.stream,
-        },
-        cfg.extra_body,
-    )
+        }
+        # Ask the upstream to emit a trailing usage chunk so instance-paid token
+        # counts can be recorded (issue #9). Some servers reject the option — the
+        # caller retries once without it.
+        if body.stream and include_usage:
+            base["stream_options"] = {"include_usage": True}
+        return apply_body_extras(base, cfg.extra_body)
 
     transport = httpx.AsyncHTTPTransport(retries=0)
+    started = time.monotonic()
 
     if body.stream:
         client = httpx.AsyncClient(
@@ -412,15 +487,36 @@ async def llm_chat(
             follow_redirects=False,
             timeout=httpx.Timeout(120.0),
         )
+
+        async def _open_stream(include_usage: bool):
+            req = client.build_request(
+                "POST", upstream_url, headers=headers, json=_build_payload(include_usage)
+            )
+            return await client.send(req, stream=True)
+
+        include_usage = True
         try:
-            req = client.build_request("POST", upstream_url, headers=headers, json=payload)
-            resp = await client.send(req, stream=True)
+            resp = await _open_stream(include_usage)
         except Exception as exc:
             await client.aclose()
             raise HTTPException(
                 status_code=502,
                 detail=f"Could not reach LLM endpoint: {exc}",
             )
+
+        # Ollama-family tolerance: if stream_options was rejected, retry once
+        # without it (usage is then simply never emitted → recorded as nulls).
+        if resp.status_code != 200 and include_usage:
+            await resp.aclose()
+            include_usage = False
+            try:
+                resp = await _open_stream(include_usage)
+            except Exception as exc:
+                await client.aclose()
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Could not reach LLM endpoint: {exc}",
+                )
 
         if resp.status_code != 200:
             error_bytes = await resp.aread()
@@ -433,9 +529,20 @@ async def llm_chat(
 
         async def _iter_upstream():
             total = 0
+            captured_usage: dict | None = None
+            text_buffer = ""
             try:
                 async for chunk in resp.aiter_bytes():
                     total += len(chunk)
+                    # Tee-parse the SSE text to capture the final usage chunk,
+                    # passing the original bytes through untouched.
+                    text_buffer += chunk.decode("utf-8", errors="ignore")
+                    while "\n" in text_buffer:
+                        line, text_buffer = text_buffer.split("\n", 1)
+                        if line.startswith("data:"):
+                            usage = usage_from_sse_data(line[5:])
+                            if usage is not None:
+                                captured_usage = usage
                     if total > _MAX_RESPONSE_BYTES:
                         log.warning("LLM streaming response exceeded %d bytes — aborting", _MAX_RESPONSE_BYTES)
                         yield b"data: [DONE]\n\n"
@@ -444,6 +551,14 @@ async def llm_chat(
             finally:
                 await resp.aclose()
                 await client.aclose()
+                # Fire-and-forget; skips BYOK, writes to the dedicated usage DB.
+                await record_llm_usage(
+                    user_id=ctx.user_id,
+                    feature="chat",
+                    cfg=cfg,
+                    usage=captured_usage,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                )
 
         return StreamingResponse(_iter_upstream(), media_type="text/event-stream")
 
@@ -454,7 +569,7 @@ async def llm_chat(
             timeout=httpx.Timeout(120.0),
         ) as client:
             try:
-                resp = await client.post(upstream_url, headers=headers, json=payload)
+                resp = await client.post(upstream_url, headers=headers, json=_build_payload(False))
             except Exception as exc:
                 raise HTTPException(
                     status_code=502,
@@ -473,4 +588,12 @@ async def llm_chat(
                     detail=f"LLM response exceeded the {_MAX_RESPONSE_BYTES // (1024*1024)} MB limit.",
                 )
 
-            return resp.json()
+            data = resp.json()
+            await record_llm_usage(
+                user_id=ctx.user_id,
+                feature="chat",
+                cfg=cfg,
+                usage=data.get("usage") if isinstance(data, dict) else None,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+            return data

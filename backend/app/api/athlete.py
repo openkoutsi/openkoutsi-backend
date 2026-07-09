@@ -16,7 +16,7 @@ from backend.app.core.file_encryption import decrypt_file
 from backend.app.core.ssrf import check_url_safe
 from backend.app.db.registry import get_registry_session
 from backend.app.api.consent import CURRENT_CONSENT_VERSION
-from backend.app.models.registry_orm import ProviderConnection, User
+from backend.app.models.registry_orm import InstanceSettings, ProviderConnection, User
 from backend.app.models.user_orm import Activity, Athlete, WeightLog
 from backend.app.schemas.athlete import AthleteResponse, AthleteUpdate, TrainingStatusBody, TrainingStatusResponse
 
@@ -326,6 +326,7 @@ _PENDING_TIMEOUT_MINUTES = 30
             operation_id="getTrainingStatus", summary="Get training-status feedback")
 async def get_training_status(
     ctx_session=Depends(get_ctx_and_session),
+    registry_session: AsyncSession = Depends(get_registry_session),
 ):
     ctx, session = ctx_session
     athlete = await _get_athlete(ctx.user_id, session)
@@ -359,12 +360,20 @@ async def get_training_status(
             await session.commit()
 
     if app_cfg.get("auto_training_status") and stale and athlete.training_status_status != "pending":
-        athlete.training_status_status = "pending"
-        athlete.training_status = None
-        athlete.training_status_updated_at = now_utc
-        await session.commit()
-        from backend.app.services.llm_training_status_analyzer import analyze_training_status_bg
-        asyncio.create_task(analyze_training_status_bg(athlete.id, ctx.user_id))
+        # Issue #9: skip the instance-paid auto refresh silently for denied users
+        # on a gated instance (the toggle stays saved but inert).
+        from backend.app.services.llm_access import check_llm_access
+        instance = (
+            await registry_session.execute(select(InstanceSettings).limit(1))
+        ).scalar_one_or_none()
+        access = await check_llm_access(ctx, athlete, instance, registry_session)
+        if access.allowed:
+            athlete.training_status_status = "pending"
+            athlete.training_status = None
+            athlete.training_status_updated_at = now_utc
+            await session.commit()
+            from backend.app.services.llm_training_status_analyzer import analyze_training_status_bg
+            asyncio.create_task(analyze_training_status_bg(athlete.id, ctx.user_id))
 
     return TrainingStatusResponse(
         status=athlete.training_status_status,
@@ -378,9 +387,19 @@ async def get_training_status(
 async def trigger_training_status(
     body: TrainingStatusBody = TrainingStatusBody(),
     ctx_session=Depends(get_ctx_and_session),
+    registry_session: AsyncSession = Depends(get_registry_session),
 ):
     ctx, session = ctx_session
     athlete = await _get_athlete(ctx.user_id, session)
+
+    # Issue #9 gate (the training-status analysis is always instance-paid).
+    from backend.app.services.llm_access import check_llm_access, subscription_required_error
+    instance = (
+        await registry_session.execute(select(InstanceSettings).limit(1))
+    ).scalar_one_or_none()
+    access = await check_llm_access(ctx, athlete, instance, registry_session)
+    if not access.allowed:
+        raise subscription_required_error()
 
     if athlete.training_status_status == "pending":
         return {"status": "pending"}

@@ -380,13 +380,17 @@ async def sync_provider_activities(
 
             app_cfg = athlete.app_settings or {}
             if app_cfg.get("auto_analyze"):
+                from backend.app.services.llm_access import auto_analysis_allowed
                 from backend.app.services.llm_activity_analyzer import (
                     analyze_activity_bg,
                 )
 
-                activity.analysis_status = "pending"
-                await session.commit()
-                asyncio.create_task(analyze_activity_bg(activity.id, athlete.id, user_id))
+                # Issue #9: skip the instance-paid auto analysis for denied users
+                # on a gated instance.
+                if await auto_analysis_allowed(user_id, athlete):
+                    activity.analysis_status = "pending"
+                    await session.commit()
+                    asyncio.create_task(analyze_activity_bg(activity.id, athlete.id, user_id))
 
         page += 1
 

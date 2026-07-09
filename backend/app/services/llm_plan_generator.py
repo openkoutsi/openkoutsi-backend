@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..models.registry_orm import InstanceSettings
 from ..models.user_orm import TrainingPlan, PlannedWorkout, Athlete, DailyMetric
 from ..schemas.plans import PlanConfig
+from .llm_access import record_llm_usage
 from .llm_client import ResolvedLlm, call_llm, extract_json, resolve_llm_config
 
 log = logging.getLogger(__name__)
@@ -146,8 +147,11 @@ def _parse_response(raw: str, num_weeks: int) -> list[list[dict]]:
     return result
 
 
-async def _call_llm(user_prompt: str, cfg: ResolvedLlm) -> str:
-    """Call the chat completions endpoint with the plan-generation system prompt."""
+async def _call_llm(user_prompt: str, cfg: ResolvedLlm) -> tuple[str, dict | None]:
+    """Call the chat completions endpoint with the plan-generation system prompt.
+
+    Returns ``(text, usage)`` — the caller records instance-paid usage (#9).
+    """
     return await call_llm(
         user_prompt,
         cfg.base_url,
@@ -167,13 +171,17 @@ async def generate_plan_weeks_llm(
     session: AsyncSession,
     instance: InstanceSettings | None = None,
     user_id: str = "",
+    allow_instance_fallback: bool = True,
 ) -> list[list[dict]]:
     """Call the LLM and return parsed weeks (list of weeks, each a list of day dicts).
 
     Persistence-free so callers can build PlannedWorkout rows for either a new or
-    an existing plan.
+    an existing plan. ``allow_instance_fallback=False`` (issue #9, BYOK-mode on a
+    gated instance) forbids falling back to the instance credentials.
     """
-    cfg = _resolve_llm_config(athlete, instance, user_id)
+    cfg = _resolve_llm_config(
+        athlete, instance, user_id, allow_instance_fallback=allow_instance_fallback
+    )
 
     # Fetch athlete's latest CTL for context
     ctl: Optional[float] = None
@@ -190,7 +198,8 @@ async def generate_plan_weeks_llm(
     user_prompt = _build_user_prompt(config, goal, num_weeks, athlete.ftp, ctl)
 
     # Call LLM with one retry on parse failure
-    raw = await _call_llm(user_prompt, cfg)
+    raw, usage = await _call_llm(user_prompt, cfg)
+    await record_llm_usage(user_id=user_id, feature="plan_generate", cfg=cfg, usage=usage)
     try:
         return _parse_response(raw, num_weeks)
     except (json.JSONDecodeError, KeyError, ValueError):
@@ -200,7 +209,8 @@ async def generate_plan_weeks_llm(
             + "\n\nYour previous response could not be parsed as valid JSON matching "
             "the required schema. Respond with ONLY the JSON object, nothing else."
         )
-        raw = await _call_llm(correction, cfg)
+        raw, usage = await _call_llm(correction, cfg)
+        await record_llm_usage(user_id=user_id, feature="plan_generate", cfg=cfg, usage=usage)
         return _parse_response(raw, num_weeks)  # raises HTTP 503 if still invalid
 
 
@@ -214,6 +224,7 @@ async def generate_plan_llm(
     session: AsyncSession,
     instance: InstanceSettings | None = None,
     user_id: str = "",
+    allow_instance_fallback: bool = True,
 ) -> TrainingPlan:
     """Generate a TrainingPlan using an LLM via OpenAI-compatible API."""
 
@@ -225,6 +236,7 @@ async def generate_plan_llm(
         session=session,
         instance=instance,
         user_id=user_id,
+        allow_instance_fallback=allow_instance_fallback,
     )
 
     end_date = start_date + timedelta(weeks=num_weeks) - timedelta(days=1)
