@@ -5,10 +5,8 @@ Streams a coaching overview of the athlete's recent training state from any
 OpenAI-compatible chat completions API and persists the result incrementally
 so local models that take several minutes never time out.
 
-Uses the same LLM configuration as llm_activity_analyzer:
-  LLM_BASE_URL  e.g. "http://localhost:11434/v1"
-  LLM_API_KEY   empty string is fine for local models
-  LLM_MODEL     e.g. "llama3.2", "gpt-4o-mini"
+Uses the same LLM configuration as llm_activity_analyzer — the instance's
+configured presets (``instance_settings.llm_models``, first entry = default).
 """
 
 from __future__ import annotations

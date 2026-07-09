@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.core.config import settings
 from backend.app.core.deps import get_ctx_and_session
 from backend.app.core.file_encryption import decrypt_file
+from backend.app.core.ssrf import check_url_safe
 from backend.app.db.registry import get_registry_session
 from backend.app.api.consent import CURRENT_CONSENT_VERSION
 from backend.app.models.registry_orm import ProviderConnection, User
@@ -52,6 +53,34 @@ async def _get_athlete(global_user_id: str, session: AsyncSession) -> Athlete:
     if athlete is None:
         raise HTTPException(status_code=404, detail="Athlete profile not found")
     return athlete
+
+
+_MAX_LLM_URL_LEN = 2048
+
+
+def _validate_llm_base_url(raw: str) -> str:
+    """Validate and normalise a user's BYOK base URL at save time.
+
+    Fails fast in the UI (instead of at the first LLM call): strips whitespace,
+    caps the length, requires an ``http(s)://`` scheme, enforces the allow-list,
+    and runs the SSRF guard (which resolves DNS and blocks metadata ranges).
+    """
+    url = raw.strip()
+    if len(url) > _MAX_LLM_URL_LEN:
+        raise HTTPException(status_code=400, detail="LLM base URL is too long.")
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise HTTPException(
+            status_code=400,
+            detail="LLM base URL must start with http:// or https://.",
+        )
+    allowed = settings.llm_allowed_servers_list
+    if allowed and url.rstrip("/") not in {a.rstrip("/") for a in allowed}:
+        raise HTTPException(
+            status_code=400,
+            detail="That LLM server is not in the server's allowed list.",
+        )
+    check_url_safe(url)
+    return url
 
 
 def _safe_app_settings(athlete: Athlete) -> dict:
@@ -175,13 +204,13 @@ async def update_athlete(
         new_settings: dict = dict(body.app_settings)
         new_settings.pop("llm_api_key_set", None)
 
-        if "llm_base_url" in new_settings and new_settings["llm_base_url"]:
-            allowed = settings.llm_allowed_servers_list
-            if allowed and new_settings["llm_base_url"].strip() not in allowed:
-                raise HTTPException(
-                    status_code=400,
-                    detail="That LLM server is not in the server's allowed list.",
-                )
+        if "llm_base_url" in new_settings:
+            raw_url = new_settings.get("llm_base_url")
+            if raw_url and str(raw_url).strip():
+                new_settings["llm_base_url"] = _validate_llm_base_url(str(raw_url))
+            else:
+                # Empty/blank clears the BYOK URL (merged-None deletes the key).
+                new_settings["llm_base_url"] = None
 
         if "llm_api_key" in new_settings:
             raw_key = new_settings.pop("llm_api_key")

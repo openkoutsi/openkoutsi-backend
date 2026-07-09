@@ -5,10 +5,8 @@ Streams a coaching analysis from any OpenAI-compatible chat completions API
 and persists the result incrementally to the database so local models that
 take several minutes never time out and the frontend can show live progress.
 
-Uses the same LLM configuration as llm_plan_generator:
-  LLM_BASE_URL  e.g. "http://localhost:11434/v1"
-  LLM_API_KEY   empty string is fine for local models
-  LLM_MODEL     e.g. "llama3.2", "gpt-4o-mini"
+Uses the same LLM configuration as llm_plan_generator — the instance's
+configured presets (``instance_settings.llm_models``, first entry = default).
 """
 
 from __future__ import annotations
@@ -217,7 +215,7 @@ async def _stream_analysis(
         result = await reg.execute(select(InstanceSettings).limit(1))
         instance = result.scalar_one_or_none()
 
-    # Priority: instance settings → global env vars
+    # Resolve from the instance's preset list (first preset = default).
     cfg = resolve_instance_llm(instance)
 
     if not cfg.base_url or not cfg.model:

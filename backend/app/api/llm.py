@@ -48,7 +48,7 @@ import logging
 from typing import Any, Optional
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -57,17 +57,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.core.auth import UserContext
 from backend.app.core.config import settings
 from backend.app.core.deps import get_ctx_and_session
+from backend.app.core.file_encryption import decrypt_secret
+from backend.app.core.limiter import limiter
 from backend.app.core.ssrf import check_url_safe
 from backend.app.db.registry import get_registry_session
 from backend.app.models.registry_orm import InstanceSettings
 from backend.app.models.user_orm import Athlete
 from backend.app.services.llm_client import (
+    LLM_ERROR_STATUS,
+    LlmConfigError,
     apply_body_extras,
     merge_llm_headers,
     preset_map,
     resolve_llm,
+    resolve_llm_config,
     temperature_param,
 )
+
+
+def _http_from_llm_config_error(exc: LlmConfigError) -> HTTPException:
+    return HTTPException(status_code=LLM_ERROR_STATUS.get(exc.code, 400), detail=str(exc))
 
 
 async def _load_instance_settings(registry_session: AsyncSession) -> InstanceSettings | None:
@@ -149,15 +158,10 @@ async def list_llm_models(
     ]
 
     # Mirror resolve_llm's selection order so `selected` reflects the model that
-    # would actually be used: saved choice → instance default → first preset →
-    # global env default.
+    # would actually be used: saved choice → first preset (the default).
     selected = (athlete_settings.get("llm_model") or "").strip()
-    if not selected and instance and instance.llm_model:
-        selected = instance.llm_model.strip()
     if not selected and presets:
         selected = next(iter(presets))
-    if not selected:
-        selected = (settings.llm_model or "").strip()
 
     # Make sure the effective selection is always offered, even if it is a lone
     # legacy single-model configuration not present in any preset list.
@@ -182,6 +186,91 @@ class LlmTestResponse(BaseModel):
 _TEST_PROMPT = "Reply with a short greeting to confirm you are reachable."
 
 
+async def _probe_llm_endpoint(
+    base_url: str,
+    model: str,
+    api_key: str | None,
+    *,
+    extra_headers: dict[str, str] | None = None,
+    extra_body: dict[str, Any] | None = None,
+) -> LlmTestResponse:
+    """Send a minimal chat completion and report whether the model replied.
+
+    Shared by the admin (instance) and user (BYOK) test endpoints. Applies the
+    SSRF guard, any extra headers and the selected model's body params, and maps
+    connection/HTTP failures to a friendly :class:`LlmTestResponse`.
+    """
+    if not base_url:
+        return LlmTestResponse(ok=False, error="No LLM base URL configured. Save a base URL first.")
+    if not model:
+        return LlmTestResponse(
+            ok=False, base_url=base_url, error="No LLM model configured. Save a model first."
+        )
+
+    chat_url = f"{base_url.rstrip('/')}/chat/completions"
+    try:
+        check_url_safe(chat_url)
+    except HTTPException as exc:
+        return LlmTestResponse(ok=False, base_url=base_url, model_configured=model, error=exc.detail)
+
+    headers = merge_llm_headers({"Content-Type": "application/json"}, extra_headers)
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    payload = apply_body_extras(
+        {
+            "model": model,
+            "messages": [{"role": "user", "content": _TEST_PROMPT}],
+            "stream": False,
+        },
+        extra_body,
+    )
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
+            resp = await client.post(chat_url, headers=headers, json=payload, follow_redirects=False)
+    except httpx.ConnectError as exc:
+        return LlmTestResponse(ok=False, base_url=base_url, model_configured=model, prompt_sent=_TEST_PROMPT, error=f"Connection refused: {exc}")
+    except httpx.TimeoutException:
+        return LlmTestResponse(ok=False, base_url=base_url, model_configured=model, prompt_sent=_TEST_PROMPT, error="Connection timed out")
+    except Exception as exc:
+        return LlmTestResponse(ok=False, base_url=base_url, model_configured=model, prompt_sent=_TEST_PROMPT, error=str(exc))
+
+    if resp.status_code == 401:
+        return LlmTestResponse(
+            ok=False, base_url=base_url, model_configured=model, prompt_sent=_TEST_PROMPT,
+            http_status=resp.status_code, error="Authentication failed — check your API key",
+        )
+    if resp.status_code != 200:
+        snippet = resp.text[:200] if resp.text else ""
+        return LlmTestResponse(
+            ok=False, base_url=base_url, model_configured=model, prompt_sent=_TEST_PROMPT,
+            http_status=resp.status_code, error=f"HTTP {resp.status_code}: {snippet}",
+        )
+
+    try:
+        data = resp.json()
+        reply = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError, ValueError):
+        return LlmTestResponse(
+            ok=False, base_url=base_url, model_configured=model, prompt_sent=_TEST_PROMPT,
+            http_status=resp.status_code,
+            error="The endpoint responded but the reply was not in the expected chat-completion format.",
+        )
+
+    reply_text = (reply or "").strip()
+    if not reply_text:
+        return LlmTestResponse(
+            ok=False, base_url=base_url, model_configured=model, prompt_sent=_TEST_PROMPT,
+            http_status=resp.status_code, error="The model returned an empty response.",
+        )
+
+    return LlmTestResponse(
+        ok=True, base_url=base_url, model_configured=model, prompt_sent=_TEST_PROMPT,
+        http_status=resp.status_code, response_text=reply_text[:500],
+    )
+
+
 @router.post("/test-connection", response_model=LlmTestResponse)
 async def test_llm_connection(
     model: Optional[str] = None,
@@ -194,7 +283,7 @@ async def test_llm_connection(
     config and confirms the model replies with a usable response. Any configured
     extra headers and the selected model's body params are applied, so this also
     validates a zero-data-retention header or a thinking config. Pass ``model``
-    to test a specific model from the configured list instead of the default.
+    to test a specific preset from the configured list instead of the default.
     """
     ctx, _ = ctx_session
     if not ctx.is_admin:
@@ -203,141 +292,75 @@ async def test_llm_connection(
     instance = await _load_instance_settings(registry_session)
     # Resolve the selected preset (its own base URL, model, key, headers, body).
     cfg = resolve_llm(instance=instance, requested_model=model)
-
-    base_url = cfg.base_url
-    if not base_url:
+    if not cfg.base_url:
         raise HTTPException(status_code=400, detail="No LLM base URL configured. Save a base URL first.")
 
-    selected = cfg.model
-    if not selected:
-        return LlmTestResponse(
-            ok=False,
-            base_url=base_url,
-            error="No LLM model configured. Save a model first.",
-        )
-
-    chat_url = f"{base_url.rstrip('/')}/chat/completions"
-    try:
-        check_url_safe(chat_url)
-    except HTTPException as exc:
-        return LlmTestResponse(ok=False, base_url=base_url, model_configured=selected, error=exc.detail)
-
-    headers = merge_llm_headers({"Content-Type": "application/json"}, cfg.extra_headers)
-    if cfg.api_key:
-        headers["Authorization"] = f"Bearer {cfg.api_key}"
-
-    payload = apply_body_extras(
-        {
-            "model": selected,
-            "messages": [{"role": "user", "content": _TEST_PROMPT}],
-            "stream": False,
-        },
-        cfg.extra_body,
-    )
-
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
-            resp = await client.post(chat_url, headers=headers, json=payload, follow_redirects=False)
-    except httpx.ConnectError as exc:
-        return LlmTestResponse(ok=False, base_url=base_url, model_configured=selected, prompt_sent=_TEST_PROMPT, error=f"Connection refused: {exc}")
-    except httpx.TimeoutException:
-        return LlmTestResponse(ok=False, base_url=base_url, model_configured=selected, prompt_sent=_TEST_PROMPT, error="Connection timed out")
-    except Exception as exc:
-        return LlmTestResponse(ok=False, base_url=base_url, model_configured=selected, prompt_sent=_TEST_PROMPT, error=str(exc))
-
-    if resp.status_code == 401:
-        return LlmTestResponse(
-            ok=False,
-            base_url=base_url,
-            model_configured=selected,
-            prompt_sent=_TEST_PROMPT,
-            http_status=resp.status_code,
-            error="Authentication failed — check your API key",
-        )
-    if resp.status_code != 200:
-        snippet = resp.text[:200] if resp.text else ""
-        return LlmTestResponse(
-            ok=False,
-            base_url=base_url,
-            model_configured=selected,
-            prompt_sent=_TEST_PROMPT,
-            http_status=resp.status_code,
-            error=f"HTTP {resp.status_code}: {snippet}",
-        )
-
-    try:
-        data = resp.json()
-        reply = data["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError, ValueError):
-        return LlmTestResponse(
-            ok=False,
-            base_url=base_url,
-            model_configured=selected,
-            prompt_sent=_TEST_PROMPT,
-            http_status=resp.status_code,
-            error="The endpoint responded but the reply was not in the expected chat-completion format.",
-        )
-
-    reply_text = (reply or "").strip()
-    if not reply_text:
-        return LlmTestResponse(
-            ok=False,
-            base_url=base_url,
-            model_configured=selected,
-            prompt_sent=_TEST_PROMPT,
-            http_status=resp.status_code,
-            error="The model returned an empty response.",
-        )
-
-    return LlmTestResponse(
-        ok=True,
-        base_url=base_url,
-        model_configured=selected,
-        prompt_sent=_TEST_PROMPT,
-        http_status=resp.status_code,
-        response_text=reply_text[:500],
+    return await _probe_llm_endpoint(
+        cfg.base_url, cfg.model, cfg.api_key,
+        extra_headers=cfg.extra_headers, extra_body=cfg.extra_body,
     )
 
 
-async def _get_llm_config(
-    athlete: Athlete,
-    user_id: str,
-    instance: InstanceSettings | None,
-    requested_model: str | None = None,
-):
-    """Return a :class:`ResolvedLlm` for this athlete.
+class LlmMyTestRequest(BaseModel):
+    """Body for a user's own BYOK connection test.
 
-    Selection resolves ``requested_model`` (per-request override) → the athlete's
-    saved model → the instance default; a selected preset supplies its own base
-    URL, model id, API key, headers and body params. Raises ``HTTPException``
-    (400/403) on the two API-facing failures: no base URL, or a resolved server
-    outside the admin allow-list.
+    Any field may be given to override the saved athlete value so the Test
+    button works before saving. When ``api_key`` is omitted (``None``) but a key
+    is already saved, the saved key is used; pass an empty string to test
+    keyless.
     """
-    cfg = resolve_llm(
-        instance=instance,
-        athlete_settings=athlete.app_settings or {},
-        user_id=user_id,
-        requested_model=requested_model,
-        default_model="llama3.2",
-    )
 
-    if not cfg.base_url:
-        raise HTTPException(
-            status_code=400,
-            detail="LLM not configured. Set a base URL in Settings → AI / LLM.",
-        )
+    base_url: Optional[str] = None
+    model: Optional[str] = None
+    api_key: Optional[str] = None
 
-    # Defense-in-depth: re-check the resolved server against the allow-list.
-    # Normalise a trailing slash on both sides so it can't cause a false 403.
+
+@router.post("/test-my-connection", response_model=LlmTestResponse)
+@limiter.limit("10/minute")
+async def test_my_llm_connection(
+    request: Request,
+    body: LlmMyTestRequest = LlmMyTestRequest(),
+    ctx_session=Depends(get_ctx_and_session),
+):
+    """Test the caller's own (BYOK) LLM connection. Any authenticated user.
+
+    Body values override the athlete's saved config so the Test button works
+    before saving; when ``api_key`` is omitted but a saved encrypted key exists
+    it is decrypted and used. The tested URL must pass the SSRF guard and, when
+    an allow-list is configured, be on it. Rate-limited since it triggers an
+    outbound request on demand.
+    """
+    ctx, session = ctx_session
+
+    result = await session.execute(select(Athlete).where(Athlete.global_user_id == ctx.user_id))
+    athlete = result.scalar_one_or_none()
+    saved = (athlete.app_settings if athlete else None) or {}
+
+    base_url = (body.base_url if body.base_url is not None else saved.get("llm_base_url") or "").strip()
+    model = (body.model if body.model is not None else saved.get("llm_model") or "").strip()
+
+    if body.api_key is not None:
+        api_key: str | None = body.api_key or None
+    elif saved.get("llm_api_key_enc"):
+        try:
+            api_key = decrypt_secret(str(saved["llm_api_key_enc"]), ctx.user_id)
+        except Exception:  # pragma: no cover - defensive; treat as no key
+            api_key = None
+    else:
+        api_key = None
+
+    if not base_url:
+        raise HTTPException(status_code=400, detail="No LLM base URL configured. Enter a base URL first.")
+
+    # BYOK URLs are subject to the admin allow-list (when set).
     allowed = settings.llm_allowed_servers_list
-    if allowed and cfg.base_url.rstrip("/") not in {a.rstrip("/") for a in allowed}:
+    if allowed and base_url.rstrip("/") not in {a.rstrip("/") for a in allowed}:
         raise HTTPException(
             status_code=403,
-            detail="The configured LLM server is not in the server's allowed list. "
-            "Update your LLM settings to use an allowed server.",
+            detail="That LLM server is not in the server's allowed list.",
         )
 
-    return cfg
+    return await _probe_llm_endpoint(base_url, model, api_key)
 
 
 # ── Endpoint ───────────────────────────────────────────────────────────────
@@ -359,7 +382,10 @@ async def llm_chat(
 
     instance = await _load_instance_settings(registry_session)
 
-    cfg = await _get_llm_config(athlete, ctx.user_id, instance, requested_model=body.model)
+    try:
+        cfg = resolve_llm_config(athlete, instance, ctx.user_id, requested_model=body.model)
+    except LlmConfigError as exc:
+        raise _http_from_llm_config_error(exc)
     upstream_url = f"{cfg.base_url.rstrip('/')}/chat/completions"
 
     check_url_safe(upstream_url)

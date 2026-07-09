@@ -3628,7 +3628,7 @@
           "llm"
         ],
         "summary": "Test Llm Connection",
-        "description": "Test the instance's configured LLM connection. Admin-only.\n\nSends a minimal \"hello world\" chat completion to the instance's saved LLM\nconfig and confirms the model replies with a usable response. Any configured\nextra headers and the selected model's body params are applied, so this also\nvalidates a zero-data-retention header or a thinking config. Pass ``model``\nto test a specific model from the configured list instead of the default.",
+        "description": "Test the instance's configured LLM connection. Admin-only.\n\nSends a minimal \"hello world\" chat completion to the instance's saved LLM\nconfig and confirms the model replies with a usable response. Any configured\nextra headers and the selected model's body params are applied, so this also\nvalidates a zero-data-retention header or a thinking config. Pass ``model``\nto test a specific preset from the configured list instead of the default.",
         "operationId": "test_llm_connection_api_llm_test_connection_post",
         "security": [
           {
@@ -3675,6 +3675,53 @@
             }
           }
         }
+      }
+    },
+    "/api/llm/test-my-connection": {
+      "post": {
+        "tags": [
+          "llm"
+        ],
+        "summary": "Test My Llm Connection",
+        "description": "Test the caller's own (BYOK) LLM connection. Any authenticated user.\n\nBody values override the athlete's saved config so the Test button works\nbefore saving; when ``api_key`` is omitted but a saved encrypted key exists\nit is decrypted and used. The tested URL must pass the SSRF guard and, when\nan allow-list is configured, be on it. Rate-limited since it triggers an\noutbound request on demand.",
+        "operationId": "test_my_llm_connection_api_llm_test_my_connection_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LlmMyTestRequest",
+                "default": {}
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LlmTestResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
       }
     },
     "/api/llm/chat": {
@@ -6234,44 +6281,6 @@
       },
       "InstanceSettingsPatch": {
         "properties": {
-          "llm_base_url": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Llm Base Url"
-          },
-          "llm_model": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Llm Model"
-          },
-          "llm_api_key": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Llm Api Key"
-          },
-          "clear_llm_api_key": {
-            "type": "boolean",
-            "title": "Clear Llm Api Key",
-            "default": false
-          },
           "llm_analysis_context": {
             "anyOf": [
               {
@@ -6307,20 +6316,6 @@
               }
             ],
             "title": "Llm Models"
-          },
-          "llm_extra_headers": {
-            "anyOf": [
-              {
-                "additionalProperties": {
-                  "type": "string"
-                },
-                "type": "object"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Llm Extra Headers"
           }
         },
         "type": "object",
@@ -6328,32 +6323,6 @@
       },
       "InstanceSettingsResponse": {
         "properties": {
-          "llm_base_url": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Llm Base Url"
-          },
-          "llm_model": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Llm Model"
-          },
-          "llm_api_key_set": {
-            "type": "boolean",
-            "title": "Llm Api Key Set"
-          },
           "llm_analysis_context": {
             "anyOf": [
               {
@@ -6383,21 +6352,10 @@
             "type": "array",
             "title": "Llm Models",
             "default": []
-          },
-          "llm_extra_headers": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "type": "object",
-            "title": "Llm Extra Headers",
-            "default": {}
           }
         },
         "type": "object",
         "required": [
-          "llm_base_url",
-          "llm_model",
-          "llm_api_key_set",
           "llm_analysis_context",
           "admin_contact"
         ],
@@ -6749,7 +6707,7 @@
           "name"
         ],
         "title": "LlmModelConfigIn",
-        "description": "A selectable model *preset* \u2014 a full or partial connection.\n\nAny of ``base_url`` / ``model`` / ``api_key`` / ``headers`` / ``body`` may\nbe given; missing pieces fall back to the instance-level defaults. This lets\nan admin offer distinct providers (Anthropic, Mistral, \u2026) as presets that a\nuser picks between. ``api_key`` is write-only; omit it to keep the stored\nkey, or set ``api_key_clear`` to remove it. ``name`` is the stable internal\nidentifier (what a user's selection is stored as); ``label`` is the\nhuman-friendly name shown to users (defaults to ``name``)."
+        "description": "A selectable model *preset* \u2014 a full or partial connection.\n\nA preset is a self-contained connection: ``base_url`` / ``model`` /\n``api_key`` / ``headers`` / ``body``. This lets an admin offer distinct\nproviders (Anthropic, Mistral, \u2026) as presets that a user picks between; the\n**first preset in the list is the instance default**. ``api_key`` is\nwrite-only; omit it to keep the stored key, or set ``api_key_clear`` to\nremove it. ``name`` is the stable internal identifier (what a user's\nselection is stored as); ``label`` is the human-friendly name shown to users\n(defaults to ``name``)."
       },
       "LlmModelConfigOut": {
         "properties": {
@@ -6861,6 +6819,46 @@
           "models"
         ],
         "title": "LlmModelsResponse"
+      },
+      "LlmMyTestRequest": {
+        "properties": {
+          "base_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Url"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "api_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Api Key"
+          }
+        },
+        "type": "object",
+        "title": "LlmMyTestRequest",
+        "description": "Body for a user's own BYOK connection test.\n\nAny field may be given to override the saved athlete value so the Test\nbutton works before saving. When ``api_key`` is omitted (``None``) but a key\nis already saved, the saved key is used; pass an empty string to test\nkeyless."
       },
       "LlmTestResponse": {
         "properties": {

@@ -46,11 +46,6 @@ class Settings(BaseSettings):
     wahoo_bridge_url: str = ""
     wahoo_bridge_secret: str = ""
 
-    # LLM plan generation (OpenAI-compatible API)
-    llm_base_url: str = ""   # e.g. "http://localhost:11434/v1" or "https://api.openai.com/v1"
-    llm_api_key: str = ""    # empty is fine for local models
-    llm_model: str = ""      # e.g. "llama3.2", "gpt-4o-mini", "mistral"
-
     # Comma-separated list of LLM base URLs that users are allowed to choose from.
     # When set, users can only pick from this list; the free-text URL input is hidden.
     # When empty (default), users may enter any URL (subject to SSRF guards).
