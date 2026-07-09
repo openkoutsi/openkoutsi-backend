@@ -6,9 +6,20 @@ workout synthesizer (``llm_workout_generator``) reuse this module so the
 LLM-config resolution, the HTTP call (with SSRF protection) and the JSON
 extraction logic live in one place.
 
-LLM settings are resolved with the same priority everywhere:
-  athlete app_settings → instance settings → global env vars
-  (LLM_BASE_URL / LLM_API_KEY / LLM_MODEL)
+LLM settings are resolved from preset lists everywhere — the athlete's own
+BYOK config (``app_settings``) and the instance's ``llm_models`` (first entry =
+default). There are no instance single-config or env-var fallbacks.
+
+No-mixing rule (BYOK)
+---------------------
+As soon as the athlete configures their *own* base URL (the single
+``llm_base_url`` field, or an athlete-level preset with a ``base_url``),
+resolution uses **only** athlete-level values (model, key, headers) — instance
+presets, the instance API key and instance headers are ignored entirely. This
+guarantees the instance's (or the hoster's) API key can never be sent to a
+user-chosen server. The resulting :class:`ResolvedLlm` carries a
+``source``/``key_source`` signal so callers (and issue #9's gating) can tell
+where the config came from.
 """
 
 from __future__ import annotations
@@ -16,7 +27,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -28,6 +39,40 @@ from ..models.user_orm import Athlete
 log = logging.getLogger(__name__)
 
 
+ConfigSource = Literal["user", "instance", "env"]
+KeySource = Literal["user", "instance", "env", "none"]
+
+
+class LlmConfigError(ValueError):
+    """Raised when an LLM config cannot be resolved for use.
+
+    Carries a machine-readable ``code`` so API layers can map to the right HTTP
+    status. Subclasses :class:`ValueError` so existing ``except ValueError``
+    call sites keep working.
+
+    Codes:
+      * ``no_base_url`` — nothing resolves to a base URL (→ HTTP 400).
+      * ``no_model`` — a base URL but no model id (→ HTTP 400).
+      * ``server_not_allowed`` — a BYOK URL is outside ``LLM_ALLOWED_SERVERS``
+        (→ HTTP 403).
+      * ``instance_fallback_disabled`` — the user has no own config and the
+        caller disallowed the instance fallback (hook for #9; → HTTP 403).
+    """
+
+    def __init__(self, code: str, message: str):
+        self.code = code
+        super().__init__(message)
+
+
+# HTTP status each :class:`LlmConfigError` code maps to (used by API layers).
+LLM_ERROR_STATUS: dict[str, int] = {
+    "no_base_url": 400,
+    "no_model": 400,
+    "server_not_allowed": 403,
+    "instance_fallback_disabled": 403,
+}
+
+
 @dataclass
 class ResolvedLlm:
     """Everything needed to make one outbound LLM request.
@@ -35,6 +80,10 @@ class ResolvedLlm:
     ``extra_headers`` are added to every request (e.g. a zero-data-retention
     header); ``extra_body`` are extra chat-completion body params tied to the
     selected model (e.g. ``max_tokens`` or a thinking config).
+
+    ``source`` records where ``base_url`` came from and ``key_source`` where
+    ``api_key`` came from. ``source == "user"`` is the canonical "BYOK active"
+    signal (consumed by #9 for gating and usage attribution).
     """
 
     base_url: str
@@ -42,6 +91,8 @@ class ResolvedLlm:
     api_key: str | None
     extra_headers: dict[str, str] = field(default_factory=dict)
     extra_body: dict[str, Any] = field(default_factory=dict)
+    source: ConfigSource = "env"
+    key_source: KeySource = "none"
 
 
 def _coerce_str_dict(value: Any) -> dict[str, str]:
@@ -114,101 +165,119 @@ def resolve_llm(
     athlete_settings: dict | None = None,
     user_id: str | None = None,
     requested_model: str | None = None,
-    default_model: str = "",
 ) -> ResolvedLlm:
-    """Resolve one outbound LLM request from instance + optional athlete config.
+    """Resolve one outbound LLM request from the configured presets.
 
-    A *preset* (an ``llm_models`` entry) is a self-contained connection — its
-    own base URL, upstream model id, API key, headers and body params. The
-    selected preset is chosen by name: ``requested_model`` (a per-request
-    override) → the athlete's saved ``llm_model`` → the instance default
-    ``llm_model`` → the first available preset. When the selection names a
-    preset, that preset's fields are used (falling back to the instance-level
-    single values); otherwise the selection is treated as a bare model id on the
-    instance endpoint (legacy single-model config).
+    Every connection lives in a *preset* (an ``llm_models`` entry) — its own
+    base URL, upstream model id, API key, headers and body params. There are no
+    instance-level single-config or env-var fallbacks: the config is entirely
+    the athlete's and the instance's preset lists. The selected preset is chosen
+    by name: ``requested_model`` (a per-request override) → the athlete's saved
+    ``llm_model`` → the **first preset in the list** (the default; athlete
+    presets take precedence over instance presets).
+
+    **No-mixing rule (BYOK):** if the athlete configured their own base URL
+    (the single ``llm_base_url`` field, or a selected athlete-level preset with
+    a ``base_url``), only athlete-level values are used — instance presets, the
+    instance key and instance headers are all ignored, so the instance key can
+    never leak to a user-chosen server.
 
     ``base_url`` / ``model`` may be empty strings when nothing is configured —
-    callers validate and surface an error.
+    callers validate and surface an error. The returned :class:`ResolvedLlm`
+    records ``source``/``key_source``.
     """
+    from ..core.file_encryption import decrypt_instance_secret, decrypt_secret
+
     athlete_settings = athlete_settings or {}
 
     inst_presets = preset_map(getattr(instance, "llm_models", None))
     ath_presets = preset_map(athlete_settings.get("llm_models"))
 
-    # ── Selection (by name) ────────────────────────────────────────────────
+    # ── Selection (by name): request → athlete → first preset ──────────────
     name = (requested_model or "").strip() or (athlete_settings.get("llm_model") or "").strip()
-    if not name and instance and instance.llm_model:
-        name = instance.llm_model.strip()
     if not name:
+        # The first preset in the list is the default (the instance default lives
+        # at the head of ``instance.llm_models``; athlete presets take precedence).
         name = next(iter(ath_presets), "") or next(iter(inst_presets), "")
-    if not name:
-        name = (settings.llm_model or default_model).strip()
 
     ath_p = ath_presets.get(name)
     inst_p = inst_presets.get(name)
-    has_preset = bool(ath_p or inst_p)
 
-    # ── base_url: athlete single → preset → instance → global ──────────────
-    base_url = (athlete_settings.get("llm_base_url") or "").strip()
-    if not base_url and ath_p and ath_p.get("base_url"):
-        base_url = str(ath_p["base_url"]).strip()
-    if not base_url and inst_p and inst_p.get("base_url"):
+    # ── Is this a BYOK (user-owned) request? ───────────────────────────────
+    byok_base = (athlete_settings.get("llm_base_url") or "").strip()
+    byok_from_preset = False
+    if not byok_base and ath_p and ath_p.get("base_url"):
+        byok_base = str(ath_p["base_url"]).strip()
+        byok_from_preset = True
+
+    if byok_base:
+        # No-mixing: athlete values only. Instance is ignored entirely.
+        base_url = byok_base
+        if byok_from_preset:
+            model = str(ath_p.get("model") or name).strip()
+        else:
+            # BYOK uses the athlete's saved model. Per-request model selection is
+            # not supported here (and never `name`, which may have fallen through
+            # to an instance preset).
+            model = (athlete_settings.get("llm_model") or "").strip()
+
+        api_key: str | None = None
+        key_source: KeySource = "none"
+        if ath_p and ath_p.get("api_key_enc") and user_id:
+            api_key = _try_decrypt(decrypt_secret, str(ath_p["api_key_enc"]), user_id)
+        if api_key is None and athlete_settings.get("llm_api_key_enc") and user_id:
+            api_key = _try_decrypt(decrypt_secret, str(athlete_settings["llm_api_key_enc"]), user_id)
+        if api_key is not None:
+            key_source = "user"
+
+        extra_headers = merge_llm_headers({}, (ath_p or {}).get("headers"))
+        body = (ath_p or {}).get("body") or {}
+        return ResolvedLlm(
+            base_url=base_url,
+            model=model,
+            api_key=api_key,
+            extra_headers=extra_headers,
+            extra_body=body if isinstance(body, dict) else {},
+            source="user",
+            key_source=key_source,
+        )
+
+    # ── Non-BYOK: instance preset only ─────────────────────────────────────
+    has_preset = bool(inst_p)
+
+    base_url = ""
+    source: ConfigSource = "instance"
+    if inst_p and inst_p.get("base_url"):
         base_url = str(inst_p["base_url"]).strip()
-    if not base_url and instance and instance.llm_base_url:
-        base_url = instance.llm_base_url.strip()
-    if not base_url:
-        base_url = (settings.llm_base_url or "").strip()
 
-    # ── model id sent upstream ─────────────────────────────────────────────
     if has_preset:
-        model = str((ath_p or {}).get("model") or (inst_p or {}).get("model") or name).strip()
+        model = str((inst_p or {}).get("model") or name).strip()
     else:
         model = name
-    if not model and instance and instance.llm_model:
-        model = instance.llm_model.strip()
-    if not model:
-        model = (settings.llm_model or default_model).strip()
 
-    # ── api key: preset key (source-aware) → athlete single → instance ─────
-    from ..core.file_encryption import decrypt_instance_secret, decrypt_secret
-
-    api_key: str | None = None
-    if ath_p and ath_p.get("api_key_enc") and user_id:
-        api_key = _try_decrypt(decrypt_secret, str(ath_p["api_key_enc"]), user_id)
-    elif inst_p and inst_p.get("api_key_enc"):
+    api_key = None
+    key_source = "none"
+    if inst_p and inst_p.get("api_key_enc"):
         api_key = _try_decrypt(decrypt_instance_secret, str(inst_p["api_key_enc"]))
-    if api_key is None and athlete_settings.get("llm_api_key_enc") and user_id:
-        api_key = _try_decrypt(decrypt_secret, str(athlete_settings["llm_api_key_enc"]), user_id)
-    if api_key is None and instance and instance.llm_api_key_enc:
-        api_key = _try_decrypt(decrypt_instance_secret, str(instance.llm_api_key_enc))
-    # Final fallback: the server-side default key (env LLM_API_KEY).
-    if api_key is None and settings.llm_api_key:
-        api_key = settings.llm_api_key
+    if api_key is not None:
+        key_source = "instance"
 
-    # ── headers: instance → instance preset → athlete preset → athlete ─────
-    extra_headers = merge_llm_headers(
-        {},
-        getattr(instance, "llm_extra_headers", None),
-        (inst_p or {}).get("headers"),
-        (ath_p or {}).get("headers"),
-        athlete_settings.get("llm_extra_headers"),
-    )
-
-    # ── body: athlete preset overrides instance preset ─────────────────────
-    body = (ath_p or {}).get("body") or (inst_p or {}).get("body") or {}
-    extra_body = body if isinstance(body, dict) else {}
+    extra_headers = merge_llm_headers({}, (inst_p or {}).get("headers"))
+    body = (inst_p or {}).get("body") or {}
 
     return ResolvedLlm(
         base_url=base_url,
         model=model,
         api_key=api_key,
         extra_headers=extra_headers,
-        extra_body=extra_body,
+        extra_body=body if isinstance(body, dict) else {},
+        source=source,
+        key_source=key_source,
     )
 
 
 def resolve_instance_llm(instance: InstanceSettings | None) -> ResolvedLlm:
-    """Instance-only resolution (instance presets/settings → global env vars).
+    """Instance-only resolution (the instance's preset list; first = default).
 
     Used by admin diagnostics and the automated analysers, which are not tied
     to a particular athlete's personal LLM overrides.
@@ -267,24 +336,60 @@ def resolve_llm_config(
     athlete: Athlete,
     instance: InstanceSettings | None,
     user_id: str,
+    *,
+    requested_model: str | None = None,
+    allow_instance_fallback: bool = True,
 ) -> ResolvedLlm:
-    """Resolve the effective LLM config using athlete → preset → instance → global.
+    """Resolve the effective LLM config for an athlete-facing request.
 
-    A selectable model is a full *preset* (its own base URL, model id, API key,
-    headers and body params); the athlete's saved ``llm_model`` picks one. See
-    :func:`resolve_llm` for the precedence rules. Raises ``ValueError`` when no
-    base URL can be determined.
+    Wraps :func:`resolve_llm` and applies the use-time policy shared by the chat
+    proxy and the plan/workout generators:
+
+    * ``allow_instance_fallback=False`` (hook for #9): when the user has no own
+      config, raise ``LlmConfigError("instance_fallback_disabled")`` instead of
+      falling back to the instance/env config.
+    * no resolvable base URL → ``LlmConfigError("no_base_url")``.
+    * a base URL but no model → ``LlmConfigError("no_model")`` (so a BYOK user who
+      forgot the model gets a clear 400 instead of an opaque upstream 502).
+    * when the base URL is user-chosen (``source == "user"``) and an allow-list
+      is configured, the URL must be on it, else
+      ``LlmConfigError("server_not_allowed")``. The allow-list only ever
+      restricts BYOK URLs; admin/instance config is not filtered.
     """
     cfg = resolve_llm(
         instance=instance,
         athlete_settings=athlete.app_settings or {},
         user_id=user_id,
-        default_model="llama3.2",
+        requested_model=requested_model,
     )
-    if not cfg.base_url:
-        raise ValueError(
-            "LLM not configured. Set a base URL in Settings → AI / LLM or ask your administrator."
+
+    if not allow_instance_fallback and cfg.source != "user":
+        raise LlmConfigError(
+            "instance_fallback_disabled",
+            "This instance requires you to configure your own LLM server in Settings → AI / LLM.",
         )
+
+    if not cfg.base_url:
+        raise LlmConfigError(
+            "no_base_url",
+            "LLM not configured. Set a base URL in Settings → AI / LLM or ask your administrator.",
+        )
+
+    if not cfg.model:
+        raise LlmConfigError(
+            "no_model",
+            "No LLM model configured. Set a model in Settings → AI / LLM or ask your administrator.",
+        )
+
+    if cfg.source == "user":
+        allowed = settings.llm_allowed_servers_list
+        if allowed and cfg.base_url.rstrip("/") not in {a.rstrip("/") for a in allowed}:
+            raise LlmConfigError(
+                "server_not_allowed",
+                "The configured LLM server is not in the server's allowed list. "
+                "Update your LLM settings to use an allowed server.",
+            )
+
     return cfg
 
 

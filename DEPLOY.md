@@ -143,13 +143,9 @@ WAHOO_CLIENT_SECRET=
 WAHOO_BRIDGE_URL=                  # public URL of the Wahoo bridge, e.g. https://wahoo-bridge.your-domain
 WAHOO_BRIDGE_SECRET=               # shared secret — must match WAHOO_BRIDGE_SECRET in wahoo_bridge/.env
 
-# Server-side LLM (OpenAI-compatible) — fallback when no instance/user LLM is configured
-LLM_BASE_URL=                      # e.g. http://localhost:11434/v1 or https://api.openai.com/v1
-LLM_API_KEY=
-LLM_MODEL=                         # e.g. llama3.2, gpt-4o-mini
-
-# Optional: comma-separated list of allowed LLM base URLs users may choose from.
-# When set, users must pick from this list. Leave blank to allow any URL.
+# Optional: comma-separated allow-list of LLM base URLs users may bring (BYOK).
+# When set, BYOK URLs are restricted to this list (at save and use time). Leave
+# blank to allow any URL (SSRF guards still apply).
 LLM_ALLOWED_SERVERS=               # e.g. http://localhost:11434/v1,https://api.openai.com/v1
 ```
 
@@ -302,7 +298,7 @@ Set the webhook token to the same value as `WAHOO_WEBHOOK_TOKEN` in `wahoo_bridg
 
 ### Pushing workouts and plans to Wahoo
 
-Sending structured workouts to Wahoo (the single-workout "Send to Wahoo" action in the Workouts tab) requires the OAuth scopes `plans_read`, `plans_write`, and `workouts_write`. These are requested automatically; users who connected Wahoo before this feature shipped must reconnect to grant them. The plan-level "Generate workouts" action synthesizes structured workouts server-side via an OpenAI-compatible LLM, so a base URL must be reachable from the backend (resolved athlete → instance → global `LLM_BASE_URL`); it does not upload anything itself — the generated workouts are uploaded to Wahoo individually from the Workouts tab.
+Sending structured workouts to Wahoo (the single-workout "Send to Wahoo" action in the Workouts tab) requires the OAuth scopes `plans_read`, `plans_write`, and `workouts_write`. These are requested automatically; users who connected Wahoo before this feature shipped must reconnect to grant them. The plan-level "Generate workouts" action synthesizes structured workouts server-side via an OpenAI-compatible LLM, so a base URL must be reachable from the backend (resolved from the athlete's own BYOK config, else the instance's default preset); it does not upload anything itself — the generated workouts are uploaded to Wahoo individually from the Workouts tab.
 
 ---
 

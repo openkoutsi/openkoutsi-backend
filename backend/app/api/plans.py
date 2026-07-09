@@ -25,6 +25,7 @@ from backend.app.services.llm_plan_generator import generate_plan_llm, generate_
 from backend.app.services.llm_workout_generator import (
     generate_workout_definition_llm, WorkoutGenerationError,
 )
+from backend.app.services.llm_client import LLM_ERROR_STATUS, LlmConfigError
 from backend.app.schemas.pagination import Page, PageParams, paginate_params
 
 router = APIRouter(prefix="/plans", tags=["plans"])
@@ -135,6 +136,8 @@ async def create_plan(
                 instance=instance,
                 user_id=ctx.user_id,
             )
+        except LlmConfigError as exc:
+            raise HTTPException(LLM_ERROR_STATUS.get(exc.code, 400), str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         except Exception as exc:
@@ -503,6 +506,8 @@ async def regenerate_plan(
                 instance=instance,
                 user_id=ctx.user_id,
             )
+        except LlmConfigError as exc:
+            raise HTTPException(LLM_ERROR_STATUS.get(exc.code, 400), str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         except Exception as exc:
@@ -624,6 +629,8 @@ async def generate_upcoming_workouts(
                 instance=instance,
                 user_id=ctx.user_id,
             )
+        except LlmConfigError as exc:
+            raise HTTPException(LLM_ERROR_STATUS.get(exc.code, 400), str(exc)) from exc
         except ValueError as exc:
             # LLM not configured — no workout can be generated; fail clearly.
             raise HTTPException(400, str(exc)) from exc

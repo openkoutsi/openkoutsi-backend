@@ -83,13 +83,14 @@ class InvitationResponse(BaseModel):
 class LlmModelConfigIn(BaseModel):
     """A selectable model *preset* — a full or partial connection.
 
-    Any of ``base_url`` / ``model`` / ``api_key`` / ``headers`` / ``body`` may
-    be given; missing pieces fall back to the instance-level defaults. This lets
-    an admin offer distinct providers (Anthropic, Mistral, …) as presets that a
-    user picks between. ``api_key`` is write-only; omit it to keep the stored
-    key, or set ``api_key_clear`` to remove it. ``name`` is the stable internal
-    identifier (what a user's selection is stored as); ``label`` is the
-    human-friendly name shown to users (defaults to ``name``).
+    A preset is a self-contained connection: ``base_url`` / ``model`` /
+    ``api_key`` / ``headers`` / ``body``. This lets an admin offer distinct
+    providers (Anthropic, Mistral, …) as presets that a user picks between; the
+    **first preset in the list is the instance default**. ``api_key`` is
+    write-only; omit it to keep the stored key, or set ``api_key_clear`` to
+    remove it. ``name`` is the stable internal identifier (what a user's
+    selection is stored as); ``label`` is the human-friendly name shown to users
+    (defaults to ``name``).
     """
     name: str
     label: Optional[str] = None
@@ -120,23 +121,15 @@ class LlmModelConfigOut(BaseModel):
 
 
 class InstanceSettingsResponse(BaseModel):
-    llm_base_url: Optional[str]
-    llm_model: Optional[str]
-    llm_api_key_set: bool
     llm_analysis_context: Optional[str]
     admin_contact: Optional[str]
+    # The instance's entire LLM config: selectable presets, first = default.
     llm_models: list[LlmModelConfigOut] = []
-    llm_extra_headers: dict[str, str] = {}
 
 
 class InstanceSettingsPatch(BaseModel):
-    llm_base_url: Optional[str] = None
-    llm_model: Optional[str] = None
-    llm_api_key: Optional[str] = None
-    clear_llm_api_key: bool = False
     llm_analysis_context: Optional[str] = None
     admin_contact: Optional[str] = None
-    # Full-replacement lists/maps: send the complete desired state, or omit to
-    # leave unchanged.
+    # Full-replacement list: send the complete desired preset list (first entry
+    # is the default), or omit to leave unchanged.
     llm_models: Optional[list[LlmModelConfigIn]] = None
-    llm_extra_headers: Optional[dict[str, str]] = None

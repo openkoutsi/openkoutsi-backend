@@ -134,12 +134,13 @@ WAHOO_CLIENT_SECRET=
 WAHOO_BRIDGE_URL=
 WAHOO_BRIDGE_SECRET=
 
-# Optional server-side LLM defaults
-LLM_BASE_URL=
-LLM_API_KEY=
-LLM_MODEL=
+# Optional: restrict which LLM base URLs users may bring (BYOK). Comma-separated;
+# empty = users may bring any URL (subject to SSRF guards).
 LLM_ALLOWED_SERVERS=
 ```
+
+There are no server-side LLM env-var defaults: all LLM connections are defined
+as presets — instance-wide by an admin, or per-user via BYOK (see below).
 
 The backend intentionally does not send a `temperature` parameter, so each
 model applies its own default. This keeps thinking-enabled models (e.g. Claude
@@ -147,26 +148,29 @@ with extended thinking, via Anthropic's OpenAI-compatible endpoint) — which
 reject any temperature other than `1` — working out of the box. Upstream LLM
 errors surface the provider's response body in the logs.
 
-Admins can also configure, per instance (Settings → AI / LLM):
+Admins configure, per instance (Settings → AI / LLM), a **list of selectable
+presets** — each a self-contained connection: display name, stable identifier,
+base URL, model id, API key, headers and extra chat-completion body params (e.g.
+`max_tokens` or a thinking/`reasoning_effort` config). This lets an admin offer
+distinct providers (Anthropic, Mistral, …) as presets. **The first preset in the
+list is the instance default.** Users pick a preset — the dropdown shows each
+preset's display name, but the selection is stored by its stable identifier, so
+renaming a display name never breaks existing selections.
 
-- **Several selectable presets** — each a full connection: display name, stable
-  identifier, base URL, model id, API key, headers and extra chat-completion
-  body params (e.g. `max_tokens` or a thinking/`reasoning_effort` config). This
-  lets an admin offer distinct providers (Anthropic, Mistral, …) as presets.
-  Any omitted field falls back to the instance-level default below. Users pick a
-  preset as their saved default — the dropdown shows each preset's display name,
-  but the selection is stored by its stable identifier, so renaming a display
-  name never breaks existing selections. The chosen preset's base URL, model,
-  key, headers and body are used for their requests. Users may also add their
-  own personal presets.
-- **Extra request headers** — arbitrary headers added to every outbound LLM
-  request (e.g. a provider's zero-data-retention header). Instance headers apply
-  to everyone; a preset's and a user's personal headers layer on top.
+**Bring your own LLM (BYOK).** Any user can instead point openkoutsi at their
+own OpenAI-compatible endpoint under Settings → AI / LLM (base URL + model +
+optional API key). Once a user sets their own base URL, **only** their own
+config is used — the instance's presets and keys are ignored entirely, so an
+instance key can never be sent to a user-chosen server. The API key is
+Fernet-encrypted per-user at rest and never returned to the browser. When
+`LLM_ALLOWED_SERVERS` is set, BYOK URLs are restricted to that allow-list (at
+save time and at use time); the SSRF guard always applies.
 
-The connection test (Settings → AI / LLM → *Test connection*) sends a small
-"hello world" message using the configured headers and the selected model's body
-params and confirms a reply comes back — so it also validates ZDR headers and a
-thinking config, not just reachability.
+The connection tests — *Test connection* (admin, instance presets) and *Test
+connection* on the user BYOK card (`POST /api/llm/test-my-connection`) — send a
+small "hello world" message using the configured headers and the selected
+model's body params and confirm a reply comes back, so they also validate ZDR
+headers and a thinking config, not just reachability.
 
 The web frontend has its own configuration (`API_URL`, etc.) — see the [openkoutsi-web](https://github.com/openkoutsi/openkoutsi-web) repository.
 

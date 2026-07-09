@@ -215,10 +215,9 @@ def _make_streaming_lines(chunks):
 
 
 def _make_mock_team(base_url="http://localhost:11434/v1", model="llama3.2", analysis_context=None):
+    # The instance's LLM config is entirely its preset list (first = default).
     team = MagicMock()
-    team.llm_base_url = base_url
-    team.llm_model = model
-    team.llm_api_key_enc = None
+    team.llm_models = [{"name": model, "base_url": base_url}]
     team.llm_analysis_context = analysis_context
     return team
 
@@ -264,17 +263,10 @@ class TestStreamAnalysis:
 
     async def test_raises_when_no_llm_config(self):
         team = MagicMock()
-        team.llm_base_url = None
-        team.llm_model = None
-        team.llm_api_key_enc = None
+        team.llm_models = None
 
-        with (
-            patch("backend.app.services.llm_activity_analyzer._RegistrySessionLocal",
-                  return_value=_mock_registry_session(team)),
-            patch("backend.app.core.config.settings") as mock_settings,
-        ):
-            mock_settings.llm_base_url = ""
-            mock_settings.llm_model = ""
+        with patch("backend.app.services.llm_activity_analyzer._RegistrySessionLocal",
+                   return_value=_mock_registry_session(team)):
             with pytest.raises(ValueError, match="LLM base URL"):
                 async for _ in _stream_analysis(_make_activity(), _make_athlete(), "team-1"):
                     pass

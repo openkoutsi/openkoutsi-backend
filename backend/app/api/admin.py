@@ -376,13 +376,9 @@ def _preset_out(entry: dict) -> LlmModelConfigOut:
 
 def _settings_response(instance: InstanceSettings) -> InstanceSettingsResponse:
     return InstanceSettingsResponse(
-        llm_base_url=instance.llm_base_url,
-        llm_model=instance.llm_model,
-        llm_api_key_set=instance.llm_api_key_enc is not None,
         llm_analysis_context=instance.llm_analysis_context,
         admin_contact=instance.admin_contact,
         llm_models=[_preset_out(e) for e in (instance.llm_models or []) if isinstance(e, dict)],
-        llm_extra_headers=instance.llm_extra_headers or {},
     )
 
 
@@ -405,28 +401,12 @@ async def update_instance_settings(
 ):
     instance = await _get_or_create_settings(session)
 
-    if body.llm_base_url is not None:
-        instance.llm_base_url = body.llm_base_url or None
-    if body.llm_model is not None:
-        instance.llm_model = body.llm_model or None
     if body.llm_analysis_context is not None:
         instance.llm_analysis_context = body.llm_analysis_context or None
     if body.admin_contact is not None:
         instance.admin_contact = body.admin_contact or None
     if body.llm_models is not None:
         instance.llm_models = _build_presets(body.llm_models, instance.llm_models) or None
-    if body.llm_extra_headers is not None:
-        instance.llm_extra_headers = {k: v for k, v in body.llm_extra_headers.items() if k.strip()} or None
-
-    if body.clear_llm_api_key:
-        instance.llm_api_key_enc = None
-    elif body.llm_api_key:
-        if not settings.encryption_key:
-            raise HTTPException(
-                status_code=400,
-                detail="ENCRYPTION_KEY not set — cannot store encrypted API key",
-            )
-        instance.llm_api_key_enc = encrypt_instance_secret(body.llm_api_key)
 
     await session.commit()
     await session.refresh(instance)

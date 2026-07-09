@@ -1,8 +1,9 @@
-"""Integration tests for POST /api/llm/test-connection.
+"""Integration tests for POST /api/llm/test-connection and /api/llm/models.
 
-The endpoint sends a minimal "hello world" chat completion to the instance's
-configured LLM and reports whether a usable response came back. The upstream
-HTTP call is mocked so no real LLM is contacted.
+The instance's LLM config is entirely its preset list (``llm_models``), whose
+first entry is the default. The endpoint sends a minimal "hello world" chat
+completion to the selected preset and reports whether a usable response came
+back. The upstream HTTP call is mocked so no real LLM is contacted.
 """
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -38,9 +39,10 @@ def _mock_httpx_client(*, status_code=200, json_body=None, text="", raises=None)
 
 
 async def _configure_llm(client, auth_headers, *, base_url="http://127.0.0.1:11434", model="test-model"):
+    """Configure the instance with a single default preset carrying base_url + model."""
     resp = await client.patch(
         "/api/admin/settings",
-        json={"llm_base_url": base_url, "llm_model": model},
+        json={"llm_models": [{"name": model, "base_url": base_url}]},
         headers=auth_headers,
     )
     assert resp.status_code == 200
@@ -56,18 +58,6 @@ class TestLlmTestConnection:
         assert resp.status_code == 400
         assert "base URL" in resp.json()["detail"]
 
-    async def test_no_model_configured(self, client, auth_headers):
-        await client.patch(
-            "/api/admin/settings",
-            json={"llm_base_url": "https://llm.example.com", "llm_model": ""},
-            headers=auth_headers,
-        )
-        resp = await client.post("/api/llm/test-connection", headers=auth_headers)
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["ok"] is False
-        assert "model" in data["error"]
-
     async def test_successful_hello_world_roundtrip(self, client, auth_headers):
         await _configure_llm(client, auth_headers)
         completion = {"choices": [{"message": {"role": "assistant", "content": "Hello! I'm here."}}]}
@@ -81,9 +71,6 @@ class TestLlmTestConnection:
         assert data["prompt_sent"] and "greeting" in data["prompt_sent"].lower()
         assert data["response_text"] == "Hello! I'm here."
         assert data["http_status"] == 200
-        # The old model-listing fields are gone.
-        assert "models_available" not in data
-        assert "model_found" not in data
 
     async def test_empty_reply_is_not_ok(self, client, auth_headers):
         await _configure_llm(client, auth_headers)
@@ -138,15 +125,17 @@ class TestLlmTestConnection:
         assert data["ok"] is False
         assert "timed out" in data["error"].lower()
 
-    async def test_applies_extra_headers_and_per_model_body(self, client, auth_headers):
-        # Configure a model with its own body extras and a global ZDR header.
+    async def test_applies_preset_headers_and_body(self, client, auth_headers):
+        # A preset carries its own base URL, a ZDR header and body extras.
         resp = await client.patch(
             "/api/admin/settings",
             json={
-                "llm_base_url": "http://127.0.0.1:11434",
-                "llm_model": "thinker",
-                "llm_models": [{"name": "thinker", "body": {"max_tokens": 32, "reasoning_effort": "high"}}],
-                "llm_extra_headers": {"X-Wafer-ZDR": "true"},
+                "llm_models": [{
+                    "name": "thinker",
+                    "base_url": "http://127.0.0.1:11434",
+                    "headers": {"X-Wafer-ZDR": "true"},
+                    "body": {"max_tokens": 32, "reasoning_effort": "high"},
+                }],
             },
             headers=auth_headers,
         )
@@ -169,11 +158,10 @@ class TestLlmTestConnection:
         await client.patch(
             "/api/admin/settings",
             json={
-                "llm_base_url": "http://127.0.0.1:11434",
-                "llm_model": "plain",
                 "llm_models": [
-                    {"name": "plain", "body": {}},
-                    {"name": "thinker", "body": {"reasoning_effort": "high"}},
+                    {"name": "plain", "base_url": "http://127.0.0.1:11434", "body": {}},
+                    {"name": "thinker", "base_url": "http://127.0.0.1:11434",
+                     "body": {"reasoning_effort": "high"}},
                 ],
             },
             headers=auth_headers,
@@ -193,15 +181,13 @@ class TestLlmTestConnection:
 
 
 class TestLlmModelsEndpoint:
-    async def test_lists_configured_models_and_selection(self, client, auth_headers):
+    async def test_lists_configured_models_and_first_is_default(self, client, auth_headers):
         await client.patch(
             "/api/admin/settings",
             json={
-                "llm_base_url": "http://127.0.0.1:11434",
-                "llm_model": "b",
                 "llm_models": [
-                    {"name": "a", "label": "Model A"},
-                    {"name": "b"},
+                    {"name": "a", "label": "Model A", "base_url": "http://x/v1"},
+                    {"name": "b", "base_url": "http://x/v1"},
                 ],
             },
             headers=auth_headers,
@@ -214,46 +200,25 @@ class TestLlmModelsEndpoint:
             {"name": "a", "label": "Model A"},
             {"name": "b", "label": "b"},
         ]
-        assert data["selected"] == "b"
-
-    async def test_selected_falls_back_to_first_preset(self, client, auth_headers):
-        # No default llm_model saved, but presets exist: selected should be the
-        # first preset (matching resolve_llm), not null.
-        await client.patch(
-            "/api/admin/settings",
-            json={
-                "llm_base_url": "http://127.0.0.1:11434",
-                "llm_model": "",
-                "llm_models": [{"name": "first"}, {"name": "second"}],
-            },
-            headers=auth_headers,
-        )
-        resp = await client.get("/api/llm/models", headers=auth_headers)
-        assert resp.json()["selected"] == "first"
-
-    async def test_single_legacy_model_is_offered(self, client, auth_headers):
-        await client.patch(
-            "/api/admin/settings",
-            json={"llm_base_url": "http://127.0.0.1:11434", "llm_model": "solo"},
-            headers=auth_headers,
-        )
-        resp = await client.get("/api/llm/models", headers=auth_headers)
-        data = resp.json()
-        assert data["models"] == [{"name": "solo", "label": "solo"}]
-        assert data["selected"] == "solo"
+        # The first preset is the default selection.
+        assert data["selected"] == "a"
 
     async def test_requires_auth(self, client):
         resp = await client.get("/api/llm/models")
         assert resp.status_code == 401
 
 
-class TestInstanceSettingsPersistModelsHeaders:
-    async def test_round_trips_models_and_headers(self, client, auth_headers):
+class TestInstanceSettingsPersistModels:
+    async def test_round_trips_models(self, client, auth_headers):
         resp = await client.patch(
             "/api/admin/settings",
             json={
-                "llm_models": [{"name": "gpt", "body": {"max_tokens": 10}}],
-                "llm_extra_headers": {"X-ZDR": "true"},
+                "llm_models": [{
+                    "name": "gpt",
+                    "base_url": "http://x/v1",
+                    "headers": {"X-ZDR": "true"},
+                    "body": {"max_tokens": 10},
+                }],
             },
             headers=auth_headers,
         )
@@ -263,13 +228,15 @@ class TestInstanceSettingsPersistModelsHeaders:
         assert data["llm_models"] == [{
             "name": "gpt",
             "label": None,
-            "base_url": None,
+            "base_url": "http://x/v1",
             "model": None,
             "api_key_set": False,
-            "headers": {},
+            "headers": {"X-ZDR": "true"},
             "body": {"max_tokens": 10},
         }]
-        assert data["llm_extra_headers"] == {"X-ZDR": "true"}
+        # The removed instance single-config / globals are no longer returned.
+        assert "llm_base_url" not in data
+        assert "llm_extra_headers" not in data
 
     async def test_full_preset_and_key_lifecycle(self, client, auth_headers):
         from cryptography.fernet import Fernet
