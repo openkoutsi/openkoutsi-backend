@@ -267,7 +267,7 @@ class TestStreamAnalysis:
 
         with patch("backend.app.services.llm_activity_analyzer._RegistrySessionLocal",
                    return_value=_mock_registry_session(team)):
-            with pytest.raises(ValueError, match="LLM base URL"):
+            with pytest.raises(ValueError, match="base URL"):
                 async for _ in _stream_analysis(_make_activity(), _make_athlete(), "team-1"):
                     pass
 
@@ -355,6 +355,69 @@ class TestStreamAnalysis:
         messages = await self._run_capture_payload(team)
         system_messages = [m for m in messages if m["role"] == "system"]
         assert len(system_messages) == 1
+
+    async def _run_capture_full(self, team, athlete):
+        """Run _stream_analysis and return the full captured request (url + body)."""
+        captured: dict = {}
+
+        mock_resp = AsyncMock()
+        mock_resp.aiter_lines = MagicMock(return_value=_make_streaming_lines(["ok"]))
+        mock_resp.is_error = False
+
+        @asynccontextmanager
+        async def _mock_stream(method, url, json=None, **kwargs):
+            captured["url"] = url
+            captured.update(json or {})
+            yield mock_resp
+
+        mock_client = AsyncMock()
+        mock_client.stream = _mock_stream
+
+        @asynccontextmanager
+        async def _mock_httpx(*args, **kwargs):
+            yield mock_client
+
+        with (
+            patch("backend.app.services.llm_activity_analyzer._RegistrySessionLocal",
+                  return_value=_mock_registry_session(team)),
+            patch("httpx.AsyncClient", return_value=_mock_httpx()),
+        ):
+            async for _ in _stream_analysis(_make_activity(), athlete, "team-1"):
+                pass
+        return captured
+
+    def _multi_preset_team(self):
+        team = MagicMock()
+        # Two instance presets; the first is the default.
+        team.llm_models = [
+            {"name": "default", "base_url": "http://127.0.0.1:11434/v1", "model": "a-model"},
+            {"name": "claude", "base_url": "http://127.0.0.1:11435/v1", "model": "b-model"},
+        ]
+        team.llm_analysis_context = None
+        return team
+
+    async def test_honours_athlete_selected_instance_preset(self):
+        # The athlete picked the non-default "claude" preset — the analyzer must
+        # use it, not the instance default (the reported bug).
+        athlete = _make_athlete(app_settings={"llm_model": "claude"})
+        captured = await self._run_capture_full(self._multi_preset_team(), athlete)
+        assert captured["model"] == "b-model"
+        assert captured["url"] == "http://127.0.0.1:11435/v1/chat/completions"
+
+    async def test_falls_back_to_default_preset_without_selection(self):
+        athlete = _make_athlete(app_settings={})
+        captured = await self._run_capture_full(self._multi_preset_team(), athlete)
+        assert captured["model"] == "a-model"
+        assert captured["url"] == "http://127.0.0.1:11434/v1/chat/completions"
+
+    async def test_honours_athlete_byok(self):
+        # A BYOK athlete's own server is used even by the background analyzer.
+        athlete = _make_athlete(
+            app_settings={"llm_base_url": "http://127.0.0.1:9999/v1", "llm_model": "my-model"}
+        )
+        captured = await self._run_capture_full(self._multi_preset_team(), athlete)
+        assert captured["model"] == "my-model"
+        assert captured["url"] == "http://127.0.0.1:9999/v1/chat/completions"
 
 
 # ── analyze_activity_bg ───────────────────────────────────────────────────────
