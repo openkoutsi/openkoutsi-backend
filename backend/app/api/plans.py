@@ -26,6 +26,7 @@ from backend.app.services.llm_workout_generator import (
     generate_workout_definition_llm, WorkoutGenerationError,
 )
 from backend.app.services.llm_client import LLM_ERROR_STATUS, LlmConfigError
+from backend.app.services.llm_access import check_llm_access, subscription_required_error
 from backend.app.schemas.pagination import Page, PageParams, paginate_params
 
 router = APIRouter(prefix="/plans", tags=["plans"])
@@ -124,6 +125,9 @@ async def create_plan(
             raise HTTPException(400, "A plan config (training days and types) is required for LLM generation")
         instance_result = await registry_session.execute(select(InstanceSettings).limit(1))
         instance = instance_result.scalar_one_or_none()
+        access = await check_llm_access(ctx, athlete, instance, registry_session)
+        if not access.allowed:
+            raise subscription_required_error()
         try:
             plan = await generate_plan_llm(
                 athlete=athlete,
@@ -135,6 +139,7 @@ async def create_plan(
                 session=session,
                 instance=instance,
                 user_id=ctx.user_id,
+                allow_instance_fallback=(access.mode != "byok"),
             )
         except LlmConfigError as exc:
             raise HTTPException(LLM_ERROR_STATUS.get(exc.code, 400), str(exc)) from exc
@@ -496,6 +501,9 @@ async def regenerate_plan(
             raise HTTPException(400, "A plan config (training days and types) is required for LLM generation")
         instance_result = await registry_session.execute(select(InstanceSettings).limit(1))
         instance = instance_result.scalar_one_or_none()
+        access = await check_llm_access(ctx, athlete, instance, registry_session)
+        if not access.allowed:
+            raise subscription_required_error()
         try:
             weeks_data = await generate_plan_weeks_llm(
                 athlete=athlete,
@@ -505,6 +513,7 @@ async def regenerate_plan(
                 session=session,
                 instance=instance,
                 user_id=ctx.user_id,
+                allow_instance_fallback=(access.mode != "byok"),
             )
         except LlmConfigError as exc:
             raise HTTPException(LLM_ERROR_STATUS.get(exc.code, 400), str(exc)) from exc
@@ -582,6 +591,9 @@ async def generate_upcoming_workouts(
 
     instance_result = await registry_session.execute(select(InstanceSettings).limit(1))
     instance = instance_result.scalar_one_or_none()
+    access = await check_llm_access(ctx, athlete, instance, registry_session)
+    if not access.allowed:
+        raise subscription_required_error()
 
     # Select in-window planned workouts, ordered by date.
     selected: list[tuple[PlannedWorkout, date]] = []
@@ -628,6 +640,7 @@ async def generate_upcoming_workouts(
                 session=session,
                 instance=instance,
                 user_id=ctx.user_id,
+                allow_instance_fallback=(access.mode != "byok"),
             )
         except LlmConfigError as exc:
             raise HTTPException(LLM_ERROR_STATUS.get(exc.code, 400), str(exc)) from exc

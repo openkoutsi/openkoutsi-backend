@@ -46,12 +46,26 @@ def isolate_user_dbs(tmp_path, monkeypatch):
     its own data_dir and a cleared engine cache for isolation.
     """
     from backend.app.core.config import settings
-    from backend.app.db import user_session
+    from backend.app.db import usage, user_session
 
     monkeypatch.setattr(settings, "data_dir", str(tmp_path))
     user_session._get_user_engine.cache_clear()
+    usage._get_usage_engine.cache_clear()
     yield
     user_session._get_user_engine.cache_clear()
+    usage._get_usage_engine.cache_clear()
+
+
+@pytest.fixture
+async def usage_db(isolate_user_dbs):
+    """Initialise the dedicated LLM-usage DB in this test's temp data dir.
+
+    Returns a session factory for asserting on recorded ``llm_usage`` rows.
+    """
+    from backend.app.db.usage import init_usage_db, usage_session_factory
+
+    await init_usage_db()
+    return usage_session_factory()
 
 
 # ── DB fixtures ────────────────────────────────────────────────────────────

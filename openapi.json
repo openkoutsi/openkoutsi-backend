@@ -706,6 +706,161 @@
         ]
       }
     },
+    "/api/admin/users/{user_id}/llm-entitlement": {
+      "put": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Grant or revoke a user's LLM-access entitlement",
+        "description": "Upsert a user's manual LLM-access entitlement (Phase 1).\n\nIdempotent: one row per user. Records ``source=\"manual\"`` and the granting\nadmin. Passing ``status=\"revoked\"`` revokes access without deleting the row\n(keeping its audit trail).",
+        "operationId": "setUserLlmEntitlement",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "User Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LlmEntitlementUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/admin/llm-usage/summary": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Aggregate instance-paid LLM usage",
+        "description": "Aggregate the dedicated usage DB (instance-paid calls only; issue #9).\n\n``group_by`` is one of ``user | provider | feature | day | week | month``.\nInput and output tokens are summed **separately** (never merged), plus a\nconvenience total and an ``unknown_usage_calls`` count. Combine ``user_id``\nwith ``group_by=month`` for \"tokens per user per month\" \u2014 the original\n\"average LLM cost per user\" question. Every row is instance-paid; BYOK calls\nare never recorded, so no filter is needed.",
+        "operationId": "getLlmUsageSummary",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "From"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "To"
+            }
+          },
+          {
+            "name": "group_by",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "day",
+              "title": "Group By"
+            }
+          },
+          {
+            "name": "user_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "User Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LlmUsageSummaryResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/athlete": {
       "get": {
         "tags": [
@@ -3622,6 +3777,33 @@
         ]
       }
     },
+    "/api/llm/access": {
+      "get": {
+        "tags": [
+          "llm"
+        ],
+        "summary": "Get Llm Access",
+        "description": "Report whether the caller may use LLM features, and by which route.",
+        "operationId": "get_llm_access_api_llm_access_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LlmAccessResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
     "/api/llm/test-connection": {
       "post": {
         "tags": [
@@ -6316,6 +6498,17 @@
               }
             ],
             "title": "Llm Models"
+          },
+          "llm_requires_subscription": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Llm Requires Subscription"
           }
         },
         "type": "object",
@@ -6352,6 +6545,11 @@
             "type": "array",
             "title": "Llm Models",
             "default": []
+          },
+          "llm_requires_subscription": {
+            "type": "boolean",
+            "title": "Llm Requires Subscription",
+            "default": false
           }
         },
         "type": "object",
@@ -6589,6 +6787,35 @@
         ],
         "title": "LinkActivityRequest"
       },
+      "LlmAccessResponse": {
+        "properties": {
+          "gated": {
+            "type": "boolean",
+            "title": "Gated"
+          },
+          "mode": {
+            "type": "string",
+            "title": "Mode"
+          },
+          "entitlement": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/backend__app__api__llm__LlmEntitlementSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "gated",
+          "mode"
+        ],
+        "title": "LlmAccessResponse",
+        "description": "The frontend's single source of truth for LLM access state (issue #9).\n\n``gated`` reflects the instance switch; ``mode`` is how the caller is (or\nwould be) served: ``ungated`` (gate off), ``byok`` (own LLM), ``entitled``\n(active entitlement), or ``none`` (gated, no BYOK, no entitlement \u2192 the\nupsell). ``entitlement`` echoes the caller's own entitlement row if any."
+      },
       "LlmChatRequest": {
         "properties": {
           "messages": {
@@ -6631,6 +6858,43 @@
           "messages"
         ],
         "title": "LlmChatRequest"
+      },
+      "LlmEntitlementUpdate": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "title": "LlmEntitlementUpdate",
+        "description": "Body for the admin grant/revoke endpoint (issue #9)."
       },
       "LlmModelConfigIn": {
         "properties": {
@@ -6938,6 +7202,94 @@
           "ok"
         ],
         "title": "LlmTestResponse"
+      },
+      "LlmUsageBucket": {
+        "properties": {
+          "key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key"
+          },
+          "calls": {
+            "type": "integer",
+            "title": "Calls"
+          },
+          "prompt_tokens": {
+            "type": "integer",
+            "title": "Prompt Tokens"
+          },
+          "completion_tokens": {
+            "type": "integer",
+            "title": "Completion Tokens"
+          },
+          "total_tokens": {
+            "type": "integer",
+            "title": "Total Tokens"
+          },
+          "unknown_usage_calls": {
+            "type": "integer",
+            "title": "Unknown Usage Calls"
+          }
+        },
+        "type": "object",
+        "required": [
+          "calls",
+          "prompt_tokens",
+          "completion_tokens",
+          "total_tokens",
+          "unknown_usage_calls"
+        ],
+        "title": "LlmUsageBucket",
+        "description": "One aggregation row of the usage summary.\n\n``key`` is the group value (a user id, provider host, feature, or time\nbucket). Input and output tokens are summed **separately** \u2014 providers price\nthem differently \u2014 and never merged into a single figure."
+      },
+      "LlmUsageSummaryResponse": {
+        "properties": {
+          "group_by": {
+            "type": "string",
+            "title": "Group By"
+          },
+          "from": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "From"
+          },
+          "to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "To"
+          },
+          "buckets": {
+            "items": {
+              "$ref": "#/components/schemas/LlmUsageBucket"
+            },
+            "type": "array",
+            "title": "Buckets",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "group_by"
+        ],
+        "title": "LlmUsageSummaryResponse"
       },
       "LoginRequest": {
         "properties": {
@@ -8327,6 +8679,16 @@
               }
             ],
             "title": "Consent Version"
+          },
+          "llm_entitlement": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/backend__app__schemas__admin__LlmEntitlementSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",
@@ -8851,6 +9213,101 @@
           "zone_number"
         ],
         "title": "ZoneSpec"
+      },
+      "backend__app__api__llm__LlmEntitlementSummary": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "title": "LlmEntitlementSummary"
+      },
+      "backend__app__schemas__admin__LlmEntitlementSummary": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "active": {
+            "type": "boolean",
+            "title": "Active"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source"
+          },
+          "starts_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Starts At"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "notes": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status",
+          "active",
+          "source"
+        ],
+        "title": "LlmEntitlementSummary",
+        "description": "A user's LLM-access entitlement as shown in the admin console (issue #9)."
       }
     },
     "securitySchemes": {

@@ -25,6 +25,7 @@ from ..db.registry import _RegistrySessionLocal
 from ..db.user_session import get_user_session_factory
 from ..models.registry_orm import InstanceSettings
 from ..models.user_orm import Activity, Athlete, DailyMetric
+from .llm_access import record_llm_usage, usage_from_sse_data
 from .llm_client import (
     apply_body_extras,
     merge_llm_headers,
@@ -207,16 +208,27 @@ async def _stream_analysis(
     locale: str | None = None,
     power_pr_badges: dict | None = None,
     distance_pr_badges: dict | None = None,
+    usage_out: dict | None = None,
 ) -> AsyncIterator[str]:
-    """Yield text chunks from the LLM via streaming SSE."""
+    """Yield text chunks from the LLM via streaming SSE.
+
+    When ``usage_out`` is provided it is populated with ``{"cfg", "usage"}`` so
+    the caller can record the instance-paid token usage (issue #9). ``usage`` is
+    the trailing ``stream_options.include_usage`` chunk, or ``None`` when the
+    upstream omits it.
+    """
     # Fetch instance settings for LLM config
     instance: InstanceSettings | None = None
     async with _RegistrySessionLocal() as reg:
         result = await reg.execute(select(InstanceSettings).limit(1))
         instance = result.scalar_one_or_none()
 
-    # Resolve from the instance's preset list (first preset = default).
+    # Resolve from the instance's preset list (first preset = default). The
+    # analyzers always run on instance credentials (never BYOK), so every call
+    # is instance-paid and recorded.
     cfg = resolve_instance_llm(instance)
+    if usage_out is not None:
+        usage_out["cfg"] = cfg
 
     if not cfg.base_url or not cfg.model:
         raise ValueError("LLM base URL and model must be configured in Settings → AI / LLM")
@@ -237,21 +249,31 @@ async def _stream_analysis(
     messages.append(
         {"role": "user", "content": _build_prompt(activity, athlete, fatigue, power_pr_badges, distance_pr_badges)}
     )
-    payload = apply_body_extras(
-        {
+
+    def _payload(include_usage: bool) -> dict:
+        base: dict = {
             "model": cfg.model,
             "messages": messages,
             **temperature_param(),
             "stream": True,
-        },
-        cfg.extra_body,
-    )
+        }
+        if include_usage:
+            base["stream_options"] = {"include_usage": True}
+        return apply_body_extras(base, cfg.extra_body)
 
     # Local models can take several minutes; use a generous but finite timeout.
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(300.0, connect=10.0)  # 5-minute read timeout
     ) as client:
-        async with client.stream("POST", url, json=payload, headers=headers) as resp:
+        # Ask for a trailing usage chunk; retry once without it if the upstream
+        # rejects stream_options (Ollama-family tolerance).
+        cm = client.stream("POST", url, json=_payload(True), headers=headers)
+        resp = await cm.__aenter__()
+        if getattr(resp, "is_error", False):
+            await cm.__aexit__(None, None, None)
+            cm = client.stream("POST", url, json=_payload(False), headers=headers)
+            resp = await cm.__aenter__()
+        try:
             await raise_for_llm_status(resp, url)
             async for line in resp.aiter_lines():
                 if not line.startswith("data: "):
@@ -259,6 +281,10 @@ async def _stream_analysis(
                 data = line[6:]
                 if data.strip() == "[DONE]":
                     break
+                if usage_out is not None:
+                    usage = usage_from_sse_data(data)
+                    if usage is not None:
+                        usage_out["usage"] = usage
                 try:
                     chunk = json.loads(data)
                     content = chunk["choices"][0]["delta"].get("content", "")
@@ -266,6 +292,8 @@ async def _stream_analysis(
                         yield content
                 except (json.JSONDecodeError, KeyError, IndexError):
                     continue
+        finally:
+            await cm.__aexit__(None, None, None)
 
 
 async def analyze_activity_bg(
@@ -314,11 +342,14 @@ async def analyze_activity_bg(
         buffer: list[str] = []
         last_flush = time.monotonic()
         accumulated = ""
+        usage_out: dict = {}
+        started = time.monotonic()
 
         try:
             async for chunk in _stream_analysis(
                 activity, athlete, user_id, fatigue=fatigue, locale=resolved_locale,
                 power_pr_badges=power_pr_badges, distance_pr_badges=distance_pr_badges,
+                usage_out=usage_out,
             ):
                 buffer.append(chunk)
                 if time.monotonic() - last_flush >= 0.5:
@@ -339,3 +370,15 @@ async def analyze_activity_bg(
             log.exception("Analysis failed for activity %s", activity_id)
             activity.analysis_status = "error"
             await session.commit()
+        finally:
+            # Record instance-paid token usage (issue #9). Fire-and-forget; a
+            # failure never affects the analysis result.
+            cfg = usage_out.get("cfg")
+            if cfg is not None:
+                await record_llm_usage(
+                    user_id=user_id,
+                    feature="activity_analysis",
+                    cfg=cfg,
+                    usage=usage_out.get("usage"),
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                )

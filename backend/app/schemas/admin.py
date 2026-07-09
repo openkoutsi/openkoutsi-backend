@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
 
 # ── First-run setup ────────────────────────────────────────────────────────
@@ -30,6 +30,17 @@ class SetupRequest(BaseModel):
 
 # ── Users (instance admin) ─────────────────────────────────────────────────
 
+class LlmEntitlementSummary(BaseModel):
+    """A user's LLM-access entitlement as shown in the admin console (issue #9)."""
+    status: str
+    active: bool  # the entitled predicate (status + start/expiry window) at read time
+    source: str
+    starts_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
+    notes: Optional[str] = None
+    updated_at: Optional[datetime] = None
+
+
 class UserResponse(BaseModel):
     id: str
     username: str
@@ -37,10 +48,26 @@ class UserResponse(BaseModel):
     created_at: datetime
     consented_at: Optional[datetime] = None
     consent_version: Optional[str] = None
+    # Null when the user has never been granted an entitlement.
+    llm_entitlement: Optional[LlmEntitlementSummary] = None
 
 
 class UserRolesUpdate(BaseModel):
     roles: list[str]
+
+
+class LlmEntitlementUpdate(BaseModel):
+    """Body for the admin grant/revoke endpoint (issue #9)."""
+    status: str  # "active" | "revoked"
+    expires_at: Optional[datetime] = None
+    notes: Optional[str] = None
+
+    @field_validator("status")
+    @classmethod
+    def _valid_status(cls, v: str) -> str:
+        if v not in ("active", "revoked"):
+            raise ValueError('status must be "active" or "revoked"')
+        return v
 
 
 class PasswordResetLinkResponse(BaseModel):
@@ -125,6 +152,8 @@ class InstanceSettingsResponse(BaseModel):
     admin_contact: Optional[str]
     # The instance's entire LLM config: selectable presets, first = default.
     llm_models: list[LlmModelConfigOut] = []
+    # Issue #9 opt-in gate: require an LLM-access entitlement (or BYOK).
+    llm_requires_subscription: bool = False
 
 
 class InstanceSettingsPatch(BaseModel):
@@ -133,3 +162,30 @@ class InstanceSettingsPatch(BaseModel):
     # Full-replacement list: send the complete desired preset list (first entry
     # is the default), or omit to leave unchanged.
     llm_models: Optional[list[LlmModelConfigIn]] = None
+    llm_requires_subscription: Optional[bool] = None
+
+
+# ── LLM usage stats (instance admin, issue #9) ──────────────────────────────
+
+class LlmUsageBucket(BaseModel):
+    """One aggregation row of the usage summary.
+
+    ``key`` is the group value (a user id, provider host, feature, or time
+    bucket). Input and output tokens are summed **separately** — providers price
+    them differently — and never merged into a single figure.
+    """
+    key: Optional[str] = None
+    calls: int
+    prompt_tokens: int
+    completion_tokens: int
+    total_tokens: int
+    unknown_usage_calls: int  # calls where the upstream omitted usage (nulls)
+
+
+class LlmUsageSummaryResponse(BaseModel):
+    group_by: str
+    from_: Optional[str] = Field(default=None, serialization_alias="from")
+    to: Optional[str] = None
+    buckets: list[LlmUsageBucket] = []
+
+    model_config = {"populate_by_name": True}

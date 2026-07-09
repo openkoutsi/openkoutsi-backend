@@ -16,6 +16,17 @@ class UserBase(DeclarativeBase):
     pass
 
 
+class UsageBase(DeclarativeBase):
+    """Base for the dedicated LLM-usage DB (issue #9).
+
+    A single, separate SQLite file holding one append-only row per
+    instance-paid LLM call (BYOK calls are never recorded). Kept apart from the
+    registry DB so its high-volume, unbounded rows can be pruned/rotated
+    independently and carry no registry foreign keys.
+    """
+    pass
+
+
 def _set_wal_mode(dbapi_conn, _connection_record) -> None:
     cursor = dbapi_conn.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")

@@ -15,6 +15,7 @@ from backend.app.core.auth import get_current_user
 from backend.app.core.config import settings
 from backend.app.core.deps import get_ctx_and_session
 from backend.app.core.file_encryption import decrypt_file, encrypt_file
+from backend.app.db.registry import get_registry_session
 from backend.app.db.user_session import get_user_session_factory
 from backend.app.models.user_orm import (
     Activity,
@@ -215,10 +216,17 @@ async def _bg_process_and_recalculate(
                     exc_info=True,
                 )
 
-            if _maybe_auto_analyze(target_act.id, athlete, user_id):
+            # Issue #9: on a gated instance, skip the instance-paid auto hooks for
+            # denied users (their settings stay saved but inert — debug log only).
+            from backend.app.services.llm_access import auto_analysis_allowed
+            llm_ok = await auto_analysis_allowed(global_user_id, athlete)
+            if not llm_ok and (athlete.app_settings or {}).get("auto_analyze"):
+                log.debug("Auto-analyze skipped for user %s — LLM access denied", global_user_id)
+
+            if llm_ok and _maybe_auto_analyze(target_act.id, athlete, user_id):
                 target_act.analysis_status = "pending"
 
-            needs_status = _maybe_auto_training_status(athlete, user_id)
+            needs_status = llm_ok and _maybe_auto_training_status(athlete, user_id)
             await session.commit()
             if needs_status:
                 from backend.app.services.llm_training_status_analyzer import analyze_training_status_bg
@@ -933,8 +941,11 @@ async def trigger_analysis(
     background_tasks: BackgroundTasks,
     body: AnalyzeBody = AnalyzeBody(),
     ctx_session=Depends(get_ctx_and_session),
+    registry_session: AsyncSession = Depends(get_registry_session),
 ):
+    from backend.app.services.llm_access import check_llm_access, subscription_required_error
     from backend.app.services.llm_activity_analyzer import analyze_activity_bg
+    from backend.app.models.registry_orm import InstanceSettings
 
     ctx, session = ctx_session
     athlete = await _get_athlete(ctx.user_id, session)
@@ -944,6 +955,15 @@ async def trigger_analysis(
     activity = result.scalar_one_or_none()
     if activity is None:
         raise HTTPException(status_code=404, detail="Activity not found")
+
+    # Issue #9 gate (the analysis is always instance-paid).
+    instance = (
+        await registry_session.execute(select(InstanceSettings).limit(1))
+    ).scalar_one_or_none()
+    access = await check_llm_access(ctx, athlete, instance, registry_session)
+    if not access.allowed:
+        raise subscription_required_error()
+
     if activity.analysis_status == "pending":
         return {"status": "pending"}
 

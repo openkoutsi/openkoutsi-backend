@@ -175,6 +175,21 @@ uv run python backend/scripts/migrate_user_dbs.py        # add --dry-run to prev
 
 This step is only needed when upgrading an existing deployment — new installs handle schema creation automatically on first startup.
 
+#### Registry and usage databases
+
+The registry DB and the dedicated **LLM-usage** DB (issue #9) are created
+automatically on first startup. When upgrading an existing deployment, apply
+their Alembic migrations:
+
+```bash
+uv run alembic -c backend/alembic-registry.ini upgrade head   # e.g. adds llm_entitlements
+uv run alembic -c backend/alembic-usage.ini upgrade head       # the separate llm_usage DB
+```
+
+The usage DB path defaults to `<DATA_DIR>/llm_usage.db`; override it with
+`LLM_USAGE_DB`. Its rows are append-only and hold no registry foreign keys, so
+it can be pruned/rotated independently.
+
 > **Upgrading from a multi-team (v1) deployment?** openkoutsi v2 removes the team
 > layer in favour of a single instance with per-user databases. Migrate existing
 > team data with the one-time script `backend/scripts/migrate_to_per_user.py`
