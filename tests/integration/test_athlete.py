@@ -12,8 +12,7 @@ import pytest
 from cryptography.fernet import Fernet
 from sqlalchemy import select
 
-TESTDATA = Path(__file__).parent.parent.parent / "testdata"
-SAMPLE_FIT = TESTDATA / "Zwift_Aerobic_Foundation_Forge.fit"
+from ._fit_fixtures import fit_fixture_params
 
 # Minimal valid image headers for magic-byte detection tests
 _JPEG = b"\xff\xd8\xff\xe0"
@@ -248,8 +247,8 @@ class TestExportAthlete:
         resp = await client.get("/api/athlete/export")
         assert resp.status_code == 401
 
-    @pytest.mark.skipif(not SAMPLE_FIT.exists(), reason="FIT fixture not found")
-    async def test_export_decrypts_encrypted_fit_files(self, client, auth_headers, session):
+    @pytest.mark.parametrize("fit_path", fit_fixture_params())
+    async def test_export_decrypts_encrypted_fit_files(self, fit_path, client, auth_headers, session):
         """Exported zip contains valid (decrypted) FIT bytes even when files are encrypted at rest."""
         from backend.app.core import config as cfg
         from backend.app.core.file_encryption import encrypt_file
@@ -257,7 +256,7 @@ class TestExportAthlete:
 
         test_key = Fernet.generate_key().decode()
 
-        with open(SAMPLE_FIT, "rb") as f:
+        with open(fit_path, "rb") as f:
             upload_resp = await client.post(
                 "/api/activities/upload",
                 files={"file": ("test.fit", f, "application/octet-stream")},
@@ -279,11 +278,10 @@ class TestExportAthlete:
         ath_result = await session.execute(select(Athlete).where(Athlete.id == activity.athlete_id))
         athlete = ath_result.scalar_one()
 
-        original_bytes = SAMPLE_FIT.read_bytes()
+        original_bytes = fit_path.read_bytes()
 
-        from tests.conftest import _TEST_TEAM_ID
         with patch.object(cfg.settings, "encryption_key", test_key):
-            encrypt_file(Path(upload_src.fit_file_path), _TEST_TEAM_ID, athlete.global_user_id)
+            encrypt_file(Path(upload_src.fit_file_path), athlete.global_user_id)
             upload_src.fit_file_encrypted = True
             await session.commit()
 

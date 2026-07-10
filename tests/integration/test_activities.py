@@ -15,8 +15,7 @@ from sqlalchemy import select
 from backend.app.core.auth import create_access_token
 from backend.app.models.user_orm import Activity, ActivitySource, Athlete
 
-TESTDATA = Path(__file__).parent.parent.parent / "testdata"
-SAMPLE_FIT = TESTDATA / "Zwift_Aerobic_Foundation_Forge.fit"
+from ._fit_fixtures import capabilities, fit_fixture_params
 
 
 # ── Manual activity creation ───────────────────────────────────────────────────
@@ -341,13 +340,14 @@ class TestDeleteActivity:
 # ── FIT file upload ────────────────────────────────────────────────────────────
 
 class TestFitUpload:
-    @pytest.mark.skipif(not SAMPLE_FIT.exists(), reason="FIT fixture not found")
-    async def test_upload_fit_file_processes_correctly(self, client, auth_headers, session):
-        """Upload a real FIT file and verify it's processed into a complete activity."""
+    @pytest.mark.parametrize("fit_path", fit_fixture_params())
+    async def test_upload_fit_file_processes_correctly(self, fit_path, client, auth_headers, session):
+        """Upload each FIT fixture and verify it's processed into a complete activity."""
+        caps = capabilities(fit_path)
         # Set FTP so power-based TSS can be calculated
         await client.patch("/api/athlete", json={"ftp": 280}, headers=auth_headers)
 
-        with open(SAMPLE_FIT, "rb") as f:
+        with open(fit_path, "rb") as f:
             resp = await client.post(
                 "/api/activities/upload",
                 files={"file": ("test.fit", f, "application/octet-stream")},
@@ -389,8 +389,12 @@ class TestFitUpload:
 
         await session.refresh(activity)
         assert activity.status == "processed"
-        assert activity.normalized_power is not None
-        assert activity.tss is not None
+        # Power-derived metrics only exist when the fixture actually has a power stream.
+        if caps.has_power:
+            assert activity.normalized_power is not None
+            assert activity.tss is not None
+        else:
+            assert activity.normalized_power is None
 
     async def test_has_fit_file_false_for_manual_activity(self, client, auth_headers):
         resp = await client.post(
@@ -405,9 +409,9 @@ class TestFitUpload:
         assert resp.status_code == 201
         assert resp.json()["has_fit_file"] is False
 
-    @pytest.mark.skipif(not SAMPLE_FIT.exists(), reason="FIT fixture not found")
-    async def test_has_fit_file_true_for_uploaded_activity(self, client, auth_headers):
-        with open(SAMPLE_FIT, "rb") as f:
+    @pytest.mark.parametrize("fit_path", fit_fixture_params())
+    async def test_has_fit_file_true_for_uploaded_activity(self, fit_path, client, auth_headers):
+        with open(fit_path, "rb") as f:
             resp = await client.post(
                 "/api/activities/upload",
                 files={"file": ("test.fit", f, "application/octet-stream")},
@@ -416,11 +420,11 @@ class TestFitUpload:
         assert resp.status_code == 201
         assert resp.json()["has_fit_file"] is True
 
-    @pytest.mark.skipif(not SAMPLE_FIT.exists(), reason="FIT fixture not found")
-    async def test_duplicate_fit_upload_returns_409(self, client, auth_headers, session):
+    @pytest.mark.parametrize("fit_path", fit_fixture_params())
+    async def test_duplicate_fit_upload_returns_409(self, fit_path, client, auth_headers, session):
         """Uploading a file whose start time matches an existing activity returns 409."""
         # First upload
-        with open(SAMPLE_FIT, "rb") as f:
+        with open(fit_path, "rb") as f:
             resp1 = await client.post(
                 "/api/activities/upload",
                 files={"file": ("test.fit", f, "application/octet-stream")},
@@ -446,7 +450,7 @@ class TestFitUpload:
         await process_fit_file(upload_src.fit_file_path, athlete, activity, session)
 
         # Second upload of the same file — should be rejected as duplicate
-        with open(SAMPLE_FIT, "rb") as f:
+        with open(fit_path, "rb") as f:
             resp2 = await client.post(
                 "/api/activities/upload",
                 files={"file": ("test.fit", f, "application/octet-stream")},
@@ -480,9 +484,9 @@ class TestDownloadFitFile:
         resp = await client.get("/api/activities/some-id/fit")
         assert resp.status_code == 401
 
-    @pytest.mark.skipif(not SAMPLE_FIT.exists(), reason="FIT fixture not found")
-    async def test_download_returns_fit_bytes(self, client, auth_headers):
-        with open(SAMPLE_FIT, "rb") as f:
+    @pytest.mark.parametrize("fit_path", fit_fixture_params())
+    async def test_download_returns_fit_bytes(self, fit_path, client, auth_headers):
+        with open(fit_path, "rb") as f:
             upload_resp = await client.post(
                 "/api/activities/upload",
                 files={"file": ("test.fit", f, "application/octet-stream")},
@@ -494,14 +498,14 @@ class TestDownloadFitFile:
         resp = await client.get(f"/api/activities/{activity_id}/fit", headers=auth_headers)
         assert resp.status_code == 200
         assert resp.headers["content-type"] == "application/octet-stream"
-        assert len(resp.content) == SAMPLE_FIT.stat().st_size
+        assert len(resp.content) == fit_path.stat().st_size
 
-    @pytest.mark.skipif(not SAMPLE_FIT.exists(), reason="FIT fixture not found")
-    async def test_encrypted_download_returns_original_bytes(self, client, auth_headers, session):
+    @pytest.mark.parametrize("fit_path", fit_fixture_params())
+    async def test_encrypted_download_returns_original_bytes(self, fit_path, client, auth_headers, session):
         """Download endpoint decrypts the file transparently when fit_file_encrypted=True."""
         test_key = Fernet.generate_key().decode()
 
-        with open(SAMPLE_FIT, "rb") as f:
+        with open(fit_path, "rb") as f:
             upload_resp = await client.post(
                 "/api/activities/upload",
                 files={"file": ("test.fit", f, "application/octet-stream")},
@@ -522,14 +526,13 @@ class TestDownloadFitFile:
         ath_result = await session.execute(select(Athlete).where(Athlete.id == activity.athlete_id))
         athlete = ath_result.scalar_one()
 
-        original_bytes = SAMPLE_FIT.read_bytes()
+        original_bytes = fit_path.read_bytes()
 
         from backend.app.core import config as cfg
         from backend.app.core.file_encryption import encrypt_file
-        from tests.conftest import _TEST_TEAM_ID
 
         with patch.object(cfg.settings, "encryption_key", test_key):
-            encrypt_file(Path(upload_src.fit_file_path), _TEST_TEAM_ID, athlete.global_user_id)
+            encrypt_file(Path(upload_src.fit_file_path), athlete.global_user_id)
             upload_src.fit_file_encrypted = True
             await session.commit()
 

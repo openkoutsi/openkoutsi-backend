@@ -2,15 +2,13 @@
 Integration tests for /api/metrics/bests/power endpoint.
 """
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 from sqlalchemy import select
 
 from backend.app.models.user_orm import Activity, ActivityPowerBest, ActivitySource, ActivityStream, Athlete
 
-TESTDATA = Path(__file__).parent.parent.parent / "testdata"
-SAMPLE_FIT = TESTDATA / "Zwift_Aerobic_Foundation_Forge.fit"
+from ._fit_fixtures import capabilities, fit_fixture_params
 
 
 async def _get_athlete(client, auth_headers, session) -> Athlete:
@@ -256,13 +254,17 @@ class TestPowerBestsDaysFilter:
         assert resp.status_code == 422
 
 
-@pytest.mark.skipif(not SAMPLE_FIT.exists(), reason="FIT fixture not found")
 class TestPowerBestsFromFitFile:
+    @pytest.mark.parametrize("fit_path", fit_fixture_params())
     async def test_power_bests_created_after_fit_processing(
-        self, client, auth_headers, session
+        self, fit_path, client, auth_headers, session
     ):
-        """End-to-end: upload + process a real FIT file; bests must appear."""
-        with open(SAMPLE_FIT, "rb") as f:
+        """End-to-end: upload + process each FIT fixture; power bests must appear."""
+        caps = capabilities(fit_path)
+        if not caps.has_power:
+            pytest.skip("fixture has no power stream")
+
+        with open(fit_path, "rb") as f:
             resp = await client.post(
                 "/api/activities/upload",
                 files={"file": ("test.fit", f, "application/octet-stream")},
@@ -295,11 +297,12 @@ class TestPowerBestsFromFitFile:
         assert resp.status_code == 200
         bests = resp.json()["bests"]
 
-        # The sample FIT is a Zwift ride, so it should have power and cover at least
-        # durations up to 1 min.
+        # A file with power always yields at least the 1-second best; the 60-second
+        # best only when the recording is long enough to cover it.
         durations_returned = {e["duration_s"] for e in bests}
         assert 1 in durations_returned
-        assert 60 in durations_returned
+        if caps.duration_s >= 60:
+            assert 60 in durations_returned
         # All entries must link back to the uploaded activity
         for entry in bests:
             assert entry["activity_id"] == activity_id
