@@ -11,8 +11,10 @@ wheels/
 # Virtual environments
 .venv
 
-# My own FIT files
-testdata/
+# Personal/scratch data stays out of git — except the committed FIT test
+# fixtures under testdata/fixtures/, which CI needs to run the FIT pipeline tests.
+testdata/*
+!testdata/fixtures/
 test.json
 data/
 

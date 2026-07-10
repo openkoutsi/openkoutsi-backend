@@ -2,15 +2,13 @@
 Integration tests for /api/metrics/bests/distance endpoint.
 """
 from datetime import datetime, timezone
-from pathlib import Path
 
 import pytest
 from sqlalchemy import select
 
 from backend.app.models.user_orm import Activity, ActivityDistanceBest, ActivitySource, ActivityStream, Athlete
 
-TESTDATA = Path(__file__).parent.parent.parent / "testdata"
-SAMPLE_FIT = TESTDATA / "Zwift_Aerobic_Foundation_Forge.fit"
+from ._fit_fixtures import capabilities, fit_fixture_params
 
 
 async def _get_athlete(client, auth_headers, session) -> Athlete:
@@ -217,13 +215,18 @@ class TestGetDistanceBestsMultipleActivities:
         assert times == sorted(times), "times must be ordered fastest-first"
 
 
-@pytest.mark.skipif(not SAMPLE_FIT.exists(), reason="FIT fixture not found")
 class TestDistanceBestsFromFitFile:
+    @pytest.mark.parametrize("fit_path", fit_fixture_params())
     async def test_distance_bests_created_after_fit_processing(
-        self, client, auth_headers, session
+        self, fit_path, client, auth_headers, session
     ):
-        """End-to-end: upload + process a real FIT file; bests must appear if GPS present."""
-        with open(SAMPLE_FIT, "rb") as f:
+        """End-to-end: upload + process each FIT fixture; distance bests appear when
+        the file carries enough of a speed stream to cover a best."""
+        caps = capabilities(fit_path)
+        if not caps.has_speed:
+            pytest.skip("fixture has no speed stream")
+
+        with open(fit_path, "rb") as f:
             resp = await client.post(
                 "/api/activities/upload",
                 files={"file": ("test.fit", f, "application/octet-stream")},
@@ -252,7 +255,6 @@ class TestDistanceBestsFromFitFile:
 
         await process_fit_file(upload_src.fit_file_path, athlete, activity, session)
 
-        # Check that distance bests were created (if the FIT file has a speed stream)
         bests_result = await session.execute(
             select(ActivityDistanceBest).where(
                 ActivityDistanceBest.activity_id == activity_id
@@ -260,7 +262,11 @@ class TestDistanceBestsFromFitFile:
         )
         bests = bests_result.scalars().all()
 
-        # If distance bests were created, verify they appear in the API response
+        # A file covering at least the smallest distance bucket must produce bests.
+        if caps.covers_min_distance:
+            assert bests, "expected distance bests for a fixture covering >= 1 km"
+
+        # If distance bests were created, verify they appear in the API response.
         if bests:
             resp = await client.get("/api/metrics/bests/distance", headers=auth_headers)
             assert resp.status_code == 200
