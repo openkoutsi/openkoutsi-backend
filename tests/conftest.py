@@ -34,6 +34,38 @@ TESTDATA_DIR = Path(__file__).parent.parent / "testdata"
 _TEST_USER_ID = "test-user-00000000"
 _TEST_ATHLETE_ID = "test-athlete-0000"
 _TEST_ROLES = ["administrator", "user"]
+_TEST_PASSWORD = "Testpass1234"
+
+
+# ── Faster password hashing for the test session ────────────────────────────
+
+@pytest.fixture(scope="session", autouse=True)
+def _cheap_bcrypt():
+    """Lower bcrypt's work factor for the whole test session.
+
+    Production uses bcrypt's default cost (12 rounds), which is deliberately
+    slow (~0.27s per hash). Tests hash and verify passwords constantly, so this
+    dominates the runtime. We patch ``bcrypt.gensalt`` to use a cheap cost for
+    the duration of the test session only — ``backend.app.core.auth`` is left
+    untouched, so production behaviour is unchanged. bcrypt records the cost in
+    the hash itself, so cheaper hashes still verify correctly.
+    """
+    import bcrypt
+
+    original = bcrypt.gensalt
+    bcrypt.gensalt = lambda rounds=4, prefix=b"2b": original(rounds=rounds, prefix=prefix)
+    try:
+        yield
+    finally:
+        bcrypt.gensalt = original
+
+
+@pytest.fixture(scope="session")
+def _test_password_hash(_cheap_bcrypt):
+    """Hash the shared test password once for the whole session and reuse it."""
+    from backend.app.core.auth import hash_password
+
+    return hash_password(_TEST_PASSWORD)
 
 
 # ── Per-user DB isolation ────────────────────────────────────────────────────
@@ -97,18 +129,17 @@ async def team_engine(user_engine):
 
 
 @pytest.fixture
-async def registry_session(registry_engine):
+async def registry_session(registry_engine, _test_password_hash):
     """Async session backed by the in-memory registry engine, with a seeded admin User."""
     import json
 
-    from backend.app.core.auth import hash_password
     from backend.app.models.registry_orm import User
     factory = async_sessionmaker(registry_engine, expire_on_commit=False)
     async with factory() as s:
         user = User(
             id=_TEST_USER_ID,
             username="test-user",
-            password_hash=hash_password("Testpass1234"),
+            password_hash=_test_password_hash,
             roles=json.dumps(_TEST_ROLES),
         )
         s.add(user)
@@ -142,8 +173,23 @@ async def seeded_athlete(session):
 
 # ── HTTP client with DI overrides ─────────────────────────────────────────
 
+@pytest.fixture(scope="module")
+def app():
+    """Build the FastAPI app once per test module.
+
+    ``create_app()`` is relatively expensive (imports and wires every router),
+    so we construct it once per module rather than once per test. The app is
+    stateless between tests except for ``dependency_overrides``, which the
+    per-test ``client`` fixture sets and clears; tests within a module run
+    sequentially, so there is no cross-test bleed. The lifespan (which starts
+    the poller tasks) is never triggered because ``ASGITransport`` does not run
+    lifespan events.
+    """
+    return create_app()
+
+
 @pytest.fixture
-async def client(session, registry_session, seeded_athlete):
+async def client(app, session, registry_session, seeded_athlete):
     """
     HTTP test client wired to in-memory test DBs.
 
@@ -152,10 +198,11 @@ async def client(session, registry_session, seeded_athlete):
     - `get_registry_session` is overridden to use the in-memory registry.
     - Background tasks are suppressed.
     - Rate limiting is disabled.
+
+    Overrides are set on the shared (module-scoped) app for this test and
+    cleared afterwards so each test wires the app to its own fresh sessions.
     """
     from backend.app.core.limiter import limiter
-
-    app = create_app()
 
     test_ctx = UserContext(
         user_id=_TEST_USER_ID,
