@@ -136,3 +136,56 @@ class TestSkipReason:
         )
         assert "not completed" in prompt
         assert "skipped" not in prompt
+
+
+class TestRestDays:
+    def test_rest_day_not_rendered_as_incomplete(self):
+        # A rest day earlier in the week must not read as a missed session.
+        plan_start = date(2025, 6, 2)  # Monday
+        now = datetime(2025, 6, 4, 8, 0, tzinfo=ZoneInfo("Europe/Helsinki"))  # Wed
+        workouts = [_workout(1, workout_type="rest")]  # Monday, in the past
+        prompt = _build_status_prompt(
+            athlete=_athlete(),
+            recent_activities=[],
+            current_metric=None,
+            active_plan=_plan(plan_start),
+            this_week_workouts=workouts,
+            active_goals=[],
+            now=now,
+        )
+        assert "rest day — nothing to complete, no action required" in prompt
+        assert "not completed" not in prompt
+
+    def test_rest_day_ignores_skip_reason(self):
+        # Rest days carry no skip semantics even if a stale reason is attached.
+        plan_start = date(2025, 6, 2)
+        now = datetime(2025, 6, 4, 8, 0, tzinfo=ZoneInfo("Europe/Helsinki"))
+        workouts = [_workout(1, workout_type="rest", skip_reason="stale reason")]
+        prompt = _build_status_prompt(
+            athlete=_athlete(),
+            recent_activities=[],
+            current_metric=None,
+            active_plan=_plan(plan_start),
+            this_week_workouts=workouts,
+            active_goals=[],
+            now=now,
+        )
+        assert "rest day — nothing to complete, no action required" in prompt
+        assert "skipped" not in prompt
+        assert "stale reason" not in prompt
+
+    def test_rest_day_case_insensitive(self):
+        plan_start = date(2025, 6, 2)
+        now = datetime(2025, 6, 4, 8, 0, tzinfo=ZoneInfo("Europe/Helsinki"))
+        workouts = [_workout(1, workout_type="Rest")]
+        prompt = _build_status_prompt(
+            athlete=_athlete(),
+            recent_activities=[],
+            current_metric=None,
+            active_plan=_plan(plan_start),
+            this_week_workouts=workouts,
+            active_goals=[],
+            now=now,
+        )
+        assert "rest day — nothing to complete, no action required" in prompt
+        assert "not completed" not in prompt

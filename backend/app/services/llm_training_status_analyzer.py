@@ -73,6 +73,9 @@ be direct and stern about it.
 - When an incomplete workout has a skip reason attached, take it into account. A legitimate \
 reason (illness, injury, travel, rest) should temper your criticism, while a pattern of weak \
 excuses warrants a firmer response.
+- Rest days are a planned, intentional part of the training plan. They do not have to be \
+performed and there is nothing to complete on them. Never treat a rest day as missed, skipped, \
+or a sign of poor adherence — an athlete taking their scheduled rest is following the plan correctly.
 
 Before the feedback paragraphs, output a single line in the format: MOOD:<mood>
 where <mood> is one of: cheer, knowing, neutral, stern.
@@ -176,6 +179,15 @@ def _build_status_prompt(
                 )
                 weekday_name = workout_date.strftime("%A")
                 today_marker = " (today)" if workout_date == today else ""
+                # Rest days are intentional and have nothing to perform, so they
+                # carry no completed/skipped status — otherwise "not completed"
+                # reads as a missed session to the model.
+                if (w.workout_type or "").strip().lower() == "rest":
+                    lines.append(
+                        f"    {weekday_name} {workout_date.isoformat()}{today_marker}: "
+                        f"rest day — nothing to complete, no action required"
+                    )
+                    continue
                 completed = "completed" if w.completed_activity_id else "not completed"
                 tss_str = f", target TSS {w.target_tss}" if w.target_tss else ""
                 skip_str = (
