@@ -45,9 +45,22 @@ _families = {
     "activity": ACTIVITY_SCENARIOS,
     "status": STATUS_SCENARIOS,
 }
+_JSON_FAMILIES = {"plan", "workout"}
 for family, scenarios in _families.items():
     for name in scenarios:
-        msgs = build({"vars": {"family": family, "scenario": name}})
+        result = build({"vars": {"family": family, "scenario": name}})
+        if family in _JSON_FAMILIES:
+            # JSON families return promptfoo's {prompt, config} shape and pin
+            # response_format so the model is forced to emit a JSON object.
+            forced = (
+                isinstance(result, dict)
+                and result.get("config", {}).get("response_format")
+                == {"type": "json_object"}
+            )
+            expect(forced, f"{family}/{name} forces json_object response")
+            msgs = result["prompt"] if isinstance(result, dict) else result
+        else:
+            msgs = result
         ok = (
             isinstance(msgs, list) and len(msgs) == 2
             and msgs[0]["role"] == "system" and msgs[1]["role"] == "user"
