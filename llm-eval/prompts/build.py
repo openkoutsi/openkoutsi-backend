@@ -5,6 +5,13 @@ prompt keyed on ``vars.family`` yields exactly the right matrix: each test row
 (``{family, scenario}``) renders through the matching backend builder and no
 other. The returned value is an OpenAI-style ``[system, user]`` chat array.
 
+The ``plan`` and ``workout`` families expect a JSON object back, so for those we
+return promptfoo's ``{"prompt": ..., "config": ...}`` shape and pin
+``response_format`` to ``{"type": "json_object"}`` — the provider then constrains
+the model to emit a JSON object, which is exactly what those families' objective
+asserts parse. The prose families (``activity``, ``status``) return the plain
+chat array unchanged.
+
 Referenced from ``promptfooconfig.yaml`` as ``file://prompts/build.py:build``.
 """
 from __future__ import annotations
@@ -70,6 +77,9 @@ _FAMILIES = {
     "status": (STATUS_SCENARIOS, _status),
 }
 
+# Families whose output is a JSON object — force the provider to return one.
+_JSON_FAMILIES = {"plan", "workout"}
+
 
 def build(context: dict):
     variables = context.get("vars", {})
@@ -81,7 +91,15 @@ def build(context: dict):
     if scenario not in scenarios:
         raise ValueError(f"unknown {family} scenario {scenario!r} (have {sorted(scenarios)})")
     system, user = builder(scenarios[scenario])
-    return [
+    messages = [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
+    if family in _JSON_FAMILIES:
+        # promptfoo merges this `config` into the provider's config for this row,
+        # so the JSON families get response_format without touching the roster.
+        return {
+            "prompt": messages,
+            "config": {"response_format": {"type": "json_object"}},
+        }
+    return messages

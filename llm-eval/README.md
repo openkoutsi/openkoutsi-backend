@@ -17,6 +17,11 @@ and can never drift.
 |---|---|---|---|
 | `plan` | `llm_plan_generator.py` | JSON | **objective** — reuses `_parse_response` (N weeks, 7 days/week, valid type, null-on-rest) |
 | `workout` | `llm_workout_generator.py` | JSON | **objective** — reuses `_parse_steps` (`WorkoutStepOrRepeat` schema + nesting rule) |
+
+The two JSON families (`plan`, `workout`) pin `response_format` to
+`{"type": "json_object"}` via the prompt function, so the provider is forced to
+return a JSON object rather than prose or fenced text. The prose families
+(`activity`, `status`) are left unconstrained.
 | `activity` | `llm_activity_analyzer.py` | prose | **format objective** (`MOOD:` line, no markdown) + **subjective** (web UI / optional rubric) |
 | `status` | `llm_training_status_analyzer.py` | prose | same as `activity`, plus plan-adherence reasoning |
 
