@@ -5,16 +5,21 @@ parsers accept. Instead of only asking for "a JSON object", we hand the provider
 a JSON *schema* derived from a pydantic class, so a model that supports
 structured outputs is constrained to the exact shape the app parses.
 
-Matching the app
-----------------
-* ``WorkoutOutput`` reuses the backend's canonical :class:`WorkoutStep` and mirrors
-  the workout prompt's own rule that *repeat blocks must not contain other repeat
-  blocks* — so ``steps`` is a flat ``WorkoutStep | RepeatBlock`` list rather than the
-  recursive ``WorkoutStepOrRepeat``. Anything valid against this schema passes
-  ``llm_workout_generator._parse_steps`` (schema + max-nesting-depth-1 rule).
-* ``PlanOutput`` mirrors ``llm_plan_generator._parse_response``: N weeks, each with
-  a 7-entry ``workouts`` list, the app's ``workout_type`` enum, and null-on-rest
-  duration/TSS.
+Reusing the backend's schemas
+-----------------------------
+Where the backend already models a shape, we import it rather than restate it, so
+these stay in lock-step with production:
+
+* ``WorkoutOutput.steps`` reuses the canonical :class:`WorkoutStep`. The canonical
+  ``RepeatBlock`` / ``WorkoutStepOrRepeat`` (and ``WorkoutDefinitionCreate.steps``)
+  are **recursive**, which strict structured outputs don't allow — so the repeat
+  block is restated here as a flat ``list[WorkoutStep]``. That also matches the
+  workout prompt's own rule that *repeat blocks must not contain other repeat
+  blocks*; anything valid here passes ``_parse_steps`` (schema + depth-1 rule).
+* ``PlanWeek.workouts`` reuses :class:`WorkoutCreate` — the backend's own "single
+  workout day as returned by the LLM". Only the ``{weeks: [{week_number,
+  workouts}]}`` wrapper that ``llm_plan_generator._parse_response`` expects is not
+  modelled anywhere in the backend, so ``PlanWeek`` / ``PlanOutput`` define it.
 
 Strict structured outputs accept only a subset of JSON Schema (no recursion, no
 numeric/length bounds, ``additionalProperties: false`` with every property
@@ -26,15 +31,16 @@ schema.
 from __future__ import annotations
 
 import copy
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Literal, Union
 
 from pydantic import BaseModel, Field
 
+from backend.app.schemas.plans import WorkoutCreate
 from openkoutsi.workout_schema import WorkoutStep
 
 # ── workout ──────────────────────────────────────────────────────────────────
 # Flat repeat block: a repeat contains only plain steps, never another repeat —
-# exactly what the workout prompt demands and what the parser's depth rule allows.
+# the recursive canonical RepeatBlock can't be expressed as a strict json_schema.
 
 
 class RepeatBlock(BaseModel):
@@ -50,26 +56,13 @@ class WorkoutOutput(BaseModel):
 
 
 # ── plan ─────────────────────────────────────────────────────────────────────
-# Mirrors llm_plan_generator._parse_response: the app's workout_type enum, days
-# 1–7, and null duration/TSS on rest days.
-
-_WORKOUT_TYPE = Literal[
-    "recovery", "tempo", "threshold", "vo2max", "endurance",
-    "long", "strength", "yoga", "cross-training", "rest",
-]
-
-
-class PlanWorkoutDay(BaseModel):
-    day_of_week: int = Field(ge=1, le=7)
-    workout_type: _WORKOUT_TYPE
-    description: Optional[str] = None
-    duration_min: Optional[int] = None
-    target_tss: Optional[int] = None
+# WorkoutCreate is the backend's own LLM-day model; only the weeks wrapper that
+# _parse_response walks is unmodelled, so it lives here.
 
 
 class PlanWeek(BaseModel):
     week_number: int = Field(ge=1)
-    workouts: list[PlanWorkoutDay]
+    workouts: list[WorkoutCreate]
 
 
 class PlanOutput(BaseModel):
