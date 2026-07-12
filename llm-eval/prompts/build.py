@@ -7,10 +7,11 @@ other. The returned value is an OpenAI-style ``[system, user]`` chat array.
 
 The ``plan`` and ``workout`` families expect a JSON object back, so for those we
 return promptfoo's ``{"prompt": ..., "config": ...}`` shape and pin
-``response_format`` to ``{"type": "json_object"}`` — the provider then constrains
-the model to emit a JSON object, which is exactly what those families' objective
-asserts parse. The prose families (``activity``, ``status``) return the plain
-chat array unchanged.
+``response_format`` to a JSON *schema* derived from a pydantic class that matches
+what the backend parser accepts (see ``prompts/schemas.py``). The provider then
+constrains the model to emit JSON of exactly that shape, which is what those
+families' objective asserts parse. The prose families (``activity``, ``status``)
+return the plain chat array unchanged.
 
 Referenced from ``promptfooconfig.yaml`` as ``file://prompts/build.py:build``.
 """
@@ -34,6 +35,7 @@ from fixtures.scenarios import (  # noqa: E402
     STATUS_SCENARIOS,
     WORKOUT_SCENARIOS,
 )
+from prompts.schemas import PlanOutput, WorkoutOutput, response_format  # noqa: E402
 
 
 def _plan(s: dict) -> tuple[str, str]:
@@ -77,8 +79,11 @@ _FAMILIES = {
     "status": (STATUS_SCENARIOS, _status),
 }
 
-# Families whose output is a JSON object — force the provider to return one.
-_JSON_FAMILIES = {"plan", "workout"}
+# JSON families → the pydantic output schema whose shape the backend parser accepts.
+_JSON_SCHEMAS = {
+    "plan": (PlanOutput, "training_plan"),
+    "workout": (WorkoutOutput, "structured_workout"),
+}
 
 
 def build(context: dict):
@@ -95,11 +100,12 @@ def build(context: dict):
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
-    if family in _JSON_FAMILIES:
-        # promptfoo merges this `config` into the provider's config for this row,
-        # so the JSON families get response_format without touching the roster.
+    if family in _JSON_SCHEMAS:
+        # promptfoo merges this `config` into the provider's config for this row, so
+        # the JSON families get a schema-constrained response_format for free.
+        model, name = _JSON_SCHEMAS[family]
         return {
             "prompt": messages,
-            "config": {"response_format": {"type": "json_object"}},
+            "config": {"response_format": response_format(model, name)},
         }
     return messages

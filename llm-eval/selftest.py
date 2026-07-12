@@ -50,14 +50,16 @@ for family, scenarios in _families.items():
     for name in scenarios:
         result = build({"vars": {"family": family, "scenario": name}})
         if family in _JSON_FAMILIES:
-            # JSON families return promptfoo's {prompt, config} shape and pin
-            # response_format so the model is forced to emit a JSON object.
+            # JSON families return promptfoo's {prompt, config} shape and pin a
+            # json_schema response_format so the model must emit the parseable shape.
+            rf = result.get("config", {}).get("response_format") if isinstance(result, dict) else None
             forced = (
-                isinstance(result, dict)
-                and result.get("config", {}).get("response_format")
-                == {"type": "json_object"}
+                isinstance(rf, dict)
+                and rf.get("type") == "json_schema"
+                and rf.get("json_schema", {}).get("strict") is True
+                and isinstance(rf.get("json_schema", {}).get("schema"), dict)
             )
-            expect(forced, f"{family}/{name} forces json_object response")
+            expect(forced, f"{family}/{name} pins a strict json_schema response")
             msgs = result["prompt"] if isinstance(result, dict) else result
         else:
             msgs = result
@@ -120,6 +122,56 @@ print("\n[mood_prose] check passes valid MOOD prose, fails missing MOOD / markdo
 gm = checks.mood_prose(_VALID_PROSE, {"vars": {}})
 bm = checks.mood_prose(_BAD_PROSE, {"vars": {}})
 expect(gm["pass"] and not bm["pass"], f"mood: good pass={gm['pass']}; bad pass={bm['pass']} ({bm['reason']})")
+
+
+# ── 3. The JSON-schema response_format is strict-conformant and app-aligned ───
+from prompts.schemas import PlanOutput, WorkoutOutput, response_format  # noqa: E402
+
+_ALLOWED_UNSUPPORTED = {
+    "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+    "minLength", "maxLength", "pattern", "minItems", "maxItems", "uniqueItems",
+    "discriminator", "default", "oneOf",
+}
+
+
+def _strict_problems(node, path="$") -> list[str]:
+    """Every object must be closed + fully-required, with no unsupported keyword."""
+    problems: list[str] = []
+    if isinstance(node, list):
+        for i, n in enumerate(node):
+            problems += _strict_problems(n, f"{path}[{i}]")
+        return problems
+    if not isinstance(node, dict):
+        return problems
+    for bad in _ALLOWED_UNSUPPORTED:
+        if bad in node:
+            problems.append(f"{path}: unsupported keyword {bad!r}")
+    if node.get("type") == "object" and "properties" in node:
+        if node.get("additionalProperties") is not False:
+            problems.append(f"{path}: additionalProperties must be false")
+        if set(node.get("required", [])) != set(node["properties"]):
+            problems.append(f"{path}: every property must be required")
+    for key, val in node.items():
+        problems += _strict_problems(val, f"{path}.{key}")
+    return problems
+
+
+print("\n[schema] response_format is strict-output-conformant")
+for model, name in ((PlanOutput, "training_plan"), (WorkoutOutput, "structured_workout")):
+    rf = response_format(model, name)
+    probs = _strict_problems(rf["json_schema"]["schema"])
+    expect(not probs, f"{name}: {'; '.join(probs) if probs else 'strict-conformant'}")
+
+print("\n[schema] pydantic model and backend parser agree on a valid sample")
+# A sample that satisfies the pydantic schema must also satisfy the app parser.
+pw = PLAN_SCENARIOS[next(iter(PLAN_SCENARIOS))]["num_weeks"]
+plan_sample = _valid_plan_json(pw)
+PlanOutput.model_validate_json(plan_sample)
+expect(checks.plan(plan_sample, {"vars": {"scenario": next(iter(PLAN_SCENARIOS))}})["pass"],
+       "plan sample validates against PlanOutput and the app parser")
+WorkoutOutput.model_validate_json(_VALID_WORKOUT)
+expect(checks.workout(_VALID_WORKOUT, {"vars": {}})["pass"],
+       "workout sample validates against WorkoutOutput and the app parser")
 
 print("\n" + ("PASSED" if not failures else f"FAILED ({len(failures)} problem(s))"))
 sys.exit(1 if failures else 0)
