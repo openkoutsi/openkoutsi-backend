@@ -153,6 +153,15 @@ with extended thinking, via Anthropic's OpenAI-compatible endpoint) — which
 reject any temperature other than `1` — working out of the box. Upstream LLM
 errors surface the provider's response body in the logs.
 
+**Guaranteed JSON for structured generation.** Training-plan and structured-workout
+generation send the provider a strict JSON-schema `response_format` (derived once
+from the backend's own pydantic models), so models that support structured outputs
+are constrained to the exact shape the parsers accept — across OpenAI, Anthropic,
+Mistral and compatible open-weight servers. It's on by default; a provider that
+rejects the parameter is detected and the call is transparently retried without it,
+and a preset can pre-empt that with `structured_outputs: false`. The existing
+prompt instructions + parse-and-retry remain the final safety net.
+
 Admins configure, per instance (Settings → AI / LLM), a **list of selectable
 presets** — each a self-contained connection: display name, stable identifier,
 base URL, model id, API key, headers and extra chat-completion body params (e.g.

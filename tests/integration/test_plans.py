@@ -288,6 +288,71 @@ class TestLlmPlanGeneration:
         # API returns 4xx/5xx when both LLM attempts produce unparseable JSON
         assert resp.status_code >= 400
 
+    async def test_llm_plan_sends_schema_by_default(self, client, auth_headers):
+        await client.patch(
+            "/api/athlete",
+            json={"app_settings": {"llm_base_url": "http://localhost:11434/v1",
+                                   "llm_model": "llama3.2"}},
+            headers=auth_headers,
+        )
+        mock_http = await self._mock_llm_call(_make_llm_plan_json(4))
+        with patch("httpx.AsyncClient", return_value=mock_http):
+            resp = await client.post("/api/plans", json=_LLM_REQUEST_BODY, headers=auth_headers)
+
+        assert resp.status_code == 201
+        rf = mock_http.post.call_args.kwargs["json"]["response_format"]
+        assert rf["type"] == "json_schema"
+        assert rf["json_schema"]["name"] == "training_plan"
+
+    async def test_llm_plan_opts_out_via_preset(self, client, auth_headers):
+        await client.patch(
+            "/api/athlete",
+            json={"app_settings": {
+                "llm_model": "local",
+                "llm_models": [{"name": "local", "base_url": "http://localhost:11434/v1",
+                                "model": "llama3.2", "structured_outputs": False}],
+            }},
+            headers=auth_headers,
+        )
+        mock_http = await self._mock_llm_call(_make_llm_plan_json(4))
+        with patch("httpx.AsyncClient", return_value=mock_http):
+            resp = await client.post("/api/plans", json=_LLM_REQUEST_BODY, headers=auth_headers)
+
+        assert resp.status_code == 201
+        assert "response_format" not in mock_http.post.call_args.kwargs["json"]
+
+    async def test_llm_plan_falls_back_when_schema_unsupported(self, client, auth_headers):
+        await client.patch(
+            "/api/athlete",
+            json={"app_settings": {"llm_base_url": "http://localhost:11434/v1",
+                                   "llm_model": "llama3.2"}},
+            headers=auth_headers,
+        )
+        err_resp = MagicMock()
+        err_resp.is_error = True
+        err_resp.status_code = 400
+        err_resp.request = MagicMock()
+        err_resp.aread = AsyncMock(
+            return_value=b'{"error": {"message": "response_format is not supported"}}'
+        )
+        good_resp = MagicMock()
+        good_resp.is_error = False
+        good_resp.json.return_value = {"choices": [{"message": {"content": _make_llm_plan_json(4)}}]}
+
+        mock_http = AsyncMock()
+        mock_http.post = AsyncMock(side_effect=[err_resp, good_resp])
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("httpx.AsyncClient", return_value=mock_http):
+            resp = await client.post("/api/plans", json=_LLM_REQUEST_BODY, headers=auth_headers)
+
+        assert resp.status_code == 201
+        assert mock_http.post.await_count == 2
+        first, second = mock_http.post.await_args_list
+        assert "response_format" in first.kwargs["json"]
+        assert "response_format" not in second.kwargs["json"]
+
     async def test_build_user_prompt_includes_ftp(self, client, auth_headers):
         from backend.app.services.llm_plan_generator import _build_user_prompt
         from backend.app.schemas.plans import PlanConfig, DayConfig

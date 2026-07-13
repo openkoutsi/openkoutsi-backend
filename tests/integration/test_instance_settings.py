@@ -44,6 +44,29 @@ class TestAdminContactAdmin:
         assert resp.status_code == 401
 
 
+class TestLlmModelPresetStructuredOutputs:
+    async def test_defaults_on_and_round_trips_opt_out(self, client, auth_headers):
+        resp = await client.patch(
+            "/api/admin/settings",
+            json={"llm_models": [
+                {"name": "default", "base_url": "https://api.example.com/v1", "model": "m"},
+                {"name": "no-schema", "base_url": "https://api.other.com/v1", "model": "m2",
+                 "structured_outputs": False},
+            ]},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        presets = {p["name"]: p for p in resp.json()["llm_models"]}
+        # Absent flag ⇒ default-on; explicit false is preserved.
+        assert presets["default"]["structured_outputs"] is True
+        assert presets["no-schema"]["structured_outputs"] is False
+
+        # And it survives a re-read.
+        got = await client.get("/api/admin/settings", headers=auth_headers)
+        presets = {p["name"]: p for p in got.json()["llm_models"]}
+        assert presets["no-schema"]["structured_outputs"] is False
+
+
 class TestPublicInstanceInfo:
     async def test_returns_null_when_unset(self, client):
         resp = await client.get("/api/public/instance-info")

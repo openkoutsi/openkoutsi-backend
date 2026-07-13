@@ -127,6 +127,10 @@ class LlmModelConfigIn(BaseModel):
     api_key_clear: bool = False
     headers: dict[str, str] = {}
     body: dict[str, Any] = {}
+    # Send a provider-side strict JSON schema (``response_format``) for structured
+    # generation. On by default; set to ``false`` for a server that doesn't
+    # support it, to skip the wasted request + auto-fallback round-trip.
+    structured_outputs: bool = True
 
     @field_validator("name")
     @classmethod
@@ -145,6 +149,7 @@ class LlmModelConfigOut(BaseModel):
     api_key_set: bool = False
     headers: dict[str, str] = {}
     body: dict[str, Any] = {}
+    structured_outputs: bool = True
 
 
 class InstanceSettingsResponse(BaseModel):

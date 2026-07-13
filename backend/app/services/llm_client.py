@@ -93,6 +93,10 @@ class ResolvedLlm:
     extra_body: dict[str, Any] = field(default_factory=dict)
     source: ConfigSource = "env"
     key_source: KeySource = "none"
+    # Whether to send a provider-side ``response_format`` (strict JSON schema) for
+    # structured generation. On by default; a preset can opt out with
+    # ``"structured_outputs": false`` (e.g. a server known not to support it).
+    structured_outputs: bool = True
 
 
 def _coerce_str_dict(value: Any) -> dict[str, str]:
@@ -149,6 +153,15 @@ def preset_map(models: Any) -> dict[str, dict[str, Any]]:
             if name:
                 out[name] = entry
     return out
+
+
+def _preset_structured_outputs(preset: dict | None) -> bool:
+    """Whether ``preset`` allows provider-side structured outputs.
+
+    Default is **on**: only an explicit ``"structured_outputs": false`` disables
+    it (an absent or truthy flag ⇒ enabled).
+    """
+    return not (isinstance(preset, dict) and preset.get("structured_outputs") is False)
 
 
 def _try_decrypt(fn, *args) -> str | None:
@@ -240,6 +253,7 @@ def resolve_llm(
             extra_body=body if isinstance(body, dict) else {},
             source="user",
             key_source=key_source,
+            structured_outputs=_preset_structured_outputs(ath_p),
         )
 
     # ── Non-BYOK: instance preset only ─────────────────────────────────────
@@ -273,6 +287,7 @@ def resolve_llm(
         extra_body=body if isinstance(body, dict) else {},
         source=source,
         key_source=key_source,
+        structured_outputs=_preset_structured_outputs(inst_p),
     )
 
 
@@ -320,6 +335,32 @@ async def raise_for_llm_status(resp: httpx.Response, url: str) -> None:
         request=resp.request,
         response=resp,
     )
+
+
+# Markers an OpenAI-compatible provider tends to put in the 400/422 body when it
+# doesn't accept a ``response_format`` / json_schema param. Matched against the
+# error text surfaced by ``raise_for_llm_status`` to drive the auto-fallback.
+_RESPONSE_FORMAT_UNSUPPORTED_MARKERS = (
+    "response_format",
+    "response format",
+    "json_schema",
+    "json schema",
+)
+
+
+def is_response_format_unsupported_error(exc: httpx.HTTPStatusError) -> bool:
+    """Is ``exc`` an upstream rejection of the ``response_format`` param?
+
+    Recognises a 400/422 whose body (surfaced by :func:`raise_for_llm_status`)
+    mentions ``response_format`` / ``json_schema`` — the signal that the provider
+    doesn't support structured outputs, so the caller should drop the field and
+    re-issue the prompt-instructed call.
+    """
+    resp = getattr(exc, "response", None)
+    if resp is None or resp.status_code not in (400, 422):
+        return False
+    text = str(exc).lower()
+    return any(marker in text for marker in _RESPONSE_FORMAT_UNSUPPORTED_MARKERS)
 
 
 def extract_json(text: str) -> str:
@@ -403,6 +444,7 @@ async def call_llm(
     temperature: float | None = None,
     extra_headers: dict[str, str] | None = None,
     extra_body: dict[str, Any] | None = None,
+    response_format: dict[str, Any] | None = None,
 ) -> tuple[str, dict[str, Any] | None]:
     """Call the OpenAI-compatible chat completions endpoint.
 
@@ -410,23 +452,29 @@ async def call_llm(
     (``{"prompt_tokens", "completion_tokens", "total_tokens"}``) or ``None`` when
     the upstream omits it. ``call_llm`` stays transport-only — the caller decides
     whether to record the usage (issue #9), since only instance-paid calls count.
+
+    When ``response_format`` is given (a provider-side ``{"type": "json_schema",
+    …}`` block), it is sent as a core payload field so a provider that supports
+    structured outputs is constrained to that schema. It is kept distinct from the
+    free-form ``extra_body`` so a caller's auto-fallback can drop just this field
+    and re-issue the call when a provider rejects it.
     """
     headers: dict[str, str] = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     headers = merge_llm_headers(headers, extra_headers)
 
-    payload = apply_body_extras(
-        {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            **temperature_param(temperature),
-        },
-        extra_body,
-    )
+    core: dict[str, Any] = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        **temperature_param(temperature),
+    }
+    if response_format is not None:
+        core["response_format"] = response_format
+    payload = apply_body_extras(core, extra_body)
 
     url = f"{base_url.rstrip('/')}/chat/completions"
     check_url_safe(url)

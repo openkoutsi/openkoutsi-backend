@@ -36,13 +36,35 @@ def _workout_json() -> str:
     ]})
 
 
-def _mock_llm(raw_json: str):
-    """Patch httpx.AsyncClient so the LLM call returns *raw_json*."""
+def _ok_resp(raw_json: str) -> MagicMock:
     resp = MagicMock()
     resp.is_error = False
     resp.json.return_value = {"choices": [{"message": {"content": raw_json}}]}
+    return resp
+
+
+def _error_resp(status: int, body: str) -> MagicMock:
+    resp = MagicMock()
+    resp.is_error = True
+    resp.status_code = status
+    resp.request = MagicMock()
+    resp.aread = AsyncMock(return_value=body.encode())
+    return resp
+
+
+def _mock_llm(raw_json: str):
+    """Patch httpx.AsyncClient so the LLM call returns *raw_json*."""
     http = AsyncMock()
-    http.post = AsyncMock(return_value=resp)
+    http.post = AsyncMock(return_value=_ok_resp(raw_json))
+    http.__aenter__ = AsyncMock(return_value=http)
+    http.__aexit__ = AsyncMock(return_value=False)
+    return http
+
+
+def _mock_llm_sequence(*responses):
+    """Patch httpx.AsyncClient so successive POSTs return *responses* in order."""
+    http = AsyncMock()
+    http.post = AsyncMock(side_effect=list(responses))
     http.__aenter__ = AsyncMock(return_value=http)
     http.__aexit__ = AsyncMock(return_value=False)
     return http
@@ -56,6 +78,18 @@ async def _configure_athlete(session, *, llm: bool = True):
             "llm_base_url": "http://localhost:11434/v1",
             "llm_model": "llama3.2",
         }
+    await session.commit()
+    return athlete
+
+
+async def _configure_athlete_preset(session, *, structured_outputs=None):
+    """Configure the athlete via a BYOK preset, optionally opting out of schema."""
+    athlete = (await session.execute(select(Athlete))).scalar_one()
+    athlete.ftp = 250
+    preset = {"name": "local", "base_url": "http://localhost:11434/v1", "model": "llama3.2"}
+    if structured_outputs is not None:
+        preset["structured_outputs"] = structured_outputs
+    athlete.app_settings = {"llm_model": "local", "llm_models": [preset]}
     await session.commit()
     return athlete
 
@@ -245,3 +279,51 @@ class TestGenerateUpcomingWorkouts:
         )).scalar_one()
         # A fresh definition replaced the cached one.
         assert pw_row.workout_definition_id != old_def.id
+
+
+class TestStructuredOutputs:
+    async def _run(self, client, auth_headers, session, mock_http):
+        plan, (pw,) = await _seed_plan(session, [
+            {"week_number": 1, "day_of_week": _today_dow(),
+             "workout_type": "threshold", "duration_min": 60, "target_tss": 80},
+        ])
+        with patch("httpx.AsyncClient", return_value=mock_http):
+            resp = await client.post(
+                f"/api/plans/{plan.id}/generate-upcoming/workouts", json={}, headers=auth_headers
+            )
+        return resp
+
+    async def test_schema_sent_by_default(self, client, auth_headers, session):
+        await _configure_athlete(session, llm=True)
+        mock_http = _mock_llm(_workout_json())
+        resp = await self._run(client, auth_headers, session, mock_http)
+        assert resp.status_code == 200
+        assert resp.json()["results"][0]["status"] == "generated"
+        # A strict json_schema response_format was attached to the request.
+        rf = mock_http.post.call_args.kwargs["json"]["response_format"]
+        assert rf["type"] == "json_schema"
+        assert rf["json_schema"]["name"] == "structured_workout"
+
+    async def test_preset_can_opt_out(self, client, auth_headers, session):
+        await _configure_athlete_preset(session, structured_outputs=False)
+        mock_http = _mock_llm(_workout_json())
+        resp = await self._run(client, auth_headers, session, mock_http)
+        assert resp.status_code == 200
+        assert resp.json()["results"][0]["status"] == "generated"
+        # The opted-out preset omits response_format entirely.
+        assert "response_format" not in mock_http.post.call_args.kwargs["json"]
+
+    async def test_unsupported_provider_falls_back(self, client, auth_headers, session):
+        await _configure_athlete(session, llm=True)
+        # First call: provider rejects response_format (400). Second: success.
+        err = _error_resp(400, '{"error": {"message": "response_format is not supported"}}')
+        mock_http = _mock_llm_sequence(err, _ok_resp(_workout_json()))
+        resp = await self._run(client, auth_headers, session, mock_http)
+
+        assert resp.status_code == 200
+        assert resp.json()["results"][0]["status"] == "generated"
+        assert mock_http.post.await_count == 2
+        # Retry dropped the schema; the first call carried it.
+        first, second = mock_http.post.await_args_list
+        assert "response_format" in first.kwargs["json"]
+        assert "response_format" not in second.kwargs["json"]
