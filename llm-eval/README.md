@@ -22,11 +22,14 @@ The two JSON families (`plan`, `workout`) pin `response_format` to a JSON
 **schema** (`{"type": "json_schema", ...}`) via the prompt function, so a model
 that supports structured outputs is constrained to emit exactly the shape the
 backend parser accepts — not just "some JSON object". The schemas are derived
-from pydantic classes in `prompts/schemas.py` that mirror the parsers
-(`WorkoutOutput` ↔ `_parse_steps`, `PlanOutput` ↔ `_parse_response`) and are
-post-processed into the strict structured-output subset (closed objects, all
-properties required, `anyOf` unions, no unsupported keywords). The prose
-families (`activity`, `status`) are left unconstrained.
+from pydantic classes that mirror the parsers (`WorkoutOutput` ↔ `_parse_steps`,
+`PlanOutput` ↔ `_parse_response`) and are post-processed into the strict
+structured-output subset (closed objects, all properties required, `anyOf`
+unions, no unsupported keywords). These now live in the backend
+(`backend/app/services/llm_schemas.py`) as the single source of truth — the
+runtime generators send the same `response_format`; `prompts/schemas.py`
+re-exports them so the eval and production never drift. The prose families
+(`activity`, `status`) are left unconstrained.
 | `activity` | `llm_activity_analyzer.py` | prose | **format objective** (`MOOD:` line, no markdown) + **subjective** (web UI / optional rubric) |
 | `status` | `llm_training_status_analyzer.py` | prose | same as `activity`, plus plan-adherence reasoning |
 
@@ -35,7 +38,7 @@ families (`activity`, `status`) are left unconstrained.
 ```
 promptfooconfig.yaml   # providers × tests; per-family asserts. Model roster lives here.
 prompts/build.py       # one prompt fn; dispatches on vars.family to the real backend builder
-prompts/schemas.py     # pydantic output schemas → json_schema response_format for plan/workout
+prompts/schemas.py     # re-exports the backend's llm_schemas (json_schema response_format for plan/workout)
 fixtures/scenarios.py  # in-memory ORM objects / PlanConfig per scenario (the eval inputs)
 asserts/checks.py      # objective asserts that reuse the backend's own parsers
 selftest.py            # offline check: renders every scenario, proves asserts bite (no keys)

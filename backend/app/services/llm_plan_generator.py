@@ -23,7 +23,12 @@ from ..models.registry_orm import InstanceSettings
 from ..models.user_orm import TrainingPlan, PlannedWorkout, Athlete, DailyMetric
 from ..schemas.plans import PlanConfig
 from .llm_access import record_llm_usage
-from .llm_client import ResolvedLlm, call_llm, extract_json, resolve_llm_config
+from .llm_client import (
+    call_llm_with_optional_schema,
+    extract_json,
+    resolve_llm_config,
+)
+from .llm_schemas import PLAN_RESPONSE_FORMAT
 
 log = logging.getLogger(__name__)
 
@@ -147,22 +152,6 @@ def _parse_response(raw: str, num_weeks: int) -> list[list[dict]]:
     return result
 
 
-async def _call_llm(user_prompt: str, cfg: ResolvedLlm) -> tuple[str, dict | None]:
-    """Call the chat completions endpoint with the plan-generation system prompt.
-
-    Returns ``(text, usage)`` — the caller records instance-paid usage (#9).
-    """
-    return await call_llm(
-        user_prompt,
-        cfg.base_url,
-        cfg.model,
-        cfg.api_key,
-        system_prompt=_SYSTEM_PROMPT,
-        extra_headers=cfg.extra_headers,
-        extra_body=cfg.extra_body,
-    )
-
-
 async def generate_plan_weeks_llm(
     athlete: Athlete,
     config: PlanConfig,
@@ -197,19 +186,25 @@ async def generate_plan_weeks_llm(
 
     user_prompt = _build_user_prompt(config, goal, num_weeks, athlete.ftp, ctl)
 
-    # Call LLM with one retry on parse failure
-    raw, usage = await _call_llm(user_prompt, cfg)
+    # Call LLM (with the strict schema by default) and one retry on parse failure
+    raw, usage, schema_dropped = await call_llm_with_optional_schema(
+        user_prompt, cfg, system_prompt=_SYSTEM_PROMPT, response_format=PLAN_RESPONSE_FORMAT,
+    )
     await record_llm_usage(user_id=user_id, feature="plan_generate", cfg=cfg, usage=usage)
     try:
         return _parse_response(raw, num_weeks)
     except (json.JSONDecodeError, KeyError, ValueError):
-        # Retry with a correction nudge
+        # Retry with a correction nudge. If the provider already rejected the
+        # schema on the first call, don't re-send it (skip the wasted round-trip).
         correction = (
             user_prompt
             + "\n\nYour previous response could not be parsed as valid JSON matching "
             "the required schema. Respond with ONLY the JSON object, nothing else."
         )
-        raw, usage = await _call_llm(correction, cfg)
+        retry_format = None if schema_dropped else PLAN_RESPONSE_FORMAT
+        raw, usage, _ = await call_llm_with_optional_schema(
+            correction, cfg, system_prompt=_SYSTEM_PROMPT, response_format=retry_format,
+        )
         await record_llm_usage(user_id=user_id, feature="plan_generate", cfg=cfg, usage=usage)
         return _parse_response(raw, num_weeks)  # raises HTTP 503 if still invalid
 

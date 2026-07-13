@@ -233,6 +233,7 @@ class TestInstanceSettingsPersistModels:
             "api_key_set": False,
             "headers": {"X-ZDR": "true"},
             "body": {"max_tokens": 10},
+            "structured_outputs": True,
         }]
         # The removed instance single-config / globals are no longer returned.
         assert "llm_base_url" not in data

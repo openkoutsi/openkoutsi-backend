@@ -6964,6 +6964,11 @@
             "type": "object",
             "title": "Body",
             "default": {}
+          },
+          "structured_outputs": {
+            "type": "boolean",
+            "title": "Structured Outputs",
+            "default": true
           }
         },
         "type": "object",
@@ -7030,6 +7035,11 @@
             "type": "object",
             "title": "Body",
             "default": {}
+          },
+          "structured_outputs": {
+            "type": "boolean",
+            "title": "Structured Outputs",
+            "default": true
           }
         },
         "type": "object",

@@ -377,6 +377,9 @@ def _build_presets(
             entry["headers"] = headers
         if m.body:
             entry["body"] = m.body
+        # Only persist the opt-out; absent ⇒ default-on (keeps entries clean).
+        if not m.structured_outputs:
+            entry["structured_outputs"] = False
 
         if m.api_key_clear:
             pass  # explicitly drop any stored key
@@ -406,6 +409,7 @@ def _preset_out(entry: dict) -> LlmModelConfigOut:
         api_key_set=bool(entry.get("api_key_enc")),
         headers=entry.get("headers") or {},
         body=entry.get("body") or {},
+        structured_outputs=entry.get("structured_outputs") is not False,
     )
 
 
