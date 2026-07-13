@@ -16,7 +16,6 @@ import logging
 from datetime import date, timedelta
 from typing import Optional
 
-import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,10 +24,8 @@ from ..models.user_orm import TrainingPlan, PlannedWorkout, Athlete, DailyMetric
 from ..schemas.plans import PlanConfig
 from .llm_access import record_llm_usage
 from .llm_client import (
-    ResolvedLlm,
-    call_llm,
+    call_llm_with_optional_schema,
     extract_json,
-    is_response_format_unsupported_error,
     resolve_llm_config,
 )
 from .llm_schemas import PLAN_RESPONSE_FORMAT
@@ -155,44 +152,6 @@ def _parse_response(raw: str, num_weeks: int) -> list[list[dict]]:
     return result
 
 
-async def _call_llm(
-    user_prompt: str, cfg: ResolvedLlm, response_format: dict | None = None
-) -> tuple[str, dict | None]:
-    """Call the chat completions endpoint with the plan-generation system prompt.
-
-    Returns ``(text, usage)`` — the caller records instance-paid usage (#9).
-    """
-    return await call_llm(
-        user_prompt,
-        cfg.base_url,
-        cfg.model,
-        cfg.api_key,
-        system_prompt=_SYSTEM_PROMPT,
-        extra_headers=cfg.extra_headers,
-        extra_body=cfg.extra_body,
-        response_format=response_format,
-    )
-
-
-async def _call_llm_with_schema(user_prompt: str, cfg: ResolvedLlm) -> tuple[str, dict | None]:
-    """Like :func:`_call_llm` but attaches the strict plan ``response_format``.
-
-    Sends the schema by default (unless the preset opts out via
-    ``structured_outputs: false``). If the provider rejects ``response_format``,
-    transparently drops it and re-issues the prompt-instructed call — so
-    unsupported providers degrade to the prompt+parse+retry path.
-    """
-    if not cfg.structured_outputs:
-        return await _call_llm(user_prompt, cfg)
-    try:
-        return await _call_llm(user_prompt, cfg, PLAN_RESPONSE_FORMAT)
-    except httpx.HTTPStatusError as exc:
-        if not is_response_format_unsupported_error(exc):
-            raise
-        log.info("provider rejected response_format for plan generation; retrying without it")
-        return await _call_llm(user_prompt, cfg)
-
-
 async def generate_plan_weeks_llm(
     athlete: Athlete,
     config: PlanConfig,
@@ -228,18 +187,24 @@ async def generate_plan_weeks_llm(
     user_prompt = _build_user_prompt(config, goal, num_weeks, athlete.ftp, ctl)
 
     # Call LLM (with the strict schema by default) and one retry on parse failure
-    raw, usage = await _call_llm_with_schema(user_prompt, cfg)
+    raw, usage, schema_dropped = await call_llm_with_optional_schema(
+        user_prompt, cfg, system_prompt=_SYSTEM_PROMPT, response_format=PLAN_RESPONSE_FORMAT,
+    )
     await record_llm_usage(user_id=user_id, feature="plan_generate", cfg=cfg, usage=usage)
     try:
         return _parse_response(raw, num_weeks)
     except (json.JSONDecodeError, KeyError, ValueError):
-        # Retry with a correction nudge
+        # Retry with a correction nudge. If the provider already rejected the
+        # schema on the first call, don't re-send it (skip the wasted round-trip).
         correction = (
             user_prompt
             + "\n\nYour previous response could not be parsed as valid JSON matching "
             "the required schema. Respond with ONLY the JSON object, nothing else."
         )
-        raw, usage = await _call_llm_with_schema(correction, cfg)
+        retry_format = None if schema_dropped else PLAN_RESPONSE_FORMAT
+        raw, usage, _ = await call_llm_with_optional_schema(
+            correction, cfg, system_prompt=_SYSTEM_PROMPT, response_format=retry_format,
+        )
         await record_llm_usage(user_id=user_id, feature="plan_generate", cfg=cfg, usage=usage)
         return _parse_response(raw, num_weeks)  # raises HTTP 503 if still invalid
 

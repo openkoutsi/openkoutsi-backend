@@ -337,30 +337,51 @@ async def raise_for_llm_status(resp: httpx.Response, url: str) -> None:
     )
 
 
-# Markers an OpenAI-compatible provider tends to put in the 400/422 body when it
-# doesn't accept a ``response_format`` / json_schema param. Matched against the
-# error text surfaced by ``raise_for_llm_status`` to drive the auto-fallback.
-_RESPONSE_FORMAT_UNSUPPORTED_MARKERS = (
-    "response_format",
-    "response format",
-    "json_schema",
-    "json schema",
-)
+# Tokens an OpenAI-compatible provider puts in a 400/422 body when it doesn't
+# accept the ``response_format`` param at all. Only the API-style underscore forms
+# are used — the spaced variants would just widen the false-positive surface.
+_RESPONSE_FORMAT_UNSUPPORTED_MARKERS = ("response_format", "json_schema")
+
+# An OpenAI-style "the schema you sent is invalid" body. We build the schema
+# ourselves (``_tighten`` over pydantic), so this is *our* bug, not a provider
+# limitation — it must NOT be swallowed by the fallback, or a schema regression
+# would silently disable structured outputs everywhere with the suite still green.
+_INVALID_SCHEMA_MARKER = "invalid schema for response_format"
+
+
+def _response_body_text(resp: Any) -> str:
+    """Best-effort decoded body of a response (``""`` if unavailable).
+
+    ``raise_for_llm_status`` already ``aread``s the body before raising, so a real
+    ``httpx.Response`` has ``.text`` populated. We match against the *body* rather
+    than ``str(exc)`` so the request URL (folded into the exception message) can't
+    cause a false match.
+    """
+    try:
+        text = resp.text
+    except Exception:  # pragma: no cover - defensive
+        return ""
+    return text if isinstance(text, str) else ""
 
 
 def is_response_format_unsupported_error(exc: httpx.HTTPStatusError) -> bool:
-    """Is ``exc`` an upstream rejection of the ``response_format`` param?
+    """Is ``exc`` an upstream rejection of the ``response_format`` *param*?
 
-    Recognises a 400/422 whose body (surfaced by :func:`raise_for_llm_status`)
-    mentions ``response_format`` / ``json_schema`` — the signal that the provider
-    doesn't support structured outputs, so the caller should drop the field and
-    re-issue the prompt-instructed call.
+    Recognises a 400/422 whose body mentions ``response_format`` / ``json_schema``
+    — the signal that the provider doesn't support structured outputs, so the
+    caller should drop the field and re-issue the prompt-instructed call.
+
+    Deliberately returns ``False`` for an "invalid schema" body: that means our
+    own schema is broken, which should surface as an error rather than silently
+    degrade every provider to prompt-only.
     """
     resp = getattr(exc, "response", None)
-    if resp is None or resp.status_code not in (400, 422):
+    if resp is None or getattr(resp, "status_code", None) not in (400, 422):
         return False
-    text = str(exc).lower()
-    return any(marker in text for marker in _RESPONSE_FORMAT_UNSUPPORTED_MARKERS)
+    body = _response_body_text(resp).lower()
+    if _INVALID_SCHEMA_MARKER in body:
+        return False
+    return any(marker in body for marker in _RESPONSE_FORMAT_UNSUPPORTED_MARKERS)
 
 
 def extract_json(text: str) -> str:
@@ -485,3 +506,57 @@ async def call_llm(
     data = resp.json()
     usage = data.get("usage") if isinstance(data, dict) else None
     return data["choices"][0]["message"]["content"], usage
+
+
+async def call_llm_with_optional_schema(
+    user_prompt: str,
+    cfg: ResolvedLlm,
+    *,
+    system_prompt: str,
+    response_format: dict[str, Any] | None,
+) -> tuple[str, dict[str, Any] | None, bool]:
+    """Call the LLM, attaching ``response_format`` with transparent fallback.
+
+    Shared by the plan and workout generators (single source of truth for the
+    structured-output wiring). The schema is sent by default; it is omitted when
+    the preset opted out (``cfg.structured_outputs`` is false) or ``response_format``
+    is ``None``. If the provider *rejects the param* (not our schema — see
+    :func:`is_response_format_unsupported_error`), the field is dropped and the
+    call re-issued prompt-only.
+
+    Returns ``(text, usage, schema_dropped)``. ``schema_dropped`` is ``True`` when
+    the successful call did **not** carry the schema (opted out, or dropped after a
+    rejection), so a caller's correction retry can skip re-sending a schema the
+    provider already refused.
+    """
+    send_schema = response_format is not None and cfg.structured_outputs
+    if not send_schema:
+        text, usage = await call_llm(
+            user_prompt, cfg.base_url, cfg.model, cfg.api_key,
+            system_prompt=system_prompt,
+            extra_headers=cfg.extra_headers, extra_body=cfg.extra_body,
+        )
+        return text, usage, True
+
+    try:
+        text, usage = await call_llm(
+            user_prompt, cfg.base_url, cfg.model, cfg.api_key,
+            system_prompt=system_prompt,
+            extra_headers=cfg.extra_headers, extra_body=cfg.extra_body,
+            response_format=response_format,
+        )
+        return text, usage, False
+    except httpx.HTTPStatusError as exc:
+        if not is_response_format_unsupported_error(exc):
+            raise
+        log.warning(
+            "LLM structured outputs unsupported: provider rejected response_format "
+            "(model=%s) — falling back to prompt-only generation",
+            cfg.model,
+        )
+        text, usage = await call_llm(
+            user_prompt, cfg.base_url, cfg.model, cfg.api_key,
+            system_prompt=system_prompt,
+            extra_headers=cfg.extra_headers, extra_body=cfg.extra_body,
+        )
+        return text, usage, True

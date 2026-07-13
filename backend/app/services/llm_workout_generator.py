@@ -19,7 +19,6 @@ import logging
 import uuid
 from typing import Optional
 
-import httpx
 from pydantic import TypeAdapter, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -27,10 +26,8 @@ from ..models.registry_orm import InstanceSettings
 from ..models.user_orm import Athlete, PlannedWorkout, WorkoutDefinition
 from .llm_access import record_llm_usage
 from .llm_client import (
-    ResolvedLlm,
-    call_llm,
+    call_llm_with_optional_schema,
     extract_json,
-    is_response_format_unsupported_error,
     resolve_llm_config,
 )
 from .llm_schemas import WORKOUT_RESPONSE_FORMAT
@@ -159,31 +156,6 @@ def _parse_steps(raw: str) -> list[dict]:
     return [s.model_dump() for s in validated]
 
 
-async def _call_llm_with_schema(user_prompt: str, cfg: ResolvedLlm) -> tuple[str, dict | None]:
-    """Call the chat endpoint with the workout system prompt and strict schema.
-
-    Sends the workout ``response_format`` by default (unless the preset opts out
-    via ``structured_outputs: false``). If the provider rejects it, transparently
-    drops the field and re-issues the prompt-instructed call, so unsupported
-    providers degrade to the prompt+parse+retry path.
-    """
-    response_format = WORKOUT_RESPONSE_FORMAT if cfg.structured_outputs else None
-    try:
-        return await call_llm(
-            user_prompt, cfg.base_url, cfg.model, cfg.api_key, system_prompt=_SYSTEM_PROMPT,
-            extra_headers=cfg.extra_headers, extra_body=cfg.extra_body,
-            response_format=response_format,
-        )
-    except httpx.HTTPStatusError as exc:
-        if response_format is None or not is_response_format_unsupported_error(exc):
-            raise
-        log.info("provider rejected response_format for workout generation; retrying without it")
-        return await call_llm(
-            user_prompt, cfg.base_url, cfg.model, cfg.api_key, system_prompt=_SYSTEM_PROMPT,
-            extra_headers=cfg.extra_headers, extra_body=cfg.extra_body,
-        )
-
-
 async def generate_workout_definition_llm(
     athlete: Athlete,
     planned_workout: PlannedWorkout,
@@ -209,18 +181,24 @@ async def generate_workout_definition_llm(
 
     user_prompt = _build_user_prompt(planned_workout, athlete.ftp, sport_type)
 
-    raw, usage = await _call_llm_with_schema(user_prompt, cfg)
+    raw, usage, schema_dropped = await call_llm_with_optional_schema(
+        user_prompt, cfg, system_prompt=_SYSTEM_PROMPT, response_format=WORKOUT_RESPONSE_FORMAT,
+    )
     await record_llm_usage(user_id=user_id, feature="workout_generate", cfg=cfg, usage=usage)
     try:
         steps = _parse_steps(raw)
     except WorkoutGenerationError:
-        # Retry once with a correction nudge.
+        # Retry once with a correction nudge. If the provider already rejected the
+        # schema, don't re-send it on the retry (skip the wasted round-trip).
         correction = (
             user_prompt
             + "\n\nYour previous response could not be parsed as valid JSON matching "
             "the required schema. Respond with ONLY the JSON object, nothing else."
         )
-        raw, usage = await _call_llm_with_schema(correction, cfg)
+        retry_format = None if schema_dropped else WORKOUT_RESPONSE_FORMAT
+        raw, usage, _ = await call_llm_with_optional_schema(
+            correction, cfg, system_prompt=_SYSTEM_PROMPT, response_format=retry_format,
+        )
         await record_llm_usage(user_id=user_id, feature="workout_generate", cfg=cfg, usage=usage)
         steps = _parse_steps(raw)  # raises WorkoutGenerationError if still invalid
 

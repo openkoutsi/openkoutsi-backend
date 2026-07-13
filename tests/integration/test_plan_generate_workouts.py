@@ -48,6 +48,7 @@ def _error_resp(status: int, body: str) -> MagicMock:
     resp.is_error = True
     resp.status_code = status
     resp.request = MagicMock()
+    resp.text = body
     resp.aread = AsyncMock(return_value=body.encode())
     return resp
 

@@ -328,13 +328,13 @@ class TestLlmPlanGeneration:
                                    "llm_model": "llama3.2"}},
             headers=auth_headers,
         )
+        err_body = '{"error": {"message": "response_format is not supported"}}'
         err_resp = MagicMock()
         err_resp.is_error = True
         err_resp.status_code = 400
         err_resp.request = MagicMock()
-        err_resp.aread = AsyncMock(
-            return_value=b'{"error": {"message": "response_format is not supported"}}'
-        )
+        err_resp.text = err_body
+        err_resp.aread = AsyncMock(return_value=err_body.encode())
         good_resp = MagicMock()
         good_resp.is_error = False
         good_resp.json.return_value = {"choices": [{"message": {"content": _make_llm_plan_json(4)}}]}
@@ -352,6 +352,45 @@ class TestLlmPlanGeneration:
         first, second = mock_http.post.await_args_list
         assert "response_format" in first.kwargs["json"]
         assert "response_format" not in second.kwargs["json"]
+
+    async def test_correction_retry_skips_already_rejected_schema(self, client, auth_headers):
+        # Provider rejects the schema (call 1) → fallback (call 2) yields unparseable
+        # output → correction retry (call 3) must NOT re-send the rejected schema.
+        await client.patch(
+            "/api/athlete",
+            json={"app_settings": {"llm_base_url": "http://localhost:11434/v1",
+                                   "llm_model": "llama3.2"}},
+            headers=auth_headers,
+        )
+        err_body = '{"error": {"message": "response_format is not supported"}}'
+        err_resp = MagicMock()
+        err_resp.is_error = True
+        err_resp.status_code = 400
+        err_resp.request = MagicMock()
+        err_resp.text = err_body
+        err_resp.aread = AsyncMock(return_value=err_body.encode())
+
+        bad_resp = MagicMock()
+        bad_resp.is_error = False
+        bad_resp.json.return_value = {"choices": [{"message": {"content": "not json"}}]}
+        good_resp = MagicMock()
+        good_resp.is_error = False
+        good_resp.json.return_value = {"choices": [{"message": {"content": _make_llm_plan_json(4)}}]}
+
+        mock_http = AsyncMock()
+        mock_http.post = AsyncMock(side_effect=[err_resp, bad_resp, good_resp])
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        with patch("httpx.AsyncClient", return_value=mock_http):
+            resp = await client.post("/api/plans", json=_LLM_REQUEST_BODY, headers=auth_headers)
+
+        assert resp.status_code == 201
+        assert mock_http.post.await_count == 3
+        c1, c2, c3 = mock_http.post.await_args_list
+        assert "response_format" in c1.kwargs["json"]      # first tries the schema
+        assert "response_format" not in c2.kwargs["json"]  # fallback drops it
+        assert "response_format" not in c3.kwargs["json"]  # retry doesn't re-send it
 
     async def test_build_user_prompt_includes_ftp(self, client, auth_headers):
         from backend.app.services.llm_plan_generator import _build_user_prompt

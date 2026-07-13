@@ -135,3 +135,26 @@ class TestIsResponseFormatUnsupportedError:
     def test_ignores_non_client_error_status(self):
         body = '{"error": "response_format server exploded"}'
         assert is_response_format_unsupported_error(self._error(500, body)) is False
+
+    def test_invalid_schema_body_not_swallowed(self):
+        # OpenAI-style "our schema is broken" — must NOT be treated as an
+        # unsupported param, so the error surfaces instead of silently degrading
+        # structured outputs to prompt-only everywhere.
+        body = '{"error": {"message": "Invalid schema for response_format \'training_plan\': bad"}}'
+        assert is_response_format_unsupported_error(self._error(400, body)) is False
+
+    def test_matches_body_not_exception_message(self):
+        # A marker only in the URL/exception message (not the response body) must
+        # not trigger a match — we classify on the body, not str(exc).
+        resp = _response(400, "temperature must be 1")
+        exc = httpx.HTTPStatusError(
+            "LLM request to https://host/response_format/v1 failed: temperature must be 1",
+            request=resp.request, response=resp,
+        )
+        assert is_response_format_unsupported_error(exc) is False
+
+    def test_drops_spaced_marker_variants(self):
+        # Only the API-style underscore forms count; a spaced "json schema" in an
+        # unrelated 400 should not false-match.
+        body = '{"error": "invalid json schema in tool definition"}'
+        assert is_response_format_unsupported_error(self._error(400, body)) is False
