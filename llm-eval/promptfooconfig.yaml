@@ -48,17 +48,22 @@ providers:
       apiBaseUrl: https://api.anthropic.com/v1
       apiKeyEnvar: ANTHROPIC_API_KEY
       max_tokens: 8192
-  # - id: https
-  #   label: wafer
-  #   config:
-  #     url: 'https://pass.wafer.ai/v1/chat/completions'
-  #     model: 'GLM-5.2'
-  #     auth:
-  #       type: bearer
-  #       token: '{{env.WAFER_API_KEY}}'
-  #     body:
-  #       model: '{{model}}'
-  #       prompt: '{{prompt}}'
+  - id: openai:chat:glm-5.2
+    label: wafer-glm-5.2
+    config:
+      apiBaseUrl: https://pass.wafer.ai/v1
+      apiKeyEnvar: WAFER_API_KEY
+      max_tokens: 8192
+  - id: openai:chat:kimi-k2.6
+    label: wafer-kimi-k2.6
+    config:
+      apiBaseUrl: https://pass.wafer.ai/v1
+      apiKeyEnvar: WAFER_API_KEY
+      max_tokens: 8192
+  - id: mistral:mistral-large-latest
+    label: mistral-large
+    config:
+      max_tokens: 8192
   - id: mistral:mistral-medium-latest
     label: mistral-medium
     config:
@@ -67,20 +72,6 @@ providers:
     label: mistral-small
     config:
       max_tokens: 8192
-
-  # ── Fill in and uncomment to add more providers ────────────────────────────
-  # - id: openai:chat:claude-fable-5       # $10 / $50 — most capable
-  #   label: fable-5
-  #   config: {apiBaseUrl: https://api.anthropic.com/v1, apiKeyEnvar: ANTHROPIC_API_KEY, max_tokens: 8192}
-  # - id: openai:chat:gpt-5                 # OpenAI — set the model id you have access to
-  #   label: gpt-5
-  #   config: {apiKeyEnvar: OPENAI_API_KEY, max_tokens: 8192}
-  # - id: openai:chat:gemini-2.5-pro        # Google's OpenAI-compatible endpoint
-  #   label: gemini-2.5-pro
-  #   config: {apiBaseUrl: https://generativelanguage.googleapis.com/v1beta/openai, apiKeyEnvar: GEMINI_API_KEY, max_tokens: 8192}
-  # - id: openai:chat:llama3.1              # Local Ollama / vLLM (OpenAI-compatible)
-  #   label: local-llama3.1
-  #   config: {apiBaseUrl: http://localhost:11434/v1, apiKey: ollama, max_tokens: 8192}
 
 # ── Optional automated first-pass grader for the prose families ──────────────
 # Uncomment to also score coaching quality with an LLM judge (costs extra tokens).
