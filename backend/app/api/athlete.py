@@ -57,6 +57,16 @@ async def _get_athlete(global_user_id: str, session: AsyncSession) -> Athlete:
 
 _MAX_LLM_URL_LEN = 2048
 
+# Self-reported athlete experience level, stored in app_settings (see #18).
+# May be used later to tune progression and koutsi feedback.
+VALID_EXPERIENCE_LEVELS = (
+    "novice",
+    "intermediate",
+    "experienced",
+    "semi-pro",
+    "elite",
+)
+
 
 def _validate_llm_base_url(raw: str) -> str:
     """Validate and normalise a user's BYOK base URL at save time.
@@ -211,6 +221,18 @@ async def update_athlete(
             else:
                 # Empty/blank clears the BYOK URL (merged-None deletes the key).
                 new_settings["llm_base_url"] = None
+
+        if "experience_level" in new_settings:
+            level = new_settings.get("experience_level")
+            if level and str(level).strip():
+                if level not in VALID_EXPERIENCE_LEVELS:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Invalid experience level.",
+                    )
+            else:
+                # Empty/blank clears the setting (merged-None deletes the key).
+                new_settings["experience_level"] = None
 
         if "llm_api_key" in new_settings:
             raw_key = new_settings.pop("llm_api_key")

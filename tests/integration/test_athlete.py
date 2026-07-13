@@ -120,6 +120,44 @@ class TestPatchAthlete:
         assert resp.status_code == 401
 
 
+class TestExperienceLevel:
+    """Self-reported experience level, stored in app_settings (see #18)."""
+
+    async def test_valid_level_round_trips(self, client, auth_headers):
+        resp = await client.patch(
+            "/api/athlete",
+            json={"app_settings": {"experience_level": "elite"}},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["app_settings"]["experience_level"] == "elite"
+
+        get_resp = await client.get("/api/athlete", headers=auth_headers)
+        assert get_resp.json()["app_settings"]["experience_level"] == "elite"
+
+    async def test_invalid_level_rejected(self, client, auth_headers):
+        resp = await client.patch(
+            "/api/athlete",
+            json={"app_settings": {"experience_level": "pro"}},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 400
+
+    async def test_empty_string_clears_level(self, client, auth_headers):
+        await client.patch(
+            "/api/athlete",
+            json={"app_settings": {"experience_level": "novice"}},
+            headers=auth_headers,
+        )
+        resp = await client.patch(
+            "/api/athlete",
+            json={"app_settings": {"experience_level": ""}},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        assert "experience_level" not in resp.json()["app_settings"]
+
+
 class TestLlmApiKeyHandling:
     """The LLM API key must be encrypted at rest and never returned to the client."""
 
