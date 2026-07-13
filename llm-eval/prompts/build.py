@@ -25,12 +25,14 @@ import _bootstrap  # noqa: F401,E402
 
 from backend.app.services import (  # noqa: E402
     llm_activity_analyzer as activity_svc,
+    llm_goal_guidance as goal_svc,
     llm_plan_generator as plan_svc,
     llm_training_status_analyzer as status_svc,
     llm_workout_generator as workout_svc,
 )
 from fixtures.scenarios import (  # noqa: E402
     ACTIVITY_SCENARIOS,
+    GOAL_SCENARIOS,
     PLAN_SCENARIOS,
     STATUS_SCENARIOS,
     WORKOUT_SCENARIOS,
@@ -72,11 +74,22 @@ def _status(s: dict) -> tuple[str, str]:
     )
 
 
+def _goal(s: dict) -> tuple[str, str]:
+    return (
+        goal_svc._build_system_prompt(s.get("locale"), s.get("coaching_style")),
+        goal_svc._build_goal_prompt(
+            s["athlete"], s["goal"], s["recent_activities"],
+            s["current_metric"], s["active_plan"], s["now"],
+        ),
+    )
+
+
 _FAMILIES = {
     "plan": (PLAN_SCENARIOS, _plan),
     "workout": (WORKOUT_SCENARIOS, _workout),
     "activity": (ACTIVITY_SCENARIOS, _activity),
     "status": (STATUS_SCENARIOS, _status),
+    "goal": (GOAL_SCENARIOS, _goal),
 }
 
 # JSON families → the pydantic output schema whose shape the backend parser accepts.

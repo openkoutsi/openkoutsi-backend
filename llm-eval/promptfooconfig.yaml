@@ -140,3 +140,30 @@ tests:
       #   value: >-
       #     Correctly treats today's not-yet-done workout as not missed, is direct
       #     about the earlier missed session, and tempers the one with a skip reason.
+
+  # Family 5 — per-goal guidance (prose + REALISM; format objective, quality subjective)
+  - description: "goal / realistic FTP bump (friendly)"
+    vars: {family: goal, scenario: ftp_bump_realistic}
+    assert:
+      - type: python
+        value: file://asserts/checks.py:realism_prose
+      # - type: llm-rubric
+      #   value: >-
+      #     Judges the goal realistic for its timeline, grounds the verdict in the
+      #     athlete's numbers, and gives concrete steps to reach it.
+  - description: "goal / over-aggressive FTP jump (stern, unrealistic)"
+    vars: {family: goal, scenario: ftp_jump_unrealistic}
+    assert:
+      - type: python
+        value: file://asserts/checks.py:realism_prose
+      # - type: llm-rubric
+      #   value: >-
+      #     Flags the goal as ambitious/unrealistic on this timeline and proposes
+      #     an honest path forward (extend the date, adjust the target, or more volume).
+  - description: "goal / gran fondo (Finnish locale)"
+    vars: {family: goal, scenario: gran_fondo_finnish}
+    assert:
+      - type: python
+        value: file://asserts/checks.py:realism_prose
+      # - type: llm-rubric
+      #   value: The guidance is written in Finnish with an English REALISM token.

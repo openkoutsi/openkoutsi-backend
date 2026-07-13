@@ -39,9 +39,10 @@ log = logging.getLogger(__name__)
 # branches on a stable key, never on message text.
 LLM_SUBSCRIPTION_REQUIRED = "llm_subscription_required"
 
-# The five gated feature areas — also the ``llm_usage.feature`` column values.
+# The gated feature areas — also the ``llm_usage.feature`` column values.
 Feature = Literal[
-    "chat", "plan_generate", "workout_generate", "activity_analysis", "training_status"
+    "chat", "plan_generate", "workout_generate", "activity_analysis",
+    "training_status", "goal_guidance",
 ]
 
 

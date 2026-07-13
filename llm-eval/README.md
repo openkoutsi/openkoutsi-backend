@@ -1,6 +1,6 @@
 # llm-eval — comparing LLM providers/models for openkoutsi
 
-openkoutsi calls an LLM in four places, all through one OpenAI-compatible
+openkoutsi calls an LLM in five places, all through one OpenAI-compatible
 `/chat/completions` path (`backend/app/services/llm_client.py:call_llm`). This
 subproject sends prompts that **mirror what the platform actually sends** to a
 matrix of models and grades the results, so hosters and BYOK users can pick a
@@ -11,7 +11,7 @@ evaluation prompt set: instead of copying the prompts, we **import the real
 backend builders**, so the text each model sees is byte-identical to production
 and can never drift.
 
-## The four families
+## The five families
 
 | Family | Backend source (`backend/app/services/…`) | Output | How it's graded |
 |---|---|---|---|
@@ -32,6 +32,7 @@ re-exports them so the eval and production never drift. The prose families
 (`activity`, `status`) are left unconstrained.
 | `activity` | `llm_activity_analyzer.py` | prose | **format objective** (`MOOD:` line, no markdown) + **subjective** (web UI / optional rubric) |
 | `status` | `llm_training_status_analyzer.py` | prose | same as `activity`, plus plan-adherence reasoning |
+| `goal` | `llm_goal_guidance.py` | prose | **format objective** (`REALISM:` line, no markdown) + **subjective** (realism judgement + concrete steps) |
 
 ## Layout
 
@@ -94,6 +95,6 @@ The prompts are imported, not copied, so they track the backend automatically.
 If the backend refactors these builders, update the imports in `prompts/build.py`
 / `asserts/checks.py` accordingly. Source files to watch:
 `llm_plan_generator.py`, `llm_workout_generator.py`, `llm_activity_analyzer.py`,
-`llm_training_status_analyzer.py`.
+`llm_training_status_analyzer.py`, `llm_goal_guidance.py`.
 
 > This is an offline decision-support tool — it is not wired into the app or CI.

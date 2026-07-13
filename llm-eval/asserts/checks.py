@@ -89,3 +89,34 @@ def mood_prose(output: str, context: dict) -> dict:
         # Format is close but imperfect — partial credit so the web UI still surfaces it.
         return _result(False, "; ".join(problems), score=0.5)
     return _result(True, f"valid MOOD ({lines[0].strip()}) + plain prose")
+
+
+_REALISM_RE = re.compile(r"^REALISM:\s?(realistic|ambitious|unrealistic)\s*$")
+
+
+def realism_prose(output: str, context: dict) -> dict:
+    """Pass iff first line is a valid REALISM tag and the body is plain prose.
+
+    The goal-guidance prompt demands ``REALISM:<verdict>`` on the first line, a
+    blank line, then plain-prose paragraphs (no markdown). Modelled on
+    ``mood_prose``; the verdict token stays English even for localized prose, so
+    the check is language-agnostic. Coaching quality is left to the web UI or the
+    optional ``llm-rubric``.
+    """
+    lines = output.splitlines()
+    if not lines or not _REALISM_RE.match(lines[0].strip()):
+        head = (lines[0] if lines else "")[:60]
+        return _result(False, f"first line is not a valid REALISM tag: {head!r}")
+
+    problems: list[str] = []
+    if len(lines) < 2 or lines[1].strip() != "":
+        problems.append("REALISM line should be followed by a blank line")
+    body = "\n".join(lines[2:])
+    if _MARKDOWN_RE.search(body):
+        problems.append("body contains markdown (headers, bullets, or code fences)")
+    if not body.strip():
+        problems.append("no guidance paragraphs after the REALISM line")
+
+    if problems:
+        return _result(False, "; ".join(problems), score=0.5)
+    return _result(True, f"valid REALISM ({lines[0].strip()}) + plain prose")
