@@ -29,14 +29,15 @@ prompts:
 providers:
   # Anthropic (OpenAI-compatible endpoint). Reasoning models reject a non-1
   # temperature, so — like the app — we send none. Pricing via the claude-api skill.
-  - id: openai:chat:claude-opus-4-8        # $5 / $25
-    label: opus-4.8
+  - id: openai:chat:claude-sonnet-5
+    label: sonnet-5
     config:
       apiBaseUrl: https://api.anthropic.com/v1
       apiKeyEnvar: ANTHROPIC_API_KEY
       max_tokens: 8192
-  - id: openai:chat:claude-sonnet-5        # $3 / $15 ($2/$10 intro through 2026-08-31)
-    label: sonnet-5
+      temperature: 1
+  - id: openai:chat:claude-sonnet-4-6
+    label: sonnet-4-6
     config:
       apiBaseUrl: https://api.anthropic.com/v1
       apiKeyEnvar: ANTHROPIC_API_KEY
@@ -46,6 +47,25 @@ providers:
     config:
       apiBaseUrl: https://api.anthropic.com/v1
       apiKeyEnvar: ANTHROPIC_API_KEY
+      max_tokens: 8192
+  # - id: https
+  #   label: wafer
+  #   config:
+  #     url: 'https://pass.wafer.ai/v1/chat/completions'
+  #     model: 'GLM-5.2'
+  #     auth:
+  #       type: bearer
+  #       token: '{{env.WAFER_API_KEY}}'
+  #     body:
+  #       model: '{{model}}'
+  #       prompt: '{{prompt}}'
+  - id: mistral:mistral-medium-latest
+    label: mistral-medium
+    config:
+      max_tokens: 8192
+  - id: mistral:mistral-small-latest
+    label: mistral-small
+    config:
       max_tokens: 8192
 
   # ── Fill in and uncomment to add more providers ────────────────────────────

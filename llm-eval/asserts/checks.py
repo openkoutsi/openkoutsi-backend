@@ -25,10 +25,16 @@ def _result(passed: bool, reason: str, score: float | None = None) -> dict:
     return {"pass": passed, "score": (1.0 if passed else 0.0) if score is None else score, "reason": reason}
 
 
-def plan(output: str, context: dict) -> dict:
+def plan(output: str | dict, context: dict) -> dict:
     """Pass iff the output parses as a valid N-week plan (same contract as the app)."""
+    import json as _json
     from backend.app.services.llm_plan_generator import _parse_response
 
+    # Anthropic's json_schema response_format causes promptfoo to deserialize the
+    # content into a dict before calling asserts; re-serialize so the backend parser
+    # receives the string it expects.
+    if isinstance(output, dict):
+        output = _json.dumps(output)
     num_weeks = PLAN_SCENARIOS[context["vars"]["scenario"]]["num_weeks"]
     try:
         weeks = _parse_response(output, num_weeks)
@@ -37,10 +43,13 @@ def plan(output: str, context: dict) -> dict:
     return _result(True, f"valid plan: {len(weeks)} weeks x 7 days")
 
 
-def workout(output: str, context: dict) -> dict:
+def workout(output: str | dict, context: dict) -> dict:
     """Pass iff the output parses into valid workout steps (schema + nesting rule)."""
+    import json as _json
     from backend.app.services.llm_workout_generator import WorkoutGenerationError, _parse_steps
 
+    if isinstance(output, dict):
+        output = _json.dumps(output)
     try:
         steps = _parse_steps(output)
     except WorkoutGenerationError as exc:
@@ -50,7 +59,7 @@ def workout(output: str, context: dict) -> dict:
     return _result(True, f"valid workout: {len(steps)} top-level steps")
 
 
-_MOOD_RE = re.compile(r"^MOOD:(cheer|knowing|neutral|stern)\s*$")
+_MOOD_RE = re.compile(r"^MOOD:\s?(cheer|knowing|neutral|stern)\s*$")
 _MARKDOWN_RE = re.compile(r"(?m)^(\s*#{1,6}\s|\s*[-*+]\s|\s*\d+\.\s)|```")
 
 
