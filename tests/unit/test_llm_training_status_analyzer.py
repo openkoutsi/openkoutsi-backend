@@ -4,13 +4,17 @@ from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
 from backend.app.models.user_orm import Athlete, PlannedWorkout, TrainingPlan
-from backend.app.services.llm_training_status_analyzer import _build_status_prompt
+from backend.app.services.llm_training_status_analyzer import (
+    _build_status_prompt,
+    _build_system_prompt,
+)
 
 
-def _athlete() -> Athlete:
+def _athlete(app_settings: dict | None = None) -> Athlete:
     a = MagicMock(spec=Athlete)
     a.ftp = 250
     a.max_hr = 190
+    a.app_settings = app_settings if app_settings is not None else {}
     return a
 
 
@@ -189,3 +193,26 @@ class TestRestDays:
         )
         assert "rest day — nothing to complete, no action required" in prompt
         assert "not completed" not in prompt
+
+
+class TestExperienceLevel:
+    def _prompt(self, app_settings):
+        now = datetime(2025, 6, 4, 8, 0, tzinfo=ZoneInfo("Europe/Helsinki"))
+        return _build_status_prompt(
+            athlete=_athlete(app_settings),
+            recent_activities=[],
+            current_metric=None,
+            active_plan=None,
+            this_week_workouts=[],
+            active_goals=[],
+            now=now,
+        )
+
+    def test_experience_level_included_when_set(self):
+        assert "experience level: elite" in self._prompt({"experience_level": "elite"})
+
+    def test_experience_level_absent_when_unset(self):
+        assert "experience level" not in self._prompt({})
+
+    def test_system_prompt_includes_guidance(self):
+        assert "experience level" in _build_system_prompt()

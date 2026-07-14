@@ -19,6 +19,7 @@ from backend.app.api.consent import CURRENT_CONSENT_VERSION
 from backend.app.models.registry_orm import InstanceSettings, ProviderConnection, User
 from backend.app.models.user_orm import Activity, Athlete, WeightLog
 from backend.app.schemas.athlete import AthleteResponse, AthleteUpdate, TrainingStatusBody, TrainingStatusResponse
+from backend.app.services.athlete_experience import VALID_EXPERIENCE_LEVELS
 
 _MAX_AVATAR_BYTES = 5 * 1024 * 1024  # 5 MB
 
@@ -57,15 +58,10 @@ async def _get_athlete(global_user_id: str, session: AsyncSession) -> Athlete:
 
 _MAX_LLM_URL_LEN = 2048
 
-# Self-reported athlete experience level, stored in app_settings (see #18).
-# May be used later to tune progression and koutsi feedback.
-VALID_EXPERIENCE_LEVELS = (
-    "novice",
-    "intermediate",
-    "experienced",
-    "semi-pro",
-    "elite",
-)
+# Self-reported athlete experience level, stored in app_settings (see #18) and
+# fed into the LLM coaching/generation prompts (see #32). The canonical tuple
+# lives in ``services.athlete_experience`` so validation here and prompt building
+# there share one source.
 
 
 def _validate_llm_base_url(raw: str) -> str:

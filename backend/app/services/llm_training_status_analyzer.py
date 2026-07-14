@@ -28,6 +28,7 @@ from ..db.user_session import get_user_session_factory
 from ..models.registry_orm import InstanceSettings
 from ..models.user_orm import Activity, Athlete, DailyMetric, Goal, PlannedWorkout, TrainingPlan
 from ..schemas.metrics import _tsb_to_form
+from .athlete_experience import EXPERIENCE_GUIDANCE, experience_level
 from .llm_access import record_llm_usage, usage_from_sse_data
 from .llm_client import (
     apply_body_extras,
@@ -104,6 +105,7 @@ def _local_now(tz_str: str | None) -> datetime:
 
 def _build_system_prompt(locale: str | None = None, coaching_style: str | None = None) -> str:
     prompt = _SYSTEM_PROMPT_BASE
+    prompt += f"\n\n{EXPERIENCE_GUIDANCE}"
     if coaching_style and coaching_style in _COACHING_STYLE_PROMPTS:
         prompt += f"\n\n{_COACHING_STYLE_PROMPTS[coaching_style]}"
     if locale:
@@ -131,6 +133,9 @@ def _build_status_prompt(
         lines.append(f"Athlete FTP: {athlete.ftp} W")
     if athlete.max_hr:
         lines.append(f"Athlete max HR: {athlete.max_hr} bpm")
+    level = experience_level(athlete.app_settings)
+    if level:
+        lines.append(f"Athlete self-reported experience level: {level}")
 
     if current_metric:
         lines.append("\nCurrent fitness state:")

@@ -25,6 +25,7 @@ from ..db.registry import _RegistrySessionLocal
 from ..db.user_session import get_user_session_factory
 from ..models.registry_orm import InstanceSettings
 from ..models.user_orm import Activity, Athlete, DailyMetric
+from .athlete_experience import EXPERIENCE_GUIDANCE, experience_level
 from .llm_access import record_llm_usage, usage_from_sse_data
 from .llm_client import (
     apply_body_extras,
@@ -77,6 +78,7 @@ The MOOD line must be the very first line, followed by a blank line, then the pa
 
 def _build_system_prompt(locale: str | None = None) -> str:
     prompt = _SYSTEM_PROMPT_BASE
+    prompt += f"\n\n{EXPERIENCE_GUIDANCE}"
     if locale:
         lang = _LOCALE_LANGUAGE.get(locale.split("-")[0].lower())
         if lang:
@@ -146,6 +148,9 @@ def _build_prompt(
         lines.append(f"  Athlete FTP: {athlete.ftp} W")
     if athlete.max_hr:
         lines.append(f"  Athlete max HR: {athlete.max_hr} bpm")
+    level = experience_level(athlete.app_settings)
+    if level:
+        lines.append(f"  Athlete self-reported experience level: {level}")
 
     if fatigue:
         from ..schemas.metrics import _tsb_to_form
