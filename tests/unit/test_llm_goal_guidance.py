@@ -10,6 +10,7 @@ from backend.app.services.llm_goal_guidance import (
     _build_goal_prompt,
     _build_system_prompt,
     _parse_verdict,
+    _stream_display_prose,
 )
 
 
@@ -189,3 +190,24 @@ class TestParseVerdict:
         assert verdict == _FALLBACK_VERDICT
         # The whole text is kept since the first line wasn't a valid tag.
         assert "Unsure." in prose
+
+
+# ── _stream_display_prose (mid-stream, never leaks the raw tag) ────────────────
+
+class TestStreamDisplayProse:
+    def test_partial_first_line_shows_nothing(self):
+        # The REALISM tag arrives token by token; until the line ends, show nothing.
+        assert _stream_display_prose("REALISM: ambi") == ""
+
+    def test_empty_shows_nothing(self):
+        assert _stream_display_prose("") == ""
+
+    def test_complete_tag_is_stripped(self):
+        # Once the first line is terminated, the tag is gone from what we persist.
+        out = _stream_display_prose("REALISM: ambitious\n\nYour FTP goal is a stretch")
+        assert "REALISM" not in out
+        assert out == "Your FTP goal is a stretch"
+
+    def test_tagless_prose_passes_through_once_a_line_ends(self):
+        out = _stream_display_prose("You should build more base.\n\nThen add intensity.")
+        assert "You should build more base." in out

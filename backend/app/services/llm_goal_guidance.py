@@ -182,6 +182,22 @@ def _parse_verdict(text: str) -> tuple[str, str]:
     return _FALLBACK_VERDICT, text.strip()
 
 
+def _stream_display_prose(text: str) -> str:
+    """Tag-free prose to persist mid-stream, so a poller never sees the raw tag.
+
+    The leading ``REALISM:`` line arrives one token at a time; showing the
+    partially-formed tag would flicker ``REAL…`` at the top of the card. We hold
+    back until the first line is terminated by a newline, then strip a recognised
+    tag via :func:`_parse_verdict` (which returns the text unchanged if the first
+    line turns out to be ordinary prose). This keeps the persisted ``guidance``
+    tag-free in both the ``pending`` and ``done`` states.
+    """
+    if "\n" not in text:
+        return ""
+    _, prose = _parse_verdict(text)
+    return prose
+
+
 async def _stream_goal_guidance(
     athlete: Athlete,
     user_id: str,
@@ -358,7 +374,9 @@ async def generate_goal_guidance_bg(
                         accumulated += "".join(buffer)
                         buffer.clear()
                         last_flush = time.monotonic()
-                        goal.guidance = accumulated
+                        # Persist tag-free prose so a mid-stream poll never
+                        # returns the raw REALISM: line (see _stream_display_prose).
+                        goal.guidance = _stream_display_prose(accumulated)
                         await session.commit()
 
                 accumulated += "".join(buffer)
