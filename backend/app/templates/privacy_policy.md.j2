@@ -24,7 +24,11 @@ Company registration number {{ controller_registration_number or "[ ]" }}.
 
 **Contact for privacy matters:** {{ contact_email or "[privacy@yourdomain.com]" }}.
 
-**Data Protection Officer (DPO):** {{ dpo or "[Name / contact details, if one has been appointed]" }}.
+{% if dpo %}
+**Data Protection Officer (DPO):** {{ dpo }}.
+{% else %}
+**Data Protection Officer (DPO):** none appointed.
+{% endif %}
 A DPO is required where core activities involve large-scale processing of special-category data such as health data.
 
 **EU / UK representative:** {{ eu_representative or "[Name and contact]" }}, required under Article 27 where the controller is established outside the EU/UK but offers the App to individuals there.
