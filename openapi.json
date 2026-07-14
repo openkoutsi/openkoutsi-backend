@@ -3313,6 +3313,54 @@
         }
       }
     },
+    "/api/plans/{plan_id}/unarchive": {
+      "post": {
+        "tags": [
+          "plans"
+        ],
+        "summary": "Unarchive a training plan",
+        "description": "Reactivate an archived plan.\n\nAny currently-active plan whose date range overlaps the reactivated plan is\narchived, so overlapping plans are never both active at once. Active plans\ncovering a different period are left untouched.",
+        "operationId": "unarchivePlan",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Plan Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrainingPlanResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/plans/{plan_id}/workouts/{workout_id}/link": {
       "put": {
         "tags": [
