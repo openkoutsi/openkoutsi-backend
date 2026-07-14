@@ -69,6 +69,12 @@ class Settings(BaseSettings):
     # Leave empty in development to disable encryption (tokens stored as plaintext).
     encryption_key: str = ""
 
+    # URL of the privacy policy shown on the consent screen and auth pages.
+    # Defaults to the canonical koutsi.dev policy; self-hosters are their own GDPR
+    # data controller and should point this at their own policy. Exposed to the
+    # frontend via GET /api/public/instance-info.
+    privacy_policy_url: str = "https://koutsi.dev/privacy"
+
     # ── Path helpers ──────────────────────────────────────────────────────────
 
     @property

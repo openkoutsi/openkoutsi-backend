@@ -71,7 +71,12 @@ class TestPublicInstanceInfo:
     async def test_returns_null_when_unset(self, client):
         resp = await client.get("/api/public/instance-info")
         assert resp.status_code == 200
-        assert resp.json() == {"admin_contact": None}
+        assert resp.json()["admin_contact"] is None
+
+    async def test_exposes_privacy_policy_url(self, client):
+        resp = await client.get("/api/public/instance-info")
+        assert resp.status_code == 200
+        assert resp.json()["privacy_policy_url"] == "https://koutsi.dev/privacy"
 
     async def test_returns_configured_value_without_auth(self, client, auth_headers):
         await client.patch(
@@ -99,4 +104,5 @@ class TestPublicInstanceInfo:
         )
         resp = await client.get("/api/public/instance-info")
         assert resp.status_code == 200
-        assert set(resp.json().keys()) == {"admin_contact"}
+        # Only whitelisted, non-secret fields are exposed.
+        assert set(resp.json().keys()) == {"admin_contact", "privacy_policy_url"}

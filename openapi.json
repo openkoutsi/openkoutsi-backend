@@ -4105,7 +4105,7 @@
           "public"
         ],
         "summary": "Get public instance info (no auth)",
-        "description": "Return non-sensitive instance settings readable without authentication.\n\nUsed by unauthenticated pages (e.g. password reset) that need the admin\ncontact. Only whitelisted, non-secret fields are exposed here.",
+        "description": "Return non-sensitive instance settings readable without authentication.\n\nUsed by unauthenticated pages (e.g. password reset) that need the admin\ncontact, and by the consent screen for the privacy-policy link. Only\nwhitelisted, non-secret fields are exposed here.",
         "operationId": "getPublicInstanceInfo",
         "responses": {
           "200": {
@@ -6671,9 +6671,16 @@
               }
             ],
             "title": "Admin Contact"
+          },
+          "privacy_policy_url": {
+            "type": "string",
+            "title": "Privacy Policy Url"
           }
         },
         "type": "object",
+        "required": [
+          "privacy_policy_url"
+        ],
         "title": "InstanceInfoResponse",
         "description": "Non-sensitive, publicly readable instance settings."
       },
