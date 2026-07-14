@@ -31,7 +31,12 @@ Company registration number {{ controller_registration_number or "[ ]" }}.
 {% endif %}
 A DPO is required where core activities involve large-scale processing of special-category data such as health data.
 
-**EU / UK representative:** {{ eu_representative or "[Name and contact]" }}, required under Article 27 where the controller is established outside the EU/UK but offers the App to individuals there.
+{% if eu_representative %}
+**EU / UK representative:** {{ eu_representative }}.
+{% else %}
+**EU / UK representative:** none appointed.
+{% endif %}
+An EU / UK representative is required under Article 27 where the controller is established outside the EU/UK but offers the App to individuals there.
 
 ## 2. Scope and our privacy-by-design approach
 
