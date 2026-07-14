@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse, Response
 from sqlalchemy import and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.api.consent import require_consent
 from backend.app.core.auth import get_current_user
 from backend.app.core.config import settings
 from backend.app.core.deps import get_ctx_and_session
@@ -318,7 +319,8 @@ async def _bg_attach_fit_and_reprocess(
         await session.commit()
 
 
-@router.post("/upload", response_model=ActivityResponse, status_code=201)
+@router.post("/upload", response_model=ActivityResponse, status_code=201,
+             dependencies=[Depends(require_consent)])
 @limiter.limit("30/hour")
 async def upload_activity(
     request: Request,

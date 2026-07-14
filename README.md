@@ -39,7 +39,7 @@ Most cycling coaching tools are cloud-only SaaS. openkoutsi is different: you ru
 - **AI coaching analysis** — per-activity analysis and plan support with OpenAI-compatible backends
 - **Koutsi daily feedback** — dashboard card with LLM-generated daily training status covering load trends, recovery state, plan adherence, and goal progress; auto-triggers after uploads/syncs when enabled
 - **API v2** — token-scoped (no team slug in any path), no trailing slashes on collection roots, a shared pagination envelope across all collections (activities, goals, plans, workouts, messages, admin lists), analytics consolidated under `/api/metrics`, and `PATCH /api/athlete` for partial updates
-- **Privacy-first** — explicit GDPR consent for health-data processing, a configurable privacy-policy link (`PRIVACY_POLICY_URL`, default `koutsi.dev/privacy`) surfaced on the consent screen, and export/delete your data at any time
+- **Privacy-first** — explicit GDPR consent for health-data processing (enforced server-side on the ingestion paths: provider connect and manual upload), a configurable privacy-policy link (`PRIVACY_POLICY_URL`, default `koutsi.dev/privacy`) surfaced on the consent screen, and export/delete your data at any time
 - **Cycling-themed 404 page** — localized "Wrong Turn!" not-found page with cycling flavour
 
 ## Architecture

@@ -132,7 +132,9 @@ async def team_engine(user_engine):
 async def registry_session(registry_engine, _test_password_hash):
     """Async session backed by the in-memory registry engine, with a seeded admin User."""
     import json
+    from datetime import datetime, timezone
 
+    from backend.app.api.consent import CURRENT_CONSENT_VERSION
     from backend.app.models.registry_orm import User
     factory = async_sessionmaker(registry_engine, expire_on_commit=False)
     async with factory() as s:
@@ -141,6 +143,11 @@ async def registry_session(registry_engine, _test_password_hash):
             username="test-user",
             password_hash=_test_password_hash,
             roles=json.dumps(_TEST_ROLES),
+            # The default test user is a normal, onboarded user who has accepted
+            # the current privacy policy, so consent-gated routes (upload,
+            # provider connect) work. Tests for the un-consented case clear this.
+            consented_at=datetime.now(timezone.utc),
+            consent_version=CURRENT_CONSENT_VERSION,
         )
         s.add(user)
         await s.commit()
