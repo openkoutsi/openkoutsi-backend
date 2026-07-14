@@ -19,6 +19,7 @@ from jose import JWTError, jwt
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.api.consent import require_consent
 from backend.app.core.config import settings
 from backend.app.core.deps import get_ctx_and_session
 from backend.app.db.registry import get_registry_session
@@ -109,7 +110,7 @@ async def status(
 
 # ── OAuth connect / callback ───────────────────────────────────────────────
 
-@router.get("/{provider}/connect")
+@router.get("/{provider}/connect", dependencies=[Depends(require_consent)])
 async def connect(
     provider: str,
     ctx_session=Depends(get_ctx_and_session),
