@@ -116,6 +116,20 @@ class TestBuildUserPrompt:
         assert "280" in prompt
         assert "2x20 at FTP" in prompt
 
+    def test_includes_experience_level_when_set(self):
+        pw = PlannedWorkout(
+            plan_id="p", week_number=1, day_of_week=2, workout_type="threshold",
+        )
+        prompt = _build_user_prompt(pw, 280, "Ride", "novice")
+        assert "experience level: novice" in prompt
+
+    def test_omits_experience_level_when_none(self):
+        pw = PlannedWorkout(
+            plan_id="p", week_number=1, day_of_week=2, workout_type="threshold",
+        )
+        prompt = _build_user_prompt(pw, 280, "Ride")
+        assert "experience level" not in prompt
+
 
 class TestPlannedDate:
     def test_first_day_is_start_date(self):

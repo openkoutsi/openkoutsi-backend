@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..models.registry_orm import InstanceSettings
 from ..models.user_orm import TrainingPlan, PlannedWorkout, Athlete, DailyMetric
 from ..schemas.plans import PlanConfig
+from .athlete_experience import EXPERIENCE_GUIDANCE, experience_level
 from .llm_access import record_llm_usage
 from .llm_client import (
     call_llm_with_optional_schema,
@@ -85,6 +86,7 @@ def _build_user_prompt(
     num_weeks: int,
     ftp: Optional[int],
     ctl: Optional[float],
+    experience: Optional[str] = None,
 ) -> str:
     day_names = {1: "Monday", 2: "Tuesday", 3: "Wednesday", 4: "Thursday",
                  5: "Friday", 6: "Saturday", 7: "Sunday"}
@@ -112,6 +114,8 @@ def _build_user_prompt(
         lines += ["", f"Athlete FTP: {ftp}W"]
     if ctl is not None:
         lines += [f"Current fitness (CTL): {ctl:.1f} TSS/day"]
+    if experience:
+        lines += [f"Athlete self-reported experience level: {experience}"]
 
     lines += [
         "",
@@ -184,11 +188,15 @@ async def generate_plan_weeks_llm(
     if latest_metric:
         ctl = latest_metric.ctl
 
-    user_prompt = _build_user_prompt(config, goal, num_weeks, athlete.ftp, ctl)
+    user_prompt = _build_user_prompt(
+        config, goal, num_weeks, athlete.ftp, ctl, experience_level(athlete.app_settings)
+    )
 
     # Call LLM (with the strict schema by default) and one retry on parse failure
     raw, usage, schema_dropped = await call_llm_with_optional_schema(
-        user_prompt, cfg, system_prompt=_SYSTEM_PROMPT, response_format=PLAN_RESPONSE_FORMAT,
+        user_prompt, cfg,
+        system_prompt=_SYSTEM_PROMPT + "\n\n" + EXPERIENCE_GUIDANCE,
+        response_format=PLAN_RESPONSE_FORMAT,
     )
     await record_llm_usage(user_id=user_id, feature="plan_generate", cfg=cfg, usage=usage)
     try:
@@ -203,7 +211,9 @@ async def generate_plan_weeks_llm(
         )
         retry_format = None if schema_dropped else PLAN_RESPONSE_FORMAT
         raw, usage, _ = await call_llm_with_optional_schema(
-            correction, cfg, system_prompt=_SYSTEM_PROMPT, response_format=retry_format,
+            correction, cfg,
+            system_prompt=_SYSTEM_PROMPT + "\n\n" + EXPERIENCE_GUIDANCE,
+            response_format=retry_format,
         )
         await record_llm_usage(user_id=user_id, feature="plan_generate", cfg=cfg, usage=usage)
         return _parse_response(raw, num_weeks)  # raises HTTP 503 if still invalid

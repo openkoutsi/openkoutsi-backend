@@ -84,6 +84,9 @@ class TestBuildSystemPrompt:
                               ("ja", "Japanese"), ("zh", "Chinese"), ("ko", "Korean")]:
             assert lang in _build_system_prompt(locale)
 
+    def test_includes_experience_guidance(self):
+        assert "experience level" in _build_system_prompt(None)
+
 
 # ── _build_prompt ─────────────────────────────────────────────────────────────
 
@@ -200,6 +203,15 @@ class TestBuildPrompt:
         act.notes = "   "
         prompt = _build_prompt(act, _make_athlete())
         assert "Athlete notes" not in prompt
+
+    def test_experience_level_included_when_set(self):
+        ath = _make_athlete(app_settings={"experience_level": "intermediate"})
+        prompt = _build_prompt(_make_activity(), ath)
+        assert "experience level: intermediate" in prompt
+
+    def test_experience_level_absent_when_unset(self):
+        prompt = _build_prompt(_make_activity(), _make_athlete(app_settings={}))
+        assert "experience level" not in prompt
 
 
 # ── _stream_analysis ──────────────────────────────────────────────────────────

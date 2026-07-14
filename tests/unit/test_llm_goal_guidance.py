@@ -77,6 +77,9 @@ class TestBuildSystemPrompt:
         prompt = _build_system_prompt(None, "stern")
         assert "strict" in prompt.lower() or "blunt" in prompt.lower()
 
+    def test_includes_experience_guidance(self):
+        assert "experience level" in _build_system_prompt(None)
+
 
 # ── _build_goal_prompt ────────────────────────────────────────────────────────
 
@@ -151,6 +154,15 @@ class TestBuildGoalPrompt:
             _make_athlete(ftp=None, max_hr=None), goal, [], None, None, _NOW
         )
         assert "Reach FTP 300 W" in prompt  # title always present
+
+    def test_experience_level_included_when_set(self):
+        ath = _make_athlete(app_settings={"experience_level": "semi-pro"})
+        prompt = _build_goal_prompt(ath, _make_goal(), [], None, None, _NOW)
+        assert "experience level: semi-pro" in prompt
+
+    def test_experience_level_absent_when_unset(self):
+        prompt = _build_goal_prompt(_make_athlete(), _make_goal(), [], None, None, _NOW)
+        assert "experience level" not in prompt
 
 
 # ── _parse_verdict ────────────────────────────────────────────────────────────

@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.registry_orm import InstanceSettings
 from ..models.user_orm import Athlete, PlannedWorkout, WorkoutDefinition
+from .athlete_experience import EXPERIENCE_GUIDANCE, experience_level
 from .llm_access import record_llm_usage
 from .llm_client import (
     call_llm_with_optional_schema,
@@ -103,7 +104,12 @@ Rules:
 """
 
 
-def _build_user_prompt(planned: PlannedWorkout, ftp: Optional[int], sport: str) -> str:
+def _build_user_prompt(
+    planned: PlannedWorkout,
+    ftp: Optional[int],
+    sport: str,
+    experience: Optional[str] = None,
+) -> str:
     lines = [
         "Design a single structured workout matching this description:",
         "",
@@ -118,6 +124,8 @@ def _build_user_prompt(planned: PlannedWorkout, ftp: Optional[int], sport: str) 
         lines.append(f"Target training stress (TSS): {planned.target_tss}")
     if ftp:
         lines.append(f"Athlete FTP: {ftp}W")
+    if experience:
+        lines.append(f"Athlete self-reported experience level: {experience}")
 
     lines += [
         "",
@@ -179,10 +187,14 @@ async def generate_workout_definition_llm(
         athlete, instance, user_id, allow_instance_fallback=allow_instance_fallback
     )
 
-    user_prompt = _build_user_prompt(planned_workout, athlete.ftp, sport_type)
+    user_prompt = _build_user_prompt(
+        planned_workout, athlete.ftp, sport_type, experience_level(athlete.app_settings)
+    )
 
     raw, usage, schema_dropped = await call_llm_with_optional_schema(
-        user_prompt, cfg, system_prompt=_SYSTEM_PROMPT, response_format=WORKOUT_RESPONSE_FORMAT,
+        user_prompt, cfg,
+        system_prompt=_SYSTEM_PROMPT + "\n\n" + EXPERIENCE_GUIDANCE,
+        response_format=WORKOUT_RESPONSE_FORMAT,
     )
     await record_llm_usage(user_id=user_id, feature="workout_generate", cfg=cfg, usage=usage)
     try:
@@ -197,7 +209,9 @@ async def generate_workout_definition_llm(
         )
         retry_format = None if schema_dropped else WORKOUT_RESPONSE_FORMAT
         raw, usage, _ = await call_llm_with_optional_schema(
-            correction, cfg, system_prompt=_SYSTEM_PROMPT, response_format=retry_format,
+            correction, cfg,
+            system_prompt=_SYSTEM_PROMPT + "\n\n" + EXPERIENCE_GUIDANCE,
+            response_format=retry_format,
         )
         await record_llm_usage(user_id=user_id, feature="workout_generate", cfg=cfg, usage=usage)
         steps = _parse_steps(raw)  # raises WorkoutGenerationError if still invalid
