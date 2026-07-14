@@ -23,6 +23,7 @@ from prompts.build import build  # noqa: E402
 from asserts import checks  # noqa: E402
 from fixtures.scenarios import (  # noqa: E402
     ACTIVITY_SCENARIOS,
+    GOAL_SCENARIOS,
     PLAN_SCENARIOS,
     STATUS_SCENARIOS,
     WORKOUT_SCENARIOS,
@@ -44,6 +45,7 @@ _families = {
     "workout": WORKOUT_SCENARIOS,
     "activity": ACTIVITY_SCENARIOS,
     "status": STATUS_SCENARIOS,
+    "goal": GOAL_SCENARIOS,
 }
 _JSON_FAMILIES = {"plan", "workout"}
 for family, scenarios in _families.items():
@@ -106,6 +108,9 @@ _BAD_WORKOUT = json.dumps({"steps": [
 _VALID_PROSE = "MOOD:cheer\n\nGreat ride today, the numbers back it up.\n\nRecover well tomorrow."
 _BAD_PROSE = "Here is your analysis:\n\n## Summary\n- great ride"
 
+_VALID_REALISM = "REALISM:ambitious\n\nA real stretch, but the trend is right.\n\nStay consistent."
+_BAD_REALISM = "Here is my take:\n\n## Verdict\n- ambitious"
+
 print("\n[plan] check passes valid, fails wrong week count")
 for name, s in PLAN_SCENARIOS.items():
     ctx = {"vars": {"scenario": name}}
@@ -122,6 +127,11 @@ print("\n[mood_prose] check passes valid MOOD prose, fails missing MOOD / markdo
 gm = checks.mood_prose(_VALID_PROSE, {"vars": {}})
 bm = checks.mood_prose(_BAD_PROSE, {"vars": {}})
 expect(gm["pass"] and not bm["pass"], f"mood: good pass={gm['pass']}; bad pass={bm['pass']} ({bm['reason']})")
+
+print("\n[realism_prose] check passes valid REALISM prose, fails missing REALISM / markdown")
+gr = checks.realism_prose(_VALID_REALISM, {"vars": {}})
+br = checks.realism_prose(_BAD_REALISM, {"vars": {}})
+expect(gr["pass"] and not br["pass"], f"realism: good pass={gr['pass']}; bad pass={br['pass']} ({br['reason']})")
 
 
 # ── 3. The JSON-schema response_format is strict-conformant and app-aligned ───

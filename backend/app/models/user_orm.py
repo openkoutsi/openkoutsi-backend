@@ -273,6 +273,16 @@ class Goal(UserBase):
     outcome_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
+    # On-demand AI guidance (issue #17): mirrors Athlete.training_status* — the
+    # streamed coach prose, its parsed REALISM verdict, the pending/done/error
+    # state, and a timestamp for pending-timeout recovery.
+    guidance: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    guidance_verdict: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    guidance_status: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    guidance_updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     athlete: Mapped["Athlete"] = relationship("Athlete", back_populates="goals")
 
 

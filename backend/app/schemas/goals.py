@@ -37,3 +37,14 @@ class GoalResponse(BaseModel):
     created_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class GoalGuidanceBody(BaseModel):
+    locale: Optional[str] = None
+
+
+class GoalGuidanceResponse(BaseModel):
+    status: Optional[str] = None
+    verdict: Optional[str] = None
+    guidance: Optional[str] = None
+    updated_at: Optional[datetime] = None

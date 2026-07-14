@@ -216,3 +216,55 @@ STATUS_SCENARIOS: dict[str, dict] = {
     "on_track_friendly": _status_common("friendly", "en", adhering=True),
     "missed_sessions_stern": _status_common("stern", "en", adhering=False),
 }
+
+# ── Family 5: per-goal guidance (prose + REALISM) ────────────────────────────
+_goal_now = datetime(2026, 7, 9, 7, 30, tzinfo=timezone.utc)
+
+
+def _goal_common(goal: Goal, *, coaching_style, locale, ctl, atl, tsb) -> dict:
+    athlete = _athlete(
+        ftp=250,
+        max_hr=186,
+        app_settings={"coaching_style": coaching_style, "locale": locale, "timezone": "UTC"},
+    )
+    recent = [
+        Activity(sport_type="Ride", start_time=datetime(2026, 7, 6, 17, tzinfo=timezone.utc), duration_s=3600, tss=68.0),
+        Activity(sport_type="Ride", start_time=datetime(2026, 7, 8, 17, tzinfo=timezone.utc), duration_s=5400, tss=110.0),
+    ]
+    metric = DailyMetric(date=date(2026, 7, 8), ctl=ctl, atl=atl, tsb=tsb)
+    plan = TrainingPlan(name="Base to Build", start_date=date(2026, 6, 29), end_date=date(2026, 8, 24), weeks=8, status="active")
+    return {
+        "athlete": athlete,
+        "goal": goal,
+        "recent_activities": recent,
+        "current_metric": metric,
+        "active_plan": plan,
+        "now": _goal_now,
+        "coaching_style": coaching_style,
+        "locale": locale,
+    }
+
+
+GOAL_SCENARIOS: dict[str, dict] = {
+    # Plausibly realistic: modest FTP bump with a comfortable timeline.
+    "ftp_bump_realistic": _goal_common(
+        Goal(title="Raise FTP from 250 to 265 W", metric="ftp", target_value=265,
+             current_value=250, target_date=date(2026, 9, 15), status="active",
+             description="Steady threshold progression before autumn."),
+        coaching_style="friendly", locale="en", ctl=64.0, atl=68.0, tsb=-4.0,
+    ),
+    # Over-aggressive: a big target on a very short timeline.
+    "ftp_jump_unrealistic": _goal_common(
+        Goal(title="Raise FTP from 250 to 330 W", metric="ftp", target_value=330,
+             current_value=250, target_date=date(2026, 8, 1), status="active",
+             description="Big power jump wanted for an end-of-summer race."),
+        coaching_style="stern", locale="en", ctl=52.0, atl=70.0, tsb=-18.0,
+    ),
+    # Finnish locale: event-distance goal with room in the calendar.
+    "gran_fondo_finnish": _goal_common(
+        Goal(title="Complete a 160 km gran fondo", metric="distance",
+             target_value=160, current_value=120, target_date=date(2026, 8, 24),
+             status="active", description="First long event of the season."),
+        coaching_style="encouraging", locale="fi", ctl=70.0, atl=66.0, tsb=4.0,
+    ),
+}
