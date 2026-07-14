@@ -40,6 +40,42 @@ def _planned_date(start_date, week_number: int, day_of_week: int):
     return start_date + timedelta(days=(week_number - 1) * 7 + (day_of_week - 1))
 
 
+def _plans_overlap(a_start, a_end, b_start, b_end) -> bool:
+    """Whether two plan date ranges overlap.
+
+    Ranges are inclusive [start, end]. If any endpoint is unknown (None) we
+    treat the ranges as overlapping, so a plan with incomplete dates is still
+    archived when a new one is created (the conservative, pre-existing
+    behaviour).
+    """
+    if a_start is None or a_end is None or b_start is None or b_end is None:
+        return True
+    return a_start <= b_end and b_start <= a_end
+
+
+def _plan_end_date(start_date, weeks):
+    """Inclusive end date for a plan of ``weeks`` weeks starting on ``start_date``."""
+    if start_date is None or not weeks:
+        return None
+    return start_date + timedelta(weeks=weeks) - timedelta(days=1)
+
+
+async def _archive_overlapping_active_plans(session, athlete_id, start_date, end_date):
+    """Archive active plans whose date range overlaps [start_date, end_date].
+
+    Non-overlapping active plans are left active, so several plans covering
+    different time periods can coexist.
+    """
+    result = await session.execute(
+        select(TrainingPlan)
+        .where(TrainingPlan.athlete_id == athlete_id, TrainingPlan.status == "active")
+    )
+    for old in result.scalars().all():
+        if _plans_overlap(old.start_date, old.end_date, start_date, end_date):
+            old.status = "archived"
+    await session.flush()
+
+
 async def _get_athlete(global_user_id: str, session: AsyncSession) -> Athlete:
     result = await session.execute(select(Athlete).where(Athlete.global_user_id == global_user_id))
     athlete = result.scalar_one_or_none()
@@ -81,14 +117,12 @@ async def create_plan(
 
     athlete = await _get_athlete(ctx.user_id, session)
 
-    # Archive any existing active plans
-    result = await session.execute(
-        select(TrainingPlan)
-        .where(TrainingPlan.athlete_id == athlete.id, TrainingPlan.status == "active")
-    )
-    for old in result.scalars().all():
-        old.status = "archived"
-    await session.flush()
+    # Archive existing active plans, but only those whose date range overlaps
+    # the new plan — a new plan covering a different period leaves earlier
+    # plans active.
+    new_start = body.start_date
+    new_end = _plan_end_date(body.start_date, body.weeks)
+    await _archive_overlapping_active_plans(session, athlete.id, new_start, new_end)
 
     if body.llm_weeks:
         # Frontend already called the LLM — persist the pre-built weeks directly.
@@ -220,6 +254,46 @@ async def update_plan(
 
     await session.commit()
     await session.refresh(plan)
+    return TrainingPlanResponse.model_validate(plan)
+
+
+@router.post("/{plan_id}/unarchive", response_model=TrainingPlanResponse,
+             operation_id="unarchivePlan", summary="Unarchive a training plan")
+async def unarchive_plan(
+    plan_id: str,
+    ctx_session=Depends(get_ctx_and_session),
+):
+    """Reactivate an archived plan.
+
+    Any currently-active plan whose date range overlaps the reactivated plan is
+    archived, so overlapping plans are never both active at once. Active plans
+    covering a different period are left untouched.
+    """
+    ctx, session = ctx_session
+    athlete = await _get_athlete(ctx.user_id, session)
+    result = await session.execute(
+        select(TrainingPlan)
+        .where(TrainingPlan.id == plan_id, TrainingPlan.athlete_id == athlete.id)
+        .options(selectinload(TrainingPlan.workouts))
+    )
+    plan = result.scalar_one_or_none()
+    if not plan:
+        raise HTTPException(404, "Plan not found")
+
+    if plan.status != "active":
+        await _archive_overlapping_active_plans(
+            session, athlete.id, plan.start_date, plan.end_date
+        )
+        plan.status = "active"
+
+    await session.commit()
+    await session.refresh(plan)
+    result = await session.execute(
+        select(TrainingPlan)
+        .where(TrainingPlan.id == plan.id)
+        .options(selectinload(TrainingPlan.workouts))
+    )
+    plan = result.scalar_one()
     return TrainingPlanResponse.model_validate(plan)
 
 

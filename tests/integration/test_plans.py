@@ -52,6 +52,45 @@ class TestCreatePlan:
         resp = await client.get(f"/api/plans/{plan1_id}", headers=auth_headers)
         assert resp.json()["status"] == "archived"
 
+    async def test_non_overlapping_plan_leaves_first_active(self, client, auth_headers):
+        resp1 = await client.post(
+            "/api/plans",
+            json={"name": "Plan 1", "start_date": str(_START), "weeks": 4},
+            headers=auth_headers,
+        )
+        plan1_id = resp1.json()["id"]
+
+        # Start the second plan the day after the first one ends → no overlap.
+        second_start = _START + timedelta(weeks=4)
+        await client.post(
+            "/api/plans",
+            json={"name": "Plan 2", "start_date": str(second_start), "weeks": 4},
+            headers=auth_headers,
+        )
+
+        # First plan should still be active because the ranges don't overlap.
+        resp = await client.get(f"/api/plans/{plan1_id}", headers=auth_headers)
+        assert resp.json()["status"] == "active"
+
+    async def test_overlapping_plan_archives_first(self, client, auth_headers):
+        resp1 = await client.post(
+            "/api/plans",
+            json={"name": "Plan 1", "start_date": str(_START), "weeks": 4},
+            headers=auth_headers,
+        )
+        plan1_id = resp1.json()["id"]
+
+        # Overlap by starting within the first plan's window.
+        second_start = _START + timedelta(weeks=2)
+        await client.post(
+            "/api/plans",
+            json={"name": "Plan 2", "start_date": str(second_start), "weeks": 4},
+            headers=auth_headers,
+        )
+
+        resp = await client.get(f"/api/plans/{plan1_id}", headers=auth_headers)
+        assert resp.json()["status"] == "archived"
+
     async def test_llm_without_configured_url_returns_400(self, client, auth_headers):
         resp = await client.post(
             "/api/plans",
@@ -137,6 +176,84 @@ class TestUpdatePlan:
 
     async def test_unauthenticated_returns_401(self, client):
         resp = await client.put("/api/plans/some-id", json={"name": "X"})
+        assert resp.status_code == 401
+
+
+class TestUnarchivePlan:
+    async def test_unarchive_reactivates_plan(self, client, auth_headers):
+        create_resp = await client.post(
+            "/api/plans",
+            json={"name": "Plan", "start_date": str(_START), "weeks": 4},
+            headers=auth_headers,
+        )
+        plan_id = create_resp.json()["id"]
+        await client.put(
+            f"/api/plans/{plan_id}",
+            json={"status": "archived"},
+            headers=auth_headers,
+        )
+
+        resp = await client.post(f"/api/plans/{plan_id}/unarchive", headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "active"
+
+    async def test_unarchive_archives_overlapping_active_plan(self, client, auth_headers):
+        # Plan 1 is created, then archived by an overlapping Plan 2.
+        resp1 = await client.post(
+            "/api/plans",
+            json={"name": "Plan 1", "start_date": str(_START), "weeks": 4},
+            headers=auth_headers,
+        )
+        plan1_id = resp1.json()["id"]
+        resp2 = await client.post(
+            "/api/plans",
+            json={"name": "Plan 2", "start_date": str(_START), "weeks": 4},
+            headers=auth_headers,
+        )
+        plan2_id = resp2.json()["id"]
+
+        # Unarchiving Plan 1 should archive the overlapping active Plan 2.
+        resp = await client.post(f"/api/plans/{plan1_id}/unarchive", headers=auth_headers)
+        assert resp.json()["status"] == "active"
+
+        resp = await client.get(f"/api/plans/{plan2_id}", headers=auth_headers)
+        assert resp.json()["status"] == "archived"
+
+    async def test_unarchive_keeps_non_overlapping_active_plan(self, client, auth_headers):
+        resp1 = await client.post(
+            "/api/plans",
+            json={"name": "Plan 1", "start_date": str(_START), "weeks": 4},
+            headers=auth_headers,
+        )
+        plan1_id = resp1.json()["id"]
+        await client.put(
+            f"/api/plans/{plan1_id}",
+            json={"status": "archived"},
+            headers=auth_headers,
+        )
+
+        # A non-overlapping active plan later in the calendar.
+        second_start = _START + timedelta(weeks=4)
+        resp2 = await client.post(
+            "/api/plans",
+            json={"name": "Plan 2", "start_date": str(second_start), "weeks": 4},
+            headers=auth_headers,
+        )
+        plan2_id = resp2.json()["id"]
+
+        resp = await client.post(f"/api/plans/{plan1_id}/unarchive", headers=auth_headers)
+        assert resp.json()["status"] == "active"
+
+        # Plan 2 does not overlap Plan 1, so it stays active.
+        resp = await client.get(f"/api/plans/{plan2_id}", headers=auth_headers)
+        assert resp.json()["status"] == "active"
+
+    async def test_unarchive_nonexistent_returns_404(self, client, auth_headers):
+        resp = await client.post("/api/plans/nope/unarchive", headers=auth_headers)
+        assert resp.status_code == 404
+
+    async def test_unauthenticated_returns_401(self, client):
+        resp = await client.post("/api/plans/some-id/unarchive")
         assert resp.status_code == 401
 
 
