@@ -4057,7 +4057,7 @@
           "public"
         ],
         "summary": "Get public instance info (no auth)",
-        "description": "Return non-sensitive instance settings readable without authentication.\n\nUsed by unauthenticated pages (e.g. password reset) that need the admin\ncontact. Only whitelisted, non-secret fields are exposed here.",
+        "description": "Return non-sensitive instance settings readable without authentication.\n\nUsed by unauthenticated pages (e.g. password reset) that need the admin\ncontact, and by the consent screen for the privacy-policy link. Only\nwhitelisted, non-secret fields are exposed here.",
         "operationId": "getPublicInstanceInfo",
         "responses": {
           "200": {
@@ -4540,27 +4540,6 @@
             "OAuth2PasswordBearer": []
           }
         ]
-      }
-    },
-    "/api/legal/privacy-policy": {
-      "get": {
-        "tags": [
-          "legal"
-        ],
-        "summary": "Get the instance privacy policy",
-        "operationId": "getPrivacyPolicy",
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PrivacyPolicyResponse"
-                }
-              }
-            }
-          }
-        }
       }
     },
     "/api/health": {
@@ -6644,9 +6623,16 @@
               }
             ],
             "title": "Admin Contact"
+          },
+          "privacy_policy_url": {
+            "type": "string",
+            "title": "Privacy Policy Url"
           }
         },
         "type": "object",
+        "required": [
+          "privacy_policy_url"
+        ],
         "title": "InstanceInfoResponse",
         "description": "Non-sensitive, publicly readable instance settings."
       },
@@ -8255,29 +8241,6 @@
           "activity_start_time"
         ],
         "title": "PowerBestEntry"
-      },
-      "PrivacyPolicyResponse": {
-        "properties": {
-          "version": {
-            "type": "string",
-            "title": "Version"
-          },
-          "configured": {
-            "type": "boolean",
-            "title": "Configured"
-          },
-          "markdown": {
-            "type": "string",
-            "title": "Markdown"
-          }
-        },
-        "type": "object",
-        "required": [
-          "version",
-          "configured",
-          "markdown"
-        ],
-        "title": "PrivacyPolicyResponse"
       },
       "RangeSpec": {
         "properties": {

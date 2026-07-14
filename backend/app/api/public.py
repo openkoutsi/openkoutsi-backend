@@ -11,6 +11,7 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.core.config import settings
 from backend.app.db.registry import get_registry_session
 from backend.app.db.user_session import get_user_session_factory
 from backend.app.models.registry_orm import InstanceSettings
@@ -23,6 +24,7 @@ class InstanceInfoResponse(BaseModel):
     """Non-sensitive, publicly readable instance settings."""
 
     admin_contact: Optional[str] = None
+    privacy_policy_url: str
 
 
 @router.get("/instance-info", response_model=InstanceInfoResponse,
@@ -34,12 +36,14 @@ async def get_instance_info(
     """Return non-sensitive instance settings readable without authentication.
 
     Used by unauthenticated pages (e.g. password reset) that need the admin
-    contact. Only whitelisted, non-secret fields are exposed here.
+    contact, and by the consent screen for the privacy-policy link. Only
+    whitelisted, non-secret fields are exposed here.
     """
     result = await session.execute(select(InstanceSettings).limit(1))
     instance = result.scalar_one_or_none()
     return InstanceInfoResponse(
-        admin_contact=instance.admin_contact if instance else None
+        admin_contact=instance.admin_contact if instance else None,
+        privacy_policy_url=settings.privacy_policy_url,
     )
 
 

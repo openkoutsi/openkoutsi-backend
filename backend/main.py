@@ -67,7 +67,6 @@ def create_app() -> FastAPI:
     from backend.app.api.public import router as public_router
     from backend.app.api.workouts import router as workouts_router
     from backend.app.api.consent import router as consent_router
-    from backend.app.api.legal import router as legal_router
     from backend.app.api.health import router as health_router
     from backend.app.api.messages import router as messages_router
 
@@ -102,7 +101,6 @@ def create_app() -> FastAPI:
     app.include_router(public_router, prefix="/api")
     app.include_router(workouts_router, prefix="/api")
     app.include_router(consent_router, prefix="/api")
-    app.include_router(legal_router, prefix="/api")
     app.include_router(health_router, prefix="/api")
     app.include_router(messages_router, prefix="/api")
 

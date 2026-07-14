@@ -18,7 +18,6 @@ dependencies = [
     "email-validator",
     "slowapi",
     "cryptography",
-    "jinja2",
     "fit-tool>=0.9",
 ]
 
