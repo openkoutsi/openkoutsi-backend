@@ -4542,6 +4542,27 @@
         ]
       }
     },
+    "/api/legal/privacy-policy": {
+      "get": {
+        "tags": [
+          "legal"
+        ],
+        "summary": "Get the instance privacy policy",
+        "operationId": "getPrivacyPolicy",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrivacyPolicyResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/health": {
       "get": {
         "summary": "Health Check",
@@ -8234,6 +8255,29 @@
           "activity_start_time"
         ],
         "title": "PowerBestEntry"
+      },
+      "PrivacyPolicyResponse": {
+        "properties": {
+          "version": {
+            "type": "string",
+            "title": "Version"
+          },
+          "configured": {
+            "type": "boolean",
+            "title": "Configured"
+          },
+          "markdown": {
+            "type": "string",
+            "title": "Markdown"
+          }
+        },
+        "type": "object",
+        "required": [
+          "version",
+          "configured",
+          "markdown"
+        ],
+        "title": "PrivacyPolicyResponse"
       },
       "RangeSpec": {
         "properties": {

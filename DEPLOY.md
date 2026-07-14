@@ -147,6 +147,27 @@ WAHOO_BRIDGE_SECRET=               # shared secret — must match WAHOO_BRIDGE_S
 # When set, BYOK URLs are restricted to this list (at save and use time). Leave
 # blank to allow any URL (SSRF guards still apply).
 LLM_ALLOWED_SERVERS=               # e.g. http://localhost:11434/v1,https://api.openai.com/v1
+
+# Privacy policy (GDPR). You run this instance, so you are the data controller
+# and must complete these. They are rendered into the policy served at
+# GET /api/legal/privacy-policy and shown on the consent screen. Blank fields
+# keep the "[…]" placeholders and the policy is flagged as not-yet-configured.
+PRIVACY_POLICY_VERSION=1.0         # bumping this invalidates prior consent (forces re-consent)
+PRIVACY_EFFECTIVE_DATE=            # e.g. 2026-07-14
+PRIVACY_LAST_UPDATED=             # e.g. 2026-07-14 (defaults to the effective date)
+PRIVACY_CONTROLLER_NAME=          # legal entity / person running this instance
+PRIVACY_CONTROLLER_ADDRESS=
+PRIVACY_CONTROLLER_COUNTRY=
+PRIVACY_CONTROLLER_REGISTRATION_NUMBER=
+PRIVACY_CONTACT_EMAIL=            # e.g. privacy@your-domain
+PRIVACY_DPO=                      # Data Protection Officer, if appointed
+PRIVACY_EU_REPRESENTATIVE=        # Art. 27 representative, if required
+PRIVACY_HOSTING_PROVIDER=         # e.g. "Hetzner, Finland (EU)"
+PRIVACY_ENCRYPTION_DESCRIPTION=   # how data is encrypted at rest on this instance
+PRIVACY_RETENTION_PERIOD=         # deletion window after account closure, e.g. "30 days"
+PRIVACY_DIAGNOSTIC_RETENTION_PERIOD=
+PRIVACY_CHILDREN_MIN_AGE=16       # age of digital consent for your market
+PRIVACY_SUPERVISORY_AUTHORITY=    # your lead DPA + its complaint page
 ```
 
 ### Initialize the database

@@ -69,6 +69,31 @@ class Settings(BaseSettings):
     # Leave empty in development to disable encryption (tokens stored as plaintext).
     encryption_key: str = ""
 
+    # ── Privacy policy ─────────────────────────────────────────────────────────
+    # openkoutsi is self-hosted: whoever runs an instance is the GDPR data
+    # controller and must fill these in. They are rendered into the privacy
+    # policy served at GET /api/legal/privacy-policy (see
+    # backend/app/services/privacy_policy.py). Any field left blank keeps the
+    # template's bracketed "[…]" placeholder, so an unconfigured instance renders
+    # a clearly-incomplete policy rather than silently claiming false facts.
+    privacy_app_name: str = "openkoutsi"
+    privacy_policy_version: str = "1.0"          # kept in sync with consent version
+    privacy_effective_date: str = ""             # e.g. "2026-07-14"
+    privacy_last_updated: str = ""               # e.g. "2026-07-14"
+    privacy_controller_name: str = ""
+    privacy_controller_address: str = ""
+    privacy_controller_country: str = ""
+    privacy_controller_registration_number: str = ""
+    privacy_contact_email: str = ""
+    privacy_dpo: str = ""                         # Data Protection Officer, if any
+    privacy_eu_representative: str = ""           # Art. 27 representative, if any
+    privacy_hosting_provider: str = ""           # e.g. "Hetzner, Finland (EU)"
+    privacy_encryption_description: str = ""      # how data is encrypted at rest
+    privacy_retention_period: str = ""            # after account deletion
+    privacy_diagnostic_retention_period: str = ""
+    privacy_children_min_age: int = 16            # age of digital consent
+    privacy_supervisory_authority: str = ""       # lead DPA + complaint page
+
     # ── Path helpers ──────────────────────────────────────────────────────────
 
     @property

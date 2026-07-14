@@ -1,0 +1,166 @@
+# Privacy & Data Processing Policy
+
+**{{ app_name }} — Fitness & Biometric Data**
+
+Version {{ policy_version }} | Effective date: {{ effective_date or "[DATE]" }} | Last updated: {{ last_updated or "[DATE]" }}
+
+---
+
+This Privacy & Data Processing Policy explains how **{{ app_name }}** (“the App”, “we”, “us”) collects, processes, stores, and protects your personal data, including biometric health data, in accordance with Regulation (EU) 2016/679 (the “GDPR”) and, where applicable, the UK GDPR and Data Protection Act 2018. It is written to be transparent about a core design principle of the App: **your fitness data belongs to you, is accessible only to you, and is never exposed to other human users.**
+
+{% if not configured %}
+> **⚠️ This policy has not been fully configured for this instance.** The operator of
+> this {{ app_name }} instance is the data controller and must set the `PRIVACY_*`
+> configuration values. Bracketed `[…]` placeholders below still need to be completed,
+> and the policy should be reviewed by a qualified data protection professional before
+> it is relied upon.
+
+{% endif %}
+## 1. Who we are (Data Controller)
+
+**Data controller:** {{ controller_name or "[Legal entity name]" }}, {{ controller_address or "[registered address]" }}, {{ controller_country or "[country]" }}. Company registration number {{ controller_registration_number or "[ ]" }}.
+
+**Contact for privacy matters:** {{ contact_email or "[privacy@yourdomain.com]" }}.
+
+**Data Protection Officer (DPO):** {{ dpo or "[Name / contact details, if one has been appointed]" }}. A DPO is required where core activities involve large-scale processing of special-category data such as health data.
+
+**EU / UK representative:** {{ eu_representative or "[Name and contact]" }}, required under Article 27 where the controller is established outside the EU/UK but offers the App to individuals there.
+
+## 2. Scope and our privacy-by-design approach
+
+The App is designed so that a person’s fitness and biometric data is stored and processed on the server in encrypted form and remains visible only to that person. The two categories of “actors” that ever have access to your data are:
+
+- **You, the user** – the only human who can view the raw data and results.
+- **Automated processing components** – the algorithms running on the server and, only if you opt in, an AI/LLM model that analyse your data to produce insights.
+
+No other human user of the App, and no operator of this instance, can view your decrypted fitness or biometric data in the ordinary course of operation. Each user's data is held in its own isolated per-user database. This principle of **data protection by design and by default (Article 25 GDPR)** underpins the whole policy below.
+
+## 3. What data we process
+
+### 3.1 Data you provide or generate
+
+Depending on the features you use, the App may process:
+
+- **Biometric and health data** such as heart rate, weight, heart-rate and power zones, and other fitness metrics you record or connect. This is “special-category data” under Article 9 GDPR and receives heightened protection.
+- **Activity and derived data** such as workouts, training-load metrics (CTL/ATL/TSB), trends, goals, and insights calculated from your metrics.
+- **Account and configuration data** such as your username, display name, chosen settings, and preferences.
+
+### 3.2 Technical data
+
+- **Device and app data** such as app version and diagnostic/error logs, used to keep the App working and secure.
+
+**Note on special-category data:** biometric data used to analyse your physical condition and health metrics falls within Article 9 GDPR. We only process it on the lawful bases set out in Section 5 and with the safeguards described in this policy.
+
+## 4. How your data is processed and stored
+
+### 4.1 Server-side, encrypted storage
+
+Your fitness and biometric data is stored on the server{% if hosting_provider %}, hosted with {{ hosting_provider }},{% endif %} in **{{ encryption_description or "encrypted form [describe the at-rest encryption and key management for this instance]" }}**, in a per-user database that logically isolates it from other users. The data is transmitted between your device and the server over an encrypted connection (TLS). It is accessible only to you and to the App’s automated processing components; it is not exposed to other users or, in the ordinary course of operation, to the instance operator.
+
+### 4.2 Automated algorithmic processing
+
+Algorithms running on the server process your data to calculate metrics, detect trends, and generate insights. This processing runs automatically and produces results that only you can see. It does not involve any human reviewer.
+
+### 4.3 Optional AI / LLM analysis
+
+**AI analysis is optional and off by default.** If — and only if — you enable an AI analysis feature, relevant data is sent to a large language model (“LLM”) to produce a natural-language analysis of your fitness data.
+
+- **You choose the provider and model.** The LLM provider and specific model are configurable. Before analysis runs, the App clearly shows you which provider and which model will process your data, so you can make an informed choice.
+- **Transparency at the point of use.** The active provider and model name are displayed in the AI settings screen and alongside each analysis result.
+- **What is sent.** Only the data necessary for the requested analysis is transmitted — the specific metrics and time range relevant to the insight.
+- **Your ability to stop.** You can disable AI analysis at any time, after which no further data is sent to any LLM provider.
+
+**Important:** when you enable AI analysis, the data you submit is transmitted to and processed by the third-party AI provider you selected, under that provider’s own terms and privacy policy. Their handling of your data (including whether it is used for model training, how long it is retained, and where it is processed) is governed by them. See Section 8 for the providers available on this instance.
+
+## 5. Lawful bases for processing
+
+Under the GDPR we must have a lawful basis for each processing activity. Ours are:
+
+| Processing activity | Lawful basis (Art. 6) | Special-category condition (Art. 9) |
+|---|---|---|
+| Core server-side processing of your fitness/biometric data to provide the App | Art. 6(1)(b) – performance of a contract with you | Art. 9(2)(a) – your explicit consent |
+| Optional AI/LLM analysis of your data | Art. 6(1)(a) – consent | Art. 9(2)(a) – your explicit consent, given per feature |
+| Security, diagnostics, and app stability | Art. 6(1)(f) – legitimate interests | N/A (no health data used for this purpose) |
+| Compliance with legal obligations | Art. 6(1)(c) – legal obligation | As applicable |
+
+**Explicit consent for biometric data.** Because biometric health data is special-category data, we rely on your explicit consent. Consent is requested separately and clearly, is not bundled with other terms, and can be **withdrawn at any time** without affecting the lawfulness of processing carried out before withdrawal. Withdrawing consent to AI analysis stops that feature; withdrawing consent to core processing means the App can no longer function and you may export or delete your data.
+
+## 6. Who can access your data
+
+- **You** – full access to your own data and insights.
+- **Automated processing** – algorithms and, if enabled, your chosen LLM, acting on your data to generate results only you see.
+- **No other users** – the App does not expose your data to any other user.
+- **The instance operator** – cannot access your decrypted fitness/biometric data in the normal course of operation, even though it is stored on the server. Data is held per-user and, where configured, encrypted at rest.
+- **Third-party AI providers** – only the provider/model you select, only when you enable AI analysis, and only for the data sent for that analysis.
+
+## 7. Automated decision-making
+
+The App uses algorithms and optional AI to generate insights and suggestions about your fitness. These are informational and do not produce legal or similarly significant effects on you within the meaning of **Article 22 GDPR**. They are decision-support tools, not automated decisions that determine your rights or obligations.
+
+## 8. Third-party AI providers and international transfers
+
+{% if ai_servers %}
+If you enable AI analysis, your data may be processed by one of the LLM providers configured on this instance. Each has its own privacy terms, which we encourage you to read before enabling the feature:
+
+{% for server in ai_servers %}
+- `{{ server }}`
+{% endfor %}
+{% else %}
+This instance does not restrict which LLM provider you may configure for AI analysis. If you enable AI analysis, your data is sent to whichever provider and model you configure. Each provider has its own privacy terms, which we encourage you to read before enabling the feature.
+{% endif %}
+
+**International transfers.** Some AI providers may process data outside the EU/UK. Where this happens, transfers are safeguarded by an appropriate mechanism such as the EU Standard Contractual Clauses, the UK International Data Transfer Agreement/Addendum, or an adequacy decision. The App tells you the provider before analysis so you can decline if you prefer not to transfer data internationally.
+
+**Processors.** Where a third party processes personal data on our behalf, we put a written data processing agreement in place under Article 28 GDPR.{% if hosting_provider %} This includes the hosting/infrastructure provider ({{ hosting_provider }}), which stores the data on our behalf as a processor.{% endif %} A provider you select for AI analysis may instead act as an independent controller for its own purposes under its own terms; we make the identity of the provider clear so you can assess this.
+
+## 9. Data retention
+
+- **Your fitness and biometric data** stored on the server is kept until you delete it or close your account, after which it is deleted{% if retention_period %} within {{ retention_period }}{% endif %}. You can export or delete your data at any time from within the App.
+- **AI analysis data** sent to a provider is retained according to that provider’s policy.
+- **Diagnostic data** is retained{% if diagnostic_retention_period %} for {{ diagnostic_retention_period }}{% endif %} and then deleted or anonymised.
+
+We keep personal data no longer than necessary for the purposes described, unless a longer period is required by law.
+
+## 10. Your rights
+
+Under the GDPR you have the right to:
+
+- **Access** – obtain a copy of the personal data we hold about you.
+- **Rectification** – correct inaccurate or incomplete data.
+- **Erasure** – have your data deleted (“right to be forgotten”).
+- **Restriction** – limit how we process your data.
+- **Portability** – receive your data in a structured, commonly used, machine-readable format and transmit it elsewhere.
+- **Object** – object to processing based on legitimate interests.
+- **Withdraw consent** – at any time, for any consent-based processing including AI analysis and biometric processing.
+- **Not be subject to solely automated decisions** with legal or similarly significant effects (Article 22).
+- **Lodge a complaint** with a supervisory authority — {{ supervisory_authority or "your local Data Protection Authority" }}.
+
+Access, portability, and erasure can be exercised directly in the App: use **Export my data** to download a copy, and **Delete my account** to erase everything. For anything else, contact us at **{{ contact_email or "[privacy@yourdomain.com]" }}**; we respond within one month as required by Article 12.
+
+## 11. Security measures
+
+We protect your data with technical and organisational measures including:
+
+- {{ encryption_description or "Encryption of fitness and biometric data at rest [describe algorithm/key management for this instance]" }}.
+- Encryption in transit (TLS) between your device and the server, and for any data sent to an AI provider you enable.
+- Per-user data isolation — each user's data lives in its own database.
+- Data minimisation — only the data needed for a given feature is processed or transmitted.
+- Access confined to you and automated components; no other-user visibility.
+
+**Data breaches.** If a breach is likely to result in a risk to your rights and freedoms, we will notify the relevant supervisory authority within 72 hours (Article 33) and, where the risk is high, inform you without undue delay (Article 34).
+
+## 12. Children
+
+The App is not intended for children under {{ children_min_age }}. We do not knowingly process the data of children below that age without verified parental consent.
+
+## 13. Changes to this policy
+
+We may update this policy from time to time. Material changes — particularly to the categories of data processed, the AI providers offered, or the lawful bases — will be notified to you within the App before they take effect, and require your renewed consent. The “Last updated” date at the top reflects the current version.
+
+## 14. Contact
+
+**Data controller:** {{ controller_name or "[Legal entity name]" }}, {{ controller_address or "[address]" }}.
+
+**Privacy contact / DPO:** {{ contact_email or "[privacy@yourdomain.com]" }}{% if dpo %} / {{ dpo }}{% endif %}.
+
+**Supervisory authority:** {{ supervisory_authority or "[Your lead DPA and its complaint page]" }}.
