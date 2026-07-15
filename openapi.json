@@ -223,6 +223,132 @@
         }
       }
     },
+    "/api/auth/signup": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Sign up with an email address",
+        "description": "Create a pending account and email a verification link.\n\nGuarded by the ``allow_self_signup`` admin toggle and a configured email\nprovider. Always returns the same generic acknowledgement (no account\nenumeration): re-signing up an unverified account resends the link with the\nnew password; an already-verified email is a silent no-op.",
+        "operationId": "signup",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignupRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/backend__app__schemas__auth__MessageResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/verify-email": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Verify email and activate account",
+        "description": "Consume a verification token, mark the email verified, and activate the\naccount (creating its per-user DB + athlete profile), then log the user in.",
+        "operationId": "verifyEmail",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VerifyEmailRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/request-password-reset": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Email a password-reset link",
+        "description": "Email a reset link to a verified account. Always returns the same generic\nacknowledgement (no account enumeration); a no-op when email is unconfigured\nor no verified account matches.",
+        "operationId": "requestPasswordReset",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RequestPasswordResetRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/backend__app__schemas__auth__MessageResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/setup/status": {
       "get": {
         "tags": [
@@ -4741,7 +4867,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/MessageResponse"
+                  "$ref": "#/components/schemas/backend__app__schemas__messages__MessageResponse"
                 }
               }
             }
@@ -6675,6 +6801,16 @@
           "privacy_policy_url": {
             "type": "string",
             "title": "Privacy Policy Url"
+          },
+          "email_enabled": {
+            "type": "boolean",
+            "title": "Email Enabled",
+            "default": false
+          },
+          "allow_self_signup": {
+            "type": "boolean",
+            "title": "Allow Self Signup",
+            "default": false
           }
         },
         "type": "object",
@@ -6732,6 +6868,17 @@
               }
             ],
             "title": "Llm Requires Subscription"
+          },
+          "allow_self_signup": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allow Self Signup"
           }
         },
         "type": "object",
@@ -6772,6 +6919,11 @@
           "llm_requires_subscription": {
             "type": "boolean",
             "title": "Llm Requires Subscription",
+            "default": false
+          },
+          "allow_self_signup": {
+            "type": "boolean",
+            "title": "Allow Self Signup",
             "default": false
           }
         },
@@ -7691,48 +7843,6 @@
         "title": "ManualActivityCreate",
         "description": "Payload for logging a workout by hand (no device recording / FIT file).\n\nEvery field is optional so users can jot down as much or as little as they\nremember, but a completely empty submission is rejected."
       },
-      "MessageResponse": {
-        "properties": {
-          "id": {
-            "type": "string",
-            "title": "Id"
-          },
-          "type": {
-            "type": "string",
-            "title": "Type"
-          },
-          "data": {
-            "additionalProperties": true,
-            "type": "object",
-            "title": "Data"
-          },
-          "read_at": {
-            "anyOf": [
-              {
-                "type": "string",
-                "format": "date-time"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Read At"
-          },
-          "created_at": {
-            "type": "string",
-            "format": "date-time",
-            "title": "Created At"
-          }
-        },
-        "type": "object",
-        "required": [
-          "id",
-          "type",
-          "data",
-          "created_at"
-        ],
-        "title": "MessageResponse"
-      },
       "OpenDuration": {
         "properties": {
           "type": {
@@ -7813,7 +7923,7 @@
         "properties": {
           "items": {
             "items": {
-              "$ref": "#/components/schemas/MessageResponse"
+              "$ref": "#/components/schemas/backend__app__schemas__messages__MessageResponse"
             },
             "type": "array",
             "title": "Items"
@@ -8452,6 +8562,21 @@
         ],
         "title": "RepeatBlock"
       },
+      "RequestPasswordResetRequest": {
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email",
+            "title": "Email"
+          }
+        },
+        "type": "object",
+        "required": [
+          "email"
+        ],
+        "title": "RequestPasswordResetRequest",
+        "description": "Request a password-reset link by email (issue #15)."
+      },
       "ResetPasswordRequest": {
         "properties": {
           "token": {
@@ -8512,6 +8637,37 @@
           "needs_setup"
         ],
         "title": "SetupStatusResponse"
+      },
+      "SignupRequest": {
+        "properties": {
+          "email": {
+            "type": "string",
+            "format": "email",
+            "title": "Email"
+          },
+          "password": {
+            "type": "string",
+            "title": "Password"
+          },
+          "display_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Name"
+          }
+        },
+        "type": "object",
+        "required": [
+          "email",
+          "password"
+        ],
+        "title": "SignupRequest",
+        "description": "Self-serve signup with an email address (issue #15)."
       },
       "SkipWorkoutRequest": {
         "properties": {
@@ -8875,8 +9031,26 @@
             "title": "Id"
           },
           "username": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Username"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
           },
           "roles": {
             "items": {
@@ -8927,7 +9101,6 @@
         "type": "object",
         "required": [
           "id",
-          "username",
           "roles",
           "created_at"
         ],
@@ -8988,6 +9161,19 @@
           "type"
         ],
         "title": "ValidationError"
+      },
+      "VerifyEmailRequest": {
+        "properties": {
+          "token": {
+            "type": "string",
+            "title": "Token"
+          }
+        },
+        "type": "object",
+        "required": [
+          "token"
+        ],
+        "title": "VerifyEmailRequest"
       },
       "WahooPushRequest": {
         "properties": {
@@ -9541,6 +9727,62 @@
         ],
         "title": "LlmEntitlementSummary",
         "description": "A user's LLM-access entitlement as shown in the admin console (issue #9)."
+      },
+      "backend__app__schemas__auth__MessageResponse": {
+        "properties": {
+          "detail": {
+            "type": "string",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "required": [
+          "detail"
+        ],
+        "title": "MessageResponse",
+        "description": "A generic, non-enumerating acknowledgement."
+      },
+      "backend__app__schemas__messages__MessageResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "type": {
+            "type": "string",
+            "title": "Type"
+          },
+          "data": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Data"
+          },
+          "read_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Read At"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "type",
+          "data",
+          "created_at"
+        ],
+        "title": "MessageResponse"
       }
     },
     "securitySchemes": {

@@ -82,6 +82,18 @@ class EmailProvider(ABC):
     def from_settings(cls, settings: "Settings") -> "EmailProvider":
         """Build the provider from application config."""
 
+    # ── Capability ─────────────────────────────────────────────────────────
+
+    @property
+    @abstractmethod
+    def is_configured(self) -> bool:
+        """Whether outbound sending is configured for this provider.
+
+        Callers offering email-dependent features (self-serve signup, password
+        reset by email) check this to degrade gracefully — hiding the feature
+        rather than letting :meth:`send` raise :class:`EmailConfigurationError`.
+        """
+
     # ── Outbound ───────────────────────────────────────────────────────────
 
     @abstractmethod

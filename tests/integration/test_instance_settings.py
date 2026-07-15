@@ -44,6 +44,23 @@ class TestAdminContactAdmin:
         assert resp.status_code == 401
 
 
+class TestAllowSelfSignupSetting:
+    async def test_defaults_off_and_round_trips(self, client, auth_headers):
+        resp = await client.get("/api/admin/settings", headers=auth_headers)
+        assert resp.json()["allow_self_signup"] is False
+
+        resp = await client.patch(
+            "/api/admin/settings",
+            json={"allow_self_signup": True},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["allow_self_signup"] is True
+
+        resp = await client.get("/api/admin/settings", headers=auth_headers)
+        assert resp.json()["allow_self_signup"] is True
+
+
 class TestLlmModelPresetStructuredOutputs:
     async def test_defaults_on_and_round_trips_opt_out(self, client, auth_headers):
         resp = await client.patch(
@@ -105,4 +122,9 @@ class TestPublicInstanceInfo:
         resp = await client.get("/api/public/instance-info")
         assert resp.status_code == 200
         # Only whitelisted, non-secret fields are exposed.
-        assert set(resp.json().keys()) == {"admin_contact", "privacy_policy_url"}
+        assert set(resp.json().keys()) == {
+            "admin_contact",
+            "privacy_policy_url",
+            "email_enabled",
+            "allow_self_signup",
+        }

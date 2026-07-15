@@ -71,6 +71,10 @@ class EuromailProvider(EmailProvider):
             webhook_secret=settings.euromail_webhook_secret,
         )
 
+    @property
+    def is_configured(self) -> bool:
+        return bool(self._api_key and self._from_addr)
+
     # ── Outbound ───────────────────────────────────────────────────────────
 
     async def send(self, message: OutboundMessage) -> str:

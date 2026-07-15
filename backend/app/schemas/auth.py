@@ -1,6 +1,16 @@
 from typing import Optional
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, EmailStr, field_validator
+
+
+def _validate_password_strength(v: str) -> str:
+    if len(v) < 12:
+        raise ValueError("Password must be at least 12 characters")
+    if not any(c.isupper() for c in v):
+        raise ValueError("Password must contain at least one uppercase letter")
+    if not any(c.isdigit() for c in v):
+        raise ValueError("Password must contain at least one digit")
+    return v
 
 
 class RegisterRequest(BaseModel):
@@ -12,16 +22,32 @@ class RegisterRequest(BaseModel):
     @field_validator("password")
     @classmethod
     def password_strength(cls, v: str) -> str:
-        if len(v) < 12:
-            raise ValueError("Password must be at least 12 characters")
-        if not any(c.isupper() for c in v):
-            raise ValueError("Password must contain at least one uppercase letter")
-        if not any(c.isdigit() for c in v):
-            raise ValueError("Password must contain at least one digit")
-        return v
+        return _validate_password_strength(v)
+
+
+class SignupRequest(BaseModel):
+    """Self-serve signup with an email address (issue #15)."""
+    email: EmailStr
+    password: str
+    display_name: Optional[str] = None
+
+    @field_validator("password")
+    @classmethod
+    def password_strength(cls, v: str) -> str:
+        return _validate_password_strength(v)
+
+
+class VerifyEmailRequest(BaseModel):
+    token: str
+
+
+class RequestPasswordResetRequest(BaseModel):
+    """Request a password-reset link by email (issue #15)."""
+    email: EmailStr
 
 
 class LoginRequest(BaseModel):
+    # Accepts either a username or an email address as the login identifier.
     username: str
     password: str
 
@@ -29,6 +55,11 @@ class LoginRequest(BaseModel):
 class TokenResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
+
+
+class MessageResponse(BaseModel):
+    """A generic, non-enumerating acknowledgement."""
+    detail: str
 
 
 class AdminResetTokenRequest(BaseModel):
@@ -46,10 +77,4 @@ class ResetPasswordRequest(BaseModel):
     @field_validator("new_password")
     @classmethod
     def password_strength(cls, v: str) -> str:
-        if len(v) < 12:
-            raise ValueError("Password must be at least 12 characters")
-        if not any(c.isupper() for c in v):
-            raise ValueError("Password must contain at least one uppercase letter")
-        if not any(c.isdigit() for c in v):
-            raise ValueError("Password must contain at least one digit")
-        return v
+        return _validate_password_strength(v)

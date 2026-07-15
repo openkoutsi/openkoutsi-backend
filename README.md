@@ -13,7 +13,8 @@ Most cycling coaching tools are cloud-only SaaS. openkoutsi is different: you ru
 ## Features
 
 - **Single instance, per-user data** — one deployment; every user's athlete profile and all training data live in their own isolated SQLite database
-- **Invite-only signup** — the setup wizard creates the first administrator; further accounts are created by registering with an instance-wide invite issued by an admin
+- **Signup** — the setup wizard creates the first administrator; further accounts come from instance-wide invites issued by an admin, or, when an admin enables the `allow_self_signup` toggle and an email provider is configured, from **self-serve email signup** (register with an email → verify it → account activates)
+- **Self-serve password reset** — with email configured, users can request a reset link from the "Forgot password?" page (`POST /api/auth/request-password-reset`); admins can still mint reset links directly. Both are single-use and expire in 1 hour
 - **Admin inbox** — in-app messages notify admins about events (e.g. used invites); each user has an isolated per-user message store, deletions are permanent, and the design leaves a hook for future email/push delivery
 - **Swappable email module** — a single, provider-agnostic seam (`backend/app/services/email/`) for all email: a generic `EmailProvider` interface (outbound `send`, inbound `verify_inbound_signature`/`parse_inbound`) with `LettermintProvider` and `EuromailProvider` (euromail.dev — EU-based, inbound included on its free tier) implementations, provider selection via `EMAIL_PROVIDER`, and self-rendered inline-styled HTML + plain-text bodies. Optional — with no provider configured, email-dependent features stay unavailable rather than erroring
 - **Admin dashboard** — manage users, invitations, password resets, an admin-contact shown on the password-reset page, and instance-wide LLM settings

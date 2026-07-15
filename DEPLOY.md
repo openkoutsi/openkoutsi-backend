@@ -222,7 +222,9 @@ it can be pruned/rotated independently.
 
 ### First-run setup
 
-On a fresh deployment, navigate to the frontend URL. The setup wizard will appear and guide you through creating the first administrator account. Onboarding is invite-only thereafter: an administrator issues an instance-wide invite from the Admin dashboard, and new users register with that invite token.
+On a fresh deployment, navigate to the frontend URL. The setup wizard will appear and guide you through creating the first administrator account. Thereafter, an administrator issues an instance-wide invite from the Admin dashboard and new users register with that invite token.
+
+Optionally, admins can enable **self-serve email signup** (Settings tab, or `allow_self_signup` via `PATCH /api/admin/settings`). It requires a configured email provider (see *Email* above): users register with an email address, verify it via an emailed link, and the account activates. Invites keep working regardless. With email configured, users can also reset their own passwords via the "Forgot password?" page. See [ADMIN.md](ADMIN.md) for the full account and password-reset flows.
 
 ### Run
 
