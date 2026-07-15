@@ -9,10 +9,12 @@ from functools import lru_cache
 
 from backend.app.core.config import Settings, settings
 from backend.app.services.email.base import EmailProvider
+from backend.app.services.email.euromail import EuromailProvider
 from backend.app.services.email.lettermint import LettermintProvider
 
 _PROVIDERS: dict[str, type[EmailProvider]] = {
     LettermintProvider.PROVIDER_NAME: LettermintProvider,
+    EuromailProvider.PROVIDER_NAME: EuromailProvider,
 }
 
 

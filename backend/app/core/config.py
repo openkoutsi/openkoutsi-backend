@@ -76,8 +76,8 @@ class Settings(BaseSettings):
     # (callers should check before offering email-dependent features) and there
     # is no inbound surface.
 
-    # Which EmailProvider implementation to use. "lettermint" is the only one
-    # today; swapping providers should touch only the email module.
+    # Which EmailProvider implementation to use. "lettermint" and "euromail" are
+    # available today; swapping providers should touch only the email module.
     email_provider: str = "lettermint"
 
     # Sender address for outbound transactional mail (e.g. verification and
@@ -92,6 +92,15 @@ class Settings(BaseSettings):
     # optional inbound-email bridge (issue #38) to authenticate the provider's
     # POSTs before they reach the backend.
     lettermint_webhook_secret: str = ""
+
+    # EuroMail (https://euromail.dev) — EU-based (Finland) transactional email
+    # provider whose free tier includes inbound email (issue #41). API token for
+    # outbound sends (delivered as a Docker secret in production).
+    euromail_api_key: str = ""
+
+    # Signing secret for verifying inbound EuroMail webhooks (HMAC-SHA256 over the
+    # X-Euromail-Signature header). Used by the optional inbound-email bridge.
+    euromail_webhook_secret: str = ""
 
     # URL of the privacy policy shown on the consent screen and auth pages.
     # Defaults to the canonical koutsi.dev policy; self-hosters are their own GDPR
