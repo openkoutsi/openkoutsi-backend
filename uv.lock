@@ -459,6 +459,18 @@ wheels = [
 ]
 
 [[package]]
+name = "euromail"
+version = "0.4.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/fd/15/5a2204551007a5ae01154153a4d1b3eaff53e8823ad78dd1c28e458bf184/euromail-0.4.0.tar.gz", hash = "sha256:252b9f14325aa160360824661304169203852eeabe7f68d71c41921e21ea1782", size = 31516, upload-time = "2026-07-07T11:14:57.334Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/dc/28/207bb69ca5a635873ff2e95ed3307d467ba62eacb48899abeca22c956045/euromail-0.4.0-py3-none-any.whl", hash = "sha256:29e19e0a84be39ef09c5a8f5b231abf0d4fb64ba3556cd77d630b0d07bcf3249", size = 27082, upload-time = "2026-07-07T11:14:56.031Z" },
+]
+
+[[package]]
 name = "fastapi"
 version = "0.135.3"
 source = { registry = "https://pypi.org/simple" }
@@ -893,6 +905,7 @@ dependencies = [
     { name = "alembic" },
     { name = "cryptography" },
     { name = "email-validator" },
+    { name = "euromail" },
     { name = "fastapi", extra = ["standard"] },
     { name = "fit-tool" },
     { name = "fitdecode" },
@@ -920,6 +933,7 @@ requires-dist = [
     { name = "alembic" },
     { name = "cryptography" },
     { name = "email-validator" },
+    { name = "euromail", specifier = ">=0.4.0" },
     { name = "fastapi", extras = ["standard"] },
     { name = "fit-tool", specifier = ">=0.9" },
     { name = "fitdecode", specifier = ">=0.11.0" },
