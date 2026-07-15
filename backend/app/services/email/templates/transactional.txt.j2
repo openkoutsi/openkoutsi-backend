@@ -1,0 +1,16 @@
+{{ title }}
+
+{{ intro }}
+{% for paragraph in body_paragraphs %}
+{{ paragraph }}
+{% endfor %}
+{%- if action_label and action_url %}
+{{ action_label }}: {{ action_url }}
+{% endif %}
+{%- if outro %}
+{{ outro }}
+{% endif %}
+{%- if footer %}
+--
+{{ footer }}
+{% endif -%}

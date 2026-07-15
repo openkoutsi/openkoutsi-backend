@@ -15,6 +15,7 @@ Most cycling coaching tools are cloud-only SaaS. openkoutsi is different: you ru
 - **Single instance, per-user data** — one deployment; every user's athlete profile and all training data live in their own isolated SQLite database
 - **Invite-only signup** — the setup wizard creates the first administrator; further accounts are created by registering with an instance-wide invite issued by an admin
 - **Admin inbox** — in-app messages notify admins about events (e.g. used invites); each user has an isolated per-user message store, deletions are permanent, and the design leaves a hook for future email/push delivery
+- **Swappable email module** — a single, provider-agnostic seam (`backend/app/services/email/`) for all email: a generic `EmailProvider` interface (outbound `send`, inbound `verify_inbound_signature`/`parse_inbound`) with a `LettermintProvider` implementation, provider selection via `EMAIL_PROVIDER`, and self-rendered inline-styled HTML + plain-text bodies. Optional — with no provider configured, email-dependent features stay unavailable rather than erroring
 - **Admin dashboard** — manage users, invitations, password resets, an admin-contact shown on the password-reset page, and instance-wide LLM settings
 - **FIT file ingestion** — upload activities directly with automatic TSS, normalized power, and zone distribution analysis
 - **Manual activity entry** — log workouts by hand (date, duration, distance, avg/max HR, avg power, cadence, RPE/TSS) with every field optional, behaving like a `manual` data provider
@@ -136,6 +137,14 @@ WAHOO_CLIENT_ID=
 WAHOO_CLIENT_SECRET=
 WAHOO_BRIDGE_URL=
 WAHOO_BRIDGE_SECRET=
+
+# Email (optional) — outbound transactional mail + inbound webhook handling go
+# through the swappable email module (backend/app/services/email/). All optional:
+# with no provider configured, email-dependent features simply stay unavailable.
+EMAIL_PROVIDER=lettermint            # provider selection; lettermint is the only one today
+EMAIL_FROM=                          # sender address for outbound mail
+LETTERMINT_API_KEY=                  # Lettermint API token for sending
+LETTERMINT_WEBHOOK_SECRET=           # secret for verifying inbound Lettermint webhooks
 
 # Optional: restrict which LLM base URLs users may bring (BYOK). Comma-separated;
 # empty = users may bring any URL (subject to SSRF guards).

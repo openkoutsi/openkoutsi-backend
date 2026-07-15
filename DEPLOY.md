@@ -56,12 +56,20 @@ All three services read their secret fields from files under `/run/secrets/`
 the lowercase settings field:
 
 - backend: `secret_key`, `encryption_key`, `strava_client_secret`,
-  `bridge_secret`, `wahoo_client_secret`, `wahoo_bridge_secret`
+  `bridge_secret`, `wahoo_client_secret`, `wahoo_bridge_secret`,
+  `lettermint_api_key` (only when outbound email is used)
 - strava bridge: `strava_client_secret`, `bridge_secret`
 - wahoo bridge: `wahoo_bridge_secret`, `wahoo_webhook_token`
 
+Email (all optional; omit entirely to leave email disabled): `EMAIL_PROVIDER`
+(default `lettermint`) and `EMAIL_FROM` are non-secret config. The Lettermint API
+token is a backend secret (`lettermint_api_key`, above). The inbound webhook
+signing secret (`lettermint_webhook_secret`) is consumed by the optional inbound
+bridge rather than the backend.
+
 Non-secret config (domains, OAuth client *IDs*, `*_BRIDGE_URL`,
-`LLM_ALLOWED_SERVERS`) is passed as plain `environment:`. Secret fields are
+`LLM_ALLOWED_SERVERS`, `EMAIL_PROVIDER`, `EMAIL_FROM`) is passed as plain
+`environment:`. Secret fields are
 **never** set as environment variables in containers, so they are not exposed
 via `docker inspect` or `/proc/<pid>/environ`. Env vars still take precedence
 over file secrets, so set only one source per field.
@@ -142,6 +150,14 @@ WAHOO_CLIENT_ID=
 WAHOO_CLIENT_SECRET=
 WAHOO_BRIDGE_URL=                  # public URL of the Wahoo bridge, e.g. https://wahoo-bridge.your-domain
 WAHOO_BRIDGE_SECRET=               # shared secret — must match WAHOO_BRIDGE_SECRET in wahoo_bridge/.env
+
+# Email (optional) — all email goes through the swappable email module
+# (backend/app/services/email/). Leave unset to keep email disabled; features
+# that need it stay unavailable rather than erroring.
+EMAIL_PROVIDER=lettermint          # provider selection; lettermint is the only implementation today
+EMAIL_FROM=                        # sender address for outbound transactional mail
+LETTERMINT_API_KEY=                # Lettermint API token (outbound sending)
+LETTERMINT_WEBHOOK_SECRET=         # verifies inbound Lettermint webhooks (used by the optional inbound bridge)
 
 # Optional: comma-separated allow-list of LLM base URLs users may bring (BYOK).
 # When set, BYOK URLs are restricted to this list (at save and use time). Leave

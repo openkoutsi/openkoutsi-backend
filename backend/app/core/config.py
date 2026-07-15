@@ -69,6 +69,30 @@ class Settings(BaseSettings):
     # Leave empty in development to disable encryption (tokens stored as plaintext).
     encryption_key: str = ""
 
+    # ── Email (transactional + inbound) ───────────────────────────────────────
+    # Everything provider-specific lives behind the shared email module
+    # (backend/app/services/email/); these settings only select and configure a
+    # provider. All are optional — when unset, outbound email degrades gracefully
+    # (callers should check before offering email-dependent features) and there
+    # is no inbound surface.
+
+    # Which EmailProvider implementation to use. "lettermint" is the only one
+    # today; swapping providers should touch only the email module.
+    email_provider: str = "lettermint"
+
+    # Sender address for outbound transactional mail (e.g. verification and
+    # password-reset messages). Required to actually send.
+    email_from: str = ""
+
+    # Lettermint (https://lettermint.co) — EU-based transactional email provider.
+    # API token for outbound sends (delivered as a Docker secret in production).
+    lettermint_api_key: str = ""
+
+    # Signing secret for verifying inbound Lettermint webhooks. Used by the
+    # optional inbound-email bridge (issue #38) to authenticate the provider's
+    # POSTs before they reach the backend.
+    lettermint_webhook_secret: str = ""
+
     # URL of the privacy policy shown on the consent screen and auth pages.
     # Defaults to the canonical koutsi.dev policy; self-hosters are their own GDPR
     # data controller and should point this at their own policy. Exposed to the

@@ -763,6 +763,18 @@ wheels = [
 ]
 
 [[package]]
+name = "lettermint"
+version = "2.1.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/df/5c/23979adf1d803456e11992ad667d649d05650bd1d48ccf70eb3f7db0e907/lettermint-2.1.0.tar.gz", hash = "sha256:d118326791e4d26d250d8386340b94514640c61ae0a1c330f9dae46f331834eb", size = 30425, upload-time = "2026-07-07T21:18:52.137Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8f/32/99745bea962ab4a4cfe0b03d89f556fb07a9ea64de9ba26015e72f1f25cc/lettermint-2.1.0-py3-none-any.whl", hash = "sha256:9603a839bcd6730a66409b4d6c3f501fd1a6489406eec0fd684a4fe5238be8f4", size = 21952, upload-time = "2026-07-07T21:18:50.771Z" },
+]
+
+[[package]]
 name = "limits"
 version = "5.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -885,6 +897,7 @@ dependencies = [
     { name = "fit-tool" },
     { name = "fitdecode" },
     { name = "httpx" },
+    { name = "lettermint" },
     { name = "passlib", extra = ["bcrypt"] },
     { name = "pydantic-settings" },
     { name = "python-jose", extra = ["cryptography"] },
@@ -911,6 +924,7 @@ requires-dist = [
     { name = "fit-tool", specifier = ">=0.9" },
     { name = "fitdecode", specifier = ">=0.11.0" },
     { name = "httpx" },
+    { name = "lettermint", specifier = ">=2.1.0" },
     { name = "passlib", extras = ["bcrypt"] },
     { name = "pydantic-settings" },
     { name = "python-jose", extras = ["cryptography"] },
