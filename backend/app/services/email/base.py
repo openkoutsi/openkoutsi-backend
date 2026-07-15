@@ -110,5 +110,7 @@ class EmailProvider(ABC):
 
         Raises :class:`InboundParseError` if the signature is invalid or the
         payload cannot be understood — a parsed message is always an
-        authenticated one.
+        authenticated one. Because this re-verifies the signature internally,
+        callers should use *either* :meth:`verify_inbound_signature` (a
+        never-raises gate) *or* this method, not both.
         """

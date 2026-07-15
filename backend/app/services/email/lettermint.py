@@ -19,6 +19,7 @@ from collections.abc import Mapping
 from datetime import datetime, timezone
 from typing import Any
 
+import httpx
 from lettermint import AsyncLettermint, Webhook
 from lettermint.exceptions import LettermintError, WebhookVerificationError
 
@@ -75,7 +76,11 @@ class LettermintProvider(EmailProvider):
                 .text(message.text)
                 .send()
             )
-        except LettermintError as exc:
+        except (LettermintError, httpx.HTTPError) as exc:
+            # The SDK wraps timeouts and HTTP status errors as LettermintError,
+            # but pre-response transport failures (ConnectError, DNS/TLS) escape
+            # as raw httpx.HTTPError. Catch both so send() always honours the
+            # documented "raises EmailError on delivery failure" contract.
             raise EmailError(f"Lettermint send failed: {exc}") from exc
         finally:
             await client.close()

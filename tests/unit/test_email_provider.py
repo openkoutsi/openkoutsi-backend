@@ -130,6 +130,33 @@ async def test_send_calls_sdk_with_html_and_text():
 
 
 @pytest.mark.asyncio
+async def test_send_wraps_transport_error_and_still_closes():
+    """A pre-response transport failure (ConnectError) is a raw httpx.HTTPError,
+    not a LettermintError — send() must still surface it as EmailError."""
+    import httpx
+
+    provider = LettermintProvider.from_settings(
+        _settings(lettermint_api_key="key", email_from="ops@koutsi.dev")
+    )
+    builder = MagicMock()
+    for setter in ("from_", "to", "subject", "html", "text"):
+        getattr(builder, setter).return_value = builder
+    builder.send = AsyncMock(side_effect=httpx.ConnectError("no route to host"))
+    client = MagicMock()
+    client.email = builder
+    client.close = AsyncMock()
+
+    with patch(
+        "backend.app.services.email.lettermint.AsyncLettermint", return_value=client
+    ):
+        with pytest.raises(EmailError, match="Lettermint send failed"):
+            await provider.send(
+                OutboundMessage(to="a@b.co", subject="s", html="<p>h</p>", text="h")
+            )
+    client.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_send_unconfigured_raises_configuration_error():
     provider = LettermintProvider.from_settings(_settings())  # no api key / from
     with pytest.raises(EmailConfigurationError):
