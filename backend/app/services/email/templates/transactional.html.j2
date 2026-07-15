@@ -1,0 +1,54 @@
+{#-
+  Minimal, inline-styled transactional email layout.
+
+  Inline CSS only — Gmail/Outlook strip <style> blocks and <head>, so every
+  visual rule lives on the element. Keep this deliberately plain: one accent
+  colour (the landing-page orange), system fonts, a single call-to-action.
+-#}
+<!DOCTYPE html>
+<html lang="en">
+  <body style="margin:0;padding:0;background-color:#f4f4f5;">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background-color:#f4f4f5;">
+      <tr>
+        <td align="center" style="padding:24px 12px;">
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:520px;background-color:#ffffff;border-radius:8px;border:1px solid #e4e4e7;">
+            <tr>
+              <td style="padding:32px 32px 8px 32px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+                <div style="font-size:20px;font-weight:700;color:#e0592e;">openkoutsi</div>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:8px 32px 0 32px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+                <h1 style="margin:0 0 16px 0;font-size:22px;line-height:1.3;font-weight:700;color:#111111;">{{ title }}</h1>
+                <p style="margin:0 0 16px 0;font-size:15px;line-height:1.6;color:#3f3f46;">{{ intro }}</p>
+                {%- for paragraph in body_paragraphs %}
+                <p style="margin:0 0 16px 0;font-size:15px;line-height:1.6;color:#3f3f46;">{{ paragraph }}</p>
+                {%- endfor %}
+              </td>
+            </tr>
+            {%- if action_label and action_url %}
+            <tr>
+              <td style="padding:8px 32px 8px 32px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+                <a href="{{ action_url }}" style="display:inline-block;background-color:#e0592e;color:#ffffff;text-decoration:none;font-size:15px;font-weight:600;padding:12px 24px;border-radius:6px;">{{ action_label }}</a>
+                <p style="margin:16px 0 0 0;font-size:13px;line-height:1.6;color:#71717a;">If the button doesn't work, copy and paste this link into your browser:<br /><a href="{{ action_url }}" style="color:#e0592e;word-break:break-all;">{{ action_url }}</a></p>
+              </td>
+            </tr>
+            {%- endif %}
+            {%- if outro %}
+            <tr>
+              <td style="padding:8px 32px 0 32px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;">
+                <p style="margin:0 0 16px 0;font-size:15px;line-height:1.6;color:#3f3f46;">{{ outro }}</p>
+              </td>
+            </tr>
+            {%- endif %}
+            <tr>
+              <td style="padding:16px 32px 32px 32px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;border-top:1px solid #e4e4e7;">
+                <p style="margin:16px 0 0 0;font-size:12px;line-height:1.6;color:#a1a1aa;">{{ footer }}</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

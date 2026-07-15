@@ -19,6 +19,7 @@ dependencies = [
     "slowapi",
     "cryptography",
     "fit-tool>=0.9",
+    "lettermint>=2.1.0",
 ]
 
 [dependency-groups]
