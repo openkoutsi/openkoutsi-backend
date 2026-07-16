@@ -8575,7 +8575,7 @@
           "email"
         ],
         "title": "RequestPasswordResetRequest",
-        "description": "Request a password-reset link by email (issue #15)."
+        "description": "Request that a password-reset link be emailed to the given address."
       },
       "ResetPasswordRequest": {
         "properties": {
@@ -8656,7 +8656,7 @@
           "password"
         ],
         "title": "SignupRequest",
-        "description": "Self-serve signup with an email address (issue #15).\n\nNo display name here: the pending account has nowhere to hold it until the\nemail is verified, and the profile name is collected during onboarding after\nactivation (mirroring the invite \u2192 onboarding flow)."
+        "description": "Self-serve signup. Requires an email address and password only; remaining\nprofile details are collected during onboarding after the email is verified."
       },
       "SkipWorkoutRequest": {
         "properties": {

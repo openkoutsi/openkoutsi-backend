@@ -26,11 +26,8 @@ class RegisterRequest(BaseModel):
 
 
 class SignupRequest(BaseModel):
-    """Self-serve signup with an email address (issue #15).
-
-    No display name here: the pending account has nowhere to hold it until the
-    email is verified, and the profile name is collected during onboarding after
-    activation (mirroring the invite → onboarding flow).
+    """Self-serve signup. Requires an email address and password only; remaining
+    profile details are collected during onboarding after the email is verified.
     """
     email: EmailStr
     password: str
@@ -46,7 +43,7 @@ class VerifyEmailRequest(BaseModel):
 
 
 class RequestPasswordResetRequest(BaseModel):
-    """Request a password-reset link by email (issue #15)."""
+    """Request that a password-reset link be emailed to the given address."""
     email: EmailStr
 
 
