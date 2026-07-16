@@ -87,6 +87,7 @@ def _user_response(user: User, entitlement: LlmEntitlement | None = None) -> Use
     return UserResponse(
         id=user.id,
         username=user.username,
+        email=user.email,
         roles=_roles_of(user),
         created_at=user.created_at,
         consented_at=user.consented_at,
@@ -419,6 +420,7 @@ def _settings_response(instance: InstanceSettings) -> InstanceSettingsResponse:
         admin_contact=instance.admin_contact,
         llm_models=[_preset_out(e) for e in (instance.llm_models or []) if isinstance(e, dict)],
         llm_requires_subscription=bool(instance.llm_requires_subscription),
+        allow_self_signup=bool(instance.allow_self_signup),
     )
 
 
@@ -449,6 +451,8 @@ async def update_instance_settings(
         instance.llm_models = _build_presets(body.llm_models, instance.llm_models) or None
     if body.llm_requires_subscription is not None:
         instance.llm_requires_subscription = bool(body.llm_requires_subscription)
+    if body.allow_self_signup is not None:
+        instance.allow_self_signup = bool(body.allow_self_signup)
 
     await session.commit()
     await session.refresh(instance)

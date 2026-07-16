@@ -43,7 +43,9 @@ class LlmEntitlementSummary(BaseModel):
 
 class UserResponse(BaseModel):
     id: str
-    username: str
+    # Nullable since self-serve signup accounts are keyed by email, not username.
+    username: Optional[str] = None
+    email: Optional[str] = None
     roles: list[str]
     created_at: datetime
     consented_at: Optional[datetime] = None
@@ -159,6 +161,8 @@ class InstanceSettingsResponse(BaseModel):
     llm_models: list[LlmModelConfigOut] = []
     # Issue #9 opt-in gate: require an LLM-access entitlement (or BYOK).
     llm_requires_subscription: bool = False
+    # Issue #15: allow self-serve email signup (also needs a configured provider).
+    allow_self_signup: bool = False
 
 
 class InstanceSettingsPatch(BaseModel):
@@ -168,6 +172,7 @@ class InstanceSettingsPatch(BaseModel):
     # is the default), or omit to leave unchanged.
     llm_models: Optional[list[LlmModelConfigIn]] = None
     llm_requires_subscription: Optional[bool] = None
+    allow_self_signup: Optional[bool] = None
 
 
 # ── LLM usage stats (instance admin, issue #9) ──────────────────────────────

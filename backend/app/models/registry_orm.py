@@ -21,7 +21,17 @@ class User(RegistryBase):
     __tablename__ = "users"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
-    username: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    # Login identifier for invited/legacy accounts. Nullable because self-serve
+    # signup accounts (issue #15) are keyed by email instead; at least one of
+    # ``username`` / ``email`` is always present (enforced in the auth layer).
+    username: Mapped[Optional[str]] = mapped_column(String, unique=True, nullable=True)
+    # Email login identifier for self-serve signup (issue #15). Unique + nullable
+    # so many legacy accounts can coexist with a NULL email. ``email_verified_at``
+    # is set once the address is confirmed; login-by-email requires it.
+    email: Mapped[Optional[str]] = mapped_column(String, unique=True, nullable=True)
+    email_verified_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     password_hash: Mapped[str] = mapped_column(String, nullable=False)
     # JSON-encoded list of roles, e.g. '["administrator"]' or '["user"]'.
     roles: Mapped[str] = mapped_column(String, nullable=False, default='["user"]')
@@ -34,6 +44,9 @@ class User(RegistryBase):
 
     reset_tokens: Mapped[list["PasswordResetToken"]] = relationship(
         "PasswordResetToken", back_populates="user", cascade="all, delete-orphan"
+    )
+    verification_tokens: Mapped[list["EmailVerificationToken"]] = relationship(
+        "EmailVerificationToken", back_populates="user", cascade="all, delete-orphan"
     )
     provider_connections: Mapped[list["ProviderConnection"]] = relationship(
         "ProviderConnection", back_populates="user", cascade="all, delete-orphan"
@@ -51,6 +64,25 @@ class PasswordResetToken(RegistryBase):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     user: Mapped["User"] = relationship("User", back_populates="reset_tokens")
+
+
+class EmailVerificationToken(RegistryBase):
+    """Single-use email-verification token for self-serve signup (issue #15).
+
+    Mirrors :class:`PasswordResetToken`: only the SHA-256 hash of the raw token is
+    stored, tokens are single-use (``used_at``) and expire (``expires_at``).
+    """
+
+    __tablename__ = "email_verification_tokens"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id", ondelete="CASCADE"))
+    token_hash: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    user: Mapped["User"] = relationship("User", back_populates="verification_tokens")
 
 
 class Invitation(RegistryBase):
@@ -106,6 +138,12 @@ class InstanceSettings(RegistryBase):
     # use LLM features via BYOK, or gets a machine-readable "subscription
     # required" error. Defaults to off — behaviour is unchanged until flipped.
     llm_requires_subscription: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
+    # Self-serve signup gate (issue #15): when true (and an email provider is
+    # configured), anyone can register with their email. Off by default — the
+    # instance stays invite-only until an admin flips it.
+    allow_self_signup: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="0"
     )
     updated_at: Mapped[datetime] = mapped_column(
