@@ -197,6 +197,10 @@ class ActivityPowerBest(UserBase):
     activity_start_time: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Effective bodyweight at the time of the activity and the resulting W/kg.
+    # NULL when no weight was logged on or before the activity date.
+    weight_kg: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    w_per_kg: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     activity: Mapped["Activity"] = relationship("Activity", back_populates="power_bests")
 

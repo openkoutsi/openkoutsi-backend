@@ -183,7 +183,9 @@ async def update_athlete(
         athlete.name = body.name
     if body.date_of_birth is not None:
         athlete.date_of_birth = body.date_of_birth
+    weight_changed = False
     if body.weight_kg is not None:
+        weight_changed = True
         athlete.weight_kg = body.weight_kg
         today = datetime.now(timezone.utc).date()
         wl_result = await session.execute(
@@ -262,6 +264,13 @@ async def update_athlete(
         # deletions so callers can remove a key without a full-replace round-trip.
         merged = {**(athlete.app_settings or {}), **new_settings}
         athlete.app_settings = {k: v for k, v in merged.items() if v is not None}
+
+    if weight_changed:
+        # A new/updated weight-log entry shifts the effective weight for a range
+        # of past activities, so re-derive the stored W/kg on their power bests.
+        from backend.app.services.weight import recompute_power_best_weights
+
+        await recompute_power_best_weights(athlete.id, session)
 
     athlete.updated_at = datetime.now(timezone.utc)
     await session.commit()

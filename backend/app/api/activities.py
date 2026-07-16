@@ -746,17 +746,28 @@ async def reprocess_activity(
 
     # Rebuild power bests
     if power_data:
+        from backend.app.services.weight import (
+            effective_weight_for,
+            load_weight_log,
+            w_per_kg,
+        )
+
+        weight_log = await load_weight_log(athlete.id, session)
+        act_date = activity.start_time.date() if activity.start_time else None
+        weight = effective_weight_for(weight_log, act_date)
         await session.execute(
             sa_delete(ActivityPowerBest).where(ActivityPowerBest.activity_id == activity_id)
         )
-        for duration_s, power_w in compute_power_bests(power_data).items():
+        for duration_s, power_w_val in compute_power_bests(power_data).items():
             session.add(
                 ActivityPowerBest(
                     activity_id=activity_id,
                     athlete_id=athlete.id,
                     duration_s=duration_s,
-                    power_w=power_w,
+                    power_w=power_w_val,
                     activity_start_time=activity.start_time,
+                    weight_kg=weight,
+                    w_per_kg=w_per_kg(power_w_val, weight),
                 )
             )
 

@@ -6,9 +6,29 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from sqlalchemy import select
 
-from backend.app.models.user_orm import Activity, ActivityPowerBest, ActivitySource, ActivityStream, Athlete
+from datetime import date
+
+from backend.app.models.user_orm import (
+    Activity,
+    ActivityPowerBest,
+    ActivitySource,
+    ActivityStream,
+    Athlete,
+    WeightLog,
+)
 
 from ._fit_fixtures import capabilities, fit_fixture_params
+
+
+async def _set_weight(session, athlete: Athlete, effective_date: str, weight_kg: float) -> None:
+    session.add(
+        WeightLog(
+            athlete_id=athlete.id,
+            effective_date=date.fromisoformat(effective_date),
+            weight_kg=weight_kg,
+        )
+    )
+    await session.commit()
 
 
 async def _get_athlete(client, auth_headers, session) -> Athlete:
@@ -306,6 +326,46 @@ class TestPowerBestsFromFitFile:
         # All entries must link back to the uploaded activity
         for entry in bests:
             assert entry["activity_id"] == activity_id
+
+
+class TestPowerBestsWkg:
+    """?metric=wkg ranks by watts-per-kg using effective weight at the time of the effort."""
+
+    async def test_wkg_ranks_by_watts_per_kg_not_watts(self, client, auth_headers, session):
+        athlete = await _get_athlete(client, auth_headers, session)
+        # A: 350 W at 80 kg = 4.375 W/kg (higher watts).
+        # B: 300 W at 65 kg = 4.615 W/kg (lower watts, higher W/kg).
+        await _set_weight(session, athlete, "2025-05-01", 80.0)
+        await _insert_activity_with_power(session, athlete, [350.0] * 60, "2025-06-01T10:00:00+00:00")
+        await _set_weight(session, athlete, "2025-06-02", 65.0)
+        await _insert_activity_with_power(session, athlete, [300.0] * 60, "2025-06-02T10:00:00+00:00")
+
+        watts = await client.get("/api/metrics/bests/power", headers=auth_headers)
+        watts_60 = [e for e in watts.json()["bests"] if e["duration_s"] == 60]
+        assert watts_60[0]["power_w"] == pytest.approx(350.0, abs=0.1)
+
+        wkg = await client.get("/api/metrics/bests/power?metric=wkg", headers=auth_headers)
+        wkg_60 = [e for e in wkg.json()["bests"] if e["duration_s"] == 60]
+        # W/kg PR (B) must now rank first even though it has fewer watts.
+        assert wkg_60[0]["power_w"] == pytest.approx(300.0, abs=0.1)
+        assert wkg_60[0]["w_per_kg"] == pytest.approx(300.0 / 65.0, abs=0.001)
+        assert wkg_60[1]["power_w"] == pytest.approx(350.0, abs=0.1)
+
+    async def test_wkg_excludes_efforts_without_weight(self, client, auth_headers, session):
+        athlete = await _get_athlete(client, auth_headers, session)
+        # Activity predates any weight-log entry → no W/kg, excluded from wkg view.
+        await _insert_activity_with_power(session, athlete, [300.0] * 60, "2025-01-01T10:00:00+00:00")
+        await _set_weight(session, athlete, "2025-06-01", 70.0)
+
+        watts = await client.get("/api/metrics/bests/power", headers=auth_headers)
+        assert len([e for e in watts.json()["bests"] if e["duration_s"] == 60]) == 1
+
+        wkg = await client.get("/api/metrics/bests/power?metric=wkg", headers=auth_headers)
+        assert [e for e in wkg.json()["bests"] if e["duration_s"] == 60] == []
+
+    async def test_invalid_metric_rejected(self, client, auth_headers):
+        resp = await client.get("/api/metrics/bests/power?metric=bogus", headers=auth_headers)
+        assert resp.status_code == 422
 
 
 class TestGetFtpEstimate:

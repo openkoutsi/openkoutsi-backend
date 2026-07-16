@@ -211,6 +211,7 @@ async def _bg_provider_sync(user_id: str, provider: str) -> None:
     from backend.app.db.registry import _RegistrySessionLocal
     from backend.app.db.user_session import get_user_session_factory, init_user_db
     from backend.app.services.metrics_engine import recalculate_from
+    from backend.app.services.weight import recompute_power_best_weights
 
     # Step 1: Refresh the token once from the registry.
     async with _RegistrySessionLocal() as reg_session:
@@ -243,6 +244,10 @@ async def _bg_provider_sync(user_id: str, provider: str) -> None:
             )
             if count > 0 and earliest is not None:
                 await recalculate_from(athlete.id, earliest, session)
+                # Re-derive W/kg on every power best now that the full history is
+                # imported (guards against any row created without weight data).
+                await recompute_power_best_weights(athlete.id, session)
+                await session.commit()
 
             log.info(
                 "%s sync complete: %d new activities for user %s",
