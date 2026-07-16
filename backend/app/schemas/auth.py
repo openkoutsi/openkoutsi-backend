@@ -26,10 +26,14 @@ class RegisterRequest(BaseModel):
 
 
 class SignupRequest(BaseModel):
-    """Self-serve signup with an email address (issue #15)."""
+    """Self-serve signup with an email address (issue #15).
+
+    No display name here: the pending account has nowhere to hold it until the
+    email is verified, and the profile name is collected during onboarding after
+    activation (mirroring the invite → onboarding flow).
+    """
     email: EmailStr
     password: str
-    display_name: Optional[str] = None
 
     @field_validator("password")
     @classmethod

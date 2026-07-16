@@ -8648,17 +8648,6 @@
           "password": {
             "type": "string",
             "title": "Password"
-          },
-          "display_name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Display Name"
           }
         },
         "type": "object",
@@ -8667,7 +8656,7 @@
           "password"
         ],
         "title": "SignupRequest",
-        "description": "Self-serve signup with an email address (issue #15)."
+        "description": "Self-serve signup with an email address (issue #15).\n\nNo display name here: the pending account has nowhere to hold it until the\nemail is verified, and the profile name is collected during onboarding after\nactivation (mirroring the invite \u2192 onboarding flow)."
       },
       "SkipWorkoutRequest": {
         "properties": {

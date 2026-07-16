@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
 from jose import JWTError
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.auth import (
@@ -95,10 +96,17 @@ async def _create_user_profile(user_id: str, display_name: str | None) -> None:
     """Bootstrap a newly activated account's per-user DB + athlete profile.
 
     Shared by invite ``register`` and self-serve ``verify_email`` so both
-    activate an account identically.
+    activate an account identically. Idempotent: creating the DB is a no-op if it
+    exists, and the athlete row is only inserted when absent, so a retry after a
+    partial activation completes it rather than duplicating the profile.
     """
     await init_user_db(user_id)
     async with get_user_session_factory(user_id)() as user_session:
+        existing = await user_session.execute(
+            select(Athlete).where(Athlete.global_user_id == user_id)
+        )
+        if existing.scalar_one_or_none() is not None:
+            return
         athlete = Athlete(
             id=str(uuid.uuid4()),
             global_user_id=user_id,
@@ -358,35 +366,42 @@ async def signup(
         # Already a real account — say nothing that reveals it.
         return ack
 
-    if user is None:
-        user = User(
-            id=str(uuid.uuid4()),
-            email=email,
-            password_hash=hash_password(body.password),
-            roles=json.dumps(["user"]),
-        )
-        session.add(user)
-        await session.flush()
-    else:
-        # Pending re-signup: let the latest attempt set the password.
-        user.password_hash = hash_password(body.password)
+    try:
+        if user is None:
+            user = User(
+                id=str(uuid.uuid4()),
+                email=email,
+                password_hash=hash_password(body.password),
+                roles=json.dumps(["user"]),
+            )
+            session.add(user)
+            await session.flush()
+        else:
+            # Pending re-signup: let the latest attempt set the password.
+            user.password_hash = hash_password(body.password)
 
-    prior = await session.execute(
-        select(EmailVerificationToken).where(
-            EmailVerificationToken.user_id == user.id,
-            EmailVerificationToken.used_at.is_(None),
+        prior = await session.execute(
+            select(EmailVerificationToken).where(
+                EmailVerificationToken.user_id == user.id,
+                EmailVerificationToken.used_at.is_(None),
+            )
         )
-    )
-    for token_row in prior.scalars():
-        token_row.used_at = now
+        for token_row in prior.scalars():
+            token_row.used_at = now
 
-    raw_token = secrets.token_urlsafe(32)
-    session.add(EmailVerificationToken(
-        user_id=user.id,
-        token_hash=hashlib.sha256(raw_token.encode()).hexdigest(),
-        expires_at=now + timedelta(hours=1),
-    ))
-    await session.commit()
+        raw_token = secrets.token_urlsafe(32)
+        session.add(EmailVerificationToken(
+            user_id=user.id,
+            token_hash=hashlib.sha256(raw_token.encode()).hexdigest(),
+            expires_at=now + timedelta(hours=1),
+        ))
+        await session.commit()
+    except IntegrityError:
+        # Concurrent signup for the same email: the unique constraint fires on the
+        # losing writer. Collapse to the generic ack so the response stays uniform
+        # (no enumeration) — the winning request already sent a verification email.
+        await session.rollback()
+        return ack
 
     verify_url = f"{settings.frontend_url}/verify-email?token={raw_token}"
     try:
@@ -433,14 +448,18 @@ async def verify_email(
     if user is None:
         raise HTTPException(status_code=400, detail="Invalid or expired token")
 
+    # Provision the per-user DB + profile *before* committing the activation, so a
+    # failure here leaves the token unspent and the account unverified — the user
+    # can simply retry the same link (within its 1h window) rather than being
+    # stranded verified-but-DB-less. _create_user_profile is idempotent, so the
+    # retry completes activation instead of duplicating the profile.
     already_active = user.email_verified_at is not None
+    await _create_user_profile(user.id, None)
+
     if not already_active:
         user.email_verified_at = now
     token_row.used_at = now
     await session.commit()
-
-    if not already_active:
-        await _create_user_profile(user.id, None)
 
     roles = _roles_of(user)
     _set_refresh_cookie(response, create_refresh_token(user.id))

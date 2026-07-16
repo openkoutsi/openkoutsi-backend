@@ -14,16 +14,19 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
-from backend.app.api.auth import get_email_provider_dep
+from backend.app.api.auth import _create_user_profile, get_email_provider_dep
 from backend.app.core.auth import hash_password
+from backend.app.db.user_session import get_user_session_factory
 from backend.app.models.registry_orm import (
     EmailVerificationToken,
     InstanceSettings,
     PasswordResetToken,
     User,
 )
+from backend.app.models.user_orm import Athlete
 
 _PREFIX = "/api/auth"
 _GOOD_PW = "Testpass1234"
@@ -158,6 +161,26 @@ class TestSignup:
         assert resp.status_code == 202  # no enumeration
         assert fake.sent == []  # nothing sent for an existing account
 
+    async def test_concurrent_email_race_collapses_to_ack(
+        self, client, app, registry_session, monkeypatch
+    ):
+        # The unique-email race: the losing writer's commit raises IntegrityError.
+        # It must collapse to the same generic 202, not surface a 500 (which would
+        # both break the endpoint and leak that the email is taken).
+        await _enable_signup(registry_session)
+        _use_provider(app)
+
+        async def _raise_integrity():
+            raise IntegrityError("INSERT", {}, Exception("UNIQUE constraint failed"))
+
+        monkeypatch.setattr(registry_session, "commit", _raise_integrity)
+
+        resp = await client.post(
+            f"{_PREFIX}/signup", json={"email": "race@example.com", "password": _GOOD_PW}
+        )
+        assert resp.status_code == 202
+        assert "detail" in resp.json()
+
 
 # ── /verify-email ───────────────────────────────────────────────────────────
 
@@ -281,3 +304,23 @@ class TestRequestPasswordReset:
         )
         assert resp.status_code == 200
         assert fake.sent == []
+
+
+# ── Activation idempotency ──────────────────────────────────────────────────
+
+
+class TestActivationIdempotency:
+    async def test_create_user_profile_is_idempotent(self, isolate_user_dbs):
+        # A retry after a partial activation must complete the profile, not
+        # duplicate it — this is what makes verify-email recoverable.
+        user_id = "idem-user-0000"
+        await _create_user_profile(user_id, "Alice")
+        await _create_user_profile(user_id, "Alice")
+
+        async with get_user_session_factory(user_id)() as s:
+            count = (await s.execute(
+                select(func.count()).select_from(Athlete).where(
+                    Athlete.global_user_id == user_id
+                )
+            )).scalar_one()
+        assert count == 1
