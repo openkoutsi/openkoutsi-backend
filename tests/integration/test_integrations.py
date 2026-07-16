@@ -58,19 +58,20 @@ async def _add_activity(
     return act
 
 
-def _make_session_cm(session):
-    """Return a team_id → session factory mock for get_user_session_factory patches."""
-    class _CM:
-        def __call__(self):
-            return self
+def _real_session_factory(engine):
+    """Return a user_id → session factory backed by a real engine.
 
-        async def __aenter__(self):
-            return session
+    Unlike a shared-session stub with a no-op ``__aexit__``, this hands out a
+    fresh session on every call and lets the ``async with`` context manager
+    really commit/close. That means a flushed-but-uncommitted delete rolls back
+    on exit exactly as it would in production, so the deletion is only observed
+    when it was actually committed — letting the tests catch the swallowed-
+    exception/rollback regression from issue #9.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
 
-        async def __aexit__(self, *args):
-            pass
-
-    return lambda team_id: _CM()
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    return lambda user_id: factory
 
 
 def _encode_state(user_id: str, provider: str, team_slug: str = _TEST_TEAM_SLUG) -> str:
@@ -357,7 +358,7 @@ class TestDisconnect:
         assert result.scalar_one_or_none() is not None
 
     async def test_deletes_provider_activities_when_requested(
-        self, client, session, registry_session, auth_headers
+        self, client, session, user_engine, registry_session, auth_headers
     ):
         await _add_connection(registry_session, _TEST_USER_ID, "strava")
         act = await _add_activity(session, _TEST_ATHLETE_ID, "strava", "strava-act-2")
@@ -367,7 +368,10 @@ class TestDisconnect:
 
         with (
             patch.object(StravaProviderClient, "deauthorize", new_callable=AsyncMock),
-            patch("backend.app.db.user_session.get_user_session_factory", _make_session_cm(session)),
+            patch(
+                "backend.app.db.user_session.get_user_session_factory",
+                _real_session_factory(user_engine),
+            ),
         ):
             resp = await client.delete(
                 "/api/integrations/strava/disconnect?delete_data=true",
@@ -379,6 +383,82 @@ class TestDisconnect:
         session.expire_all()
         result = await session.execute(select(Activity).where(Activity.id == act_id))
         assert result.scalar_one_or_none() is None
+
+    async def test_deletes_provider_activities_via_request_body(
+        self, client, session, user_engine, registry_session, auth_headers
+    ):
+        """delete_data supplied in the JSON body (not the query string) still deletes."""
+        await _add_connection(registry_session, _TEST_USER_ID, "strava")
+        act = await _add_activity(session, _TEST_ATHLETE_ID, "strava", "strava-act-body")
+        act_id = act.id
+
+        from backend.app.services.providers.strava import StravaProviderClient
+
+        with (
+            patch.object(StravaProviderClient, "deauthorize", new_callable=AsyncMock),
+            patch(
+                "backend.app.db.user_session.get_user_session_factory",
+                _real_session_factory(user_engine),
+            ),
+        ):
+            resp = await client.request(
+                "DELETE",
+                "/api/integrations/strava/disconnect",
+                headers=auth_headers,
+                json={"delete_data": True},
+            )
+
+        assert resp.status_code == 204
+
+        session.expire_all()
+        result = await session.execute(select(Activity).where(Activity.id == act_id))
+        assert result.scalar_one_or_none() is None
+
+    async def test_delete_failure_keeps_connection_and_data(
+        self, client, session, user_engine, registry_session, auth_headers
+    ):
+        """If the deletion raises, the endpoint must not report success.
+
+        The connection stays connected and the activity stays put (the flushed
+        deletes roll back), so the caller learns the data was NOT deleted.
+        """
+        await _add_connection(registry_session, _TEST_USER_ID, "strava")
+        act = await _add_activity(session, _TEST_ATHLETE_ID, "strava", "strava-act-boom")
+        act_id = act.id
+
+        from backend.app.services.providers.strava import StravaProviderClient
+
+        with (
+            patch.object(StravaProviderClient, "deauthorize", new_callable=AsyncMock),
+            patch(
+                "backend.app.db.user_session.get_user_session_factory",
+                _real_session_factory(user_engine),
+            ),
+            patch(
+                "backend.app.services.metrics_engine.recalculate_from",
+                new=AsyncMock(side_effect=RuntimeError("boom")),
+            ),
+        ):
+            resp = await client.delete(
+                "/api/integrations/strava/disconnect?delete_data=true",
+                headers=auth_headers,
+            )
+
+        assert resp.status_code == 500
+
+        # Connection must survive.
+        conn_result = await registry_session.execute(
+            select(ProviderConnection).where(
+                ProviderConnection.user_id == _TEST_USER_ID,
+                ProviderConnection.provider == "strava",
+            )
+        )
+        assert conn_result.scalar_one_or_none() is not None
+
+        # Activity must survive (the flushed delete rolled back).
+        session.expire_all()
+        act_result = await session.execute(select(Activity).where(Activity.id == act_id))
+        assert act_result.scalar_one_or_none() is not None
 
     async def test_wahoo_disconnect_calls_deauthorize(
         self, client, registry_session, auth_headers
@@ -405,7 +485,7 @@ class TestDisconnect:
         assert result.scalar_one_or_none() is None
 
     async def test_preserves_activities_from_other_providers(
-        self, client, session, registry_session, auth_headers
+        self, client, session, user_engine, registry_session, auth_headers
     ):
         await _add_connection(registry_session, _TEST_USER_ID, "strava")
         strava_act = await _add_activity(session, _TEST_ATHLETE_ID, "strava", "strava-123")
@@ -417,7 +497,10 @@ class TestDisconnect:
 
         with (
             patch.object(StravaProviderClient, "deauthorize", new_callable=AsyncMock),
-            patch("backend.app.db.user_session.get_user_session_factory", _make_session_cm(session)),
+            patch(
+                "backend.app.db.user_session.get_user_session_factory",
+                _real_session_factory(user_engine),
+            ),
         ):
             resp = await client.delete(
                 "/api/integrations/strava/disconnect?delete_data=true",
@@ -435,3 +518,70 @@ class TestDisconnect:
         )
         assert strava_result.scalar_one_or_none() is None
         assert wahoo_result.scalar_one_or_none() is not None
+
+    async def test_merged_activity_survives_until_last_provider_removed(
+        self, client, session, user_engine, registry_session, auth_headers
+    ):
+        """A single activity backed by both Strava and Wahoo must survive
+        disconnecting one provider (it still has the other source) and only be
+        removed once the last backing source is deleted."""
+        await _add_connection(registry_session, _TEST_USER_ID, "strava")
+        await _add_connection(registry_session, _TEST_USER_ID, "wahoo")
+
+        act = Activity(
+            athlete_id=_TEST_ATHLETE_ID,
+            start_time=datetime(2024, 1, 15, tzinfo=timezone.utc),
+            duration_s=3600,
+            status="processed",
+        )
+        session.add(act)
+        await session.flush()
+        session.add(ActivitySource(activity_id=act.id, provider="strava", external_id="s-1"))
+        session.add(ActivitySource(activity_id=act.id, provider="wahoo", external_id="w-1"))
+        await session.commit()
+        act_id = act.id
+
+        from backend.app.services.providers.strava import StravaProviderClient
+        from backend.app.services.providers.wahoo import WahooClient
+
+        # Disconnect Strava + delete its data: the merged activity stays because
+        # the Wahoo source still backs it.
+        with (
+            patch.object(StravaProviderClient, "deauthorize", new_callable=AsyncMock),
+            patch(
+                "backend.app.db.user_session.get_user_session_factory",
+                _real_session_factory(user_engine),
+            ),
+        ):
+            resp = await client.delete(
+                "/api/integrations/strava/disconnect?delete_data=true",
+                headers=auth_headers,
+            )
+        assert resp.status_code == 204
+
+        session.expire_all()
+        result = await session.execute(select(Activity).where(Activity.id == act_id))
+        assert result.scalar_one_or_none() is not None
+        srcs = await session.execute(
+            select(ActivitySource).where(ActivitySource.activity_id == act_id)
+        )
+        assert {s.provider for s in srcs.scalars().all()} == {"wahoo"}
+
+        # Now disconnect Wahoo + delete its data: the last source goes, so the
+        # activity is removed too.
+        with (
+            patch.object(WahooClient, "deauthorize", new_callable=AsyncMock),
+            patch(
+                "backend.app.db.user_session.get_user_session_factory",
+                _real_session_factory(user_engine),
+            ),
+        ):
+            resp = await client.delete(
+                "/api/integrations/wahoo/disconnect?delete_data=true",
+                headers=auth_headers,
+            )
+        assert resp.status_code == 204
+
+        session.expire_all()
+        result = await session.execute(select(Activity).where(Activity.id == act_id))
+        assert result.scalar_one_or_none() is None
