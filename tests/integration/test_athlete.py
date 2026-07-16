@@ -333,6 +333,276 @@ class TestExportAthlete:
 
         assert exported_bytes == original_bytes
 
+    async def test_export_contains_all_sections(self, client, auth_headers):
+        """Every data category has a JSON file, even for an otherwise-empty account."""
+        resp = await client.get("/api/athlete/export", headers=auth_headers)
+        assert resp.status_code == 200
+
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            names = set(zf.namelist())
+
+        assert {
+            "profile.json",
+            "activities.json",
+            "goals.json",
+            "plans.json",
+            "workout_definitions.json",
+            "daily_metrics.json",
+            "personal_records.json",
+            "inbox.json",
+            "weight_log.json",
+        } <= names
+
+    async def test_export_profile_redacts_llm_key_and_includes_settings(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        """LLM analysis settings are exported, but the encrypted BYOK key never leaks."""
+        seeded_athlete.app_settings = {
+            "llm_api_key_enc": "super-secret-encrypted-token",
+            "llm_model": "my-model",
+            "experience_level": "intermediate",
+        }
+        seeded_athlete.availability = {"monday": True}
+        seeded_athlete.training_status = "Building nicely."
+        await session.commit()
+
+        resp = await client.get("/api/athlete/export", headers=auth_headers)
+        assert resp.status_code == 200
+
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            profile = json.loads(zf.read("profile.json"))
+
+        settings = profile["app_settings"]
+        assert settings["llm_api_key_set"] is True
+        assert "llm_api_key_enc" not in settings
+        assert "super-secret-encrypted-token" not in json.dumps(profile)
+        assert settings["llm_model"] == "my-model"
+        assert settings["experience_level"] == "intermediate"
+        assert profile["availability"] == {"monday": True}
+        assert profile["training_status"] == "Building nicely."
+
+    async def test_export_activity_includes_notes_labels_analysis(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        from backend.app.models.user_orm import Activity
+
+        session.add(
+            Activity(
+                id="act-notes-1",
+                athlete_id=seeded_athlete.id,
+                name="Tempo ride",
+                sport_type="Ride",
+                start_time=datetime(2025, 6, 1, 10, 0, 0),
+                labels=["tempo", "endurance"],
+                notes="Felt strong.",
+                workout_category="tempo",
+                analysis_status="done",
+                analysis="Great aerobic session.",
+            )
+        )
+        await session.commit()
+
+        resp = await client.get("/api/athlete/export", headers=auth_headers)
+        assert resp.status_code == 200
+
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            activities = json.loads(zf.read("activities.json"))
+
+        entry = next(a for a in activities if a["id"] == "act-notes-1")
+        assert entry["labels"] == ["tempo", "endurance"]
+        assert entry["notes"] == "Felt strong."
+        assert entry["workout_category"] == "tempo"
+        assert entry["analysis_status"] == "done"
+        assert entry["analysis"] == "Great aerobic session."
+
+    async def test_export_goals(self, client, auth_headers, session, seeded_athlete):
+        from backend.app.models.user_orm import Goal
+
+        session.add(
+            Goal(
+                id="goal-1",
+                athlete_id=seeded_athlete.id,
+                title="Sub-3 marathon",
+                metric="time",
+                target_value=10800.0,
+                status="active",
+            )
+        )
+        await session.commit()
+
+        resp = await client.get("/api/athlete/export", headers=auth_headers)
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            goals = json.loads(zf.read("goals.json"))
+
+        assert len(goals) == 1
+        assert goals[0]["title"] == "Sub-3 marathon"
+        assert goals[0]["target_value"] == 10800.0
+
+    async def test_export_plans_with_nested_workouts(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        from backend.app.models.user_orm import PlannedWorkout, TrainingPlan
+
+        session.add(
+            TrainingPlan(id="plan-1", athlete_id=seeded_athlete.id, name="Base build", weeks=4)
+        )
+        session.add(
+            PlannedWorkout(
+                id="pw-1",
+                plan_id="plan-1",
+                week_number=1,
+                day_of_week=3,
+                workout_type="endurance",
+                description="90 min Z2",
+            )
+        )
+        await session.commit()
+
+        resp = await client.get("/api/athlete/export", headers=auth_headers)
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            plans = json.loads(zf.read("plans.json"))
+
+        assert len(plans) == 1
+        assert plans[0]["name"] == "Base build"
+        assert len(plans[0]["planned_workouts"]) == 1
+        assert plans[0]["planned_workouts"][0]["description"] == "90 min Z2"
+
+    async def test_export_workout_definitions(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        from backend.app.models.user_orm import WorkoutDefinition
+
+        session.add(
+            WorkoutDefinition(
+                id="wd-1",
+                athlete_id=seeded_athlete.id,
+                name="4x4 VO2max",
+                sport_type="Ride",
+                steps=[{"type": "interval", "duration_s": 240, "target": 300}],
+            )
+        )
+        await session.commit()
+
+        resp = await client.get("/api/athlete/export", headers=auth_headers)
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            defs = json.loads(zf.read("workout_definitions.json"))
+
+        assert len(defs) == 1
+        assert defs[0]["name"] == "4x4 VO2max"
+        assert defs[0]["steps"][0]["duration_s"] == 240
+
+    async def test_export_daily_metrics(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        from datetime import date
+
+        from backend.app.models.user_orm import DailyMetric
+
+        session.add(
+            DailyMetric(
+                athlete_id=seeded_athlete.id,
+                date=date(2025, 6, 1),
+                fitness=55.0,
+                fatigue=40.0,
+                form=15.0,
+                load_day=80.0,
+            )
+        )
+        await session.commit()
+
+        resp = await client.get("/api/athlete/export", headers=auth_headers)
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            metrics = json.loads(zf.read("daily_metrics.json"))
+
+        assert len(metrics) == 1
+        assert metrics[0]["fitness"] == 55.0
+        assert metrics[0]["load_day"] == 80.0
+
+    async def test_export_personal_records(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        from backend.app.models.user_orm import (
+            Activity,
+            ActivityDistanceBest,
+            ActivityPowerBest,
+        )
+
+        start = datetime(2025, 6, 1, 10, 0, 0)
+        session.add(
+            Activity(
+                id="act-pr-1",
+                athlete_id=seeded_athlete.id,
+                name="PR ride",
+                sport_type="Ride",
+                start_time=start,
+            )
+        )
+        session.add(
+            ActivityPowerBest(
+                activity_id="act-pr-1",
+                athlete_id=seeded_athlete.id,
+                duration_s=300,
+                power_w=280.0,
+                activity_start_time=start,
+            )
+        )
+        session.add(
+            ActivityDistanceBest(
+                activity_id="act-pr-1",
+                athlete_id=seeded_athlete.id,
+                distance_m=5000,
+                time_s=600,
+                activity_start_time=start,
+            )
+        )
+        await session.commit()
+
+        resp = await client.get("/api/athlete/export", headers=auth_headers)
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            records = json.loads(zf.read("personal_records.json"))
+
+        assert records["power_bests"][0]["power_w"] == 280.0
+        assert records["distance_bests"][0]["distance_m"] == 5000
+
+    async def test_export_inbox(self, client, auth_headers, session):
+        from backend.app.models.message_orm import Message
+
+        session.add(Message(id="msg-1", type="welcome", data={"foo": "bar"}))
+        await session.commit()
+
+        resp = await client.get("/api/athlete/export", headers=auth_headers)
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            inbox = json.loads(zf.read("inbox.json"))
+
+        assert len(inbox) == 1
+        assert inbox[0]["type"] == "welcome"
+        assert inbox[0]["data"] == {"foo": "bar"}
+
+    async def test_export_weight_log(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        from datetime import date
+
+        from backend.app.models.user_orm import WeightLog
+
+        session.add(
+            WeightLog(
+                id="wl-1",
+                athlete_id=seeded_athlete.id,
+                effective_date=date(2025, 6, 1),
+                weight_kg=72.5,
+            )
+        )
+        await session.commit()
+
+        resp = await client.get("/api/athlete/export", headers=auth_headers)
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            weights = json.loads(zf.read("weight_log.json"))
+
+        assert len(weights) == 1
+        assert weights[0]["weight_kg"] == 72.5
+        assert weights[0]["effective_date"] == "2025-06-01"
+
 
 # ── Avatar fixture ─────────────────────────────────────────────────────────────
 

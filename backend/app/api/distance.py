@@ -22,22 +22,17 @@ async def _get_athlete(global_user_id: str, session: AsyncSession) -> Athlete:
     return athlete
 
 
-@router.get("/bests/distance", response_model=AllTimeDistanceBestsResponse,
-            operation_id="getDistanceBests", summary="All-time distance bests")
-async def get_distance_bests(
+async def all_time_distance_bests(
+    athlete: Athlete,
+    session: AsyncSession,
     include_virtual: bool = False,
-    ctx_session=Depends(get_ctx_and_session),
-):
-    """
-    Return the top-3 all-time best times for each standard distance,
-    ordered by (distance_m asc, rank asc).  Distances with no data are omitted.
+) -> list[DistanceBestEntry]:
+    """Top-3 all-time best times per standard distance for an athlete.
 
-    By default only real (non-virtual) rides are included. Pass
-    include_virtual=true to include all ride types.
+    Ordered by (distance_m asc, rank asc); distances with no data are omitted.
+    By default only real (non-virtual) rides are included. Shared by the
+    ``/bests/distance`` route and the data export.
     """
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
-
     query = (
         select(ActivityDistanceBest, Activity.name)
         .join(Activity, Activity.id == ActivityDistanceBest.activity_id)
@@ -69,4 +64,23 @@ async def get_distance_bests(
     distance_order = {d: i for i, d in enumerate(DISTANCE_BEST_DISTANCES)}
     entries.sort(key=lambda e: (distance_order.get(e.distance_m, 9999), e.rank))
 
+    return entries
+
+
+@router.get("/bests/distance", response_model=AllTimeDistanceBestsResponse,
+            operation_id="getDistanceBests", summary="All-time distance bests")
+async def get_distance_bests(
+    include_virtual: bool = False,
+    ctx_session=Depends(get_ctx_and_session),
+):
+    """
+    Return the top-3 all-time best times for each standard distance,
+    ordered by (distance_m asc, rank asc).  Distances with no data are omitted.
+
+    By default only real (non-virtual) rides are included. Pass
+    include_virtual=true to include all ride types.
+    """
+    ctx, session = ctx_session
+    athlete = await _get_athlete(ctx.user_id, session)
+    entries = await all_time_distance_bests(athlete, session, include_virtual=include_virtual)
     return AllTimeDistanceBestsResponse(bests=entries)

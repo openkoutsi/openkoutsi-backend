@@ -29,20 +29,17 @@ async def _get_athlete(global_user_id: str, session: AsyncSession) -> Athlete:
     return athlete
 
 
-@router.get("/bests/power", response_model=AllTimePowerBestsResponse,
-            operation_id="getPowerBests", summary="All-time power bests")
-async def get_power_bests(
-    days: Optional[int] = Query(None, ge=1, description="Restrict to bests from the past N days. Omit for all-time."),
-    ctx_session=Depends(get_ctx_and_session),
-):
-    """
-    Return the top-3 best average power for each standard duration,
-    ordered by (duration_s asc, rank asc).  Durations with no data are omitted.
-    Pass ?days=90/180/365 to restrict to a rolling window; omit for all-time.
-    """
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+async def all_time_power_bests(
+    athlete: Athlete,
+    session: AsyncSession,
+    days: Optional[int] = None,
+) -> list[PowerBestEntry]:
+    """Top-3 best average power per standard duration for an athlete.
 
+    Ordered by (duration_s asc, rank asc); durations with no data are omitted.
+    Pass ``days`` to restrict to a rolling window; omit for all-time. Shared by
+    the ``/bests/power`` route and the data export.
+    """
     # Load weight log (sorted ascending by date for the lookup below)
     wl_rows = await session.execute(
         select(WeightLog)
@@ -107,6 +104,23 @@ async def get_power_bests(
     duration_order = {d: i for i, d in enumerate(POWER_BEST_DURATIONS)}
     entries.sort(key=lambda e: (duration_order.get(e.duration_s, 9999), e.rank))
 
+    return entries
+
+
+@router.get("/bests/power", response_model=AllTimePowerBestsResponse,
+            operation_id="getPowerBests", summary="All-time power bests")
+async def get_power_bests(
+    days: Optional[int] = Query(None, ge=1, description="Restrict to bests from the past N days. Omit for all-time."),
+    ctx_session=Depends(get_ctx_and_session),
+):
+    """
+    Return the top-3 best average power for each standard duration,
+    ordered by (duration_s asc, rank asc).  Durations with no data are omitted.
+    Pass ?days=90/180/365 to restrict to a rolling window; omit for all-time.
+    """
+    ctx, session = ctx_session
+    athlete = await _get_athlete(ctx.user_id, session)
+    entries = await all_time_power_bests(athlete, session, days=days)
     return AllTimePowerBestsResponse(bests=entries)
 
 

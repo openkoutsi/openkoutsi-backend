@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from backend.app.core.config import settings
 from backend.app.core.deps import get_ctx_and_session
@@ -16,8 +17,19 @@ from backend.app.core.file_encryption import decrypt_file
 from backend.app.core.ssrf import check_url_safe
 from backend.app.db.registry import get_registry_session
 from backend.app.api.consent import CURRENT_CONSENT_VERSION
+from backend.app.api.distance import all_time_distance_bests
+from backend.app.api.power import all_time_power_bests
+from backend.app.models.message_orm import Message
 from backend.app.models.registry_orm import InstanceSettings, ProviderConnection, User
-from backend.app.models.user_orm import Activity, Athlete, WeightLog
+from backend.app.models.user_orm import (
+    Activity,
+    Athlete,
+    DailyMetric,
+    Goal,
+    TrainingPlan,
+    WeightLog,
+    WorkoutDefinition,
+)
 from backend.app.schemas.athlete import AthleteResponse, AthleteUpdate, TrainingStatusBody, TrainingStatusResponse
 from backend.app.services.athlete_experience import VALID_EXPERIENCE_LEVELS
 
@@ -447,6 +459,209 @@ async def get_weight_log(ctx_session=Depends(get_ctx_and_session)):
     return [{"date": e.effective_date.isoformat(), "weight_kg": e.weight_kg} for e in entries]
 
 
+def _iso(value) -> str | None:
+    """ISO-format a date/datetime, or None."""
+    return value.isoformat() if value is not None else None
+
+
+def _export_profile(athlete: Athlete, username: str) -> dict:
+    """Full athlete profile, including LLM/analysis settings (BYOK key redacted)."""
+    return {
+        "id": athlete.id,
+        "username": username,
+        "name": athlete.name,
+        "date_of_birth": _iso(athlete.date_of_birth),
+        "weight_kg": athlete.weight_kg,
+        "ftp": athlete.ftp,
+        "max_hr": athlete.max_hr,
+        "resting_hr": athlete.resting_hr,
+        "hr_zones": athlete.hr_zones or [],
+        "power_zones": athlete.power_zones or [],
+        "availability": athlete.availability or {},
+        "ftp_tests": athlete.ftp_tests or [],
+        "app_settings": _safe_app_settings(athlete),
+        "training_status": athlete.training_status,
+        "training_status_status": athlete.training_status_status,
+        "training_status_date": _iso(athlete.training_status_date),
+        "training_status_updated_at": _iso(athlete.training_status_updated_at),
+        "created_at": _iso(athlete.created_at),
+        "updated_at": _iso(athlete.updated_at),
+        "exported_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def _export_activity(a: Activity) -> dict:
+    """One activity, including notes, labels and LLM analysis."""
+    return {
+        "id": a.id,
+        "name": a.name,
+        "sport_type": a.sport_type,
+        "start_time": _iso(a.start_time),
+        "duration_s": a.duration_s,
+        "distance_m": a.distance_m,
+        "elevation_m": a.elevation_m,
+        "avg_power": a.avg_power,
+        "weighted_power": a.weighted_power,
+        "avg_hr": a.avg_hr,
+        "max_hr": a.max_hr,
+        "avg_speed_ms": a.avg_speed_ms,
+        "avg_cadence": a.avg_cadence,
+        "load": a.load,
+        "intensity": a.intensity,
+        "workout_category": a.workout_category,
+        "labels": a.labels or [],
+        "notes": a.notes,
+        "status": a.status,
+        "analysis_status": a.analysis_status,
+        "analysis": a.analysis,
+        "sources": [s.provider for s in (a.sources or [])],
+        "created_at": _iso(a.created_at),
+        "has_fit_file": a.has_fit_file,
+    }
+
+
+async def _export_goals(athlete: Athlete, session: AsyncSession) -> list[dict]:
+    result = await session.execute(
+        select(Goal).where(Goal.athlete_id == athlete.id).order_by(Goal.created_at)
+    )
+    return [
+        {
+            "id": g.id,
+            "title": g.title,
+            "description": g.description,
+            "target_date": _iso(g.target_date),
+            "metric": g.metric,
+            "target_value": g.target_value,
+            "current_value": g.current_value,
+            "status": g.status,
+            "outcome_note": g.outcome_note,
+            "guidance": g.guidance,
+            "guidance_verdict": g.guidance_verdict,
+            "guidance_status": g.guidance_status,
+            "guidance_updated_at": _iso(g.guidance_updated_at),
+            "created_at": _iso(g.created_at),
+        }
+        for g in result.scalars().all()
+    ]
+
+
+async def _export_plans(athlete: Athlete, session: AsyncSession) -> list[dict]:
+    result = await session.execute(
+        select(TrainingPlan)
+        .where(TrainingPlan.athlete_id == athlete.id)
+        .options(selectinload(TrainingPlan.workouts))
+        .order_by(TrainingPlan.created_at)
+    )
+    return [
+        {
+            "id": p.id,
+            "name": p.name,
+            "start_date": _iso(p.start_date),
+            "end_date": _iso(p.end_date),
+            "goal": p.goal,
+            "weeks": p.weeks,
+            "status": p.status,
+            "config": p.config or {},
+            "generation_method": p.generation_method,
+            "created_at": _iso(p.created_at),
+            "planned_workouts": [
+                {
+                    "id": w.id,
+                    "week_number": w.week_number,
+                    "day_of_week": w.day_of_week,
+                    "workout_type": w.workout_type,
+                    "description": w.description,
+                    "duration_min": w.duration_min,
+                    "target_load": w.target_load,
+                    "completed_activity_id": w.completed_activity_id,
+                    "workout_definition_id": w.workout_definition_id,
+                    "skip_reason": w.skip_reason,
+                }
+                for w in sorted(
+                    p.workouts, key=lambda w: (w.week_number, w.day_of_week)
+                )
+            ],
+        }
+        for p in result.scalars().all()
+    ]
+
+
+async def _export_workout_definitions(
+    athlete: Athlete, session: AsyncSession
+) -> list[dict]:
+    result = await session.execute(
+        select(WorkoutDefinition)
+        .where(WorkoutDefinition.athlete_id == athlete.id)
+        .order_by(WorkoutDefinition.created_at)
+    )
+    return [
+        {
+            "id": w.id,
+            "name": w.name,
+            "description": w.description,
+            "sport_type": w.sport_type,
+            "steps": w.steps or [],
+            "estimated_duration_s": w.estimated_duration_s,
+            "estimated_load": w.estimated_load,
+            "created_at": _iso(w.created_at),
+            "updated_at": _iso(w.updated_at),
+        }
+        for w in result.scalars().all()
+    ]
+
+
+async def _export_daily_metrics(athlete: Athlete, session: AsyncSession) -> list[dict]:
+    """CTL/ATL/TSB per day (`load_day` also drives weekly TSS)."""
+    result = await session.execute(
+        select(DailyMetric)
+        .where(DailyMetric.athlete_id == athlete.id)
+        .order_by(DailyMetric.date)
+    )
+    return [
+        {
+            "date": _iso(m.date),
+            "fitness": m.fitness,
+            "fatigue": m.fatigue,
+            "form": m.form,
+            "load_day": m.load_day,
+        }
+        for m in result.scalars().all()
+    ]
+
+
+async def _export_inbox(session: AsyncSession) -> list[dict]:
+    """In-app messages. The per-user DB identifies the recipient, so no filter."""
+    result = await session.execute(
+        select(Message).order_by(Message.created_at)
+    )
+    return [
+        {
+            "id": m.id,
+            "type": m.type,
+            "data": m.data or {},
+            "read_at": _iso(m.read_at),
+            "created_at": _iso(m.created_at),
+        }
+        for m in result.scalars().all()
+    ]
+
+
+async def _export_weight_log(athlete: Athlete, session: AsyncSession) -> list[dict]:
+    result = await session.execute(
+        select(WeightLog)
+        .where(WeightLog.athlete_id == athlete.id)
+        .order_by(WeightLog.effective_date)
+    )
+    return [
+        {
+            "effective_date": _iso(w.effective_date),
+            "weight_kg": w.weight_kg,
+            "created_at": _iso(w.created_at),
+        }
+        for w in result.scalars().all()
+    ]
+
+
 @router.get("/export",
             operation_id="exportAthlete", summary="Export all athlete data as a zip")
 async def export_athlete(
@@ -462,22 +677,6 @@ async def export_athlete(
     user = user_result.scalar_one_or_none()
     username = user.username if user else ctx.user_id
 
-    profile_data = {
-        "id": athlete.id,
-        "username": username,
-        "name": athlete.name,
-        "date_of_birth": athlete.date_of_birth.isoformat() if athlete.date_of_birth else None,
-        "weight_kg": athlete.weight_kg,
-        "ftp": athlete.ftp,
-        "max_hr": athlete.max_hr,
-        "resting_hr": athlete.resting_hr,
-        "hr_zones": athlete.hr_zones or [],
-        "power_zones": athlete.power_zones or [],
-        "ftp_tests": athlete.ftp_tests or [],
-        "created_at": athlete.created_at.isoformat(),
-        "exported_at": datetime.now(timezone.utc).isoformat(),
-    }
-
     activities_result = await session.execute(
         select(Activity)
         .where(Activity.athlete_id == athlete.id)
@@ -485,33 +684,29 @@ async def export_athlete(
     )
     activities = activities_result.scalars().all()
 
-    activities_data = [
-        {
-            "id": a.id,
-            "name": a.name,
-            "sport_type": a.sport_type,
-            "start_time": a.start_time.isoformat() if a.start_time else None,
-            "duration_s": a.duration_s,
-            "distance_m": a.distance_m,
-            "elevation_m": a.elevation_m,
-            "avg_power": a.avg_power,
-            "weighted_power": a.weighted_power,
-            "avg_hr": a.avg_hr,
-            "max_hr": a.max_hr,
-            "load": a.load,
-            "intensity": a.intensity,
-            "sources": [s.provider for s in (a.sources or [])],
-            "status": a.status,
-            "created_at": a.created_at.isoformat(),
-            "has_fit_file": a.has_fit_file,
-        }
-        for a in activities
-    ]
+    power_bests = await all_time_power_bests(athlete, session)
+    distance_bests = await all_time_distance_bests(athlete, session)
+    personal_records = {
+        "power_bests": [e.model_dump(mode="json") for e in power_bests],
+        "distance_bests": [e.model_dump(mode="json") for e in distance_bests],
+    }
+
+    files: dict[str, object] = {
+        "profile.json": _export_profile(athlete, username),
+        "activities.json": [_export_activity(a) for a in activities],
+        "goals.json": await _export_goals(athlete, session),
+        "plans.json": await _export_plans(athlete, session),
+        "workout_definitions.json": await _export_workout_definitions(athlete, session),
+        "daily_metrics.json": await _export_daily_metrics(athlete, session),
+        "personal_records.json": personal_records,
+        "inbox.json": await _export_inbox(session),
+        "weight_log.json": await _export_weight_log(athlete, session),
+    }
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("profile.json", json.dumps(profile_data, indent=2))
-        zf.writestr("activities.json", json.dumps(activities_data, indent=2))
+        for filename, payload in files.items():
+            zf.writestr(filename, json.dumps(payload, indent=2))
         for a in activities:
             fit_sources = [s for s in (a.sources or []) if s.fit_file_path]
             for src in fit_sources:
