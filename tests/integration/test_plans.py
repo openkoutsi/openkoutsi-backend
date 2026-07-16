@@ -294,10 +294,10 @@ def _make_llm_plan_json(num_weeks=4) -> str:
         for day in range(1, 8):
             if day in (2, 4, 6):
                 workouts.append({"day_of_week": day, "workout_type": "endurance",
-                                  "description": "Easy ride", "duration_min": 60, "target_tss": 50})
+                                  "description": "Easy ride", "duration_min": 60, "target_load": 50})
             else:
                 workouts.append({"day_of_week": day, "workout_type": "rest",
-                                  "description": None, "duration_min": None, "target_tss": None})
+                                  "description": None, "duration_min": None, "target_load": None})
         weeks.append({"week_number": w, "workouts": workouts})
     return json.dumps({"weeks": weeks})
 
@@ -521,7 +521,7 @@ class TestLlmPlanGeneration:
         )
         prompt = _build_user_prompt(config, "Gran Fondo 2025", 8, 280, 45.0)
         assert "280" in prompt  # FTP
-        assert "45.0" in prompt  # CTL
+        assert "45.0" in prompt  # Fitness
         assert "Gran Fondo" in prompt
 
     async def test_extract_json_strips_markdown_fences(self):
@@ -725,7 +725,7 @@ class TestEditWorkout:
         plan_id, workout = await self._workout(client, auth_headers)
         resp = await client.put(
             f"/api/plans/{plan_id}/workouts/{workout['id']}",
-            json={"workout_type": "vo2max", "description": "5x3min", "duration_min": 75, "target_tss": 95},
+            json={"workout_type": "vo2max", "description": "5x3min", "duration_min": 75, "target_load": 95},
             headers=auth_headers,
         )
         assert resp.status_code == 200
@@ -733,7 +733,7 @@ class TestEditWorkout:
         assert data["workout_type"] == "vo2max"
         assert data["description"] == "5x3min"
         assert data["duration_min"] == 75
-        assert data["target_tss"] == 95
+        assert data["target_load"] == 95
 
     async def test_partial_update_leaves_other_fields(self, client, auth_headers):
         plan_id, workout = await self._workout(client, auth_headers)
@@ -796,7 +796,7 @@ class TestAddWorkout:
         resp = await client.post(
             f"/api/plans/{plan['id']}/workouts",
             json={"week_number": 1, "day_of_week": 3, "workout_type": "tempo",
-                  "description": "Tempo intervals", "duration_min": 50, "target_tss": 60},
+                  "description": "Tempo intervals", "duration_min": 50, "target_load": 60},
             headers=auth_headers,
         )
         assert resp.status_code == 201

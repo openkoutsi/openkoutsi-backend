@@ -79,11 +79,11 @@ def _valid_plan_json(num_weeks: int) -> str:
     for w in range(1, num_weeks + 1):
         workouts = [
             {"day_of_week": d, "workout_type": "rest", "description": None,
-             "duration_min": None, "target_tss": None}
+             "duration_min": None, "target_load": None}
             for d in range(1, 8)
         ]
         workouts[1] = {"day_of_week": 2, "workout_type": "threshold",
-                       "description": "2x20 at threshold", "duration_min": 60, "target_tss": 80}
+                       "description": "2x20 at threshold", "duration_min": 60, "target_load": 80}
         weeks.append({"week_number": w, "workouts": workouts})
     return json.dumps({"weeks": weeks})
 

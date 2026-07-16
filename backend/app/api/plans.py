@@ -150,7 +150,7 @@ async def create_plan(
                     workout_type=day.workout_type,
                     description=day.description,
                     duration_min=day.duration_min,
-                    target_tss=day.target_tss,
+                    target_load=day.target_load,
                 ))
         await session.commit()
         await session.refresh(plan)
@@ -448,7 +448,7 @@ async def add_workout(
         workout_type=body.workout_type,
         description=body.description,
         duration_min=body.duration_min,
-        target_tss=body.target_tss,
+        target_load=body.target_load,
     )
     session.add(workout)
     await session.commit()
@@ -482,7 +482,7 @@ async def update_workout(
     if workout.completed_activity_id is not None:
         raise HTTPException(409, "Cannot edit a workout that has already been completed")
 
-    for field in ("workout_type", "description", "duration_min", "target_tss", "day_of_week", "week_number"):
+    for field in ("workout_type", "description", "duration_min", "target_load", "day_of_week", "week_number"):
         value = getattr(body, field)
         if value is not None:
             setattr(workout, field, value)
@@ -568,7 +568,7 @@ async def regenerate_plan(
                     workout_type=day.workout_type,
                     description=day.description,
                     duration_min=day.duration_min,
-                    target_tss=day.target_tss,
+                    target_load=day.target_load,
                 )
     elif body.use_llm:
         if not body.config:
@@ -681,7 +681,7 @@ async def generate_upcoming_workouts(
 
     for pw, pdate in selected:
         wtype = (pw.workout_type or "").lower()
-        if wtype in ("", "rest") or (pw.duration_min is None and pw.target_tss is None):
+        if wtype in ("", "rest") or (pw.duration_min is None and pw.target_load is None):
             results.append(GenerateUpcomingResultItem(
                 planned_workout_id=pw.id, date=pdate, workout_type=pw.workout_type,
                 status="skipped", reason="rest_or_unstructured",

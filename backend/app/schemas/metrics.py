@@ -6,46 +6,46 @@ from pydantic import BaseModel, model_validator
 
 class FitnessMetricResponse(BaseModel):
     date: date
-    ctl: float
-    atl: float
-    tsb: float
-    tss_day: float = 0.0      # DB column name
-    daily_tss: float = 0.0    # frontend-facing alias
+    fitness: float
+    fatigue: float
+    form: float
+    load_day: float = 0.0      # DB column name
+    daily_load: float = 0.0    # frontend-facing alias
 
     model_config = {"from_attributes": True}
 
     @model_validator(mode="after")
     def _sync_aliases(self) -> "FitnessMetricResponse":
         # Ensure both names are populated, whichever side has a value
-        if self.daily_tss == 0.0 and self.tss_day != 0.0:
-            self.daily_tss = self.tss_day
-        elif self.tss_day == 0.0 and self.daily_tss != 0.0:
-            self.tss_day = self.daily_tss
+        if self.daily_load == 0.0 and self.load_day != 0.0:
+            self.daily_load = self.load_day
+        elif self.load_day == 0.0 and self.daily_load != 0.0:
+            self.load_day = self.daily_load
         return self
 
 
 FormLabel = Literal["peak", "fresh", "neutral", "tired", "overreached"]
 
 
-def _tsb_to_form(tsb: float) -> FormLabel:
-    if tsb > 25:
+def _form_to_label(form: float) -> FormLabel:
+    if form > 25:
         return "peak"
-    if tsb > 5:
+    if form > 5:
         return "fresh"
-    if tsb > -10:
+    if form > -10:
         return "neutral"
-    if tsb > -30:
+    if form > -30:
         return "tired"
     return "overreached"
 
 
 class FitnessCurrentResponse(FitnessMetricResponse):
-    form: FormLabel = "neutral"
+    form_label: FormLabel = "neutral"
 
     @model_validator(mode="after")
     def _compute_form(self) -> "FitnessCurrentResponse":
-        self.daily_tss = self.tss_day if self.daily_tss == 0.0 else self.daily_tss
-        self.form = _tsb_to_form(self.tsb)
+        self.daily_load = self.load_day if self.daily_load == 0.0 else self.daily_load
+        self.form_label = _form_to_label(self.form)
         return self
 
 

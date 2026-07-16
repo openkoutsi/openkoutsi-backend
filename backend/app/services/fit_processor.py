@@ -13,8 +13,8 @@ from openkoutsi.fit_processing import (
     compute_interval_stats,
 )
 from openkoutsi.training_math import (
-    normalized_power,
-    calculate_tss,
+    weighted_power,
+    calculate_load,
     compute_power_bests,
     compute_distance_bests,
 )
@@ -45,10 +45,10 @@ async def process_fit_file(
 ) -> Activity:
     profile = summarizeWorkout(path)
 
-    np = normalized_power(profile.power) if profile.power else None
-    tss, intensity_factor = calculate_tss(
+    wp = weighted_power(profile.power) if profile.power else None
+    load, intensity = calculate_load(
         profile.duration,
-        np,
+        wp,
         profile.avgHeartRate if profile.heartRate else None,
         athlete.ftp,
         athlete.max_hr,
@@ -61,13 +61,13 @@ async def process_fit_file(
     activity.distance_m = float(profile.distance)
     activity.elevation_m = float(profile.elevationGain)
     activity.avg_power = profile.avgPower if profile.power else None
-    activity.normalized_power = np
+    activity.weighted_power = wp
     activity.avg_hr = profile.avgHeartRate if profile.heartRate else None
     activity.max_hr = profile.peakHR if profile.heartRate else None
     activity.avg_speed_ms = (profile.avgSpeed / 3.6) if profile.speed else None
     activity.avg_cadence = float(profile.avgCadence) if profile.cadence else None
-    activity.tss = tss
-    activity.intensity_factor = intensity_factor
+    activity.load = load
+    activity.intensity = intensity
     activity.status = "processed"
 
     power_data = [float(v) for v in profile.power]
@@ -130,8 +130,8 @@ async def process_fit_file(
     for iv in intervals:
         session.add(ActivityInterval(id=str(uuid.uuid4()), activity_id=activity.id, **iv))
 
-    vi = (np / activity.avg_power) if (np and activity.avg_power) else None
-    category = classify_workout(intensity_factor, vi)
+    vi = (wp / activity.avg_power) if (wp and activity.avg_power) else None
+    category = classify_workout(intensity, vi)
     activity.workout_category = category.value if category else None
 
     await session.commit()

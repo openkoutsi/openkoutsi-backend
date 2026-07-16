@@ -111,7 +111,7 @@ async def get_fitness_current(ctx_session=Depends(get_ctx_and_session)):
         metric = fallback.scalar_one_or_none()
     if metric is None:
         return FitnessCurrentResponse(
-            date=today, ctl=0.0, atl=0.0, tsb=0.0, tss_day=0.0
+            date=today, fitness=0.0, fatigue=0.0, form=0.0, load_day=0.0
         )
     return FitnessCurrentResponse.model_validate(metric)
 
@@ -173,7 +173,7 @@ async def get_ftp_history(ctx_session=Depends(get_ctx_and_session)):
 
 @router.post("/catch-up", status_code=200)
 async def catch_up(ctx_session=Depends(get_ctx_and_session)):
-    """Fill missing DailyMetric rows using stored TSS. Called on dashboard load."""
+    """Fill missing DailyMetric rows using stored Load. Called on dashboard load."""
     ctx, session = ctx_session
     athlete = await _get_athlete(ctx.user_id, session)
     updated = await catch_up_metrics(athlete.id, session)
@@ -186,8 +186,8 @@ async def recalculate_all(
     ctx_session=Depends(get_ctx_and_session),
 ):
     """
-    Recompute TSS for every processed activity using the athlete's current FTP/max_hr,
-    then rebuild CTL/ATL/TSB from the earliest activity forward.
+    Recompute Load for every processed activity using the athlete's current FTP/max_hr,
+    then rebuild Fitness/Fatigue/Form from the earliest activity forward.
 
     Returns immediately (202); work happens in the background.
     """
@@ -202,7 +202,7 @@ _RECALCULATE_LOOKBACK_DAYS = 180
 
 async def _bg_full_recalculate(user_id: str, athlete_id: str) -> None:
     from sqlalchemy import delete
-    from openkoutsi.training_math import normalized_power, calculate_tss, compute_power_bests, compute_distance_bests
+    from openkoutsi.training_math import weighted_power, calculate_load, compute_power_bests, compute_distance_bests
     from backend.app.services.metrics_engine import recalculate_from
     from backend.app.models.user_orm import ActivityDistanceBest, ActivityPowerBest
 
@@ -214,7 +214,7 @@ async def _bg_full_recalculate(user_id: str, athlete_id: str) -> None:
         )
         athlete = athlete_result.scalar_one()
 
-        # Load recent processed activities only; CTL/ATL seed error < 2% after 180 days
+        # Load recent processed activities only; Fitness/Fatigue seed error < 2% after 180 days
         acts_result = await session.execute(
             select(Activity)
             .where(
@@ -232,7 +232,7 @@ async def _bg_full_recalculate(user_id: str, athlete_id: str) -> None:
         earliest: date | None = None
 
         for activity in activities:
-            # Re-derive NP from stored power stream (if any)
+            # Re-derive Weighted Power from stored power stream (if any)
             stream_result = await session.execute(
                 select(ActivityStream).where(
                     ActivityStream.activity_id == activity.id,
@@ -242,24 +242,24 @@ async def _bg_full_recalculate(user_id: str, athlete_id: str) -> None:
             power_stream = stream_result.scalar_one_or_none()
             power_data: list[float] = power_stream.data if power_stream else []
 
-            np = (
-                normalized_power(power_data)
+            wp = (
+                weighted_power(power_data)
                 if len(power_data) >= 30
                 else (activity.avg_power)
             )
 
-            tss, intensity_factor = calculate_tss(
+            load, intensity = calculate_load(
                 activity.duration_s or 0,
-                np,
+                wp,
                 activity.avg_hr,
                 athlete.ftp,
                 athlete.max_hr,
             )
 
-            activity.tss = tss
-            activity.intensity_factor = intensity_factor
-            if np is not None:
-                activity.normalized_power = np
+            activity.load = load
+            activity.intensity = intensity
+            if wp is not None:
+                activity.weighted_power = wp
 
             # Recompute power bests from the stored stream
             if power_data:

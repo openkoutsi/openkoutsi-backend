@@ -36,11 +36,11 @@ def _make_goal(**kwargs):
     return goal
 
 
-def _make_metric(ctl=64.0, atl=71.0, tsb=-7.0):
+def _make_metric(fitness=64.0, fatigue=71.0, form=-7.0):
     m = MagicMock(spec=DailyMetric)
-    m.ctl = ctl
-    m.atl = atl
-    m.tsb = tsb
+    m.fitness = fitness
+    m.fatigue = fatigue
+    m.form = form
     return m
 
 
@@ -49,7 +49,7 @@ def _make_activity(**kwargs):
     act.sport_type = kwargs.get("sport_type", "Ride")
     act.start_time = kwargs.get("start_time", datetime(2026, 7, 8, 17, tzinfo=timezone.utc))
     act.duration_s = kwargs.get("duration_s", 3600)
-    act.tss = kwargs.get("tss", 68.0)
+    act.load = kwargs.get("load", 68.0)
     return act
 
 
@@ -113,15 +113,15 @@ class TestBuildGoalPrompt:
 
     def test_includes_fitness_metrics(self):
         prompt = _build_goal_prompt(
-            _make_athlete(), _make_goal(), [], _make_metric(ctl=64.0), None, _NOW
+            _make_athlete(), _make_goal(), [], _make_metric(fitness=64.0), None, _NOW
         )
-        assert "CTL" in prompt
-        assert "ATL" in prompt
-        assert "TSB" in prompt
+        assert "Fitness" in prompt
+        assert "Fatigue" in prompt
+        assert "Form" in prompt
 
     def test_omits_fitness_without_metric(self):
         prompt = _build_goal_prompt(_make_athlete(), _make_goal(), [], None, None, _NOW)
-        assert "CTL" not in prompt
+        assert "Fitness" not in prompt
 
     def test_includes_recent_activities(self):
         prompt = _build_goal_prompt(

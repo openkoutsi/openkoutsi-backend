@@ -43,7 +43,7 @@ from prompts.schemas import PlanOutput, WorkoutOutput, response_format  # noqa: 
 def _plan(s: dict) -> tuple[str, str]:
     return (
         plan_svc._SYSTEM_PROMPT,
-        plan_svc._build_user_prompt(s["config"], s["goal"], s["num_weeks"], s["ftp"], s["ctl"]),
+        plan_svc._build_user_prompt(s["config"], s["goal"], s["num_weeks"], s["ftp"], s["fitness"]),
     )
 
 

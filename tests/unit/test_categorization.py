@@ -5,7 +5,7 @@ from openkoutsi.categorization import WorkoutCategory, classify_workout
 
 
 class TestClassifyWorkout:
-    def test_returns_none_without_intensity_factor(self):
+    def test_returns_none_without_intensity(self):
         assert classify_workout(None, None) is None
         assert classify_workout(None, 1.05) is None
 

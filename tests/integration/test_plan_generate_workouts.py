@@ -134,7 +134,7 @@ def _today_dow() -> int:
 async def _link_definition(session, athlete, pw) -> WorkoutDefinition:
     wd = WorkoutDefinition(
         id=str(uuid.uuid4()), athlete_id=athlete.id, name="Cached",
-        sport_type="Ride", steps=_DEF_STEPS, estimated_duration_s=1200, estimated_tss=30.0,
+        sport_type="Ride", steps=_DEF_STEPS, estimated_duration_s=1200, estimated_load=30.0,
     )
     session.add(wd)
     await session.flush()
@@ -149,7 +149,7 @@ class TestGenerateUpcomingWorkouts:
         # A single structured workout scheduled today (week 1, day = today's weekday).
         plan, (pw,) = await _seed_plan(session, [
             {"week_number": 1, "day_of_week": _today_dow(),
-             "workout_type": "threshold", "description": "2x20", "duration_min": 60, "target_tss": 80},
+             "workout_type": "threshold", "description": "2x20", "duration_min": 60, "target_load": 80},
         ])
 
         with patch("httpx.AsyncClient", return_value=_mock_llm(_workout_json())):
@@ -179,10 +179,10 @@ class TestGenerateUpcomingWorkouts:
         await _configure_athlete(session, llm=False)  # no LLM — nothing should need it
         plan, (rest_pw, future_pw) = await _seed_plan(session, [
             {"week_number": 1, "day_of_week": _today_dow(),
-             "workout_type": "rest", "duration_min": None, "target_tss": None},
+             "workout_type": "rest", "duration_min": None, "target_load": None},
             # Week 4 → ~3 weeks out, well beyond the today→+6 window.
             {"week_number": 4, "day_of_week": _today_dow(),
-             "workout_type": "threshold", "duration_min": 60, "target_tss": 80},
+             "workout_type": "threshold", "duration_min": 60, "target_load": 80},
         ])
 
         resp = await client.post(
@@ -202,7 +202,7 @@ class TestGenerateUpcomingWorkouts:
         athlete = await _configure_athlete(session, llm=False)
         plan, (pw,) = await _seed_plan(session, [
             {"week_number": 1, "day_of_week": _today_dow(),
-             "workout_type": "threshold", "duration_min": 60, "target_tss": 80},
+             "workout_type": "threshold", "duration_min": 60, "target_load": 80},
         ])
         wd = await _link_definition(session, athlete, pw)
 
@@ -225,7 +225,7 @@ class TestGenerateUpcomingWorkouts:
         await _configure_athlete(session, llm=True)
         plan, (pw,) = await _seed_plan(session, [
             {"week_number": 1, "day_of_week": _today_dow(),
-             "workout_type": "threshold", "duration_min": 60, "target_tss": 80},
+             "workout_type": "threshold", "duration_min": 60, "target_load": 80},
         ])
 
         with patch("httpx.AsyncClient", return_value=_mock_llm("not valid json")):
@@ -246,7 +246,7 @@ class TestGenerateUpcomingWorkouts:
         await _configure_athlete(session, llm=False)
         plan, _ = await _seed_plan(session, [
             {"week_number": 1, "day_of_week": _today_dow(),
-             "workout_type": "threshold", "duration_min": 60, "target_tss": 80},
+             "workout_type": "threshold", "duration_min": 60, "target_load": 80},
         ])
         resp = await client.post(
             f"/api/plans/{plan.id}/generate-upcoming/workouts", json={}, headers=auth_headers
@@ -263,7 +263,7 @@ class TestGenerateUpcomingWorkouts:
         athlete = await _configure_athlete(session, llm=True)
         plan, (pw,) = await _seed_plan(session, [
             {"week_number": 1, "day_of_week": _today_dow(),
-             "workout_type": "threshold", "duration_min": 60, "target_tss": 80},
+             "workout_type": "threshold", "duration_min": 60, "target_load": 80},
         ])
         old_def = await _link_definition(session, athlete, pw)
 
@@ -286,7 +286,7 @@ class TestStructuredOutputs:
     async def _run(self, client, auth_headers, session, mock_http):
         plan, (pw,) = await _seed_plan(session, [
             {"week_number": 1, "day_of_week": _today_dow(),
-             "workout_type": "threshold", "duration_min": 60, "target_tss": 80},
+             "workout_type": "threshold", "duration_min": 60, "target_load": 80},
         ])
         with patch("httpx.AsyncClient", return_value=mock_http):
             resp = await client.post(

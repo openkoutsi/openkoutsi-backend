@@ -27,9 +27,9 @@ def _make_activity(**kwargs):
     act.distance_m = kwargs.get("distance_m", 50000)
     act.elevation_m = kwargs.get("elevation_m", 500)
     act.avg_power = kwargs.get("avg_power", 220)
-    act.normalized_power = kwargs.get("normalized_power", 235)
-    act.intensity_factor = kwargs.get("intensity_factor", 0.84)
-    act.tss = kwargs.get("tss", 75.0)
+    act.weighted_power = kwargs.get("weighted_power", 235)
+    act.intensity = kwargs.get("intensity", 0.84)
+    act.load = kwargs.get("load", 75.0)
     act.avg_hr = kwargs.get("avg_hr", 155)
     act.max_hr = kwargs.get("max_hr", 178)
     act.intervals = kwargs.get("intervals", [])
@@ -48,11 +48,11 @@ def _make_athlete(**kwargs):
     return ath
 
 
-def _make_fatigue(ctl=50.0, atl=55.0, tsb=-5.0):
+def _make_fatigue(fitness=50.0, fatigue=55.0, form=-5.0):
     f = MagicMock()
-    f.ctl = ctl
-    f.atl = atl
-    f.tsb = tsb
+    f.fitness = fitness
+    f.fatigue = fatigue
+    f.form = form
     return f
 
 
@@ -110,21 +110,21 @@ class TestBuildPrompt:
         act = _make_activity()
         prompt = _build_prompt(act, _make_athlete())
         assert "220" in prompt  # avg power
-        assert "235" in prompt  # NP
+        assert "235" in prompt  # Weighted Power
 
     def test_includes_fatigue_when_provided(self):
         prompt = _build_prompt(_make_activity(), _make_athlete(), _make_fatigue())
-        assert "CTL" in prompt
-        assert "ATL" in prompt
-        assert "TSB" in prompt
+        assert "Fitness" in prompt
+        assert "Fatigue" in prompt
+        assert "Form" in prompt
 
     def test_no_fatigue_omits_fatigue_section(self):
         prompt = _build_prompt(_make_activity(), _make_athlete(), None)
-        assert "CTL" not in prompt
+        assert "Fitness" not in prompt
 
     def test_missing_optional_fields_dont_crash(self):
         act = _make_activity(distance_m=None, elevation_m=None, avg_power=None,
-                              normalized_power=None, tss=None, avg_hr=None, max_hr=None)
+                              weighted_power=None, load=None, avg_hr=None, max_hr=None)
         prompt = _build_prompt(act, _make_athlete(ftp=None, max_hr=None))
         assert "Ride" in prompt  # at minimum sport type is present
 

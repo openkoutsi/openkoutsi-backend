@@ -1,5 +1,5 @@
 """
-Shared training load calculations — peak power, normalized power, TSS, distance bests.
+Shared training load calculations — peak power, weighted power, Load, distance bests.
 """
 
 POWER_BEST_DURATIONS: list[int] = [
@@ -142,7 +142,7 @@ def compute_distance_bests(speed_stream: list[float]) -> dict[int, int]:
     }
 
 
-def normalized_power(power_series: list[float]) -> float | None:
+def weighted_power(power_series: list[float]) -> float | None:
     """30-second rolling average → raise to 4th power → mean → 4th root."""
     if len(power_series) < 30:
         return None
@@ -156,30 +156,30 @@ def normalized_power(power_series: list[float]) -> float | None:
     return (sum(v**4 for v in rolling) / len(rolling)) ** 0.25
 
 
-def calculate_tss(
+def calculate_load(
     duration_s: int,
-    np: float | None,
+    wp: float | None,
     avg_hr: float | None,
     ftp: int | None,
     max_hr: int | None,
 ) -> tuple[float | None, float | None]:
     """
-    Returns (tss, intensity_factor).
+    Returns (load, intensity).
 
-    Priority: power-based TSS if NP and FTP are available, otherwise
-    HR-based TRIMP TSS if avg_hr and max_hr are available.
+    Priority: power-based Load if Weighted Power and FTP are available, otherwise
+    HR-based TRIMP Load if avg_hr and max_hr are available.
     """
-    if np is not None and ftp:
-        intensity_factor = np / ftp
-        tss = (duration_s * np * intensity_factor) / (ftp * 3600) * 100
-        return tss, intensity_factor
+    if wp is not None and ftp:
+        intensity = wp / ftp
+        load = (duration_s * wp * intensity) / (ftp * 3600) * 100
+        return load, intensity
 
     if avg_hr is not None and max_hr:
         lthr = 0.9 * max_hr
         if lthr == 0:
             return None, None
-        intensity_factor = avg_hr / lthr
-        tss = (duration_s / 3600) * intensity_factor ** 2 * 100
-        return tss, None
+        intensity = avg_hr / lthr
+        load = (duration_s / 3600) * intensity ** 2 * 100
+        return load, None
 
     return None, None

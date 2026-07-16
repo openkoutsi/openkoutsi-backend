@@ -123,7 +123,7 @@ async def create_workout(
         sport_type=body.sport_type,
         steps=steps,
         estimated_duration_s=estimate_duration_s(steps),
-        estimated_tss=estimate_tss(steps, athlete.ftp),
+        estimated_load=estimate_tss(steps, athlete.ftp),
     )
     session.add(workout)
     await session.commit()
@@ -155,7 +155,7 @@ async def update_workout(
     if "steps" in update:
         update["steps"] = _validate_steps(body.steps)
         update["estimated_duration_s"] = estimate_duration_s(update["steps"])
-        update["estimated_tss"] = estimate_tss(update["steps"], athlete.ftp)
+        update["estimated_load"] = estimate_tss(update["steps"], athlete.ftp)
 
     for field, value in update.items():
         setattr(workout, field, value)

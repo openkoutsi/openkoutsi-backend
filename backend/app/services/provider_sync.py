@@ -46,10 +46,10 @@ from openkoutsi.fit_processing import (
 )
 from backend.app.services.providers.registry import PROVIDERS
 from openkoutsi.training_math import (
-    calculate_tss,
+    calculate_load,
     compute_distance_bests,
     compute_power_bests,
-    normalized_power,
+    weighted_power,
 )
 from openkoutsi.fit import summarizeWorkout, extractIntervals
 
@@ -211,25 +211,25 @@ async def sync_provider_activities(
                 ):
                     old_dur = act.duration_s
                     act.duration_s = norm.duration_s
-                    if act.normalized_power and athlete.ftp:
-                        new_tss, new_if = calculate_tss(
+                    if act.weighted_power and athlete.ftp:
+                        new_tss, new_if = calculate_load(
                             norm.duration_s,
-                            act.normalized_power,
+                            act.weighted_power,
                             act.avg_hr,
                             athlete.ftp,
                             athlete.max_hr,
                         )
-                        act.tss = new_tss
-                        act.intensity_factor = new_if
+                        act.load = new_tss
+                        act.intensity = new_if
                     elif act.avg_hr and athlete.max_hr:
-                        new_tss, _ = calculate_tss(
+                        new_tss, _ = calculate_load(
                             norm.duration_s,
                             None,
                             act.avg_hr,
                             athlete.ftp,
                             athlete.max_hr,
                         )
-                        act.tss = new_tss
+                        act.load = new_tss
                     await session.commit()
                     log.info(
                         "Corrected duration for %s/%s: %ds → %ds",
@@ -519,10 +519,10 @@ async def _fill_from_source(
             speed_ms = [v / 3.6 for v in profile.speed]
             alt_data = [float(v) for v in profile.altitude]
 
-            np_val = normalized_power(power_data) if power_data else None
+            np_val = weighted_power(power_data) if power_data else None
             avg_hr_v = profile.avgHeartRate if hr_data else norm.avg_hr
             dur_v = profile.duration or norm.duration_s or 0
-            tss, intensity_factor = calculate_tss(
+            load, intensity = calculate_load(
                 dur_v, np_val, avg_hr_v, athlete.ftp, athlete.max_hr
             )
 
@@ -543,7 +543,7 @@ async def _fill_from_source(
                 else norm.elevation_m
             )
             activity.avg_power = profile.avgPower if power_data else norm.avg_power
-            activity.normalized_power = np_val
+            activity.weighted_power = np_val
             activity.avg_hr = avg_hr_v
             activity.max_hr = profile.peakHR if hr_data else norm.max_hr
             activity.avg_speed_ms = (
@@ -552,12 +552,12 @@ async def _fill_from_source(
             activity.avg_cadence = (
                 float(profile.avgCadence) if profile.cadence else norm.avg_cadence
             )
-            activity.tss = tss
-            activity.intensity_factor = intensity_factor
+            activity.load = load
+            activity.intensity = intensity
             activity.status = "processed"
 
             vi = (np_val / activity.avg_power) if (np_val and activity.avg_power) else None
-            category = classify_workout(intensity_factor, vi)
+            category = classify_workout(intensity, vi)
             activity.workout_category = category.value if category else None
 
             _add_streams(
@@ -605,10 +605,10 @@ async def _fill_from_source(
     speed_data = streams_raw.get("speed", [])
     altitude_data = streams_raw.get("altitude", [])
 
-    np_val = normalized_power(power_data) if power_data else None
+    np_val = weighted_power(power_data) if power_data else None
     avg_hr = (sum(hr_data) / len(hr_data)) if hr_data else norm.avg_hr
     dur_s = norm.duration_s or 0
-    tss, intensity_factor = calculate_tss(
+    load, intensity = calculate_load(
         dur_s, np_val, avg_hr, athlete.ftp, athlete.max_hr
     )
 
@@ -621,17 +621,17 @@ async def _fill_from_source(
     activity.avg_power = norm.avg_power or (
         sum(power_data) / len(power_data) if power_data else None
     )
-    activity.normalized_power = np_val
+    activity.weighted_power = np_val
     activity.avg_hr = avg_hr
     activity.max_hr = norm.max_hr
     activity.avg_speed_ms = norm.avg_speed_ms
     activity.avg_cadence = norm.avg_cadence
-    activity.tss = tss
-    activity.intensity_factor = intensity_factor
+    activity.load = load
+    activity.intensity = intensity
     activity.status = "processed"
 
     vi = (np_val / activity.avg_power) if (np_val and activity.avg_power) else None
-    category = classify_workout(intensity_factor, vi)
+    category = classify_workout(intensity, vi)
     activity.workout_category = category.value if category else None
 
     _add_streams(

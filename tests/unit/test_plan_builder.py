@@ -116,8 +116,8 @@ class TestBuildWeekFromConfig:
         normal_week = build_week_from_config(config, 1, 8)
         recovery_week = build_week_from_config(config, 4, 8)  # week 4 = recovery
 
-        normal_tss = sum(w["target_tss"] or 0 for w in normal_week)
-        recovery_tss = sum(w["target_tss"] or 0 for w in recovery_week)
+        normal_tss = sum(w["target_load"] or 0 for w in normal_week)
+        recovery_tss = sum(w["target_load"] or 0 for w in recovery_week)
         assert recovery_tss < normal_tss
 
     def test_high_intensity_scales_up_tss(self):
@@ -126,8 +126,8 @@ class TestBuildWeekFromConfig:
         normal_week = build_week_from_config(normal_config, 2, 8)
         high_week = build_week_from_config(high_config, 2, 8)
 
-        normal_tss = sum(w["target_tss"] or 0 for w in normal_week)
-        high_tss = sum(w["target_tss"] or 0 for w in high_week)
+        normal_tss = sum(w["target_load"] or 0 for w in normal_week)
+        high_tss = sum(w["target_load"] or 0 for w in high_week)
         assert high_tss > normal_tss
 
     def test_custom_notes_override_description(self):
@@ -143,6 +143,6 @@ class TestBuildWeekFromConfig:
         config = PlanConfig(days_per_week=1, day_configs=days, periodization="base_building",
                             intensity_preference="moderate")
         recovery = build_week_from_config(config, 4, 8)
-        recovery_tss = next(w["target_tss"] for w in recovery if w["day_of_week"] == 2)
-        # yoga base TSS is 10; recovery week skips scaling and uses raw base
+        recovery_tss = next(w["target_load"] for w in recovery if w["day_of_week"] == 2)
+        # yoga base Load is 10; recovery week skips scaling and uses raw base
         assert recovery_tss == 10

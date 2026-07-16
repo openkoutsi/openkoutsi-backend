@@ -28,13 +28,13 @@ class TestCreateManualActivity:
                 "sport_type": "Ride",
                 "start_time": "2025-06-01T10:00:00Z",
                 "duration_s": 3600,
-                "tss": 100.0,
+                "load": 100.0,
             },
             headers=auth_headers,
         )
         assert resp.status_code == 201
         data = resp.json()
-        assert data["tss"] == 100.0
+        assert data["load"] == 100.0
         assert data["status"] == "processed"
 
     async def test_no_tss_inputs_gives_null_tss(self, client, auth_headers):
@@ -48,10 +48,10 @@ class TestCreateManualActivity:
             headers=auth_headers,
         )
         assert resp.status_code == 201
-        assert resp.json()["tss"] is None
+        assert resp.json()["load"] is None
 
     async def test_rpe_based_tss(self, client, auth_headers):
-        # tss = (duration_s / 3600) * rpe^2 * 10
+        # load = (duration_s / 3600) * rpe^2 * 10
         resp = await client.post(
             "/api/activities",
             json={
@@ -64,7 +64,7 @@ class TestCreateManualActivity:
         )
         assert resp.status_code == 201
         expected_tss = (3600 / 3600) * 49 * 10  # 490
-        assert resp.json()["tss"] == pytest.approx(expected_tss, rel=1e-6)
+        assert resp.json()["load"] == pytest.approx(expected_tss, rel=1e-6)
 
     async def test_hr_based_tss_requires_athlete_max_hr(self, client, auth_headers):
         # Set max_hr on the athlete first
@@ -80,8 +80,8 @@ class TestCreateManualActivity:
             headers=auth_headers,
         )
         assert resp.status_code == 201
-        assert resp.json()["tss"] is not None
-        assert resp.json()["tss"] > 0
+        assert resp.json()["load"] is not None
+        assert resp.json()["load"] > 0
 
     async def test_empty_body_returns_422(self, client, auth_headers):
         # Every field is optional, but a completely empty submission is rejected.
@@ -99,7 +99,7 @@ class TestCreateManualActivity:
         data = resp.json()
         assert data["sport_type"] == "Run"
         assert data["duration_s"] is None
-        assert data["tss"] is None
+        assert data["load"] is None
         assert data["status"] == "processed"
         assert "manual" in data["sources"]
 
@@ -125,14 +125,14 @@ class TestCreateManualActivity:
         assert data["distance_m"] == 30000.0
 
     async def test_no_duration_gives_null_tss(self, client, auth_headers):
-        # rpe/avg_hr can't derive TSS without a duration to scale by.
+        # rpe/avg_hr can't derive Load without a duration to scale by.
         resp = await client.post(
             "/api/activities",
             json={"sport_type": "Run", "avg_hr": 150.0, "rpe": 7},
             headers=auth_headers,
         )
         assert resp.status_code == 201
-        assert resp.json()["tss"] is None
+        assert resp.json()["load"] is None
 
     async def test_unauthenticated_returns_401(self, client):
         resp = await client.post(
@@ -344,7 +344,7 @@ class TestFitUpload:
     async def test_upload_fit_file_processes_correctly(self, fit_path, client, auth_headers, session):
         """Upload each FIT fixture and verify it's processed into a complete activity."""
         caps = capabilities(fit_path)
-        # Set FTP so power-based TSS can be calculated
+        # Set FTP so power-based Load can be calculated
         await client.patch("/api/athlete", json={"ftp": 280}, headers=auth_headers)
 
         with open(fit_path, "rb") as f:
@@ -391,10 +391,10 @@ class TestFitUpload:
         assert activity.status == "processed"
         # Power-derived metrics only exist when the fixture actually has a power stream.
         if caps.has_power:
-            assert activity.normalized_power is not None
-            assert activity.tss is not None
+            assert activity.weighted_power is not None
+            assert activity.load is not None
         else:
-            assert activity.normalized_power is None
+            assert activity.weighted_power is None
 
     async def test_has_fit_file_false_for_manual_activity(self, client, auth_headers):
         resp = await client.post(
@@ -767,11 +767,11 @@ class TestReprocess:
         await client.patch("/api/athlete", json={"ftp": 250}, headers=auth_headers)
         activity_id = await self._create_processed(client, auth_headers)
 
-        # Add a power stream and clear TSS so we can verify reprocess sets it
+        # Add a power stream and clear Load so we can verify reprocess sets it
         act_result = await session.execute(sa_select(Activity).where(Activity.id == activity_id))
         activity = act_result.scalar_one()
         activity.avg_power = 200.0
-        activity.tss = None
+        activity.load = None
         session.add(ActivityStream(activity_id=activity_id, stream_type="power", data=[200] * 20))
         await session.commit()
 
@@ -779,7 +779,7 @@ class TestReprocess:
         assert resp.status_code == 200
 
         await session.refresh(activity)
-        assert activity.tss is not None
+        assert activity.load is not None
 
         # Fitness should have been updated too
         resp2 = await client.get("/api/metrics/fitness/current", headers=auth_headers)
@@ -894,20 +894,20 @@ class TestActivitySearchAndFilter:
         assert data["items"][0]["distance_m"] == 5000
 
     async def test_min_tss_filter(self, client, auth_headers):
-        await self._create(client, auth_headers, tss=40.0, start_time="2025-06-01T10:00:00Z")
-        await self._create(client, auth_headers, tss=120.0, start_time="2025-06-02T10:00:00Z")
+        await self._create(client, auth_headers, load=40.0, start_time="2025-06-01T10:00:00Z")
+        await self._create(client, auth_headers, load=120.0, start_time="2025-06-02T10:00:00Z")
         resp = await client.get("/api/activities?min_tss=100", headers=auth_headers)
         data = resp.json()
         assert data["total"] == 1
-        assert data["items"][0]["tss"] == 120.0
+        assert data["items"][0]["load"] == 120.0
 
     async def test_max_tss_filter(self, client, auth_headers):
-        await self._create(client, auth_headers, tss=40.0, start_time="2025-06-01T10:00:00Z")
-        await self._create(client, auth_headers, tss=120.0, start_time="2025-06-02T10:00:00Z")
+        await self._create(client, auth_headers, load=40.0, start_time="2025-06-01T10:00:00Z")
+        await self._create(client, auth_headers, load=120.0, start_time="2025-06-02T10:00:00Z")
         resp = await client.get("/api/activities?max_tss=100", headers=auth_headers)
         data = resp.json()
         assert data["total"] == 1
-        assert data["items"][0]["tss"] == 40.0
+        assert data["items"][0]["load"] == 40.0
 
     async def test_workout_category_filter(self, client, auth_headers):
         r1 = await self._create(client, auth_headers, start_time="2025-06-01T10:00:00Z")
