@@ -13,9 +13,10 @@ import logging
 from datetime import date, datetime, timezone
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
 from jose import JWTError, jwt
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -315,21 +316,100 @@ async def sync_zones(
 
 # ── Disconnect ─────────────────────────────────────────────────────────────
 
+
+class DisconnectRequest(BaseModel):
+    """Optional request body for the disconnect endpoint.
+
+    ``delete_data`` may be supplied either as a query parameter or in this body;
+    accepting both means a query-vs-body mismatch from the caller can't silently
+    default to ``False`` and skip the deletion.
+    """
+
+    delete_data: bool = False
+
+
+async def _delete_provider_data(user_id: str, provider: str) -> None:
+    """Permanently delete every activity imported from ``provider``.
+
+    Opens the user's DB, removes each ``ActivitySource`` for the provider (and
+    any parent ``Activity`` that is left with no remaining sources), recalculates
+    affected daily metrics, and commits. Raises on any failure so the caller can
+    surface it — data deletion must never be reported as successful unless it was
+    actually committed.
+    """
+    from pathlib import Path
+
+    from backend.app.db.user_session import get_user_session_factory
+    from backend.app.services.metrics_engine import recalculate_from
+
+    async with get_user_session_factory(user_id)() as user_session:
+        athlete_result = await user_session.execute(
+            select(Athlete).where(Athlete.global_user_id == user_id)
+        )
+        athlete = athlete_result.scalar_one_or_none()
+        if athlete is None:
+            return
+
+        src_result = await user_session.execute(
+            select(ActivitySource)
+            .join(Activity, ActivitySource.activity_id == Activity.id)
+            .where(
+                Activity.athlete_id == athlete.id,
+                ActivitySource.provider == provider,
+            )
+        )
+        sources = src_result.scalars().all()
+
+        earliest_date = None
+        for src in sources:
+            act = src.activity
+            if src.fit_file_path:
+                Path(src.fit_file_path).unlink(missing_ok=True)
+            await user_session.delete(src)
+            await user_session.flush()
+
+            remaining = await user_session.execute(
+                select(ActivitySource).where(ActivitySource.activity_id == act.id)
+            )
+            if remaining.scalar_one_or_none() is None:
+                if act.start_time:
+                    day = (
+                        act.start_time.date()
+                        if hasattr(act.start_time, "date")
+                        else act.start_time
+                    )
+                    if earliest_date is None or day < earliest_date:
+                        earliest_date = day
+                await user_session.delete(act)
+                await user_session.flush()
+
+        if earliest_date is not None:
+            await recalculate_from(athlete.id, earliest_date, user_session)
+
+        await user_session.commit()
+
+
 @router.delete("/{provider}/disconnect", status_code=204)
 async def disconnect(
     provider: str,
     delete_data: bool = Query(False, description="Also delete all activities imported from this provider"),
+    body: DisconnectRequest | None = Body(None),
     ctx_session=Depends(get_ctx_and_session),
     registry_session: AsyncSession = Depends(get_registry_session),
 ):
     """Revoke the provider token and remove the stored connection.
 
-    Pass ``delete_data=true`` to also permanently delete all activities that
-    were imported from this provider across all teams the user belongs to.
+    Pass ``delete_data=true`` (as a query parameter or in the request body) to
+    also permanently delete every activity imported from this provider from the
+    user's data. If that deletion fails, the connection is left in place and the
+    request fails with ``500`` — the caller is never told the data is gone unless
+    it actually was.
     """
     ctx, _ = ctx_session
     _require_provider(provider)
     conn = await _get_connection(ctx.user_id, provider, registry_session)
+
+    should_delete = delete_data or (body is not None and body.delete_data)
 
     if conn.access_token:
         try:
@@ -338,59 +418,18 @@ async def disconnect(
         except Exception:
             pass  # best-effort
 
-    if delete_data:
-        from pathlib import Path
-        from backend.app.db.user_session import get_user_session_factory
-        from backend.app.services.metrics_engine import recalculate_from
-
+    # Delete the data (and commit it) *before* removing the connection, so the
+    # connection — and the 204 that signals success — only go away once the data
+    # is really gone. A failure here must be loud, not swallowed.
+    if should_delete:
         try:
-            async with get_user_session_factory(ctx.user_id)() as user_session:
-                athlete_result = await user_session.execute(
-                    select(Athlete).where(Athlete.global_user_id == ctx.user_id)
-                )
-                athlete = athlete_result.scalar_one_or_none()
-                if athlete is not None:
-                    src_result = await user_session.execute(
-                        select(ActivitySource)
-                        .join(Activity, ActivitySource.activity_id == Activity.id)
-                        .where(
-                            Activity.athlete_id == athlete.id,
-                            ActivitySource.provider == provider,
-                        )
-                    )
-                    sources = src_result.scalars().all()
-
-                    earliest_date = None
-                    for src in sources:
-                        act = src.activity
-                        if src.fit_file_path:
-                            p = Path(src.fit_file_path)
-                            if p.exists():
-                                p.unlink(missing_ok=True)
-                        await user_session.delete(src)
-                        await user_session.flush()
-
-                        remaining = await user_session.execute(
-                            select(ActivitySource).where(ActivitySource.activity_id == act.id)
-                        )
-                        if remaining.scalar_one_or_none() is None:
-                            if act.start_time:
-                                day = (
-                                    act.start_time.date()
-                                    if hasattr(act.start_time, "date")
-                                    else act.start_time
-                                )
-                                if earliest_date is None or day < earliest_date:
-                                    earliest_date = day
-                            await user_session.delete(act)
-                            await user_session.flush()
-
-                    if earliest_date is not None:
-                        await recalculate_from(athlete.id, earliest_date, user_session)
-
-                    await user_session.commit()
+            await _delete_provider_data(ctx.user_id, provider)
         except Exception:
             log.exception("Failed to delete %s data for user %s", provider, ctx.user_id)
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to delete activity data; the connection was left in place.",
+            )
 
     await registry_session.delete(conn)
     await registry_session.commit()

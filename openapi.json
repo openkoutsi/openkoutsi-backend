@@ -2352,7 +2352,7 @@
           "integrations"
         ],
         "summary": "Disconnect",
-        "description": "Revoke the provider token and remove the stored connection.\n\nPass ``delete_data=true`` to also permanently delete all activities that\nwere imported from this provider across all teams the user belongs to.",
+        "description": "Revoke the provider token and remove the stored connection.\n\nPass ``delete_data=true`` (as a query parameter or in the request body) to\nalso permanently delete every activity imported from this provider from the\nuser's data. If that deletion fails, the connection is left in place and the\nrequest fails with ``500`` \u2014 the caller is never told the data is gone unless\nit actually was.",
         "operationId": "disconnect_api_integrations__provider__disconnect_delete",
         "security": [
           {
@@ -2382,6 +2382,23 @@
             "description": "Also delete all activities imported from this provider"
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/DisconnectRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Body"
+              }
+            }
+          }
+        },
         "responses": {
           "204": {
             "description": "Successful Response"
@@ -6043,6 +6060,18 @@
           "password"
         ],
         "title": "DeleteAccountRequest"
+      },
+      "DisconnectRequest": {
+        "properties": {
+          "delete_data": {
+            "type": "boolean",
+            "title": "Delete Data",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "DisconnectRequest",
+        "description": "Optional request body for the disconnect endpoint.\n\n``delete_data`` may be supplied either as a query parameter or in this body;\naccepting both means a query-vs-body mismatch from the caller can't silently\ndefault to ``False`` and skip the deletion."
       },
       "DistanceBestEntry": {
         "properties": {
