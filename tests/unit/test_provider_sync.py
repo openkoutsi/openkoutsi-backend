@@ -352,10 +352,10 @@ class TestSyncProviderActivities:
                 athlete, strava_conn, session, user_id=_TEAM_ID, access_token=_ACCESS_TOKEN
             )
 
-        # Capture Strava-derived TSS
+        # Capture Strava-derived Load
         acts = (await session.execute(select(Activity).where(Activity.athlete_id == athlete.id))).scalars().all()
         assert len(acts) == 1
-        strava_tss = acts[0].tss
+        strava_tss = acts[0].load
 
         # Wahoo syncs with a FIT file — should repopulate (priority 2 beats priority 3)
         fit_bytes = b"fakeFITdata"
@@ -397,8 +397,8 @@ class TestSyncProviderActivities:
         assert wahoo_count == 1
 
         await session.refresh(acts[0])
-        # Activity should now have Wahoo FIT data (higher power → higher TSS)
-        assert acts[0].tss is not None
+        # Activity should now have Wahoo FIT data (higher power → higher Load)
+        assert acts[0].load is not None
         # Two sources on the single Activity
         srcs = (await session.execute(select(ActivitySource).where(ActivitySource.activity_id == acts[0].id))).scalars().all()
         assert {s.provider for s in srcs} == {"strava", "wahoo"}
@@ -449,7 +449,7 @@ class TestSyncProviderActivities:
 
         acts = (await session.execute(select(Activity).where(Activity.athlete_id == athlete.id))).scalars().all()
         assert len(acts) == 1
-        wahoo_tss = acts[0].tss
+        wahoo_tss = acts[0].load
 
         # Strava syncs with different stream data — should NOT repopulate (priority 3 > 2)
         strava_mock = MagicMock()
@@ -467,7 +467,7 @@ class TestSyncProviderActivities:
 
         await session.refresh(acts[0])
         # Metrics should be unchanged from Wahoo's data
-        assert acts[0].tss == wahoo_tss
+        assert acts[0].load == wahoo_tss
 
         srcs = (await session.execute(select(ActivitySource).where(ActivitySource.activity_id == acts[0].id))).scalars().all()
         assert {s.provider for s in srcs} == {"wahoo", "strava"}
@@ -498,7 +498,7 @@ class TestSyncProviderActivities:
 
         acts = (await session.execute(select(Activity).where(Activity.athlete_id == athlete.id))).scalars().all()
         assert len(acts) == 1
-        assert acts[0].tss is None  # blank Wahoo has no TSS
+        assert acts[0].load is None  # blank Wahoo has no Load
 
         # Strava syncs with power data → priority=3 beats blank Wahoo priority=4 → repopulates
         strava_mock = MagicMock()
@@ -516,7 +516,7 @@ class TestSyncProviderActivities:
 
         await session.refresh(acts[0])
         # Activity should now have Strava's data
-        assert acts[0].tss is not None
+        assert acts[0].load is not None
 
         srcs = (await session.execute(select(ActivitySource).where(ActivitySource.activity_id == acts[0].id))).scalars().all()
         assert {s.provider for s in srcs} == {"wahoo", "strava"}
@@ -630,7 +630,7 @@ class TestSyncProviderActivities:
         mock_client = MagicMock()
         mock_client.list_activities = AsyncMock(side_effect=[[_norm()], []])
         mock_client.download_fit_file = AsyncMock(side_effect=Exception("no FIT"))
-        # 3600 samples at 200 W → IF = 200/250 = 0.80 → "tempo"
+        # 3600 samples at 200 W → Intensity = 200/250 = 0.80 → "tempo"
         mock_client.get_activity_streams = AsyncMock(
             return_value={"power": [200] * 3600}
         )
@@ -662,7 +662,7 @@ class TestSyncProviderActivities:
         wahoo_cls = MagicMock(return_value=wahoo_mock)
 
         fake_profile = MagicMock()
-        # 3600 samples at 225 W → IF = 225/250 = 0.90 → "threshold"
+        # 3600 samples at 225 W → Intensity = 225/250 = 0.90 → "threshold"
         fake_profile.power = [225] * 3600
         fake_profile.heartRate = []
         fake_profile.cadence = []

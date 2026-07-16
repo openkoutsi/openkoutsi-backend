@@ -30,7 +30,7 @@ from ..db.registry import _RegistrySessionLocal
 from ..db.user_session import get_user_session_factory
 from ..models.registry_orm import InstanceSettings
 from ..models.user_orm import Activity, Athlete, DailyMetric, Goal, TrainingPlan
-from ..schemas.metrics import _tsb_to_form
+from ..schemas.metrics import _form_to_label
 from .athlete_experience import EXPERIENCE_GUIDANCE, experience_level
 from .llm_access import record_llm_usage, usage_from_sse_data
 from .llm_client import (
@@ -63,7 +63,7 @@ training/event goal. Assess whether the goal is realistic for its timeline given
 the athlete's current fitness and recent trend, then give concrete, actionable \
 guidance on how to reach it. Write 2-4 paragraphs of plain prose — no markdown \
 headers, no bullet points, no code blocks. Separate each paragraph with a single \
-blank line. Ground your judgement in the athlete's numbers (FTP, CTL/ATL/TSB, \
+blank line. Ground your judgement in the athlete's numbers (FTP, Fitness/Fatigue/Form, \
 recent training volume) and the days remaining until the target date; be honest \
 when a goal is over-aggressive, but always give a realistic path forward.
 
@@ -136,10 +136,10 @@ def _build_goal_prompt(
 
     if current_metric:
         lines.append("\nCurrent fitness state:")
-        lines.append(f"  Fitness (CTL): {current_metric.ctl:.1f}")
-        lines.append(f"  Fatigue (ATL): {current_metric.atl:.1f}")
+        lines.append(f"  Fitness: {current_metric.fitness:.1f}")
+        lines.append(f"  Fatigue: {current_metric.fatigue:.1f}")
         lines.append(
-            f"  Form (TSB): {current_metric.tsb:.1f} ({_tsb_to_form(current_metric.tsb)})"
+            f"  Form: {current_metric.form:.1f} ({_form_to_label(current_metric.form)})"
         )
 
     lines.append("\nLast 28 days of training:")
@@ -147,9 +147,9 @@ def _build_goal_prompt(
         for act in recent_activities:
             act_date = act.start_time.date() if act.start_time else "?"
             mins = int((act.duration_s or 0) // 60)
-            tss = f"{act.tss:.0f} TSS" if act.tss else "no TSS"
+            load = f"{act.load:.0f} Load" if act.load else "no Load"
             lines.append(
-                f"  {act_date}  {act.sport_type or 'unknown'}  {mins}min  {tss}"
+                f"  {act_date}  {act.sport_type or 'unknown'}  {mins}min  {load}"
             )
     else:
         lines.append("  (no activities recorded)")

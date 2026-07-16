@@ -2,7 +2,7 @@
 LLM-based structured workout synthesizer.
 
 Turns a loose ``PlannedWorkout`` descriptor (workout_type / description /
-duration_min / target_tss) into a fully structured ``WorkoutDefinition`` with an
+duration_min / target_load) into a fully structured ``WorkoutDefinition`` with an
 interval tree, suitable for pushing to Wahoo (or any other device target).
 
 Reuses the shared ``llm_client`` helpers for config resolution, the HTTP call
@@ -100,7 +100,7 @@ Rules:
   or {"type": "absolute", "value": <watts>}, or {"type": "zone", "zone_number": <int>}.
 - Prefer percent-of-FTP targets so the workout scales to the athlete.
 - Start with a warmup and end with a cooldown.
-- Make the total time and intensity roughly match the requested duration and TSS.
+- Make the total time and intensity roughly match the requested duration and Load.
 """
 
 
@@ -120,8 +120,8 @@ def _build_user_prompt(
         lines.append(f"Description: {planned.description}")
     if planned.duration_min is not None:
         lines.append(f"Target duration: {planned.duration_min} minutes")
-    if planned.target_tss is not None:
-        lines.append(f"Target training stress (TSS): {planned.target_tss}")
+    if planned.target_load is not None:
+        lines.append(f"Target load: {planned.target_load}")
     if ftp:
         lines.append(f"Athlete FTP: {ftp}W")
     if experience:
@@ -226,7 +226,7 @@ async def generate_workout_definition_llm(
         sport_type=sport_type,
         steps=steps,
         estimated_duration_s=estimate_duration_s(steps),
-        estimated_tss=estimate_tss(steps, athlete.ftp),
+        estimated_load=estimate_tss(steps, athlete.ftp),
     )
     session.add(workout)
     await session.flush()

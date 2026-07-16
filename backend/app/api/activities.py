@@ -43,7 +43,7 @@ from backend.app.services.fit_processor import process_fit_file, read_fit_start_
 from backend.app.services.metrics_engine import recalculate_from
 from backend.app.services.pr_detection import detect_pr_badges
 from backend.app.services.provider_sync import _source_priority
-from openkoutsi.training_math import calculate_tss
+from openkoutsi.training_math import calculate_load
 from openkoutsi.categorization import WorkoutCategory, classify_workout
 from backend.app.services.activity_workout_matcher import find_and_link_workout
 
@@ -150,8 +150,8 @@ async def _bg_process_and_recalculate(
                 if existing_act is not None:
                     for attr in (
                         "name", "sport_type", "start_time", "duration_s", "distance_m",
-                        "elevation_m", "avg_power", "normalized_power", "avg_hr", "max_hr",
-                        "avg_speed_ms", "avg_cadence", "tss", "intensity_factor",
+                        "elevation_m", "avg_power", "weighted_power", "avg_hr", "max_hr",
+                        "avg_speed_ms", "avg_cadence", "load", "intensity",
                         "workout_category", "status",
                     ):
                         setattr(existing_act, attr, getattr(activity, attr))
@@ -423,14 +423,14 @@ async def create_manual_activity(
     ctx, session = ctx_session
     athlete = await _get_athlete(ctx.user_id, session)
 
-    tss: Optional[float] = None
-    if payload.tss is not None:
-        tss = payload.tss
+    load: Optional[float] = None
+    if payload.load is not None:
+        load = payload.load
     elif payload.duration_s is not None and payload.rpe is not None:
         # rpe/avg_hr derivations both need a duration to scale by.
-        tss = (payload.duration_s / 3600) * (payload.rpe ** 2) * 10
+        load = (payload.duration_s / 3600) * (payload.rpe ** 2) * 10
     elif payload.duration_s is not None and payload.avg_hr is not None:
-        tss, _ = calculate_tss(
+        load, _ = calculate_load(
             payload.duration_s, None, payload.avg_hr, None, athlete.max_hr
         )
 
@@ -450,7 +450,7 @@ async def create_manual_activity(
         avg_cadence=payload.avg_cadence,
         distance_m=payload.distance_m,
         elevation_m=payload.elevation_m,
-        tss=tss,
+        load=load,
         status="processed",
     )
     session.add(activity)
@@ -465,7 +465,7 @@ async def create_manual_activity(
     if payload.start_time is not None:
         await find_and_link_workout(session, athlete.id, activity)
 
-    if tss is not None and payload.start_time is not None:
+    if load is not None and payload.start_time is not None:
         start_date = (
             payload.start_time.date()
             if hasattr(payload.start_time, "date")
@@ -496,8 +496,8 @@ async def list_activities(
     max_duration: Optional[int] = Query(None, ge=0, description="Maximum duration in seconds"),
     min_distance: Optional[float] = Query(None, ge=0, description="Minimum distance in meters"),
     max_distance: Optional[float] = Query(None, ge=0, description="Maximum distance in meters"),
-    min_tss: Optional[float] = Query(None, ge=0, description="Minimum TSS"),
-    max_tss: Optional[float] = Query(None, ge=0, description="Maximum TSS"),
+    min_tss: Optional[float] = Query(None, ge=0, description="Minimum Load"),
+    max_tss: Optional[float] = Query(None, ge=0, description="Maximum Load"),
     has_power: Optional[bool] = Query(None, description="Only activities with power data"),
     wahoo_device_only: bool = Query(False, alias="wahoo_device_only"),
     page: int = Query(1, ge=1),
@@ -539,9 +539,9 @@ async def list_activities(
     if max_distance is not None:
         base_query = base_query.where(Activity.distance_m <= max_distance)
     if min_tss is not None:
-        base_query = base_query.where(Activity.tss >= min_tss)
+        base_query = base_query.where(Activity.load >= min_tss)
     if max_tss is not None:
-        base_query = base_query.where(Activity.tss <= max_tss)
+        base_query = base_query.where(Activity.load <= max_tss)
     if has_power is True:
         base_query = base_query.where(Activity.avg_power.isnot(None))
     elif has_power is False:
@@ -697,10 +697,10 @@ async def reprocess_activity(
     activity_id: str,
     ctx_session=Depends(get_ctx_and_session),
 ):
-    """Recompute NP/TSS/IF/bests/intervals from stored streams using current athlete settings."""
+    """Recompute Weighted Power/Load/Intensity/bests/intervals from stored streams using current athlete settings."""
     import io
     from sqlalchemy import delete as sa_delete
-    from openkoutsi.training_math import normalized_power, compute_power_bests, compute_distance_bests
+    from openkoutsi.training_math import weighted_power, compute_power_bests, compute_distance_bests
     from openkoutsi.fit_processing import (
         auto_interval_s,
         build_auto_intervals,
@@ -726,23 +726,23 @@ async def reprocess_activity(
     power_data: list[float] = stream_map.get("power") or []
     speed_data: list[float] = stream_map.get("speed") or []
 
-    # Recompute NP, TSS, IF from stored streams using current athlete FTP/max_HR
-    np = (
-        normalized_power(power_data)
+    # Recompute Weighted Power, Load, Intensity from stored streams using current athlete FTP/max_HR
+    wp = (
+        weighted_power(power_data)
         if len(power_data) >= 30
         else (activity.avg_power)
     )
-    tss, intensity_factor = calculate_tss(
+    load, intensity = calculate_load(
         activity.duration_s or 0,
-        np,
+        wp,
         activity.avg_hr,
         athlete.ftp,
         athlete.max_hr,
     )
-    activity.tss = tss
-    activity.intensity_factor = intensity_factor
-    if np is not None:
-        activity.normalized_power = np
+    activity.load = load
+    activity.intensity = intensity
+    if wp is not None:
+        activity.weighted_power = wp
 
     # Rebuild power bests
     if power_data:
@@ -812,11 +812,11 @@ async def reprocess_activity(
 
     # Recalculate workout category
     vi = (
-        (activity.normalized_power / activity.avg_power)
-        if (activity.normalized_power and activity.avg_power)
+        (activity.weighted_power / activity.avg_power)
+        if (activity.weighted_power and activity.avg_power)
         else None
     )
-    category = classify_workout(activity.intensity_factor, vi)
+    category = classify_workout(activity.intensity, vi)
     activity.workout_category = category.value if category else None
 
     await session.commit()

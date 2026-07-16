@@ -55,7 +55,7 @@ PLAN_SCENARIOS: dict[str, dict] = {
         "goal": None,
         "num_weeks": 4,
         "ftp": 210,
-        "ctl": 42.0,
+        "fitness": 42.0,
     },
     "race_prep_gran_fondo": {
         "config": PlanConfig(
@@ -74,7 +74,7 @@ PLAN_SCENARIOS: dict[str, dict] = {
         "goal": "Gran Fondo (140 km, 2500 m climbing) in 8 weeks",
         "num_weeks": 8,
         "ftp": 285,
-        "ctl": 72.0,
+        "fitness": 72.0,
     },
 }
 
@@ -85,7 +85,7 @@ WORKOUT_SCENARIOS: dict[str, dict] = {
             workout_type="vo2max",
             description="5 x 4 min at VO2max with 4 min recoveries",
             duration_min=75,
-            target_tss=95,
+            target_load=95,
         ),
         "ftp": 265,
         "sport": "Ride",
@@ -95,7 +95,7 @@ WORKOUT_SCENARIOS: dict[str, dict] = {
             workout_type="long",
             description="Steady endurance ride, mostly zone 2 with a few tempo surges",
             duration_min=180,
-            target_tss=150,
+            target_load=150,
         ),
         "ftp": 240,
         "sport": "Ride",
@@ -105,7 +105,7 @@ WORKOUT_SCENARIOS: dict[str, dict] = {
             workout_type="threshold",
             description="3 x 12 min over-unders alternating 90s at 95% and 30s at 105% FTP",
             duration_min=70,
-            target_tss=85,
+            target_load=85,
         ),
         "ftp": 300,
         "sport": "Ride",
@@ -120,9 +120,9 @@ _pr_ride = Activity(
     distance_m=52000,
     elevation_m=680,
     avg_power=238,
-    normalized_power=255,
-    intensity_factor=0.93,
-    tss=129.0,
+    weighted_power=255,
+    intensity=0.93,
+    load=129.0,
     avg_hr=156,
     max_hr=182,
     labels=["race"],
@@ -140,9 +140,9 @@ _easy_ride = Activity(
     duration_s=2700,
     distance_m=20000,
     avg_power=120,
-    normalized_power=128,
-    intensity_factor=0.46,
-    tss=24.0,
+    weighted_power=128,
+    intensity=0.46,
+    load=24.0,
     avg_hr=118,
     max_hr=135,
     labels=["recovery"],
@@ -152,7 +152,7 @@ ACTIVITY_SCENARIOS: dict[str, dict] = {
     "pr_hard_ride": {
         "activity": _pr_ride,
         "athlete": _athlete(ftp=275, max_hr=188),
-        "fatigue": DailyMetric(date=date(2026, 7, 4), ctl=78.0, atl=65.0, tsb=13.0),
+        "fatigue": DailyMetric(date=date(2026, 7, 4), fitness=78.0, fatigue=65.0, form=13.0),
         "power_pr_badges": {60: {"all_time": "gold"}, 300: {"3mo": "silver"}},
         "distance_pr_badges": None,
         "locale": None,
@@ -160,7 +160,7 @@ ACTIVITY_SCENARIOS: dict[str, dict] = {
     "recovery_ride_finnish": {
         "activity": _easy_ride,
         "athlete": _athlete(ftp=260, max_hr=185),
-        "fatigue": DailyMetric(date=date(2026, 7, 5), ctl=80.0, atl=92.0, tsb=-12.0),
+        "fatigue": DailyMetric(date=date(2026, 7, 5), fitness=80.0, fatigue=92.0, form=-12.0),
         "power_pr_badges": None,
         "distance_pr_badges": None,
         "locale": "fi",
@@ -178,25 +178,25 @@ def _status_common(coaching_style, locale, adhering: bool) -> dict:
         app_settings={"coaching_style": coaching_style, "locale": locale, "timezone": "UTC"},
     )
     recent = [
-        Activity(sport_type="Ride", start_time=datetime(2026, 7, 6, 17, tzinfo=timezone.utc), duration_s=3600, tss=68.0),
-        Activity(sport_type="Ride", start_time=datetime(2026, 7, 8, 17, tzinfo=timezone.utc), duration_s=4500, tss=92.0),
+        Activity(sport_type="Ride", start_time=datetime(2026, 7, 6, 17, tzinfo=timezone.utc), duration_s=3600, load=68.0),
+        Activity(sport_type="Ride", start_time=datetime(2026, 7, 8, 17, tzinfo=timezone.utc), duration_s=4500, load=92.0),
     ]
-    metric = DailyMetric(date=date(2026, 7, 8), ctl=64.0, atl=71.0, tsb=-7.0)
+    metric = DailyMetric(date=date(2026, 7, 8), fitness=64.0, fatigue=71.0, form=-7.0)
     plan = TrainingPlan(name="Base to Build", start_date=date(2026, 6, 29), end_date=date(2026, 8, 24), weeks=8, status="active")
     # Current plan week is 2 (plan started Mon 2026-06-29).
     if adhering:
         week = [
-            PlannedWorkout(week_number=2, day_of_week=1, workout_type="recovery", target_tss=30, completed_activity_id="a1"),
-            PlannedWorkout(week_number=2, day_of_week=3, workout_type="threshold", target_tss=85, completed_activity_id="a2"),
-            PlannedWorkout(week_number=2, day_of_week=4, workout_type="endurance", target_tss=60),  # today, not yet done
-            PlannedWorkout(week_number=2, day_of_week=6, workout_type="long", target_tss=120),
+            PlannedWorkout(week_number=2, day_of_week=1, workout_type="recovery", target_load=30, completed_activity_id="a1"),
+            PlannedWorkout(week_number=2, day_of_week=3, workout_type="threshold", target_load=85, completed_activity_id="a2"),
+            PlannedWorkout(week_number=2, day_of_week=4, workout_type="endurance", target_load=60),  # today, not yet done
+            PlannedWorkout(week_number=2, day_of_week=6, workout_type="long", target_load=120),
         ]
     else:
         week = [
-            PlannedWorkout(week_number=2, day_of_week=1, workout_type="recovery", target_tss=30),  # missed, no reason
-            PlannedWorkout(week_number=2, day_of_week=3, workout_type="threshold", target_tss=85, skip_reason="felt tired"),
-            PlannedWorkout(week_number=2, day_of_week=4, workout_type="endurance", target_tss=60),  # today, not yet done
-            PlannedWorkout(week_number=2, day_of_week=6, workout_type="long", target_tss=120),
+            PlannedWorkout(week_number=2, day_of_week=1, workout_type="recovery", target_load=30),  # missed, no reason
+            PlannedWorkout(week_number=2, day_of_week=3, workout_type="threshold", target_load=85, skip_reason="felt tired"),
+            PlannedWorkout(week_number=2, day_of_week=4, workout_type="endurance", target_load=60),  # today, not yet done
+            PlannedWorkout(week_number=2, day_of_week=6, workout_type="long", target_load=120),
         ]
     goals = [Goal(title="Reach FTP 275 W before September", target_date=date(2026, 9, 1), status="active", target_value=275, current_value=250)]
     return {
@@ -221,17 +221,17 @@ STATUS_SCENARIOS: dict[str, dict] = {
 _goal_now = datetime(2026, 7, 9, 7, 30, tzinfo=timezone.utc)
 
 
-def _goal_common(goal: Goal, *, coaching_style, locale, ctl, atl, tsb) -> dict:
+def _goal_common(goal: Goal, *, coaching_style, locale, fitness, fatigue, form) -> dict:
     athlete = _athlete(
         ftp=250,
         max_hr=186,
         app_settings={"coaching_style": coaching_style, "locale": locale, "timezone": "UTC"},
     )
     recent = [
-        Activity(sport_type="Ride", start_time=datetime(2026, 7, 6, 17, tzinfo=timezone.utc), duration_s=3600, tss=68.0),
-        Activity(sport_type="Ride", start_time=datetime(2026, 7, 8, 17, tzinfo=timezone.utc), duration_s=5400, tss=110.0),
+        Activity(sport_type="Ride", start_time=datetime(2026, 7, 6, 17, tzinfo=timezone.utc), duration_s=3600, load=68.0),
+        Activity(sport_type="Ride", start_time=datetime(2026, 7, 8, 17, tzinfo=timezone.utc), duration_s=5400, load=110.0),
     ]
-    metric = DailyMetric(date=date(2026, 7, 8), ctl=ctl, atl=atl, tsb=tsb)
+    metric = DailyMetric(date=date(2026, 7, 8), fitness=fitness, fatigue=fatigue, form=form)
     plan = TrainingPlan(name="Base to Build", start_date=date(2026, 6, 29), end_date=date(2026, 8, 24), weeks=8, status="active")
     return {
         "athlete": athlete,
@@ -251,20 +251,20 @@ GOAL_SCENARIOS: dict[str, dict] = {
         Goal(title="Raise FTP from 250 to 265 W", metric="ftp", target_value=265,
              current_value=250, target_date=date(2026, 9, 15), status="active",
              description="Steady threshold progression before autumn."),
-        coaching_style="friendly", locale="en", ctl=64.0, atl=68.0, tsb=-4.0,
+        coaching_style="friendly", locale="en", fitness=64.0, fatigue=68.0, form=-4.0,
     ),
     # Over-aggressive: a big target on a very short timeline.
     "ftp_jump_unrealistic": _goal_common(
         Goal(title="Raise FTP from 250 to 330 W", metric="ftp", target_value=330,
              current_value=250, target_date=date(2026, 8, 1), status="active",
              description="Big power jump wanted for an end-of-summer race."),
-        coaching_style="stern", locale="en", ctl=52.0, atl=70.0, tsb=-18.0,
+        coaching_style="stern", locale="en", fitness=52.0, fatigue=70.0, form=-18.0,
     ),
     # Finnish locale: event-distance goal with room in the calendar.
     "gran_fondo_finnish": _goal_common(
         Goal(title="Complete a 160 km gran fondo", metric="distance",
              target_value=160, current_value=120, target_date=date(2026, 8, 24),
              status="active", description="First long event of the season."),
-        coaching_style="encouraging", locale="fi", ctl=70.0, atl=66.0, tsb=4.0,
+        coaching_style="encouraging", locale="fi", fitness=70.0, fatigue=66.0, form=4.0,
     ),
 }

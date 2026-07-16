@@ -32,12 +32,12 @@ async def _make_athlete(session) -> Athlete:
     return athlete
 
 
-async def _make_activity(session, athlete_id: str, tss: float, day: date) -> Activity:
-    """Insert a processed Activity with the given TSS on the given date."""
+async def _make_activity(session, athlete_id: str, load: float, day: date) -> Activity:
+    """Insert a processed Activity with the given Load on the given date."""
     activity = Activity(
         id=str(uuid.uuid4()),
         athlete_id=athlete_id,
-        tss=tss,
+        load=load,
         status="processed",
         start_time=datetime.combine(day, datetime.min.time()).replace(tzinfo=timezone.utc),
     )
@@ -51,7 +51,7 @@ async def _make_activity(session, athlete_id: str, tss: float, day: date) -> Act
 class TestRecalculateFrom:
     async def test_single_activity_ctl_atl(self, session):
         athlete = await _make_athlete(session)
-        await _make_activity(session, athlete.id, tss=100.0, day=TODAY)
+        await _make_activity(session, athlete.id, load=100.0, day=TODAY)
 
         await recalculate_from(athlete.id, TODAY, session)
 
@@ -63,16 +63,16 @@ class TestRecalculateFrom:
         )
         metric = result.scalar_one()
 
-        assert metric.ctl == pytest.approx(100 * K42, rel=1e-6)
-        assert metric.atl == pytest.approx(100 * K7, rel=1e-6)
-        # TSB is computed from yesterday's CTL - ATL (both zero for first day)
-        assert metric.tsb == pytest.approx(0.0, abs=1e-9)
-        assert metric.tss_day == pytest.approx(100.0, rel=1e-6)
+        assert metric.fitness == pytest.approx(100 * K42, rel=1e-6)
+        assert metric.fatigue == pytest.approx(100 * K7, rel=1e-6)
+        # Form is computed from yesterday's Fitness - Fatigue (both zero for first day)
+        assert metric.form == pytest.approx(0.0, abs=1e-9)
+        assert metric.load_day == pytest.approx(100.0, rel=1e-6)
 
     async def test_two_activities_same_day_tss_summed(self, session):
         athlete = await _make_athlete(session)
-        await _make_activity(session, athlete.id, tss=60.0, day=TODAY)
-        await _make_activity(session, athlete.id, tss=40.0, day=TODAY)
+        await _make_activity(session, athlete.id, load=60.0, day=TODAY)
+        await _make_activity(session, athlete.id, load=40.0, day=TODAY)
 
         await recalculate_from(athlete.id, TODAY, session)
 
@@ -84,14 +84,14 @@ class TestRecalculateFrom:
         )
         metric = result.scalar_one()
 
-        # Both activities' TSS should be summed before the EMA step
-        assert metric.tss_day == pytest.approx(100.0, rel=1e-6)
-        assert metric.ctl == pytest.approx(100 * K42, rel=1e-6)
+        # Both activities' Load should be summed before the EMA step
+        assert metric.load_day == pytest.approx(100.0, rel=1e-6)
+        assert metric.fitness == pytest.approx(100 * K42, rel=1e-6)
 
     async def test_second_day_inherits_previous_ctl_atl(self, session):
         athlete = await _make_athlete(session)
         yesterday = TODAY - timedelta(days=1)
-        await _make_activity(session, athlete.id, tss=100.0, day=yesterday)
+        await _make_activity(session, athlete.id, load=100.0, day=yesterday)
 
         await recalculate_from(athlete.id, yesterday, session)
 
@@ -103,10 +103,10 @@ class TestRecalculateFrom:
             )
         )
         m1 = r1.scalar_one()
-        assert m1.ctl == pytest.approx(100 * K42, rel=1e-6)
-        assert m1.atl == pytest.approx(100 * K7, rel=1e-6)
+        assert m1.fitness == pytest.approx(100 * K42, rel=1e-6)
+        assert m1.fatigue == pytest.approx(100 * K7, rel=1e-6)
 
-        # Day 2 (today) — no activity, so tss_day=0
+        # Day 2 (today) — no activity, so load_day=0
         r2 = await session.execute(
             select(DailyMetric).where(
                 DailyMetric.athlete_id == athlete.id,
@@ -114,16 +114,16 @@ class TestRecalculateFrom:
             )
         )
         m2 = r2.scalar_one()
-        expected_ctl2 = m1.ctl + (0.0 - m1.ctl) * K42
-        expected_atl2 = m1.atl + (0.0 - m1.atl) * K7
-        assert m2.ctl == pytest.approx(expected_ctl2, rel=1e-6)
-        assert m2.atl == pytest.approx(expected_atl2, rel=1e-6)
-        # TSB on day 2 = day 1's CTL - day 1's ATL
-        assert m2.tsb == pytest.approx(m1.ctl - m1.atl, rel=1e-6)
+        expected_ctl2 = m1.fitness + (0.0 - m1.fitness) * K42
+        expected_atl2 = m1.fatigue + (0.0 - m1.fatigue) * K7
+        assert m2.fitness == pytest.approx(expected_ctl2, rel=1e-6)
+        assert m2.fatigue == pytest.approx(expected_atl2, rel=1e-6)
+        # Form on day 2 = day 1's Fitness - day 1's Fatigue
+        assert m2.form == pytest.approx(m1.fitness - m1.fatigue, rel=1e-6)
 
     async def test_empty_athlete_produces_no_metrics(self, session):
         athlete = await _make_athlete(session)
-        # No activities — recalculate from today still runs (creates metrics with 0 tss)
+        # No activities — recalculate from today still runs (creates metrics with 0 load)
         await recalculate_from(athlete.id, TODAY, session)
 
         result = await session.execute(
@@ -132,15 +132,15 @@ class TestRecalculateFrom:
         metrics = result.scalars().all()
         # One row for today with zeroed-out values
         assert len(metrics) == 1
-        assert metrics[0].tss_day == pytest.approx(0.0)
-        assert metrics[0].ctl == pytest.approx(0.0)
+        assert metrics[0].load_day == pytest.approx(0.0)
+        assert metrics[0].fitness == pytest.approx(0.0)
 
 
 class TestCatchUpMetrics:
     async def test_no_update_when_metrics_match_activities(self, session):
-        """No recalculation when stored tss_day matches actual activity TSS."""
+        """No recalculation when stored load_day matches actual activity Load."""
         athlete = await _make_athlete(session)
-        await _make_activity(session, athlete.id, tss=80.0, day=TODAY)
+        await _make_activity(session, athlete.id, load=80.0, day=TODAY)
         await recalculate_from(athlete.id, TODAY, session)
 
         updated = await catch_up_metrics(athlete.id, session)
@@ -148,14 +148,14 @@ class TestCatchUpMetrics:
         assert updated is False
 
     async def test_recalculates_when_activity_deleted(self, session):
-        """Detects stale tss_day after an activity is hard-deleted without going
+        """Detects stale load_day after an activity is hard-deleted without going
         through the API endpoint (which would normally trigger _bg_recalculate)."""
         athlete = await _make_athlete(session)
         yesterday = TODAY - timedelta(days=1)
 
-        act1 = await _make_activity(session, athlete.id, tss=60.0, day=yesterday)
-        act2 = await _make_activity(session, athlete.id, tss=40.0, day=yesterday)
-        await _make_activity(session, athlete.id, tss=50.0, day=TODAY)
+        act1 = await _make_activity(session, athlete.id, load=60.0, day=yesterday)
+        act2 = await _make_activity(session, athlete.id, load=40.0, day=yesterday)
+        await _make_activity(session, athlete.id, load=50.0, day=TODAY)
         await recalculate_from(athlete.id, yesterday, session)
 
         # Verify initial state: both days correct
@@ -165,7 +165,7 @@ class TestCatchUpMetrics:
                 DailyMetric.date == yesterday,
             )
         )
-        assert r.scalar_one().tss_day == pytest.approx(100.0)
+        assert r.scalar_one().load_day == pytest.approx(100.0)
 
         # Simulate out-of-band hard delete (bypasses the API delete endpoint)
         await session.delete(act2)
@@ -182,8 +182,8 @@ class TestCatchUpMetrics:
             )
         )
         fixed = r2.scalar_one()
-        # tss_day should now reflect only act1's 60 TSS
-        assert fixed.tss_day == pytest.approx(60.0)
+        # load_day should now reflect only act1's 60 Load
+        assert fixed.load_day == pytest.approx(60.0)
 
     async def test_recalculates_cascade_from_earliest_stale_day(self, session):
         """When the stale day is before the forward-fill gap, recalculation
@@ -192,8 +192,8 @@ class TestCatchUpMetrics:
         two_days_ago = TODAY - timedelta(days=2)
         yesterday = TODAY - timedelta(days=1)
 
-        act = await _make_activity(session, athlete.id, tss=100.0, day=two_days_ago)
-        await _make_activity(session, athlete.id, tss=50.0, day=yesterday)
+        act = await _make_activity(session, athlete.id, load=100.0, day=two_days_ago)
+        await _make_activity(session, athlete.id, load=50.0, day=yesterday)
         # Don't create today's metric — forward fill gap exists
         await recalculate_from(athlete.id, two_days_ago, session)
 
@@ -222,5 +222,5 @@ class TestCatchUpMetrics:
             )
         )
         fixed = r3.scalar_one()
-        # Activity deleted → tss_day should now be 0
-        assert fixed.tss_day == pytest.approx(0.0)
+        # Activity deleted → load_day should now be 0
+        assert fixed.load_day == pytest.approx(0.0)

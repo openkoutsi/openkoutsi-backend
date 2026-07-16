@@ -26,10 +26,10 @@ class TestGetFitness:
         metric = DailyMetric(
             athlete_id=athlete_id,
             date=today,
-            ctl=30.0,
-            atl=40.0,
-            tsb=-10.0,
-            tss_day=80.0,
+            fitness=30.0,
+            fatigue=40.0,
+            form=-10.0,
+            load_day=80.0,
         )
         session.add(metric)
         await session.commit()
@@ -38,8 +38,8 @@ class TestGetFitness:
         assert resp.status_code == 200
         data = resp.json()
         assert len(data) == 1
-        assert data[0]["ctl"] == 30.0
-        assert data[0]["atl"] == 40.0
+        assert data[0]["fitness"] == 30.0
+        assert data[0]["fatigue"] == 40.0
 
     async def test_days_filter_limits_results(self, client, auth_headers, session):
         ath_resp = await client.get("/api/athlete", headers=auth_headers)
@@ -50,7 +50,7 @@ class TestGetFitness:
             session.add(DailyMetric(
                 athlete_id=athlete_id,
                 date=today - timedelta(days=offset),
-                ctl=10.0, atl=10.0, tsb=0.0, tss_day=50.0,
+                fitness=10.0, fatigue=10.0, form=0.0, load_day=50.0,
             ))
         await session.commit()
 
@@ -69,25 +69,25 @@ class TestGetFitnessCurrent:
         resp = await client.get("/api/metrics/fitness/current", headers=auth_headers)
         assert resp.status_code == 200
         data = resp.json()
-        assert data["ctl"] == 0.0
-        assert data["atl"] == 0.0
-        assert data["tsb"] == 0.0
+        assert data["fitness"] == 0.0
+        assert data["fatigue"] == 0.0
+        assert data["form"] == 0.0
         assert "form" in data
 
-    async def test_form_label_computed_from_tsb(self, client, auth_headers, session):
+    async def test_form_label_computed_from_form(self, client, auth_headers, session):
         ath_resp = await client.get("/api/athlete", headers=auth_headers)
         athlete_id = ath_resp.json()["id"]
         today = date.today()
 
-        # TSB > 25 → "peak"
+        # Form > 25 → "peak"
         session.add(DailyMetric(
             athlete_id=athlete_id, date=today,
-            ctl=50.0, atl=20.0, tsb=30.0, tss_day=0.0,
+            fitness=50.0, fatigue=20.0, form=30.0, load_day=0.0,
         ))
         await session.commit()
 
         resp = await client.get("/api/metrics/fitness/current", headers=auth_headers)
-        assert resp.json()["form"] == "peak"
+        assert resp.json()["form_label"] == "peak"
 
     async def test_tired_form_label(self, client, auth_headers, session):
         ath_resp = await client.get("/api/athlete", headers=auth_headers)
@@ -96,12 +96,12 @@ class TestGetFitnessCurrent:
 
         session.add(DailyMetric(
             athlete_id=athlete_id, date=today,
-            ctl=40.0, atl=60.0, tsb=-20.0, tss_day=0.0,
+            fitness=40.0, fatigue=60.0, form=-20.0, load_day=0.0,
         ))
         await session.commit()
 
         resp = await client.get("/api/metrics/fitness/current", headers=auth_headers)
-        assert resp.json()["form"] == "tired"
+        assert resp.json()["form_label"] == "tired"
 
     async def test_unauthenticated_returns_401(self, client):
         resp = await client.get("/api/metrics/fitness/current")
@@ -114,11 +114,11 @@ class TestCatchUp:
         athlete_id = ath_resp.json()["id"]
         today = date.today()
 
-        # Seed yesterday so CTL/ATL can be inherited
+        # Seed yesterday so Fitness/Fatigue can be inherited
         session.add(DailyMetric(
             athlete_id=athlete_id,
             date=today - timedelta(days=1),
-            ctl=40.0, atl=50.0, tsb=-10.0, tss_day=80.0,
+            fitness=40.0, fatigue=50.0, form=-10.0, load_day=80.0,
         ))
         await session.commit()
 
@@ -138,7 +138,7 @@ class TestCatchUp:
         session.add(DailyMetric(
             athlete_id=athlete_id,
             date=today,
-            ctl=30.0, atl=35.0, tsb=-5.0, tss_day=0.0,
+            fitness=30.0, fatigue=35.0, form=-5.0, load_day=0.0,
         ))
         await session.commit()
 
@@ -162,7 +162,7 @@ class TestRecalculate:
         assert resp.status_code == 401
 
     async def test_bg_full_recalculate_updates_tss(self, client, auth_headers, session):
-        """Call _bg_full_recalculate directly with the test session to verify it updates TSS."""
+        """Call _bg_full_recalculate directly with the test session to verify it updates Load."""
         from backend.app.api.metrics import _bg_full_recalculate
         from tests.conftest import _TEST_USER_ID
 
@@ -182,15 +182,15 @@ class TestRecalculate:
         )
         activity_id = act_resp.json()["id"]
 
-        # Add a short power stream (< 30 points so NP falls back to avg_power)
+        # Add a short power stream (< 30 points so Weighted Power falls back to avg_power)
         act_result = await session.execute(select(Activity).where(Activity.id == activity_id))
         activity = act_result.scalar_one()
         activity.avg_power = 200.0
-        activity.tss = None  # clear so we can verify it gets set
+        activity.load = None  # clear so we can verify it gets set
         session.add(ActivityStream(
             activity_id=activity_id,
             stream_type="power",
-            data=[200] * 20,  # too short for NP calculation
+            data=[200] * 20,  # too short for Weighted Power calculation
         ))
         await session.commit()
 
@@ -203,7 +203,7 @@ class TestRecalculate:
             await _bg_full_recalculate(_TEST_USER_ID, athlete_id)
 
         await session.refresh(activity)
-        assert activity.tss is not None
+        assert activity.load is not None
 
 
 # ── Activity summary ───────────────────────────────────────────────────────────
@@ -400,7 +400,7 @@ class TestFitnessDateRange:
             session.add(DailyMetric(
                 athlete_id=athlete_id,
                 date=today - timedelta(days=offset),
-                ctl=float(offset), atl=float(offset), tsb=0.0, tss_day=0.0,
+                fitness=float(offset), fatigue=float(offset), form=0.0, load_day=0.0,
             ))
         await session.commit()
 
@@ -409,7 +409,7 @@ class TestFitnessDateRange:
         resp = await client.get(f"/api/metrics/fitness?start={start}&end={end}", headers=auth_headers)
         data = resp.json()
         assert len(data) == 1
-        assert data[0]["ctl"] == 50.0
+        assert data[0]["fitness"] == 50.0
 
     async def test_current_falls_back_to_latest_when_no_today_metric(self, client, auth_headers, session):
         ath_resp = await client.get("/api/athlete", headers=auth_headers)
@@ -418,10 +418,10 @@ class TestFitnessDateRange:
 
         session.add(DailyMetric(
             athlete_id=athlete_id, date=yesterday,
-            ctl=55.0, atl=60.0, tsb=-5.0, tss_day=0.0,
+            fitness=55.0, fatigue=60.0, form=-5.0, load_day=0.0,
         ))
         await session.commit()
 
         resp = await client.get("/api/metrics/fitness/current", headers=auth_headers)
         assert resp.status_code == 200
-        assert resp.json()["ctl"] == 55.0
+        assert resp.json()["fitness"] == 55.0

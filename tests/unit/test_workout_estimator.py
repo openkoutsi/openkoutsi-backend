@@ -64,25 +64,25 @@ class TestEstimateTss:
         assert estimate_tss([], 250) == 0.0
 
     def test_pct_ftp_spec(self):
-        # 1 hour at 100% FTP => IF=1.0, TSS = 1 * 1.0^2 * 100 = 100
+        # 1 hour at 100% FTP => Intensity=1.0, Load = 1 * 1.0^2 * 100 = 100
         step = _time_step(3600, spec={"type": "pct_ftp", "pct": 100})
         result = estimate_tss([step], 250)
         assert result == pytest.approx(100.0, rel=1e-6)
 
     def test_pct_ftp_below_threshold(self):
-        # 1 hour at 75% FTP => TSS = 1 * 0.75^2 * 100 = 56.25
+        # 1 hour at 75% FTP => Load = 1 * 0.75^2 * 100 = 56.25
         step = _time_step(3600, spec={"type": "pct_ftp", "pct": 75})
         result = estimate_tss([step], 250)
         assert result == pytest.approx(56.25, rel=1e-6)
 
     def test_absolute_spec(self):
-        # 1 hour at 250W with FTP 250 => IF=1.0, TSS=100
+        # 1 hour at 250W with FTP 250 => Intensity=1.0, Load=100
         step = _time_step(3600, spec={"type": "absolute", "value": 250})
         result = estimate_tss([step], 250)
         assert result == pytest.approx(100.0, rel=1e-6)
 
     def test_range_spec_uses_midpoint(self):
-        # 1 hour at range 200-300W with FTP 250 => midpoint 250W, IF=1.0, TSS=100
+        # 1 hour at range 200-300W with FTP 250 => midpoint 250W, Intensity=1.0, Load=100
         step = _time_step(3600, spec={"type": "range", "low": 200, "high": 300})
         result = estimate_tss([step], 250)
         assert result == pytest.approx(100.0, rel=1e-6)

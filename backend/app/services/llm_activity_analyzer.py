@@ -134,12 +134,12 @@ def _build_prompt(
         lines.append(f"  Elevation gain: {activity.elevation_m:.0f} m")
     if activity.avg_power:
         lines.append(f"  Average power: {activity.avg_power:.0f} W")
-    if activity.normalized_power:
-        lines.append(f"  Normalized power: {activity.normalized_power:.0f} W")
-    if activity.intensity_factor:
-        lines.append(f"  Intensity factor: {activity.intensity_factor:.3f}")
-    if activity.tss:
-        lines.append(f"  Training stress score (TSS): {activity.tss:.1f}")
+    if activity.weighted_power:
+        lines.append(f"  Weighted power: {activity.weighted_power:.0f} W")
+    if activity.intensity:
+        lines.append(f"  Intensity factor: {activity.intensity:.3f}")
+    if activity.load:
+        lines.append(f"  Training load: {activity.load:.1f}")
     if activity.avg_hr:
         lines.append(f"  Average heart rate: {activity.avg_hr:.0f} bpm")
     if activity.max_hr:
@@ -153,11 +153,11 @@ def _build_prompt(
         lines.append(f"  Athlete self-reported experience level: {level}")
 
     if fatigue:
-        from ..schemas.metrics import _tsb_to_form
+        from ..schemas.metrics import _form_to_label
         lines.append("\nAthlete fatigue state prior to this workout:")
-        lines.append(f"  Fitness (CTL): {fatigue.ctl:.1f}")
-        lines.append(f"  Fatigue (ATL): {fatigue.atl:.1f}")
-        lines.append(f"  Form (TSB): {fatigue.tsb:.1f} ({_tsb_to_form(fatigue.tsb)})")
+        lines.append(f"  Fitness: {fatigue.fitness:.1f}")
+        lines.append(f"  Fatigue: {fatigue.fatigue:.1f}")
+        lines.append(f"  Form: {fatigue.form:.1f} ({_form_to_label(fatigue.form)})")
 
     if activity.intervals:
         lines.append("\nInterval breakdown:")

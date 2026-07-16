@@ -13,7 +13,7 @@ class PlannedWorkoutResponse(BaseModel):
     workout_type: str
     description: Optional[str] = None
     duration_min: Optional[int] = None
-    target_tss: Optional[int] = None
+    target_load: Optional[int] = None
     completed_activity_id: Optional[str] = None
     skip_reason: Optional[str] = None
 
@@ -30,7 +30,7 @@ class WorkoutCreate(BaseModel):
     workout_type: str
     description: Optional[str] = None
     duration_min: Optional[int] = None
-    target_tss: Optional[int] = None
+    target_load: Optional[int] = None
 
 
 class TrainingPlanCreate(BaseModel):
@@ -56,7 +56,7 @@ class PlannedWorkoutUpdate(BaseModel):
     workout_type: Optional[str] = None
     description: Optional[str] = None
     duration_min: Optional[int] = None
-    target_tss: Optional[int] = None
+    target_load: Optional[int] = None
     day_of_week: Optional[int] = None
     week_number: Optional[int] = None
 
@@ -68,7 +68,7 @@ class PlannedWorkoutCreate(BaseModel):
     workout_type: str
     description: Optional[str] = None
     duration_min: Optional[int] = None
-    target_tss: Optional[int] = None
+    target_load: Optional[int] = None
 
 
 class RegeneratePlanRequest(BaseModel):

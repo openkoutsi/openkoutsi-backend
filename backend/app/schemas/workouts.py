@@ -30,7 +30,7 @@ class WorkoutDefinitionResponse(BaseModel):
     sport_type: str
     steps: list[dict]
     estimated_duration_s: Optional[int] = None
-    estimated_tss: Optional[float] = None
+    estimated_load: Optional[float] = None
     created_at: datetime
     updated_at: datetime
 

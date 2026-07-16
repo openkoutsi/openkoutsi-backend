@@ -1,4 +1,4 @@
-"""Estimate duration and TSS for a workout definition from its step tree."""
+"""Estimate duration and Load for a workout definition from its step tree."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ def estimate_duration_s(steps: list[dict]) -> int:
 
 
 def _step_tss(step: dict, ftp: int) -> float:
-    """Estimate TSS contribution for a single step."""
+    """Estimate Load contribution for a single step."""
     dur = step.get("duration", {})
     if dur.get("type") != "time":
         return 0.0
@@ -38,12 +38,12 @@ def _step_tss(step: dict, ftp: int) -> float:
         pct = ((low + high) / 2.0) / ftp if ftp else 0.0
     else:
         return 0.0
-    # TSS = duration_h * IF^2 * 100 (simplified steady-state approximation)
+    # Load = duration_h * Intensity^2 * 100 (simplified steady-state approximation)
     return duration_h * (pct ** 2) * 100.0
 
 
 def estimate_tss(steps: list[dict], ftp: int | None) -> float | None:
-    """Estimate total TSS for a workout. Returns None if athlete has no FTP."""
+    """Estimate total Load for a workout. Returns None if athlete has no FTP."""
     if not ftp:
         return None
     return _tss_recursive(steps, ftp)

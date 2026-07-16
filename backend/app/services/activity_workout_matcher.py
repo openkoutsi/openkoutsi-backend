@@ -25,7 +25,7 @@ async def find_and_link_workout(
     - Activity date falls within the plan's [start_date, end_date]
     - Same week_number and day_of_week relative to the plan's start_date
     - Sport type compatible with workout type
-    - activity.tss >= 60% of planned target_tss (when both present)
+    - activity.load >= 60% of planned target_load (when both present)
     - activity.duration_s >= 60% of planned duration_min in seconds (when both present)
     - planned workout not already linked to another activity
 
@@ -91,9 +91,9 @@ def _matches(activity: Activity, workout: PlannedWorkout) -> bool:
     if not sports_match(activity.sport_type, workout.workout_type):
         return False
 
-    if workout.target_tss is not None and workout.target_tss > 0:
-        act_tss = activity.tss or 0.0
-        if act_tss < workout.target_tss * _TSS_THRESHOLD:
+    if workout.target_load is not None and workout.target_load > 0:
+        act_tss = activity.load or 0.0
+        if act_tss < workout.target_load * _TSS_THRESHOLD:
             return False
 
     if workout.duration_min is not None and workout.duration_min > 0:

@@ -27,40 +27,40 @@ AUTO_CATEGORIES = {
 
 
 def classify_workout(
-    intensity_factor: float | None,
+    intensity: float | None,
     variability_index: float | None,
 ) -> WorkoutCategory | None:
     """
     Classify a workout using Coggan's 7-zone power model.
 
-    intensity_factor: NP / FTP
-    variability_index: NP / avg_power — high VI (>1.10) indicates interval/punchy riding
+    intensity: Weighted Power / FTP
+    variability_index: Weighted Power / avg_power — high VI (>1.10) indicates interval/punchy riding
     """
-    if intensity_factor is None:
+    if intensity is None:
         return None
 
     vi = variability_index or 1.0
 
-    if intensity_factor >= 1.20:
+    if intensity >= 1.20:
         return WorkoutCategory.sprint
 
-    if intensity_factor >= 1.10:
+    if intensity >= 1.10:
         return WorkoutCategory.anaerobic
 
-    if intensity_factor >= 1.00:
+    if intensity >= 1.00:
         return WorkoutCategory.vo2max
 
-    if intensity_factor >= 0.90:
+    if intensity >= 0.90:
         if vi > 1.10:
             return WorkoutCategory.vo2max
         return WorkoutCategory.threshold
 
-    if intensity_factor >= 0.78:
+    if intensity >= 0.78:
         if vi > 1.10:
             return WorkoutCategory.threshold
         return WorkoutCategory.tempo
 
-    if intensity_factor >= 0.65:
+    if intensity >= 0.65:
         return WorkoutCategory.endurance
 
     return WorkoutCategory.recovery

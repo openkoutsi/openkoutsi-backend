@@ -30,7 +30,7 @@ def _workout(day_of_week: int, **kwargs) -> PlannedWorkout:
     w = MagicMock(spec=PlannedWorkout)
     w.day_of_week = day_of_week
     w.workout_type = kwargs.get("workout_type", "endurance")
-    w.target_tss = kwargs.get("target_tss", None)
+    w.target_load = kwargs.get("target_load", None)
     w.completed_activity_id = kwargs.get("completed_activity_id", None)
     w.skip_reason = kwargs.get("skip_reason", None)
     return w
@@ -42,9 +42,9 @@ class TestThisWeekWeekdayLabels:
         plan_start = date(2025, 6, 2)
         now = datetime(2025, 6, 4, 8, 0, tzinfo=ZoneInfo("Europe/Helsinki"))
         workouts = [
-            _workout(1, workout_type="threshold", target_tss=80),  # Monday
-            _workout(3, workout_type="intervals", target_tss=90),  # Wednesday = today
-            _workout(7, workout_type="long", target_tss=120),       # Sunday
+            _workout(1, workout_type="threshold", target_load=80),  # Monday
+            _workout(3, workout_type="intervals", target_load=90),  # Wednesday = today
+            _workout(7, workout_type="long", target_load=120),       # Sunday
         ]
         prompt = _build_status_prompt(
             athlete=_athlete(),

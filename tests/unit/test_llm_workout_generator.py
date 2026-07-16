@@ -107,7 +107,7 @@ class TestBuildUserPrompt:
         pw = PlannedWorkout(
             plan_id="p", week_number=1, day_of_week=2,
             workout_type="threshold", description="2x20 at FTP",
-            duration_min=60, target_tss=80,
+            duration_min=60, target_load=80,
         )
         prompt = _build_user_prompt(pw, 280, "Ride")
         assert "threshold" in prompt

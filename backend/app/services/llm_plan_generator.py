@@ -56,14 +56,14 @@ _SCHEMA_EXAMPLE = """\
           "workout_type": "rest",
           "description": null,
           "duration_min": null,
-          "target_tss": null
+          "target_load": null
         },
         {
           "day_of_week": 2,
           "workout_type": "threshold",
           "description": "2x20 min at threshold power",
           "duration_min": 60,
-          "target_tss": 80
+          "target_load": 80
         }
       ]
     }
@@ -74,9 +74,9 @@ Rules:
 - day_of_week: integer 1 (Monday) to 7 (Sunday)
 - workout_type: one of "recovery", "tempo", "threshold", "vo2max", "endurance", "long", "strength", "yoga", "cross-training", "rest"
 - Every week must have exactly 7 workouts, one per day_of_week (1-7)
-- Days not scheduled as training should be "rest" with null duration and tss
-- TSS and duration_min must be null for rest days, integers otherwise
-- Scale TSS and duration progressively across weeks (base building, recovery every 4th week, taper at end)
+- Days not scheduled as training should be "rest" with null duration and load
+- Load and duration_min must be null for rest days, integers otherwise
+- Scale Load and duration progressively across weeks (base building, recovery every 4th week, taper at end)
 """
 
 
@@ -85,7 +85,7 @@ def _build_user_prompt(
     goal: Optional[str],
     num_weeks: int,
     ftp: Optional[int],
-    ctl: Optional[float],
+    fitness: Optional[float],
     experience: Optional[str] = None,
 ) -> str:
     day_names = {1: "Monday", 2: "Tuesday", 3: "Wednesday", 4: "Thursday",
@@ -112,8 +112,8 @@ def _build_user_prompt(
         lines += ["", f"Additional context: {config.long_description}"]
     if ftp:
         lines += ["", f"Athlete FTP: {ftp}W"]
-    if ctl is not None:
-        lines += [f"Current fitness (CTL): {ctl:.1f} TSS/day"]
+    if fitness is not None:
+        lines += [f"Current fitness: {fitness:.1f} Load/day"]
     if experience:
         lines += [f"Athlete self-reported experience level: {experience}"]
 
@@ -150,7 +150,7 @@ def _parse_response(raw: str, num_weeks: int) -> list[list[dict]]:
                 "workout_type": str(w.get("workout_type", "rest")),
                 "description": w.get("description") or None,
                 "duration_min": int(w["duration_min"]) if w.get("duration_min") is not None else None,
-                "target_tss": int(w["target_tss"]) if w.get("target_tss") is not None else None,
+                "target_load": int(w["target_load"]) if w.get("target_load") is not None else None,
             })
         result.append(normalised)
     return result
@@ -176,8 +176,8 @@ async def generate_plan_weeks_llm(
         athlete, instance, user_id, allow_instance_fallback=allow_instance_fallback
     )
 
-    # Fetch athlete's latest CTL for context
-    ctl: Optional[float] = None
+    # Fetch athlete's latest Fitness for context
+    fitness: Optional[float] = None
     result = await session.execute(
         select(DailyMetric)
         .where(DailyMetric.athlete_id == athlete.id)
@@ -186,10 +186,10 @@ async def generate_plan_weeks_llm(
     )
     latest_metric = result.scalar_one_or_none()
     if latest_metric:
-        ctl = latest_metric.ctl
+        fitness = latest_metric.fitness
 
     user_prompt = _build_user_prompt(
-        config, goal, num_weeks, athlete.ftp, ctl, experience_level(athlete.app_settings)
+        config, goal, num_weeks, athlete.ftp, fitness, experience_level(athlete.app_settings)
     )
 
     # Call LLM (with the strict schema by default) and one retry on parse failure

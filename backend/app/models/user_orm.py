@@ -106,13 +106,13 @@ class Activity(UserBase):
     distance_m: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     elevation_m: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     avg_power: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    normalized_power: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    weighted_power: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     avg_hr: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     max_hr: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     avg_speed_ms: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     avg_cadence: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    tss: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    intensity_factor: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    load: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    intensity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     workout_category: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     labels: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -248,10 +248,10 @@ class DailyMetric(UserBase):
         String, ForeignKey("athletes.id", ondelete="CASCADE"), primary_key=True
     )
     date: Mapped[date] = mapped_column(Date, primary_key=True)
-    ctl: Mapped[float] = mapped_column(Float, default=0.0)
-    atl: Mapped[float] = mapped_column(Float, default=0.0)
-    tsb: Mapped[float] = mapped_column(Float, default=0.0)
-    tss_day: Mapped[float] = mapped_column(Float, default=0.0)
+    fitness: Mapped[float] = mapped_column(Float, default=0.0)
+    fatigue: Mapped[float] = mapped_column(Float, default=0.0)
+    form: Mapped[float] = mapped_column(Float, default=0.0)
+    load_day: Mapped[float] = mapped_column(Float, default=0.0)
 
     athlete: Mapped["Athlete"] = relationship("Athlete", back_populates="daily_metrics")
 
@@ -321,7 +321,7 @@ class PlannedWorkout(UserBase):
     workout_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     description: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     duration_min: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    target_tss: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    target_load: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     completed_activity_id: Mapped[Optional[str]] = mapped_column(
         String, ForeignKey("activities.id", ondelete="SET NULL"), nullable=True
     )
@@ -345,7 +345,7 @@ class WorkoutDefinition(UserBase):
     sport_type: Mapped[str] = mapped_column(String, nullable=False, default="Ride")
     steps: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     estimated_duration_s: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    estimated_tss: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    estimated_load: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now

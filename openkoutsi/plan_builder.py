@@ -11,36 +11,36 @@ from openkoutsi.plan_schema import PlanConfig
 
 # day_of_week: 1=Mon ... 7=Sun
 _BASE_WEEK: list[dict] = [
-    {"day_of_week": 1, "workout_type": "rest",      "duration_min": None, "target_tss": None, "description": None},
-    {"day_of_week": 2, "workout_type": "threshold", "duration_min": 60,   "target_tss": 80,   "description": "2×20 min at threshold power"},
-    {"day_of_week": 3, "workout_type": "recovery",  "duration_min": 60,   "target_tss": 40,   "description": "Zone 2 aerobic"},
-    {"day_of_week": 4, "workout_type": "endurance", "duration_min": 75,   "target_tss": 55,   "description": "Steady endurance with some tempo efforts"},
-    {"day_of_week": 5, "workout_type": "rest",      "duration_min": None, "target_tss": None, "description": None},
-    {"day_of_week": 6, "workout_type": "endurance", "duration_min": 120,  "target_tss": 90,   "description": "Long easy endurance ride"},
-    {"day_of_week": 7, "workout_type": "recovery",  "duration_min": 45,   "target_tss": 25,   "description": "Active recovery spin"},
+    {"day_of_week": 1, "workout_type": "rest",      "duration_min": None, "target_load": None, "description": None},
+    {"day_of_week": 2, "workout_type": "threshold", "duration_min": 60,   "target_load": 80,   "description": "2×20 min at threshold power"},
+    {"day_of_week": 3, "workout_type": "recovery",  "duration_min": 60,   "target_load": 40,   "description": "Zone 2 aerobic"},
+    {"day_of_week": 4, "workout_type": "endurance", "duration_min": 75,   "target_load": 55,   "description": "Steady endurance with some tempo efforts"},
+    {"day_of_week": 5, "workout_type": "rest",      "duration_min": None, "target_load": None, "description": None},
+    {"day_of_week": 6, "workout_type": "endurance", "duration_min": 120,  "target_load": 90,   "description": "Long easy endurance ride"},
+    {"day_of_week": 7, "workout_type": "recovery",  "duration_min": 45,   "target_load": 25,   "description": "Active recovery spin"},
 ]
 
 _PEAK_WEEK: list[dict] = [
-    {"day_of_week": 1, "workout_type": "rest",      "duration_min": None, "target_tss": None, "description": None},
-    {"day_of_week": 2, "workout_type": "vo2max",    "duration_min": 60,   "target_tss": 90,   "description": "5×5 min VO2max intervals"},
-    {"day_of_week": 3, "workout_type": "recovery",  "duration_min": 60,   "target_tss": 40,   "description": "Zone 2 aerobic"},
-    {"day_of_week": 4, "workout_type": "threshold", "duration_min": 90,   "target_tss": 100,  "description": "3×20 min threshold"},
-    {"day_of_week": 5, "workout_type": "rest",      "duration_min": None, "target_tss": None, "description": None},
-    {"day_of_week": 6, "workout_type": "endurance", "duration_min": 150,  "target_tss": 120,  "description": "Long endurance with race-pace effort"},
-    {"day_of_week": 7, "workout_type": "recovery",  "duration_min": 45,   "target_tss": 25,   "description": "Active recovery"},
+    {"day_of_week": 1, "workout_type": "rest",      "duration_min": None, "target_load": None, "description": None},
+    {"day_of_week": 2, "workout_type": "vo2max",    "duration_min": 60,   "target_load": 90,   "description": "5×5 min VO2max intervals"},
+    {"day_of_week": 3, "workout_type": "recovery",  "duration_min": 60,   "target_load": 40,   "description": "Zone 2 aerobic"},
+    {"day_of_week": 4, "workout_type": "threshold", "duration_min": 90,   "target_load": 100,  "description": "3×20 min threshold"},
+    {"day_of_week": 5, "workout_type": "rest",      "duration_min": None, "target_load": None, "description": None},
+    {"day_of_week": 6, "workout_type": "endurance", "duration_min": 150,  "target_load": 120,  "description": "Long endurance with race-pace effort"},
+    {"day_of_week": 7, "workout_type": "recovery",  "duration_min": 45,   "target_load": 25,   "description": "Active recovery"},
 ]
 
 _RECOVERY_WEEK: list[dict] = [
-    {"day_of_week": 1, "workout_type": "rest",      "duration_min": None, "target_tss": None, "description": None},
-    {"day_of_week": 2, "workout_type": "recovery",  "duration_min": 45,   "target_tss": 25,   "description": "Easy spin"},
-    {"day_of_week": 3, "workout_type": "recovery",  "duration_min": 60,   "target_tss": 35,   "description": "Zone 2"},
-    {"day_of_week": 4, "workout_type": "tempo",     "duration_min": 60,   "target_tss": 55,   "description": "Moderate tempo"},
-    {"day_of_week": 5, "workout_type": "rest",      "duration_min": None, "target_tss": None, "description": None},
-    {"day_of_week": 6, "workout_type": "endurance", "duration_min": 90,   "target_tss": 65,   "description": "Shorter long ride"},
-    {"day_of_week": 7, "workout_type": "rest",      "duration_min": None, "target_tss": None, "description": None},
+    {"day_of_week": 1, "workout_type": "rest",      "duration_min": None, "target_load": None, "description": None},
+    {"day_of_week": 2, "workout_type": "recovery",  "duration_min": 45,   "target_load": 25,   "description": "Easy spin"},
+    {"day_of_week": 3, "workout_type": "recovery",  "duration_min": 60,   "target_load": 35,   "description": "Zone 2"},
+    {"day_of_week": 4, "workout_type": "tempo",     "duration_min": 60,   "target_load": 55,   "description": "Moderate tempo"},
+    {"day_of_week": 5, "workout_type": "rest",      "duration_min": None, "target_load": None, "description": None},
+    {"day_of_week": 6, "workout_type": "endurance", "duration_min": 90,   "target_load": 65,   "description": "Shorter long ride"},
+    {"day_of_week": 7, "workout_type": "rest",      "duration_min": None, "target_load": None, "description": None},
 ]
 
-# Base parameters per workout type: (duration_min, target_tss, description)
+# Base parameters per workout type: (duration_min, target_load, description)
 _BASE_PARAMS: dict[str, tuple[int, int, str]] = {
     "easy":           (60,  40,  "Zone 2 aerobic endurance"),
     "tempo":          (60,  65,  "Tempo effort at ~75-85% FTP"),
@@ -68,7 +68,7 @@ def week_template(week_num: int, total_weeks: int, goal: Optional[str]) -> list[
 
 def progression_factor(week_num: int, total_weeks: int, periodization: str) -> float:
     """
-    Return a multiplier (0.6 – 1.3) that scales TSS/duration week over week.
+    Return a multiplier (0.6 – 1.3) that scales Load/duration week over week.
 
     Patterns:
     - base_building:  gentle 3-week ramp + 1 recovery, reaching ~1.1× at peak
@@ -107,7 +107,7 @@ def build_week_from_config(config: PlanConfig, week_num: int, total_weeks: int) 
                 "day_of_week": day_num,
                 "workout_type": "rest",
                 "duration_min": None,
-                "target_tss": None,
+                "target_load": None,
                 "description": None,
             })
         else:
@@ -118,16 +118,16 @@ def build_week_from_config(config: PlanConfig, week_num: int, total_weeks: int) 
             is_recovery = (week_num % 4 == 0 or week_num == total_weeks)
             if is_recovery and dc.workout_type in ("strength", "yoga", "rest"):
                 duration = base_dur or None
-                tss = base_tss or None
+                load = base_tss or None
             else:
                 duration = round(base_dur * scale) if base_dur else None
-                tss = round(base_tss * scale) if base_tss else None
+                load = round(base_tss * scale) if base_tss else None
 
             week.append({
                 "day_of_week": day_num,
                 "workout_type": dc.workout_type,
                 "duration_min": duration,
-                "target_tss": tss,
+                "target_load": load,
                 "description": dc.notes or base_desc,
             })
     return week

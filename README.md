@@ -1,6 +1,6 @@
 # openkoutsi-backend
 
-The backend (FastAPI API + bridge services + core library) for openkoutsi, a self-hosted cycling coaching platform. Upload FIT files or sync from Strava/Wahoo, track fitness metrics (CTL/ATL/TSB), and generate periodized training plans from your own server.
+The backend (FastAPI API + bridge services + core library) for openkoutsi, a self-hosted cycling coaching platform. Upload FIT files or sync from Strava/Wahoo, track fitness metrics (Fitness/Fatigue/Form), and generate periodized training plans from your own server.
 
 > **koutsi** (κουτσί) — Finnish for "coach"
 
@@ -18,19 +18,19 @@ Most cycling coaching tools are cloud-only SaaS. openkoutsi is different: you ru
 - **Admin inbox** — in-app messages notify admins about events (e.g. used invites); each user has an isolated per-user message store, deletions are permanent, and the design leaves a hook for future email/push delivery
 - **Swappable email module** — a single, provider-agnostic seam (`backend/app/services/email/`) for all email: a generic `EmailProvider` interface (outbound `send`, inbound `verify_inbound_signature`/`parse_inbound`) with `LettermintProvider` and `EuromailProvider` (euromail.dev — EU-based, inbound included on its free tier) implementations, provider selection via `EMAIL_PROVIDER`, and self-rendered inline-styled HTML + plain-text bodies. Optional — with no provider configured, email-dependent features stay unavailable rather than erroring
 - **Admin dashboard** — manage users, invitations, password resets, an admin-contact shown on the password-reset page, and instance-wide LLM settings
-- **FIT file ingestion** — upload activities directly with automatic TSS, normalized power, and zone distribution analysis
-- **Manual activity entry** — log workouts by hand (date, duration, distance, avg/max HR, avg power, cadence, RPE/TSS) with every field optional, behaving like a `manual` data provider
+- **FIT file ingestion** — upload activities directly with automatic Load, weighted power, and zone distribution analysis
+- **Manual activity entry** — log workouts by hand (date, duration, distance, avg/max HR, avg power, cadence, RPE/Load) with every field optional, behaving like a `manual` data provider
 - **Workout categorization** — automatic Coggan-style zone classification with manual override
 - **Strava + Wahoo sync** — OAuth integrations with history import and webhook updates through bridge services
 - **Zone sync** — sync HR/power zones and FTP from connected providers
 - **FTP estimation** — estimate FTP from your power curve via the 20-minute (95%) or Critical Power method, shown on the Power view, and accept either to set your profile FTP
 - **Experience level** — self-reported athlete experience level (novice, intermediate, experienced, semi-pro, elite) stored on the profile via `PATCH /api/athlete` and fed into the LLM context for plan/workout generation and training-status, activity and goal analysis, so coaching and progression are tailored to the athlete's level
-- **Fitness metrics** — CTL/ATL/TSB computed and shown as interactive charts; stale metrics caused by deleted activities are detected and corrected automatically on dashboard load. The fitness history card also shows cycling totals — number of activities, active time, and covered distance — for the selected time period
+- **Fitness metrics** — Fitness/Fatigue/Form computed and shown as interactive charts; stale metrics caused by deleted activities are detected and corrected automatically on dashboard load. The fitness history card also shows cycling totals — number of activities, active time, and covered distance — for the selected time period
 - **Training calendar** — dashboard calendar shows both performed and planned workouts with distinct visual markers (completed, pending, skipped), and lets you mark a planned workout as done or skipped straight from the day view without opening the plan
 - **Training plan generation** — periodized plans (Base → Build → Peak → Taper)
 - **Training plan editing** — edit plan metadata (name, goal, start date, length), edit/add/delete individual planned workouts from the calendar day view, and regenerate a plan's workouts (rule-based or AI); completed workouts are locked from edits and preserved on regeneration
 - **Plan archiving/unarchiving** — creating a new plan only archives existing active plans whose dates overlap it, so plans covering different periods stay active together; archived plans can be reactivated via `POST /api/plans/{id}/unarchive`, which archives any overlapping active plan in turn
-- **Activity → plan linking** — uploaded activities are automatically matched to the day's planned workout (sport, TSS ≥ 60%, duration ≥ 60%); manual link/unlink via the plan calendar or the dashboard activity calendar
+- **Activity → plan linking** — uploaded activities are automatically matched to the day's planned workout (sport, Load ≥ 60%, duration ≥ 60%); manual link/unlink via the plan calendar or the dashboard activity calendar
 - **Workout skip tracking** — mark planned workouts as skipped with a reason (illness, injury, fatigue, travel, weather, etc.) for accurate training log and LLM coaching context
 - **Structured workouts** — create interval workouts and export as Zwift `.zwo` or FIT workout files for head units (FIT export flattens repeat blocks into individual consecutive steps for reliable display on Wahoo/Garmin devices)
 - **Push workouts to Wahoo** — send a structured workout straight to a connected Wahoo account as a plan + scheduled workout, so it appears in Planned Workouts on ELEMNT/RIVAL (schedule within today→+6 days; re-pushing updates instead of duplicating)
