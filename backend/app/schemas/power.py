@@ -12,6 +12,7 @@ class PowerBestEntry(BaseModel):
     activity_name: Optional[str]
     activity_start_time: Optional[datetime]
     weight_kg: Optional[float] = None
+    w_per_kg: Optional[float] = None
 
 
 class AllTimePowerBestsResponse(BaseModel):

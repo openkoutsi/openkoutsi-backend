@@ -45,6 +45,7 @@ from openkoutsi.fit_processing import (
     compute_interval_stats,
 )
 from backend.app.services.providers.registry import PROVIDERS
+from backend.app.services.weight import effective_weight_for, load_weight_log, w_per_kg
 from openkoutsi.training_math import (
     calculate_load,
     compute_distance_bests,
@@ -480,6 +481,9 @@ async def _fill_from_source(
                     If None, FIT was already tried and failed (skip download).
                     If bytes, use the pre-fetched FIT data directly.
     """
+    # Effective weight at the activity's date, for the W/kg on each power best.
+    weight_log = await load_weight_log(athlete.id, session)
+
     # ── FIT-first path (Wahoo and any future FIT-capable provider) ──────
     if prefetched_fit is _NOTFETCHED:
         fit_bytes: bytes | None = None
@@ -563,7 +567,7 @@ async def _fill_from_source(
             _add_streams(
                 activity, session, power_data, hr_data, cadence_data, speed_ms, alt_data
             )
-            _add_power_bests(activity, athlete, session, power_data)
+            _add_power_bests(activity, athlete, session, power_data, weight_log)
             _add_distance_bests(activity, athlete, session, speed_ms)
 
             stream_map = {
@@ -637,7 +641,7 @@ async def _fill_from_source(
     _add_streams(
         activity, session, power_data, hr_data, cadence_data, speed_data, altitude_data
     )
-    _add_power_bests(activity, athlete, session, power_data)
+    _add_power_bests(activity, athlete, session, power_data, weight_log)
     _add_distance_bests(activity, athlete, session, speed_data)
 
     await session.commit()
@@ -679,9 +683,12 @@ def _add_power_bests(
     athlete: Athlete,
     session: AsyncSession,
     power_data: list,
+    weight_log: list[tuple[date, float]] | None = None,
 ) -> None:
     if not power_data:
         return
+    act_date = activity.start_time.date() if activity.start_time else None
+    weight = effective_weight_for(weight_log or [], act_date)
     for dur_s, pwr_w in compute_power_bests(power_data).items():
         session.add(
             ActivityPowerBest(
@@ -690,6 +697,8 @@ def _add_power_bests(
                 duration_s=dur_s,
                 power_w=pwr_w,
                 activity_start_time=activity.start_time,
+                weight_kg=weight,
+                w_per_kg=w_per_kg(pwr_w, weight),
             )
         )
 

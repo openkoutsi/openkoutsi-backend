@@ -26,6 +26,7 @@ from backend.app.models.user_orm import (
     ActivityStream,
     Athlete,
 )
+from backend.app.services.weight import effective_weight_for, load_weight_log, w_per_kg
 
 
 def read_fit_start_time(path: str) -> Optional[datetime]:
@@ -90,6 +91,9 @@ async def process_fit_file(
             )
 
     if power_data:
+        weight_log = await load_weight_log(athlete.id, session)
+        act_date = activity.start_time.date() if activity.start_time else None
+        weight = effective_weight_for(weight_log, act_date)
         bests = compute_power_bests(power_data)
         for duration_s, power_w in bests.items():
             session.add(
@@ -99,6 +103,8 @@ async def process_fit_file(
                     duration_s=duration_s,
                     power_w=power_w,
                     activity_start_time=activity.start_time,
+                    weight_kg=weight,
+                    w_per_kg=w_per_kg(power_w, weight),
                 )
             )
 

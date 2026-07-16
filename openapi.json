@@ -2801,7 +2801,7 @@
           "metrics"
         ],
         "summary": "All-time power bests",
-        "description": "Return the top-3 best average power for each standard duration,\nordered by (duration_s asc, rank asc).  Durations with no data are omitted.\nPass ?days=90/180/365 to restrict to a rolling window; omit for all-time.",
+        "description": "Return the top-3 best efforts for each standard duration,\nordered by (duration_s asc, rank asc).  Durations with no data are omitted.\n\nPass ?metric=wkg to rank by watts-per-kg using the effective bodyweight at\nthe time of each effort (efforts with no known weight are omitted); the\ndefault ?metric=watts ranks by absolute power.  Pass ?days=90/180/365 to\nrestrict to a rolling window; omit for all-time.",
         "operationId": "getPowerBests",
         "security": [
           {
@@ -2827,6 +2827,22 @@
               "title": "Days"
             },
             "description": "Restrict to bests from the past N days. Omit for all-time."
+          },
+          {
+            "name": "metric",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "watts",
+                "wkg"
+              ],
+              "type": "string",
+              "description": "Rank by absolute 'watts' or by 'wkg' (watts per kg at the time of each effort).",
+              "default": "watts",
+              "title": "Metric"
+            },
+            "description": "Rank by absolute 'watts' or by 'wkg' (watts per kg at the time of each effort)."
           }
         ],
         "responses": {
@@ -8416,6 +8432,17 @@
               }
             ],
             "title": "Weight Kg"
+          },
+          "w_per_kg": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "W Per Kg"
           }
         },
         "type": "object",
