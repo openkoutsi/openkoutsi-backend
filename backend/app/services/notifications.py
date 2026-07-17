@@ -19,6 +19,7 @@ log = logging.getLogger(__name__)
 
 # ── Message types ────────────────────────────────────────────────────────────
 INVITE_USED = "invite_used"     # someone registered via an invite link
+INBOUND_EMAIL = "inbound_email"  # mail to the operator address (issue #38)
 
 
 async def notify_user(user_id: str, type: str, data: dict) -> None:
@@ -32,11 +33,15 @@ async def notify_user(user_id: str, type: str, data: dict) -> None:
 
 async def notify_admins(
     registry_session: AsyncSession, type: str, data: dict
-) -> None:
-    """Fan out an in-app message to every instance administrator."""
+) -> int:
+    """Fan out an in-app message to every instance administrator.
+
+    Returns the number of administrators the message was delivered to.
+    """
     result = await registry_session.execute(
         select(User).where(User.deleted_at.is_(None))
     )
+    delivered = 0
     for user in result.scalars().all():
         try:
             roles = json.loads(user.roles) if user.roles else []
@@ -44,6 +49,8 @@ async def notify_admins(
             roles = []
         if "administrator" in roles:
             await notify_user(user.id, type, data)
+            delivered += 1
+    return delivered
 
 
 async def _dispatch_external(user_id: str, type: str, data: dict) -> None:

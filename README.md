@@ -16,6 +16,7 @@ Most cycling coaching tools are cloud-only SaaS. openkoutsi is different: you ru
 - **Signup** — the setup wizard creates the first administrator; further accounts come from instance-wide invites issued by an admin, or, when an admin enables the `allow_self_signup` toggle and an email provider is configured, from **self-serve email signup** (register with an email → verify it → account activates)
 - **Self-serve password reset** — with email configured, users can request a reset link from the "Forgot password?" page (`POST /api/auth/request-password-reset`); admins can still mint reset links directly. Both are single-use and expire in 1 hour
 - **Admin inbox** — in-app messages notify admins about events (e.g. used invites); each user has an isolated per-user message store, deletions are permanent, and the design leaves a hook for future email/push delivery
+- **Inbound email (opt-in)** — mail sent to the configured operator address is surfaced in every administrator's in-app inbox. It arrives through an optional, off-by-default `inbound_bridge/` microservice (the "third bridge" alongside Strava/Wahoo): the email provider POSTs to the bridge, which verifies the provider's webhook signature and *holds* the parsed message in a queue; the backend **polls** the bridge on its own schedule (like the Strava/Wahoo bridges) and fans each message out via the notifications service. Because the bridge holds mail until the backend claims it, nothing is lost while the backend is down, and the backend exposes no public inbound endpoint. Only a bounded snippet is stored in-app; the operator address is configurable (never hardcoded) and self-hosters who omit the bridge have no inbound path at all
 - **Swappable email module** — a single, provider-agnostic seam (`backend/app/services/email/`) for all email: a generic `EmailProvider` interface (outbound `send`, inbound `verify_inbound_signature`/`parse_inbound`) with `LettermintProvider` and `EuromailProvider` (euromail.dev — EU-based, inbound included on its free tier) implementations, provider selection via `EMAIL_PROVIDER`, and self-rendered inline-styled HTML + plain-text bodies. Optional — with no provider configured, email-dependent features stay unavailable rather than erroring
 - **Admin dashboard** — manage users, invitations, password resets, an admin-contact shown on the password-reset page, and instance-wide LLM settings
 - **FIT file ingestion** — upload activities directly with automatic Load, weighted power, and zone distribution analysis
@@ -48,22 +49,22 @@ Most cycling coaching tools are cloud-only SaaS. openkoutsi is different: you ru
 ## Architecture
 
 ```
-┌────────────────────────────────────────────────────────────────────┐
-│  FastAPI backend (Python · SQLAlchemy · Alembic)                  │
-│  (the Next.js frontend lives in openkoutsi/openkoutsi-web)        │
-│                                                                    │
-│  data/registry.db                 users, invitations, settings      │
-│  data/users/{id}/user.db          per-user athlete + training data   │
-│  data/users/{id}/uploads/         encrypted FIT files               │
-└────────────────────────────────────────────────────────────────────┘
-                 ↕ polls for events
-       ┌──────────────────────────────┐     ┌──────────────────────────────┐
-       │ Strava Bridge (FastAPI)      │     │ Wahoo Bridge (FastAPI)       │
-       │ public webhook endpoint       │     │ public webhook endpoint       │
-       └──────────────────────────────┘     └──────────────────────────────┘
+       ┌──────────────────────────────────────────────────────────────────────────────────────────────────────┐
+       │ FastAPI backend (Python · SQLAlchemy · Alembic)                                                      │
+       │ (the Next.js frontend lives in openkoutsi/openkoutsi-web)                                            │
+       │                                                                                                      │
+       │ data/registry.db        users, invitations, settings                                                 │
+       │ data/users/{id}/user.db per-user athlete + training data                                             │
+       │ data/users/{id}/uploads encrypted FIT files                                                          │
+       └──────────────────────────────────────────────────────────────────────────────────────────────────────┘
+                   ↕ polls                            ↕ polls                            ↕ polls
+       ┌──────────────────────────────┐   ┌──────────────────────────────┐   ┌──────────────────────────────┐
+       │ Strava Bridge (FastAPI)      │   │ Wahoo Bridge (FastAPI)       │   │ Inbound Email Bridge         │
+       │ public webhook receiver      │   │ public webhook receiver      │   │ (FastAPI · optional, opt-in) │
+       └──────────────────────────────┘   └──────────────────────────────┘   └──────────────────────────────┘
 ```
 
-The bridge services are small external webhook receivers. The main app polls them, so the main app can stay private (for example behind NAT) while only bridges are exposed publicly.
+The bridge services are small external webhook receivers that queue events, so the main app can stay private (for example behind NAT) while only bridges are exposed publicly. All three follow the same pattern: the bridge holds received events and the main app **polls** and claims them, processing on its own schedule (so nothing is lost while the backend is down). The optional inbound-email bridge ships as an off-by-default Docker Compose profile (`--profile inbound-email`).
 
 ## Stack
 
@@ -150,6 +151,16 @@ LETTERMINT_WEBHOOK_SECRET=           # secret for verifying inbound Lettermint w
 EUROMAIL_API_KEY=                    # EuroMail API token for sending (EMAIL_PROVIDER=euromail)
 EUROMAIL_WEBHOOK_SECRET=             # secret for verifying inbound EuroMail webhooks
 
+# Inbound email (optional, opt-in, off by default) — surfaces mail sent to the
+# operator address in every administrator's in-app inbox. The backend polls the
+# optional inbound bridge (see below), which holds verified mail in a queue.
+# With INBOUND_EMAIL_ENABLED=false the backend never polls and there is no
+# inbound path at all.
+INBOUND_EMAIL_ENABLED=false          # master switch for the inbound-email poller
+INBOUND_EMAIL_ADDRESS=               # operator address mail is accepted for (e.g. lassi@koutsi.dev); never hardcoded
+INBOUND_BRIDGE_URL=                  # public URL of the inbound bridge the backend polls
+INBOUND_BRIDGE_SECRET=               # shared bearer for polling/claiming on the inbound bridge
+
 # Optional: restrict which LLM base URLs users may bring (BYOK). Comma-separated;
 # empty = users may bring any URL (subject to SSRF guards).
 LLM_ALLOWED_SERVERS=
@@ -225,7 +236,8 @@ The web frontend has its own configuration (`API_URL`, etc.) — see the [openko
 ## Integrations
 
 - **Strava:** configure Strava app credentials in `.env` and deploy `strava_bridge/` to a public HTTPS URL.
-- **Wahoo:** configure Wahoo credentials in `.env` and deploy `wahoo_bridge/` to a public HTTPS URL. Pushing structured workouts to Wahoo requires the `plans_read`, `plans_write`, and `workouts_write` scopes; users connected before this feature must reconnect Wahoo to grant them. The "Generate workouts" plan action needs a server-reachable LLM (resolved athlete → instance → global) to synthesize the structured workouts; uploading the generated workouts to Wahoo is then done individually from the Workouts tab.
+- **Wahoo:** configure Wahoo credentials in `.env` and deploy `wahoo_bridge/` to a public HTTPS URL.
+- **Inbound email (optional):** to surface operator-address mail in-app, set `INBOUND_EMAIL_ENABLED=true`, `INBOUND_EMAIL_ADDRESS`, `INBOUND_BRIDGE_URL` (where the backend polls), and a shared `INBOUND_BRIDGE_SECRET` on the backend, then deploy `inbound_bridge/` (via the `inbound-email` Compose profile) with the same `INBOUND_BRIDGE_SECRET` and the provider's `EUROMAIL_WEBHOOK_SECRET`. Point the email provider's inbound route for the operator address at the bridge's public `POST /webhook/euromail` (each provider has its own path). Left disabled, the backend never polls and the instance has no inbound path. Pushing structured workouts to Wahoo requires the `plans_read`, `plans_write`, and `workouts_write` scopes; users connected before this feature must reconnect Wahoo to grant them. The "Generate workouts" plan action needs a server-reachable LLM (resolved athlete → instance → global) to synthesize the structured workouts; uploading the generated workouts to Wahoo is then done individually from the Workouts tab.
 - **Disconnecting a provider:** `DELETE /api/integrations/{provider}/disconnect` optionally deletes the imported activities when `delete_data=true` is passed (accepted as a query parameter *or* in the JSON body). The data is deleted and committed *before* the connection is removed, and a failed deletion returns `500` with the connection left in place — the caller is never told the data is gone unless it actually was.
 
 ### Deployment

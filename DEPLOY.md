@@ -28,6 +28,7 @@ The deployment model is **build-in-CI, pull-on-VM**:
 | Backend       | `ghcr.io/openkoutsi/openkoutsi-backend`        | this repo (`Dockerfile`)            |
 | Strava bridge | `ghcr.io/openkoutsi/openkoutsi-strava-bridge`  | this repo (`strava_bridge/`)        |
 | Wahoo bridge  | `ghcr.io/openkoutsi/openkoutsi-wahoo-bridge`   | this repo (`wahoo_bridge/`)         |
+| Inbound bridge | `ghcr.io/openkoutsi/openkoutsi-inbound-bridge` | this repo (`inbound_bridge/`) — optional, opt-in |
 | Web frontend  | `ghcr.io/openkoutsi/openkoutsi-web`            | [openkoutsi-web](https://github.com/openkoutsi/openkoutsi-web) |
 
 Each build pushes two tags: `latest` (the channel the VM tracks) and
@@ -58,9 +59,12 @@ the lowercase settings field:
 - backend: `secret_key`, `encryption_key`, `strava_client_secret`,
   `bridge_secret`, `wahoo_client_secret`, `wahoo_bridge_secret`,
   `lettermint_api_key` / `euromail_api_key` (only when outbound email is used;
-  set the one matching `EMAIL_PROVIDER`)
+  set the one matching `EMAIL_PROVIDER`), `inbound_bridge_secret` (only when
+  inbound email is enabled)
 - strava bridge: `strava_client_secret`, `bridge_secret`
 - wahoo bridge: `wahoo_bridge_secret`, `wahoo_webhook_token`
+- inbound bridge (optional): `inbound_bridge_secret`, `euromail_webhook_secret`
+  (the backend polls the bridge, so its `INBOUND_BRIDGE_URL` is non-secret config)
 
 Email (all optional; omit entirely to leave email disabled): `EMAIL_PROVIDER`
 (default `lettermint`; `euromail` is also available) and `EMAIL_FROM` are
@@ -97,6 +101,7 @@ when rolling out a new image.
 docker build -t openkoutsi-backend .
 docker build -t openkoutsi-strava-bridge strava_bridge
 docker build -t openkoutsi-wahoo-bridge wahoo_bridge
+docker build -t openkoutsi-inbound-bridge inbound_bridge   # optional, opt-in
 
 # Backend needs SECRET_KEY (as a file secret) and a data volume:
 mkdir -p /tmp/ok-secrets && python -c "import secrets;print(secrets.token_hex(32))" > /tmp/ok-secrets/secret_key
@@ -162,6 +167,12 @@ LETTERMINT_API_KEY=                # Lettermint API token (outbound sending)
 LETTERMINT_WEBHOOK_SECRET=         # verifies inbound Lettermint webhooks (used by the optional inbound bridge)
 EUROMAIL_API_KEY=                  # EuroMail API token (outbound sending; EMAIL_PROVIDER=euromail)
 EUROMAIL_WEBHOOK_SECRET=           # verifies inbound EuroMail webhooks (used by the optional inbound bridge)
+
+# Inbound email (optional, opt-in, off by default — see "Inbound Email Bridge")
+INBOUND_EMAIL_ENABLED=false        # master switch for the inbound-email poller
+INBOUND_EMAIL_ADDRESS=             # operator address mail is accepted for, e.g. lassi@koutsi.dev
+INBOUND_BRIDGE_URL=                # public URL of the inbound bridge the backend polls, e.g. https://inbound-bridge.your-domain
+INBOUND_BRIDGE_SECRET=             # shared secret — must match INBOUND_BRIDGE_SECRET in inbound_bridge/.env
 
 # Optional: comma-separated allow-list of LLM base URLs users may bring (BYOK).
 # When set, BYOK URLs are restricted to this list (at save and use time). Leave
@@ -344,6 +355,73 @@ Sending structured workouts to Wahoo (the single-workout "Send to Wahoo" action 
 
 ---
 
+## 5b. Inbound Email Bridge (optional, opt-in)
+
+The inbound bridge is the optional "third bridge" that surfaces mail sent to the
+operator address in every administrator's in-app inbox. It is **off by default**;
+skip this whole section to run with no inbound-email path.
+
+Like the Strava/Wahoo bridges, it **holds** received mail in a queue and the
+backend **polls** it — so nothing is lost while the backend is down, and the
+backend exposes no public inbound endpoint. The bridge verifies the email
+provider's webhook signature, parses the message, and stores it; the backend
+polls `GET /events/pending` with the shared `INBOUND_BRIDGE_SECRET`, delivers
+each message, and claims it. Requires a **public HTTPS URL**.
+
+### Enable on the backend
+
+In the main `.env` (or Docker secrets):
+
+```env
+INBOUND_EMAIL_ENABLED=true
+INBOUND_EMAIL_ADDRESS=lassi@koutsi.dev                 # the operator address (yours)
+INBOUND_BRIDGE_URL=https://inbound-bridge.your-domain  # where the backend polls
+INBOUND_BRIDGE_SECRET=<random string>                  # python -c "import secrets; print(secrets.token_hex(32))"
+```
+
+### Setup
+
+```bash
+cd inbound_bridge
+uv sync
+```
+
+Create `inbound_bridge/.env`:
+
+```env
+INBOUND_BRIDGE_SECRET=<same random string as INBOUND_BRIDGE_SECRET in main .env>
+EUROMAIL_WEBHOOK_SECRET=<the provider's inbound signing secret>
+DATABASE_PATH=bridge.db
+EMAIL_PROVIDER=euromail
+```
+
+### Run
+
+```bash
+uv run uvicorn main:app --host 0.0.0.0 --port 8086
+```
+
+With Docker Compose the service sits behind the `inbound-email` profile, so start
+it explicitly: `docker compose --profile inbound-email up -d inbound_bridge`.
+Expose it via your reverse proxy (e.g. `inbound-bridge.your-domain`).
+
+### Register the inbound route with the provider (one-time)
+
+In the EuroMail dashboard, add an inbound route for the operator address that
+POSTs to the provider-specific path (each provider has its own, since their
+webhook formats differ):
+
+```
+https://inbound-bridge.your-domain/webhook/euromail
+```
+
+Set the route's signing secret to the same value as `EUROMAIL_WEBHOOK_SECRET`
+above (optionally also forward a copy to a mailbox — replies are handled there in
+v1). You must also add the mail domain's MX/SPF/DMARC records pointing at the
+provider; see the `openkoutsi-ops` DNS table.
+
+---
+
 ## 6. systemd Services
 
 Service files are provided in the `systemd/` directory as [template units](https://www.freedesktop.org/software/systemd/man/systemd.unit.html#Description). The `@username` suffix at enable time fills in the user and home directory automatically.
@@ -356,6 +434,8 @@ sudo systemctl enable --now openkoutsi-backend@$(whoami)
 sudo systemctl enable --now openkoutsi-bridge@$(whoami)
 # Only needed if using the Wahoo bridge:
 sudo systemctl enable --now openkoutsi-wahoo-bridge@$(whoami)
+# Only needed if using the optional inbound-email bridge:
+sudo systemctl enable --now openkoutsi-inbound-bridge@$(whoami)
 ```
 
 The units expect the repository to be checked out at `~/projects/openkoutsi-backend`. The frontend systemd unit ships with the [openkoutsi-web](https://github.com/openkoutsi/openkoutsi-web) repository.
