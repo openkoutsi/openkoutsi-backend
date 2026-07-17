@@ -102,36 +102,6 @@ class Settings(BaseSettings):
     # X-Euromail-Signature header). Used by the optional inbound-email bridge.
     euromail_webhook_secret: str = ""
 
-    # ── Inbound email (issue #38) ─────────────────────────────────────────────
-    # Surfacing operator-address mail in-app is opt-in and off by default. When
-    # disabled, the backend never polls the optional inbound bridge, so a
-    # self-hosted instance that does not run it has no inbound path at all.
-    #
-    # The bridge is a high-uptime public receiver that *holds* verified mail in a
-    # queue; the backend *polls* it (like the Strava/Wahoo bridges) and fans each
-    # message out to administrators — so nothing is lost while the backend is
-    # down, and the backend exposes no public inbound endpoint.
-    inbound_email_enabled: bool = False
-
-    # The operator/inbound address mail is accepted for (e.g. lassi@koutsi.dev on
-    # the public instance). Never hardcoded in application code — configure it
-    # here. When set, the poller only fans out mail addressed to it; when empty,
-    # any recipient the bridge holds is accepted (the provider already routes only
-    # the operator address). May mirror the admin_contact instance setting shown
-    # on the password-reset page.
-    inbound_email_address: str = ""
-
-    # Public URL of the optional inbound-email bridge the backend polls for
-    # received messages, e.g. https://inbound-bridge.your-domain. Empty (default)
-    # leaves the poller inactive.
-    inbound_bridge_url: str = ""
-
-    # Shared bearer secret the backend presents when polling/claiming events on
-    # the inbound bridge (the bridge's counterpart to bridge_secret /
-    # wahoo_bridge_secret). Must match the bridge's own value; delivered as a
-    # Docker secret in production.
-    inbound_bridge_secret: str = ""
-
     # URL of the privacy policy shown on the consent screen and auth pages.
     # Defaults to the canonical koutsi.dev policy; self-hosters are their own GDPR
     # data controller and should point this at their own policy. Exposed to the

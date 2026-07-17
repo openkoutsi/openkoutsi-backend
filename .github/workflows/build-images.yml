@@ -1,6 +1,6 @@
 name: Build Images
 
-# Builds the backend and all bridge images. On pull requests the images are
+# Builds the backend and both bridge images. On pull requests the images are
 # built (to verify they still build) but NOT pushed; images are published to
 # GHCR only from `main` (and manual workflow_dispatch).
 on:
@@ -34,10 +34,6 @@ jobs:
             image: ghcr.io/openkoutsi/openkoutsi-wahoo-bridge
             context: wahoo_bridge
             dockerfile: wahoo_bridge/Dockerfile
-          - name: inbound-bridge
-            image: ghcr.io/openkoutsi/openkoutsi-inbound-bridge
-            context: inbound_bridge
-            dockerfile: inbound_bridge/Dockerfile
 
     steps:
       - uses: actions/checkout@v4
