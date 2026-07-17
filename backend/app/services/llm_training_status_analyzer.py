@@ -61,7 +61,7 @@ _SYSTEM_PROMPT_BASE = """\
 You are Koutsi, an expert endurance sports coach. Review the athlete's overall \
 training state and provide direct, actionable daily coaching feedback in 3-5 paragraphs. \
 Cover: recent training load trend, current fitness and fatigue state, \
-adherence to the active training plan (if any), and 1-2 specific recommendations \
+adherence to the active training plan(s) (if any), and 1-2 specific recommendations \
 for the coming days. Write in plain prose — no markdown headers, no bullet points, \
 no code blocks. Separate each paragraph with a single blank line.
 
@@ -119,8 +119,7 @@ def _build_status_prompt(
     athlete: Athlete,
     recent_activities: list[Activity],
     current_metric: DailyMetric | None,
-    active_plan: TrainingPlan | None,
-    this_week_workouts: list[PlannedWorkout],
+    active_plans: list[tuple[TrainingPlan, list[PlannedWorkout]]],
     active_goals: list[Goal],
     now: datetime,
 ) -> str:
@@ -157,12 +156,23 @@ def _build_status_prompt(
     else:
         lines.append("  (no activities recorded)")
 
-    if active_plan:
-        plan_start = active_plan.start_date or today
+    for plan, this_week_workouts in active_plans:
+        # Ended-but-not-archived plans are no longer relevant to today's status.
+        if plan.end_date is not None and today > plan.end_date:
+            continue
+        # Upcoming plans (start in the future) are noted for context only, with no
+        # "current week" or this-week workouts.
+        if plan.start_date is not None and plan.start_date > today:
+            lines.append(f"\nUpcoming training plan: {plan.name}")
+            lines.append(
+                f"  Period: {plan.start_date} → {plan.end_date or 'open-ended'}"
+            )
+            continue
+        plan_start = plan.start_date or today
         week_num = max(1, (today - plan_start).days // 7 + 1)
-        lines.append(f"\nActive training plan: {active_plan.name}")
+        lines.append(f"\nActive training plan: {plan.name}")
         lines.append(
-            f"  Period: {active_plan.start_date} → {active_plan.end_date or 'open-ended'}"
+            f"  Period: {plan.start_date} → {plan.end_date or 'open-ended'}"
         )
         lines.append(f"  Current week: {week_num}")
         if this_week_workouts:
@@ -223,8 +233,7 @@ async def _stream_status_analysis(
     user_id: str,
     recent_activities: list[Activity],
     current_metric: DailyMetric | None,
-    active_plan: TrainingPlan | None,
-    this_week_workouts: list[PlannedWorkout],
+    active_plans: list[tuple[TrainingPlan, list[PlannedWorkout]]],
     active_goals: list[Goal],
     now: datetime,
     locale: str | None = None,
@@ -258,8 +267,8 @@ async def _stream_status_analysis(
     headers = merge_llm_headers(headers, cfg.extra_headers)
 
     prompt = _build_status_prompt(
-        athlete, recent_activities, current_metric, active_plan,
-        this_week_workouts, active_goals, now,
+        athlete, recent_activities, current_metric, active_plans,
+        active_goals, now,
     )
     messages: list[dict] = [
         {"role": "system", "content": _build_system_prompt(locale, coaching_style)},
@@ -360,31 +369,42 @@ async def analyze_training_status_bg(
             )
             current_metric = metric_result.scalar_one_or_none()
 
-            # Active training plan
-            plan_result = await session.execute(
+            # Active training plans (issue #45): the app allows several
+            # non-overlapping active plans to coexist, so consider all of them
+            # rather than just the most recently created one. Each current plan
+            # gets its own week's planned workouts; upcoming/ended plans are
+            # passed through with an empty list and classified by the prompt
+            # builder.
+            plans_result = await session.execute(
                 select(TrainingPlan)
                 .where(
                     TrainingPlan.athlete_id == athlete_id,
                     TrainingPlan.status == "active",
                 )
-                .order_by(TrainingPlan.created_at.desc())
-                .limit(1)
+                .order_by(TrainingPlan.start_date.asc().nullsfirst())
             )
-            active_plan = plan_result.scalar_one_or_none()
-
-            # This week's planned workouts (if plan exists)
-            this_week_workouts: list[PlannedWorkout] = []
-            if active_plan and active_plan.start_date:
-                current_week = max(1, (today - active_plan.start_date).days // 7 + 1)
-                pw_result = await session.execute(
-                    select(PlannedWorkout)
-                    .where(
-                        PlannedWorkout.plan_id == active_plan.id,
-                        PlannedWorkout.week_number == current_week,
-                    )
-                    .order_by(PlannedWorkout.day_of_week)
+            active_plans: list[tuple[TrainingPlan, list[PlannedWorkout]]] = []
+            for plan in plans_result.scalars().all():
+                workouts: list[PlannedWorkout] = []
+                # Only current plans (started and not yet ended) contribute this
+                # week's workouts; upcoming/ended plans don't have a "this week".
+                covers_today = (
+                    plan.start_date is not None
+                    and plan.start_date <= today
+                    and (plan.end_date is None or today <= plan.end_date)
                 )
-                this_week_workouts = list(pw_result.scalars().all())
+                if covers_today:
+                    current_week = max(1, (today - plan.start_date).days // 7 + 1)
+                    pw_result = await session.execute(
+                        select(PlannedWorkout)
+                        .where(
+                            PlannedWorkout.plan_id == plan.id,
+                            PlannedWorkout.week_number == current_week,
+                        )
+                        .order_by(PlannedWorkout.day_of_week)
+                    )
+                    workouts = list(pw_result.scalars().all())
+                active_plans.append((plan, workouts))
 
             # Active goals
             goals_result = await session.execute(
@@ -407,7 +427,7 @@ async def analyze_training_status_bg(
                 async for chunk in _stream_status_analysis(
                     athlete, user_id,
                     recent_activities, current_metric,
-                    active_plan, this_week_workouts, active_goals,
+                    active_plans, active_goals,
                     now, locale=resolved_locale, coaching_style=coaching_style,
                     usage_out=usage_out,
                 ):

@@ -18,11 +18,12 @@ def _athlete(app_settings: dict | None = None) -> Athlete:
     return a
 
 
-def _plan(start: date) -> TrainingPlan:
+def _plan(start: date, *, name: str = "Base build", end: date | None = None) -> TrainingPlan:
     p = MagicMock(spec=TrainingPlan)
-    p.name = "Base build"
+    p.id = "plan-1"
+    p.name = name
     p.start_date = start
-    p.end_date = None
+    p.end_date = end
     return p
 
 
@@ -50,8 +51,7 @@ class TestThisWeekWeekdayLabels:
             athlete=_athlete(),
             recent_activities=[],
             current_metric=None,
-            active_plan=_plan(plan_start),
-            this_week_workouts=workouts,
+            active_plans=[(_plan(plan_start), workouts)],
             active_goals=[],
             now=now,
         )
@@ -73,8 +73,7 @@ class TestThisWeekWeekdayLabels:
             athlete=_athlete(),
             recent_activities=[],
             current_metric=None,
-            active_plan=_plan(plan_start),
-            this_week_workouts=workouts,
+            active_plans=[(_plan(plan_start), workouts)],
             active_goals=[],
             now=now,
         )
@@ -94,8 +93,7 @@ class TestSkipReason:
             athlete=_athlete(),
             recent_activities=[],
             current_metric=None,
-            active_plan=_plan(plan_start),
-            this_week_workouts=workouts,
+            active_plans=[(_plan(plan_start), workouts)],
             active_goals=[],
             now=now,
         )
@@ -116,8 +114,7 @@ class TestSkipReason:
             athlete=_athlete(),
             recent_activities=[],
             current_metric=None,
-            active_plan=_plan(plan_start),
-            this_week_workouts=workouts,
+            active_plans=[(_plan(plan_start), workouts)],
             active_goals=[],
             now=now,
         )
@@ -133,8 +130,7 @@ class TestSkipReason:
             athlete=_athlete(),
             recent_activities=[],
             current_metric=None,
-            active_plan=_plan(plan_start),
-            this_week_workouts=workouts,
+            active_plans=[(_plan(plan_start), workouts)],
             active_goals=[],
             now=now,
         )
@@ -152,8 +148,7 @@ class TestRestDays:
             athlete=_athlete(),
             recent_activities=[],
             current_metric=None,
-            active_plan=_plan(plan_start),
-            this_week_workouts=workouts,
+            active_plans=[(_plan(plan_start), workouts)],
             active_goals=[],
             now=now,
         )
@@ -169,8 +164,7 @@ class TestRestDays:
             athlete=_athlete(),
             recent_activities=[],
             current_metric=None,
-            active_plan=_plan(plan_start),
-            this_week_workouts=workouts,
+            active_plans=[(_plan(plan_start), workouts)],
             active_goals=[],
             now=now,
         )
@@ -186,13 +180,88 @@ class TestRestDays:
             athlete=_athlete(),
             recent_activities=[],
             current_metric=None,
-            active_plan=_plan(plan_start),
-            this_week_workouts=workouts,
+            active_plans=[(_plan(plan_start), workouts)],
             active_goals=[],
             now=now,
         )
         assert "rest day — nothing to complete, no action required" in prompt
         assert "not completed" not in prompt
+
+
+class TestMultipleActivePlans:
+    # Non-overlapping active plans can coexist (issue #45); the status prompt must
+    # consider all of them, not just one.
+    _now = datetime(2025, 6, 4, 8, 0, tzinfo=ZoneInfo("Europe/Helsinki"))  # Wednesday
+
+    def test_multiple_current_plans_all_rendered(self):
+        plan_a = _plan(date(2025, 6, 2), name="Endurance Base")
+        plan_b = _plan(date(2025, 5, 26), name="Strength Block")
+        prompt = _build_status_prompt(
+            athlete=_athlete(),
+            recent_activities=[],
+            current_metric=None,
+            active_plans=[
+                (plan_a, [_workout(3, workout_type="intervals")]),
+                (plan_b, [_workout(3, workout_type="squats")]),
+            ],
+            active_goals=[],
+            now=self._now,
+        )
+        assert "Active training plan: Endurance Base" in prompt
+        assert "Active training plan: Strength Block" in prompt
+        # Each plan's own week is rendered (plan_b started a week earlier).
+        assert "intervals" in prompt
+        assert "squats" in prompt
+
+    def test_upcoming_plan_noted_without_this_week_detail(self):
+        upcoming = _plan(date(2025, 7, 1), name="Race Prep", end=date(2025, 8, 15))
+        prompt = _build_status_prompt(
+            athlete=_athlete(),
+            recent_activities=[],
+            current_metric=None,
+            active_plans=[(upcoming, [])],
+            active_goals=[],
+            now=self._now,
+        )
+        assert "Upcoming training plan: Race Prep" in prompt
+        assert "2025-07-01" in prompt
+        assert "Current week" not in prompt
+        assert "This week's planned workouts" not in prompt
+
+    def test_ended_plan_excluded(self):
+        ended = _plan(date(2025, 4, 1), name="Old Block", end=date(2025, 5, 1))
+        prompt = _build_status_prompt(
+            athlete=_athlete(),
+            recent_activities=[],
+            current_metric=None,
+            active_plans=[(ended, [])],
+            active_goals=[],
+            now=self._now,
+        )
+        assert "Old Block" not in prompt
+        assert "training plan" not in prompt
+
+    def test_mixed_current_upcoming_ended(self):
+        current = _plan(date(2025, 6, 2), name="Current Base")
+        upcoming = _plan(date(2025, 7, 1), name="Future Prep")
+        ended = _plan(date(2025, 4, 1), name="Past Block", end=date(2025, 5, 1))
+        prompt = _build_status_prompt(
+            athlete=_athlete(),
+            recent_activities=[],
+            current_metric=None,
+            active_plans=[
+                (ended, []),
+                (current, [_workout(3, workout_type="threshold")]),
+                (upcoming, []),
+            ],
+            active_goals=[],
+            now=self._now,
+        )
+        assert "Active training plan: Current Base" in prompt
+        assert "Current week" in prompt
+        assert "threshold" in prompt
+        assert "Upcoming training plan: Future Prep" in prompt
+        assert "Past Block" not in prompt
 
 
 class TestExperienceLevel:
@@ -202,8 +271,7 @@ class TestExperienceLevel:
             athlete=_athlete(app_settings),
             recent_activities=[],
             current_metric=None,
-            active_plan=None,
-            this_week_workouts=[],
+            active_plans=[],
             active_goals=[],
             now=now,
         )

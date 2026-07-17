@@ -222,8 +222,7 @@ def _status_common(coaching_style, locale, adhering: bool) -> dict:
         "athlete": athlete,
         "recent_activities": recent,
         "current_metric": metric,
-        "active_plan": plan,
-        "this_week_workouts": week,
+        "active_plans": [(plan, week)],
         "active_goals": goals,
         "now": _now,
         "coaching_style": coaching_style,
@@ -231,9 +230,23 @@ def _status_common(coaching_style, locale, adhering: bool) -> dict:
     }
 
 
+def _multi_plan_status() -> dict:
+    """Athlete with a current plan plus a non-overlapping upcoming plan (issue #45)."""
+    base = _status_common("friendly", "en", adhering=True)
+    current_plan, current_week = base["active_plans"][0]
+    # A second, non-overlapping plan that starts after the current one ends.
+    upcoming_plan = TrainingPlan(
+        name="Race Prep Block", start_date=date(2026, 8, 25),
+        end_date=date(2026, 10, 5), weeks=6, status="active",
+    )
+    base["active_plans"] = [(current_plan, current_week), (upcoming_plan, [])]
+    return base
+
+
 STATUS_SCENARIOS: dict[str, dict] = {
     "on_track_friendly": _status_common("friendly", "en", adhering=True),
     "missed_sessions_stern": _status_common("stern", "en", adhering=False),
+    "current_and_upcoming_plans": _multi_plan_status(),
 }
 
 # ── Family 5: per-goal guidance (prose + REALISM) ────────────────────────────
