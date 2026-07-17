@@ -408,10 +408,11 @@ Expose it via your reverse proxy (e.g. `inbound-bridge.your-domain`).
 ### Register the inbound route with the provider (one-time)
 
 In the EuroMail dashboard, add an inbound route for the operator address that
-POSTs to:
+POSTs to the provider-specific path (each provider has its own, since their
+webhook formats differ):
 
 ```
-https://inbound-bridge.your-domain/webhook
+https://inbound-bridge.your-domain/webhook/euromail
 ```
 
 Set the route's signing secret to the same value as `EUROMAIL_WEBHOOK_SECRET`

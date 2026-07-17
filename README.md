@@ -49,19 +49,19 @@ Most cycling coaching tools are cloud-only SaaS. openkoutsi is different: you ru
 ## Architecture
 
 ```
-┌────────────────────────────────────────────────────────────────────┐
-│  FastAPI backend (Python · SQLAlchemy · Alembic)                  │
-│  (the Next.js frontend lives in openkoutsi/openkoutsi-web)        │
-│                                                                    │
-│  data/registry.db                 users, invitations, settings      │
-│  data/users/{id}/user.db          per-user athlete + training data   │
-│  data/users/{id}/uploads/         encrypted FIT files               │
-└────────────────────────────────────────────────────────────────────┘
-                 ↕ polls for events                    ↕ polls for mail
-       ┌──────────────────────────────┐     ┌──────────────────────────────┐     ┌──────────────────────────────┐
-       │ Strava Bridge (FastAPI)      │     │ Wahoo Bridge (FastAPI)       │     │ Inbound Email Bridge          │
-       │ public webhook endpoint       │     │ public webhook endpoint       │     │ (FastAPI · optional, opt-in)  │
-       └──────────────────────────────┘     └──────────────────────────────┘     └──────────────────────────────┘
+       ┌──────────────────────────────────────────────────────────────────────────────────────────────────────┐
+       │ FastAPI backend (Python · SQLAlchemy · Alembic)                                                      │
+       │ (the Next.js frontend lives in openkoutsi/openkoutsi-web)                                            │
+       │                                                                                                      │
+       │ data/registry.db        users, invitations, settings                                                 │
+       │ data/users/{id}/user.db per-user athlete + training data                                             │
+       │ data/users/{id}/uploads encrypted FIT files                                                          │
+       └──────────────────────────────────────────────────────────────────────────────────────────────────────┘
+                   ↕ polls                            ↕ polls                            ↕ polls
+       ┌──────────────────────────────┐   ┌──────────────────────────────┐   ┌──────────────────────────────┐
+       │ Strava Bridge (FastAPI)      │   │ Wahoo Bridge (FastAPI)       │   │ Inbound Email Bridge         │
+       │ public webhook receiver      │   │ public webhook receiver      │   │ (FastAPI · optional, opt-in) │
+       └──────────────────────────────┘   └──────────────────────────────┘   └──────────────────────────────┘
 ```
 
 The bridge services are small external webhook receivers that queue events, so the main app can stay private (for example behind NAT) while only bridges are exposed publicly. All three follow the same pattern: the bridge holds received events and the main app **polls** and claims them, processing on its own schedule (so nothing is lost while the backend is down). The optional inbound-email bridge ships as an off-by-default Docker Compose profile (`--profile inbound-email`).
@@ -237,7 +237,7 @@ The web frontend has its own configuration (`API_URL`, etc.) — see the [openko
 
 - **Strava:** configure Strava app credentials in `.env` and deploy `strava_bridge/` to a public HTTPS URL.
 - **Wahoo:** configure Wahoo credentials in `.env` and deploy `wahoo_bridge/` to a public HTTPS URL.
-- **Inbound email (optional):** to surface operator-address mail in-app, set `INBOUND_EMAIL_ENABLED=true`, `INBOUND_EMAIL_ADDRESS`, `INBOUND_BRIDGE_URL` (where the backend polls), and a shared `INBOUND_BRIDGE_SECRET` on the backend, then deploy `inbound_bridge/` (via the `inbound-email` Compose profile) with the same `INBOUND_BRIDGE_SECRET` and the provider's `EUROMAIL_WEBHOOK_SECRET`. Point the email provider's inbound route for the operator address at the bridge's public `POST /webhook`. Left disabled, the backend never polls and the instance has no inbound path. Pushing structured workouts to Wahoo requires the `plans_read`, `plans_write`, and `workouts_write` scopes; users connected before this feature must reconnect Wahoo to grant them. The "Generate workouts" plan action needs a server-reachable LLM (resolved athlete → instance → global) to synthesize the structured workouts; uploading the generated workouts to Wahoo is then done individually from the Workouts tab.
+- **Inbound email (optional):** to surface operator-address mail in-app, set `INBOUND_EMAIL_ENABLED=true`, `INBOUND_EMAIL_ADDRESS`, `INBOUND_BRIDGE_URL` (where the backend polls), and a shared `INBOUND_BRIDGE_SECRET` on the backend, then deploy `inbound_bridge/` (via the `inbound-email` Compose profile) with the same `INBOUND_BRIDGE_SECRET` and the provider's `EUROMAIL_WEBHOOK_SECRET`. Point the email provider's inbound route for the operator address at the bridge's public `POST /webhook/euromail` (each provider has its own path). Left disabled, the backend never polls and the instance has no inbound path. Pushing structured workouts to Wahoo requires the `plans_read`, `plans_write`, and `workouts_write` scopes; users connected before this feature must reconnect Wahoo to grant them. The "Generate workouts" plan action needs a server-reachable LLM (resolved athlete → instance → global) to synthesize the structured workouts; uploading the generated workouts to Wahoo is then done individually from the Workouts tab.
 - **Disconnecting a provider:** `DELETE /api/integrations/{provider}/disconnect` optionally deletes the imported activities when `delete_data=true` is passed (accepted as a query parameter *or* in the JSON body). The data is deleted and committed *before* the connection is removed, and a failed deletion returns `500` with the connection left in place — the caller is never told the data is gone unless it actually was.
 
 ### Deployment

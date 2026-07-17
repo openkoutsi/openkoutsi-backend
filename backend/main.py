@@ -21,7 +21,7 @@ log = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     from backend.app.api.strava import strava_bridge_poller
     from backend.app.api.wahoo import wahoo_bridge_poller
-    from backend.app.api.inbound import inbound_bridge_poller
+    from backend.app.services.inbound_email import inbound_bridge_poller
 
     await init_registry_db()
     await init_usage_db()

@@ -23,11 +23,17 @@ The signature scheme mirrors the shared email module's ``EuromailProvider``
 ``strava_bridge/main.py``) so the bridge stays a self-contained deployable that
 does not import the backend package.
 
+Each provider gets its **own** webhook path (``POST /webhook/{provider}``) because
+providers do not share a wire format — the signature scheme (header name, signed
+input) and the JSON payload shape both differ between, e.g., EuroMail and
+Lettermint — so a single endpoint can't safely parse them. The path selects which
+provider's verify/parse to apply; today only ``euromail`` is implemented.
+
 Endpoints:
-  GET  /                    — health check / provider challenge handshake
-  POST /webhook             — receive a provider inbound webhook, verify + queue
-  GET  /events/pending      — return unclaimed messages (Bearer auth)
-  POST /events/{id}/claim   — mark a message as claimed (Bearer auth)
+  GET  /                       — health check / provider challenge handshake
+  POST /webhook/{provider}     — receive a provider inbound webhook, verify + queue
+  GET  /events/pending         — return unclaimed messages (Bearer auth)
+  POST /events/{id}/claim      — mark a message as claimed (Bearer auth)
 """
 
 import asyncio
@@ -285,9 +291,17 @@ async def health(request: Request):
     return {"status": "ok"}
 
 
-@app.post("/webhook", status_code=202)
-async def receive_webhook(request: Request):
-    """Verify a provider inbound webhook and queue it for the backend to poll."""
+@app.post("/webhook/{provider}", status_code=202)
+async def receive_webhook(provider: str, request: Request):
+    """Verify a provider inbound webhook and queue it for the backend to poll.
+
+    ``provider`` selects the verify/parse scheme; providers don't share a wire
+    format, so each posts to its own path (e.g. ``/webhook/euromail``). An
+    unknown provider 404s.
+    """
+    if provider != "euromail":
+        raise HTTPException(status_code=404, detail=f"Unknown provider {provider!r}")
+
     raw_body = await request.body()
 
     if not _verify_signature(

@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import inbound_bridge.main as bridge_module
 from inbound_bridge.main import app as bridge_app, Base as BridgeBase, InboundEmailEvent
-from backend.app.api.inbound import _deliver, _poll_inbound_bridge_once
+from backend.app.services.inbound_email import _deliver, _poll_inbound_bridge_once
 from backend.app.core.config import settings as app_settings
 from backend.app.db.user_session import get_user_session_factory, init_user_db
 from backend.app.models.message_orm import Message
@@ -125,9 +125,9 @@ async def _poll(mock_deliver: AsyncMock) -> None:
 
     BridgeAsgiClient = _make_polling_client_class()
     with (
-        patch("backend.app.api.inbound.httpx.AsyncClient", new=BridgeAsgiClient),
-        patch("backend.app.api.inbound.settings", mock_settings),
-        patch("backend.app.api.inbound._deliver", mock_deliver),
+        patch("backend.app.services.inbound_email.httpx.AsyncClient", new=BridgeAsgiClient),
+        patch("backend.app.services.inbound_email.settings", mock_settings),
+        patch("backend.app.services.inbound_email._deliver", mock_deliver),
     ):
         await _poll_inbound_bridge_once()
 
@@ -135,7 +135,7 @@ async def _poll(mock_deliver: AsyncMock) -> None:
 async def _post_signed(client: AsyncClient, payload: dict) -> httpx.Response:
     body = json.dumps(payload).encode()
     return await client.post(
-        "/webhook", content=body, headers={"X-Euromail-Signature": _sign(WEBHOOK_SECRET, body)}
+        "/webhook/euromail", content=body, headers={"X-Euromail-Signature": _sign(WEBHOOK_SECRET, body)}
     )
 
 
@@ -161,7 +161,7 @@ class TestBridgeWebhookEndpoint:
         _, sessions = patched_bridge
         body = json.dumps(_INBOUND_PAYLOAD).encode()
         resp = await bridge_client.post(
-            "/webhook",
+            "/webhook/euromail",
             content=body,
             headers={"X-Euromail-Signature": f"t={int(time.time())},v1=deadbeef"},
         )
@@ -171,7 +171,7 @@ class TestBridgeWebhookEndpoint:
 
     async def test_missing_signature_rejected(self, bridge_client, patched_bridge):
         resp = await bridge_client.post(
-            "/webhook", content=json.dumps(_INBOUND_PAYLOAD).encode()
+            "/webhook/euromail", content=json.dumps(_INBOUND_PAYLOAD).encode()
         )
         assert resp.status_code == 401
 
@@ -179,7 +179,7 @@ class TestBridgeWebhookEndpoint:
         body = json.dumps(_INBOUND_PAYLOAD).encode()
         sig = _sign(WEBHOOK_SECRET, body, ts=int(time.time()) - 3600)
         resp = await bridge_client.post(
-            "/webhook", content=body, headers={"X-Euromail-Signature": sig}
+            "/webhook/euromail", content=body, headers={"X-Euromail-Signature": sig}
         )
         assert resp.status_code == 401
 
@@ -187,13 +187,22 @@ class TestBridgeWebhookEndpoint:
         body = b"this is not json"
         sig = _sign(WEBHOOK_SECRET, body)
         resp = await bridge_client.post(
-            "/webhook", content=body, headers={"X-Euromail-Signature": sig}
+            "/webhook/euromail", content=body, headers={"X-Euromail-Signature": sig}
         )
         assert resp.status_code == 400
 
     async def test_incomplete_payload_rejected(self, bridge_client, patched_bridge):
         resp = await _post_signed(bridge_client, {"data": {"subject": "no sender"}})
         assert resp.status_code == 400
+
+    async def test_unknown_provider_404(self, bridge_client, patched_bridge):
+        body = json.dumps(_INBOUND_PAYLOAD).encode()
+        resp = await bridge_client.post(
+            "/webhook/lettermint",
+            content=body,
+            headers={"X-Euromail-Signature": _sign(WEBHOOK_SECRET, body)},
+        )
+        assert resp.status_code == 404
 
 
 class TestChallengeHandshake:
