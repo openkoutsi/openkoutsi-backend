@@ -40,7 +40,28 @@ services:
       - "8085:8085"
     restart: unless-stopped
 
+  # Optional inbound-email bridge (issue #38). Off by default — only started
+  # when the operator opts in with `--profile inbound-email` (or by listing the
+  # profile in COMPOSE_PROFILES). An instance that omits it has no inbound
+  # surface. It verifies and *holds* operator-address mail in a queue; the
+  # backend polls it, so it needs the shared INBOUND_BRIDGE_SECRET and the
+  # provider's EUROMAIL_WEBHOOK_SECRET set in its env file.
+  inbound_bridge:
+    profiles: ["inbound-email"]
+    build:
+      context: inbound_bridge
+      dockerfile: Dockerfile
+    env_file: inbound_bridge/.env
+    environment:
+      DATABASE_PATH: /data/bridge.db
+    volumes:
+      - inbound_bridge_data:/data
+    ports:
+      - "8086:8086"
+    restart: unless-stopped
+
 volumes:
   backend_data:
   bridge_data:
   wahoo_bridge_data:
+  inbound_bridge_data:
