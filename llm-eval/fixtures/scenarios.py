@@ -148,6 +148,17 @@ _easy_ride = Activity(
     labels=["recovery"],
 )
 
+# Supplemental training (non-cycling) → short acknowledgement branch (issue #52).
+_strength_session = Activity(
+    sport_type="WeightTraining",
+    start_time=datetime(2026, 7, 7, 7, 0, tzinfo=timezone.utc),
+    duration_s=2400,
+    avg_hr=112,
+    max_hr=138,
+    labels=["strength"],
+    notes="Full-body gym session, focused on core and legs.",
+)
+
 ACTIVITY_SCENARIOS: dict[str, dict] = {
     "pr_hard_ride": {
         "activity": _pr_ride,
@@ -164,6 +175,14 @@ ACTIVITY_SCENARIOS: dict[str, dict] = {
         "power_pr_badges": None,
         "distance_pr_badges": None,
         "locale": "fi",
+    },
+    "supplemental_strength": {
+        "activity": _strength_session,
+        "athlete": _athlete(ftp=260, max_hr=185),
+        "fatigue": None,
+        "power_pr_badges": None,
+        "distance_pr_badges": None,
+        "locale": None,
     },
 }
 
