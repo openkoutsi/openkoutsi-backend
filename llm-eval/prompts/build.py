@@ -69,7 +69,7 @@ def _status(s: dict) -> tuple[str, str]:
         status_svc._build_system_prompt(s.get("locale"), s.get("coaching_style")),
         status_svc._build_status_prompt(
             s["athlete"], s["recent_activities"], s["current_metric"],
-            s["active_plan"], s["this_week_workouts"], s["active_goals"], s["now"],
+            s["active_plans"], s["active_goals"], s["now"],
         ),
     )
 
