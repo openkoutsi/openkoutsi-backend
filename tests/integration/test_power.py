@@ -444,3 +444,72 @@ class TestGetFtpEstimate:
         body = resp.json()
         assert body["simple_available"] is False
         assert body["cp_available"] is False
+
+
+# A sprint followed by a long steady effort produces a realistically decaying
+# mean-maximal-power curve, so all four models can be fit.
+_DECAYING_STREAM = [600.0] * 60 + [250.0] * 1250  # 1310 s
+
+
+class TestGetPowerModels:
+    async def test_empty_for_new_athlete(self, client, auth_headers):
+        resp = await client.get("/api/metrics/power-models", headers=auth_headers)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert [m["model"] for m in body["models"]] == ["cp2", "cp3", "exp", "power_law"]
+        assert all(m["available"] is False for m in body["models"])
+        assert all(m["curve"] == [] and m["predictions"] == [] for m in body["models"])
+
+    async def test_unauthenticated_returns_401(self, client):
+        resp = await client.get("/api/metrics/power-models")
+        assert resp.status_code == 401
+
+    async def test_all_models_fit_with_rich_stream(
+        self, client, auth_headers, session
+    ):
+        athlete = await _get_athlete(client, auth_headers, session)
+        await _insert_activity_with_power(
+            session, athlete, _DECAYING_STREAM, "2025-06-01T10:00:00+00:00"
+        )
+
+        resp = await client.get("/api/metrics/power-models", headers=auth_headers)
+        assert resp.status_code == 200
+        models = {m["model"]: m for m in resp.json()["models"]}
+
+        for key in ("cp2", "cp3", "exp", "power_law"):
+            m = models[key]
+            assert m["available"] is True, key
+            assert len(m["curve"]) > 0
+            assert len(m["predictions"]) > 0
+            assert m["rmse"] is not None
+            # Curve points are (duration, power) with decreasing power.
+            powers = [p["power_w"] for p in m["curve"]]
+            assert powers == sorted(powers, reverse=True)
+
+        # CP-family models expose the critical-power asymptote.
+        for key in ("cp2", "cp3", "exp"):
+            assert models[key]["cp"] is not None and models[key]["cp"] > 0
+
+        # Bounded models expose a finite maximal instantaneous power.
+        assert models["cp3"]["pmax"] > models["cp3"]["cp"]
+        assert models["exp"]["pmax"] > models["exp"]["cp"]
+        assert models["exp"]["tau"] is not None
+        assert models["power_law"]["b"] < 0
+        # cp2 is not extrapolated into the sprint region; cp3/exp are.
+        cp2_durations = {p["duration_s"] for p in models["cp2"]["predictions"]}
+        assert 5 not in cp2_durations
+        assert 5 in {p["duration_s"] for p in models["cp3"]["predictions"]}
+
+    async def test_days_filter_excludes_old_activity(
+        self, client, auth_headers, session
+    ):
+        athlete = await _get_athlete(client, auth_headers, session)
+        old = datetime.now(timezone.utc) - timedelta(days=200)
+        await _insert_activity_with_power(
+            session, athlete, _DECAYING_STREAM, old.isoformat()
+        )
+
+        resp = await client.get("/api/metrics/power-models?days=90", headers=auth_headers)
+        body = resp.json()
+        assert body["days"] == 90
+        assert all(m["available"] is False for m in body["models"])

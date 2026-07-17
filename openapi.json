@@ -2927,6 +2927,64 @@
         }
       }
     },
+    "/api/metrics/power-models": {
+      "get": {
+        "tags": [
+          "metrics"
+        ],
+        "summary": "Fitted power\u2013duration models",
+        "description": "Fit several power\u2013duration models to the athlete's power curve and return,\nfor each model: its fitted parameters, a sampled curve for plotting, the\nmodeled potential at key durations (5 s / 60 s / 5 min / 20 min), and the\nfit error (RMSE) against the actual bests.\n\nModels: 2-parameter Critical Power (``cp2``), 3-parameter CP (``cp3``),\nCP-anchored exponential (``exp``) and power law / Riegel (``power_law``).\nAll use the rank-1 (single best) power per duration.  Pass ?days=90/180/365\nto fit from a rolling window; omit for all-time.",
+        "operationId": "getPowerModels",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Fit from bests in the past N days. Omit for all-time.",
+              "title": "Days"
+            },
+            "description": "Fit from bests in the past N days. Omit for all-time."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PowerModelsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/goals": {
       "get": {
         "tags": [
@@ -8455,6 +8513,172 @@
           "activity_start_time"
         ],
         "title": "PowerBestEntry"
+      },
+      "PowerModelFit": {
+        "properties": {
+          "model": {
+            "type": "string",
+            "title": "Model"
+          },
+          "available": {
+            "type": "boolean",
+            "title": "Available",
+            "default": false
+          },
+          "cp": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cp"
+          },
+          "w_prime": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "W Prime"
+          },
+          "k": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "K"
+          },
+          "pmax": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pmax"
+          },
+          "tau": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tau"
+          },
+          "a": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "A"
+          },
+          "b": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "B"
+          },
+          "rmse": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rmse"
+          },
+          "curve": {
+            "items": {
+              "$ref": "#/components/schemas/PowerModelPoint"
+            },
+            "type": "array",
+            "title": "Curve",
+            "default": []
+          },
+          "predictions": {
+            "items": {
+              "$ref": "#/components/schemas/PowerModelPoint"
+            },
+            "type": "array",
+            "title": "Predictions",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "model"
+        ],
+        "title": "PowerModelFit",
+        "description": "A single fitted power\u2013duration model.\n\n``model`` is a stable key (``cp2``, ``cp3``, ``exp``, ``power_law``).\nParameter fields are populated only for the models that define them.\n``curve`` is a dense sampled curve for plotting; ``predictions`` are the\nmodeled potential values at the profile durations (5/60/300/1200 s)."
+      },
+      "PowerModelPoint": {
+        "properties": {
+          "duration_s": {
+            "type": "integer",
+            "title": "Duration S"
+          },
+          "power_w": {
+            "type": "number",
+            "title": "Power W"
+          }
+        },
+        "type": "object",
+        "required": [
+          "duration_s",
+          "power_w"
+        ],
+        "title": "PowerModelPoint"
+      },
+      "PowerModelsResponse": {
+        "properties": {
+          "models": {
+            "items": {
+              "$ref": "#/components/schemas/PowerModelFit"
+            },
+            "type": "array",
+            "title": "Models",
+            "default": []
+          },
+          "days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Days"
+          }
+        },
+        "type": "object",
+        "title": "PowerModelsResponse"
       },
       "RangeSpec": {
         "properties": {

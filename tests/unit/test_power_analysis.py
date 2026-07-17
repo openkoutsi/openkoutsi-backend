@@ -2,15 +2,26 @@
 Unit tests for peak_average_power and compute_power_bests in training_math.py.
 """
 
+import math
+
 import pytest
 
 from openkoutsi.training_math import (
+    CP3_FIT_DURATIONS,
     CP_FIT_DURATIONS,
+    EXP_FIT_DURATIONS,
     POWER_BEST_DURATIONS,
+    POWER_LAW_FIT_DURATIONS,
     compute_power_bests,
+    estimate_cp3,
     estimate_cp_wprime,
+    estimate_exponential,
     estimate_ftp_simple,
+    estimate_power_law,
+    model_rmse,
     peak_average_power,
+    predict_power,
+    sample_power_curve,
 )
 
 
@@ -169,3 +180,92 @@ class TestEstimateCpWPrime:
         bests = {120: 1000.0, 1200: 50.0}
         cp, w_prime = estimate_cp_wprime(bests)
         assert cp is None and w_prime is None
+
+
+class TestEstimateCp3:
+    def test_recovers_known_params(self):
+        # Bests exactly on P(t) = CP + W'/(t - k); the fit must recover them.
+        cp_true, wp_true, k_true = 250.0, 15000.0, -20.0
+        bests = {d: cp_true + wp_true / (d - k_true) for d in CP3_FIT_DURATIONS}
+        result = estimate_cp3(bests)
+        assert result is not None
+        cp, w_prime, k, pmax = result
+        assert cp == pytest.approx(cp_true, rel=1e-2)
+        assert w_prime == pytest.approx(wp_true, rel=1e-2)
+        assert k == pytest.approx(k_true, rel=5e-2)
+        assert pmax == pytest.approx(cp_true - wp_true / k_true, rel=2e-2)
+
+    def test_pmax_exceeds_cp(self):
+        cp_true, wp_true, k_true = 240.0, 12000.0, -15.0
+        bests = {d: cp_true + wp_true / (d - k_true) for d in CP3_FIT_DURATIONS}
+        cp, _wp, _k, pmax = estimate_cp3(bests)
+        assert pmax > cp
+
+    def test_insufficient_points_returns_none(self):
+        assert estimate_cp3({120: 300.0, 300: 260.0}) is None
+        assert estimate_cp3({}) is None
+
+
+class TestEstimateExponential:
+    def test_recovers_known_params(self):
+        cp_true, pmax_true, tau_true = 240.0, 1100.0, 90.0
+        bests = {
+            d: cp_true + (pmax_true - cp_true) * math.exp(-d / tau_true)
+            for d in EXP_FIT_DURATIONS
+        }
+        result = estimate_exponential(bests)
+        assert result is not None
+        cp, pmax, tau = result
+        assert cp == pytest.approx(cp_true, rel=2e-2)
+        assert pmax == pytest.approx(pmax_true, rel=2e-2)
+        assert tau == pytest.approx(tau_true, rel=5e-2)
+
+    def test_insufficient_points_returns_none(self):
+        assert estimate_exponential({5: 900.0, 60: 400.0}) is None
+
+
+class TestEstimatePowerLaw:
+    def test_recovers_known_params(self):
+        a_true, b_true = 2000.0, -0.12
+        bests = {d: a_true * d ** b_true for d in POWER_LAW_FIT_DURATIONS}
+        result = estimate_power_law(bests)
+        assert result is not None
+        a, b = result
+        assert a == pytest.approx(a_true, rel=1e-6)
+        assert b == pytest.approx(b_true, rel=1e-6)
+
+    def test_single_point_returns_none(self):
+        assert estimate_power_law({300: 260.0}) is None
+
+    def test_flat_curve_returns_none(self):
+        # b == 0 (constant power) is not a decaying power law.
+        assert estimate_power_law({d: 250.0 for d in POWER_LAW_FIT_DURATIONS}) is None
+
+
+class TestPredictAndSample:
+    def test_predict_matches_equations(self):
+        assert predict_power("cp2", (250.0, 15000.0), 300) == pytest.approx(250.0 + 15000.0 / 300)
+        assert predict_power("cp3", (250.0, 15000.0, -20.0, 1000.0), 300) == pytest.approx(
+            250.0 + 15000.0 / (300 - (-20.0))
+        )
+        assert predict_power("exp", (240.0, 1100.0, 90.0), 90) == pytest.approx(
+            240.0 + (1100.0 - 240.0) * math.exp(-1.0)
+        )
+        assert predict_power("power_law", (2000.0, -0.12), 100) == pytest.approx(2000.0 * 100 ** -0.12)
+
+    def test_unknown_model_raises(self):
+        with pytest.raises(ValueError):
+            predict_power("nope", (1.0,), 60)
+
+    def test_sample_curve_returns_point_per_duration(self):
+        pts = sample_power_curve("cp2", (250.0, 15000.0), [60, 300, 1200])
+        assert [d for d, _ in pts] == [60, 300, 1200]
+        assert pts[0][1] == pytest.approx(250.0 + 15000.0 / 60)
+
+    def test_model_rmse_zero_on_exact_fit(self):
+        params = (250.0, 15000.0)
+        bests = {d: predict_power("cp2", params, d) for d in CP_FIT_DURATIONS}
+        assert model_rmse("cp2", params, bests, CP_FIT_DURATIONS) == pytest.approx(0.0, abs=1e-6)
+
+    def test_model_rmse_none_without_overlap(self):
+        assert model_rmse("cp2", (250.0, 15000.0), {}, CP_FIT_DURATIONS) is None

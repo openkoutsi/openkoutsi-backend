@@ -2,6 +2,8 @@
 Shared training load calculations — peak power, weighted power, Load, distance bests.
 """
 
+import math
+
 POWER_BEST_DURATIONS: list[int] = [
     1, 3, 5, 10, 15, 30, 45, 60, 120, 180, 300, 480, 600,
     900, 1200, 1800, 2700, 3600, 7200, 10800, 14400,
@@ -90,6 +92,254 @@ def estimate_cp_wprime(bests: dict[int, float]) -> tuple[float | None, float | N
     if cp <= 0:
         return None, None
     return cp, w_prime
+
+
+# ---------------------------------------------------------------------------
+# Advanced power–duration models
+#
+# Each model predicts mean power P(t) for an effort of ``t`` seconds and is fit
+# to the athlete's rank-1 best power per duration (same input as the CP fit
+# above).  There is no numpy/scipy available, so the two nonlinear models
+# (3-parameter CP and exponential) are fit with a 1-D grid search over the
+# single nonlinear parameter, solving the remaining parameters in closed form
+# by ordinary least squares at each grid point.
+#
+# Fit-duration windows below are deliberately conservative and tunable.
+# ---------------------------------------------------------------------------
+
+# 3-parameter CP is usable down to ~15–30 s; fit 30 s – 20 min.
+CP3_FIT_DURATIONS: list[int] = [30, 60, 120, 180, 300, 480, 600, 900, 1200]
+
+# Exponential spans sprint → threshold; include short efforts near P_max.
+EXP_FIT_DURATIONS: list[int] = [5, 15, 30, 60, 120, 180, 300, 480, 600, 900, 1200]
+
+# Power law (Riegel) describes the endurance portion; skip the very short
+# sprints where it over-predicts.  Extended out to the longest bests present.
+POWER_LAW_FIT_DURATIONS: list[int] = [
+    60, 120, 180, 300, 480, 600, 900, 1200, 1800, 2700, 3600,
+    7200, 10800, 14400, 18000, 21600, 25200, 28800,
+]
+
+# Durations (seconds) reported as the athlete's estimated potential:
+# 5 s neuromuscular / P_max, 60 s anaerobic capacity, 300 s maximal aerobic
+# power, 1200 s ≈ threshold.
+POTENTIAL_DURATIONS: list[int] = [5, 60, 300, 1200]
+
+
+def _log_spaced(lo: int, hi: int, count: int) -> list[int]:
+    """Return ``count`` roughly log-spaced integer durations from ``lo`` to ``hi``."""
+    lo = max(lo, 1)
+    if hi <= lo or count < 2:
+        return [lo]
+    ratio = (hi / lo) ** (1.0 / (count - 1))
+    return sorted({int(round(lo * ratio ** i)) for i in range(count)})
+
+
+# Dense log-spaced grid used to sample a smooth model curve for plotting.
+MODEL_CURVE_DURATIONS: list[int] = _log_spaced(5, 28800, 56)
+
+
+def _linear_ols(xs: list[float], ys: list[float]) -> tuple[float, float, float] | None:
+    """
+    Ordinary least squares fit of ``y = slope·x + intercept``.
+
+    Returns ``(slope, intercept, sse)`` where ``sse`` is the residual sum of
+    squares, or ``None`` if there are fewer than 2 points or ``x`` has no spread.
+    """
+    n = len(xs)
+    if n < 2:
+        return None
+    sum_x = sum(xs)
+    sum_y = sum(ys)
+    sum_xx = sum(x * x for x in xs)
+    sum_xy = sum(x * y for x, y in zip(xs, ys))
+    denom = n * sum_xx - sum_x * sum_x
+    if denom == 0:
+        return None
+    slope = (n * sum_xy - sum_x * sum_y) / denom
+    intercept = (sum_y - slope * sum_x) / n
+    sse = sum((y - (slope * x + intercept)) ** 2 for x, y in zip(xs, ys))
+    return slope, intercept, sse
+
+
+def _grid_search_1d(lo: float, hi: float, f, steps: int = 120):
+    """
+    Two-pass linear grid search minimising ``f(x)[0]`` over ``x ∈ [lo, hi]``.
+
+    ``f`` returns a tuple whose first element is the objective (e.g. SSE), or
+    ``None`` for an invalid ``x``.  A coarse scan is followed by a finer scan
+    around the best point.  Returns ``(x, f(x))`` or ``None`` if ``f`` was never
+    valid.
+    """
+    def scan(a: float, b: float):
+        best = None
+        for i in range(steps + 1):
+            x = a + (b - a) * i / steps
+            res = f(x)
+            if res is not None and (best is None or res[0] < best[1][0]):
+                best = (x, res)
+        return best
+
+    coarse = scan(lo, hi)
+    if coarse is None:
+        return None
+    span = (hi - lo) / steps
+    fine = scan(max(lo, coarse[0] - span), min(hi, coarse[0] + span))
+    if fine is None:
+        return coarse
+    return fine if fine[1][0] <= coarse[1][0] else coarse
+
+
+def estimate_cp3(
+    bests: dict[int, float],
+) -> tuple[float, float, float, float] | None:
+    """
+    Fit the 3-parameter Critical Power model (Morton) to the power bests.
+
+    Model: ``P(t) = CP + W'/(t − k)`` with ``k < 0``, giving a finite maximal
+    instantaneous power ``P_max = CP − W'/k`` at ``t → 0``.  For a fixed ``k``
+    the model is linear in ``CP`` and ``W'`` (regress ``P`` on ``1/(t − k)``), so
+    ``k`` is found by grid search.
+
+    Uses durations in ``CP3_FIT_DURATIONS``; needs at least 3 points.  Returns
+    ``(cp, w_prime, k, pmax)`` or ``None`` if it cannot be fit sensibly.
+    """
+    points = [(float(d), bests[d]) for d in CP3_FIT_DURATIONS if d in bests]
+    if len(points) < 3:
+        return None
+    ts = [t for t, _ in points]
+    ps = [p for _, p in points]
+
+    def objective(k: float):
+        xs = [1.0 / (t - k) for t in ts]  # t − k > 0 since k < 0 and t > 0
+        fit = _linear_ols(xs, ps)
+        if fit is None:
+            return None
+        w_prime, cp, sse = fit
+        if cp <= 0 or w_prime <= 0:
+            return None
+        return sse, cp, w_prime
+
+    result = _grid_search_1d(-60.0, -0.5, objective)
+    if result is None:
+        return None
+    k, (_, cp, w_prime) = result
+    pmax = cp - w_prime / k
+    return cp, w_prime, k, pmax
+
+
+def estimate_exponential(
+    bests: dict[int, float],
+) -> tuple[float, float, float] | None:
+    """
+    Fit the CP-anchored exponential model to the power bests.
+
+    Model: ``P(t) = CP + (P_max − CP)·e^(−t/τ)`` — power decays from a maximal
+    instantaneous ``P_max`` toward the ``CP`` asymptote with time constant
+    ``τ``.  For a fixed ``τ`` the model is linear in ``CP`` and the amplitude
+    ``A = P_max − CP`` (regress ``P`` on ``e^(−t/τ)``), so ``τ`` is found by grid
+    search (over ``ln τ`` for scale invariance).
+
+    Uses durations in ``EXP_FIT_DURATIONS``; needs at least 3 points.  Returns
+    ``(cp, pmax, tau)`` or ``None`` if it cannot be fit sensibly.
+    """
+    points = [(float(d), bests[d]) for d in EXP_FIT_DURATIONS if d in bests]
+    if len(points) < 3:
+        return None
+    ts = [t for t, _ in points]
+    ps = [p for _, p in points]
+
+    def objective(log_tau: float):
+        tau = math.exp(log_tau)
+        xs = [math.exp(-t / tau) for t in ts]
+        fit = _linear_ols(xs, ps)
+        if fit is None:
+            return None
+        amplitude, cp, sse = fit  # slope = P_max − CP, intercept = CP
+        if cp <= 0 or amplitude <= 0:
+            return None
+        return sse, cp, cp + amplitude
+
+    # τ from ~5 s to ~1 h.
+    result = _grid_search_1d(math.log(5.0), math.log(3600.0), objective)
+    if result is None:
+        return None
+    log_tau, (_, cp, pmax) = result
+    return cp, pmax, math.exp(log_tau)
+
+
+def estimate_power_law(bests: dict[int, float]) -> tuple[float, float] | None:
+    """
+    Fit the power-law (Riegel) model ``P(t) = a·t^b`` (``b < 0``) to the bests.
+
+    Linear in log space: ``ln P = ln a + b·ln t``, fit by OLS.  Uses durations
+    in ``POWER_LAW_FIT_DURATIONS``; needs at least 2 points.  Returns
+    ``(a, b)`` or ``None`` if it cannot be fit sensibly.
+    """
+    points = [
+        (float(d), bests[d])
+        for d in POWER_LAW_FIT_DURATIONS
+        if d in bests and bests[d] > 0
+    ]
+    if len(points) < 2:
+        return None
+    xs = [math.log(t) for t, _ in points]
+    ys = [math.log(p) for _, p in points]
+    fit = _linear_ols(xs, ys)
+    if fit is None:
+        return None
+    b, ln_a, _ = fit
+    if b >= 0:
+        return None
+    return math.exp(ln_a), b
+
+
+def predict_power(model: str, params: tuple[float, ...], t: float) -> float:
+    """
+    Predict mean power (watts) for an effort of ``t`` seconds using the fitted
+    ``params`` of ``model`` (``"cp2"``, ``"cp3"``, ``"exp"`` or ``"power_law"``).
+    """
+    t = float(t)
+    if model == "cp2":
+        cp, w_prime = params
+        return cp + w_prime / t
+    if model == "cp3":
+        cp, w_prime, k, _pmax = params
+        return cp + w_prime / (t - k)
+    if model == "exp":
+        cp, pmax, tau = params
+        return cp + (pmax - cp) * math.exp(-t / tau)
+    if model == "power_law":
+        a, b = params
+        return a * (t ** b)
+    raise ValueError(f"unknown power model: {model!r}")
+
+
+def sample_power_curve(
+    model: str, params: tuple[float, ...], durations: list[int]
+) -> list[tuple[int, float]]:
+    """Return ``[(duration_s, predicted_power_w), …]`` for the given durations."""
+    return [(d, predict_power(model, params, d)) for d in durations]
+
+
+def model_rmse(
+    model: str,
+    params: tuple[float, ...],
+    bests: dict[int, float],
+    fit_durations: list[int],
+) -> float | None:
+    """
+    Root-mean-square error (watts) of ``model`` against the actual bests over
+    the durations it was fit on.  Returns ``None`` if no overlapping data.
+    """
+    residuals = [
+        predict_power(model, params, d) - bests[d]
+        for d in fit_durations
+        if d in bests
+    ]
+    if not residuals:
+        return None
+    return (sum(r * r for r in residuals) / len(residuals)) ** 0.5
 
 
 # Distance best durations in metres

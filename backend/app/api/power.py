@@ -8,13 +8,31 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.deps import get_ctx_and_session
 from backend.app.models.user_orm import Activity, ActivityPowerBest, Athlete
-from backend.app.schemas.power import AllTimePowerBestsResponse, FtpEstimateResponse, PowerBestEntry
+from backend.app.schemas.power import (
+    AllTimePowerBestsResponse,
+    FtpEstimateResponse,
+    PowerBestEntry,
+    PowerModelFit,
+    PowerModelPoint,
+    PowerModelsResponse,
+)
 from backend.app.services.weight import effective_weight_for, load_weight_log, w_per_kg
 from openkoutsi.training_math import (
+    CP3_FIT_DURATIONS,
     CP_FIT_DURATIONS,
+    EXP_FIT_DURATIONS,
+    MODEL_CURVE_DURATIONS,
+    POTENTIAL_DURATIONS,
     POWER_BEST_DURATIONS,
+    POWER_LAW_FIT_DURATIONS,
+    estimate_cp3,
     estimate_cp_wprime,
+    estimate_exponential,
     estimate_ftp_simple,
+    estimate_power_law,
+    model_rmse,
+    predict_power,
+    sample_power_curve,
 )
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
@@ -192,3 +210,140 @@ async def get_ftp_estimate(
         ftp_cp=round(cp) if cp is not None else None,
         cp_available=cp is not None,
     )
+
+
+# Durations each model was fit over (for RMSE) and the shortest duration we are
+# willing to plot / predict it at.  Unbounded models (cp2, power_law) are not
+# extrapolated below their fit window where they blow up; the CP-anchored models
+# (cp3, exp) are bounded at t→0 and safe to sample down to the curve minimum.
+_MODEL_FIT_DURATIONS: dict[str, list[int]] = {
+    "cp2": CP_FIT_DURATIONS,
+    "cp3": CP3_FIT_DURATIONS,
+    "exp": EXP_FIT_DURATIONS,
+    "power_law": POWER_LAW_FIT_DURATIONS,
+}
+_MODEL_FLOOR: dict[str, int] = {"cp2": 120, "cp3": 0, "exp": 0, "power_law": 60}
+
+
+def _build_model_fit(
+    model: str, params: tuple[float, ...], rank1: dict[int, float], **fields
+) -> PowerModelFit:
+    """Assemble a PowerModelFit: sampled curve, profile predictions and RMSE."""
+    max_duration = max(rank1) if rank1 else 0
+    start = max(5, _MODEL_FLOOR[model])
+    curve_durations = [d for d in MODEL_CURVE_DURATIONS if start <= d <= max_duration]
+
+    curve = [
+        PowerModelPoint(duration_s=d, power_w=round(p, 1))
+        for d, p in sample_power_curve(model, params, curve_durations)
+    ]
+    predictions = [
+        PowerModelPoint(duration_s=d, power_w=round(predict_power(model, params, d), 1))
+        for d in POTENTIAL_DURATIONS
+        if d >= _MODEL_FLOOR[model]
+    ]
+    rmse = model_rmse(model, params, rank1, _MODEL_FIT_DURATIONS[model])
+
+    return PowerModelFit(
+        model=model,
+        available=True,
+        rmse=round(rmse, 1) if rmse is not None else None,
+        curve=curve,
+        predictions=predictions,
+        **fields,
+    )
+
+
+def build_power_models(rank1: dict[int, float]) -> list[PowerModelFit]:
+    """Fit every power–duration model to the rank-1 bests and assemble results.
+
+    Always returns one entry per model (in a stable order); models that cannot
+    be fit from the available data are returned with ``available=False``.
+    """
+    fits: list[PowerModelFit] = []
+
+    cp, w_prime = estimate_cp_wprime(rank1)
+    if cp is not None and w_prime is not None:
+        fits.append(_build_model_fit(
+            "cp2", (cp, w_prime), rank1,
+            cp=round(cp, 1), w_prime=round(w_prime),
+        ))
+    else:
+        fits.append(PowerModelFit(model="cp2"))
+
+    cp3 = estimate_cp3(rank1)
+    if cp3 is not None:
+        cp_v, wp_v, k_v, pmax_v = cp3
+        fits.append(_build_model_fit(
+            "cp3", cp3, rank1,
+            cp=round(cp_v, 1), w_prime=round(wp_v), k=round(k_v, 2), pmax=round(pmax_v, 1),
+        ))
+    else:
+        fits.append(PowerModelFit(model="cp3"))
+
+    exp = estimate_exponential(rank1)
+    if exp is not None:
+        cp_v, pmax_v, tau_v = exp
+        fits.append(_build_model_fit(
+            "exp", exp, rank1,
+            cp=round(cp_v, 1), pmax=round(pmax_v, 1), tau=round(tau_v, 1),
+        ))
+    else:
+        fits.append(PowerModelFit(model="exp"))
+
+    power_law = estimate_power_law(rank1)
+    if power_law is not None:
+        a_v, b_v = power_law
+        fits.append(_build_model_fit(
+            "power_law", power_law, rank1,
+            a=round(a_v, 3), b=round(b_v, 4),
+        ))
+    else:
+        fits.append(PowerModelFit(model="power_law"))
+
+    return fits
+
+
+@router.get("/power-models", response_model=PowerModelsResponse,
+            operation_id="getPowerModels", summary="Fitted power–duration models")
+async def get_power_models(
+    days: Optional[int] = Query(None, ge=1, description="Fit from bests in the past N days. Omit for all-time."),
+    ctx_session=Depends(get_ctx_and_session),
+):
+    """
+    Fit several power–duration models to the athlete's power curve and return,
+    for each model: its fitted parameters, a sampled curve for plotting, the
+    modeled potential at key durations (5 s / 60 s / 5 min / 20 min), and the
+    fit error (RMSE) against the actual bests.
+
+    Models: 2-parameter Critical Power (``cp2``), 3-parameter CP (``cp3``),
+    CP-anchored exponential (``exp``) and power law / Riegel (``power_law``).
+    All use the rank-1 (single best) power per duration.  Pass ?days=90/180/365
+    to fit from a rolling window; omit for all-time.
+    """
+    ctx, session = ctx_session
+    athlete = await _get_athlete(ctx.user_id, session)
+
+    cutoff = (
+        datetime.now(timezone.utc) - timedelta(days=days)
+        if days is not None
+        else None
+    )
+
+    where_clauses = [ActivityPowerBest.athlete_id == athlete.id]
+    if cutoff is not None:
+        where_clauses.append(ActivityPowerBest.activity_start_time >= cutoff)
+
+    rows = await session.execute(
+        select(ActivityPowerBest.duration_s, ActivityPowerBest.power_w)
+        .where(*where_clauses)
+        .order_by(ActivityPowerBest.duration_s, ActivityPowerBest.power_w.desc())
+    )
+
+    # Keep the single best (rank-1) power per duration.
+    rank1: dict[int, float] = {}
+    for duration_s, power_w in rows.all():
+        if duration_s not in rank1:
+            rank1[duration_s] = power_w
+
+    return PowerModelsResponse(models=build_power_models(rank1), days=days)
