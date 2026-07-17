@@ -56,7 +56,7 @@ def _workout(s: dict) -> tuple[str, str]:
 
 def _activity(s: dict) -> tuple[str, str]:
     return (
-        activity_svc._build_system_prompt(s.get("locale")),
+        activity_svc._build_system_prompt(s.get("locale"), s["activity"].sport_type),
         activity_svc._build_prompt(
             s["activity"], s["athlete"], s.get("fatigue"),
             s.get("power_pr_badges"), s.get("distance_pr_badges"),

@@ -36,6 +36,8 @@ from .llm_client import (
 )
 from .pr_detection import detect_pr_badges
 
+from openkoutsi.sport_matching import CYCLING_SPORT_TYPES
+
 if TYPE_CHECKING:
     pass
 
@@ -75,10 +77,32 @@ where <mood> is one of: cheer, knowing, neutral, stern.
 The MOOD line must be the very first line, followed by a blank line, then the paragraphs.\
 """
 
+_SYSTEM_PROMPT_SUPPLEMENTAL = """\
+You are Koutsi, an encouraging cycling coach. The athlete's primary sport is cycling; \
+the workout below is a different sport, so treat it as supplemental / cross-training \
+rather than their main focus. Do NOT give a detailed coaching breakdown — no pacing, \
+power or heart-rate analysis, no multi-paragraph feedback. Instead respond with a \
+short (1-2 sentences), warm acknowledgement that recognises the work the athlete put in \
+and encourages them to keep it up.
+Write in plain prose — no markdown headers, no bullet points, no code blocks.
 
-def _build_system_prompt(locale: str | None = None) -> str:
-    prompt = _SYSTEM_PROMPT_BASE
-    prompt += f"\n\n{EXPERIENCE_GUIDANCE}"
+Before the acknowledgement, output a single line in the format: MOOD:<mood>
+where <mood> is one of: cheer, knowing, neutral, stern. Use cheer for a strong effort \
+and knowing (the default) otherwise.
+The MOOD line must be the very first line, followed by a blank line, then the acknowledgement.\
+"""
+
+
+def _build_system_prompt(
+    locale: str | None = None, sport_type: str | None = None
+) -> str:
+    # Cycling is the athlete's primary sport → full coaching analysis. Everything
+    # else is supplemental training and only gets a short acknowledgement (issue #52).
+    if sport_type in CYCLING_SPORT_TYPES:
+        prompt = _SYSTEM_PROMPT_BASE
+        prompt += f"\n\n{EXPERIENCE_GUIDANCE}"
+    else:
+        prompt = _SYSTEM_PROMPT_SUPPLEMENTAL
     if locale:
         lang = _LOCALE_LANGUAGE.get(locale.split("-")[0].lower())
         if lang:
@@ -245,7 +269,7 @@ async def _stream_analysis(
     headers = merge_llm_headers(headers, cfg.extra_headers)
 
     messages: list[dict] = [
-        {"role": "system", "content": _build_system_prompt(locale)},
+        {"role": "system", "content": _build_system_prompt(locale, activity.sport_type)},
     ]
     analysis_context = getattr(instance, "llm_analysis_context", None)
     if analysis_context and analysis_context.strip():

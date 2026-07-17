@@ -85,7 +85,35 @@ class TestBuildSystemPrompt:
             assert lang in _build_system_prompt(locale)
 
     def test_includes_experience_guidance(self):
-        assert "experience level" in _build_system_prompt(None)
+        assert "experience level" in _build_system_prompt(None, "Ride")
+
+    def test_cycling_sport_gets_detailed_prompt(self):
+        prompt = _build_system_prompt(None, "Ride")
+        assert "3-5 paragraphs" in prompt
+        assert "experience level" in prompt
+        assert "MOOD:" in prompt
+
+    def test_cycling_variants_get_detailed_prompt(self):
+        for sport in ("VirtualRide", "GravelRide", "MountainBikeRide", "EBikeRide"):
+            prompt = _build_system_prompt(None, sport)
+            assert "3-5 paragraphs" in prompt, sport
+
+    def test_non_cycling_sport_gets_short_acknowledgement(self):
+        for sport in ("Run", "Swim", "WeightTraining", "Yoga", "Walk"):
+            prompt = _build_system_prompt(None, sport)
+            assert "supplemental" in prompt.lower(), sport
+            assert "3-5 paragraphs" not in prompt, sport
+            assert "experience level" not in prompt, sport
+            # Frontend/eval still require the MOOD contract.
+            assert "MOOD:" in prompt, sport
+
+    def test_missing_sport_defaults_to_short_acknowledgement(self):
+        prompt = _build_system_prompt(None, None)
+        assert "3-5 paragraphs" not in prompt
+        assert "MOOD:" in prompt
+
+    def test_supplemental_prompt_honours_locale(self):
+        assert "Finnish" in _build_system_prompt("fi", "Yoga")
 
 
 # ── _build_prompt ─────────────────────────────────────────────────────────────
@@ -318,7 +346,7 @@ class TestStreamAnalysis:
 
         assert collected == ["ok"]
 
-    async def _run_capture_payload(self, team):
+    async def _run_capture_payload(self, team, activity=None):
         """Run _stream_analysis and return the captured messages list."""
         captured: dict = {}
 
@@ -343,10 +371,21 @@ class TestStreamAnalysis:
                   return_value=_mock_registry_session(team)),
             patch("httpx.AsyncClient", return_value=_mock_httpx()),
         ):
-            async for _ in _stream_analysis(_make_activity(), _make_athlete(), "team-1"):
+            async for _ in _stream_analysis(activity or _make_activity(), _make_athlete(), "team-1"):
                 pass
 
         return captured["messages"]
+
+    async def test_cycling_activity_uses_detailed_system_prompt(self):
+        team = _make_mock_team(analysis_context=None)
+        messages = await self._run_capture_payload(team, _make_activity(sport_type="Ride"))
+        assert "3-5 paragraphs" in messages[0]["content"]
+
+    async def test_non_cycling_activity_uses_short_system_prompt(self):
+        team = _make_mock_team(analysis_context=None)
+        messages = await self._run_capture_payload(team, _make_activity(sport_type="Yoga"))
+        assert "3-5 paragraphs" not in messages[0]["content"]
+        assert "supplemental" in messages[0]["content"].lower()
 
     async def test_analysis_context_injected_as_second_system_message(self):
         team = _make_mock_team(analysis_context="Focus on running economy.")
