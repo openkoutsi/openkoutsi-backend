@@ -151,24 +151,16 @@ async def _load_active_plans(
                 PlannedWorkout.linked_activities
             )
         )
+        # Sessions run with expire_on_commit=False, so plans/workouts already
+        # loaded in this session could carry stale collections. Recompute must
+        # see current DB state (self-healing depends on it), so overwrite any
+        # already-loaded attributes with a fresh read.
+        .execution_options(populate_existing=True)
     )
     return list(result.scalars().all())
 
 
-async def _upsert_snapshot(
-    athlete_id: str, plan_id: str, day: date, ps: PlanScore, session: AsyncSession
-) -> None:
-    existing = await session.execute(
-        select(PlanAdherenceDaily).where(
-            PlanAdherenceDaily.athlete_id == athlete_id,
-            PlanAdherenceDaily.plan_id == plan_id,
-            PlanAdherenceDaily.date == day,
-        )
-    )
-    row = existing.scalar_one_or_none()
-    if row is None:
-        row = PlanAdherenceDaily(athlete_id=athlete_id, plan_id=plan_id, date=day)
-        session.add(row)
+def _apply_snapshot(row: PlanAdherenceDaily, ps: PlanScore) -> None:
     row.score = ps.score
     row.completed = ps.completed
     row.missed = ps.missed
@@ -176,14 +168,31 @@ async def _upsert_snapshot(
     row.pending = ps.pending
 
 
-async def catch_up_adherence(athlete_id: str, session: AsyncSession) -> bool:
-    """Fill missing ``plan_adherence_daily`` rows up to today for active plans.
+def _snapshot_differs(row: PlanAdherenceDaily, ps: PlanScore) -> bool:
+    """Whether a stored snapshot no longer matches a freshly computed score."""
+    if (row.score is None) != (ps.score is None):
+        return True
+    if row.score is not None and ps.score is not None and abs(row.score - ps.score) > 0.01:
+        return True
+    return (
+        row.completed != ps.completed
+        or row.missed != ps.missed
+        or row.skipped != ps.skipped
+        or row.pending != ps.pending
+    )
 
-    For each active plan, snapshots are (re)computed for today (so the score
-    moves the moment an activity lands) plus any missing days back to the plan
-    start, computing each day's score "as of" that day. Deterministic and
-    idempotent — recomputing a day yields the same value. Returns True if any
-    row was written.
+
+async def catch_up_adherence(athlete_id: str, session: AsyncSession) -> bool:
+    """Recompute the ``plan_adherence_daily`` snapshot series for active plans.
+
+    For each active plan, every day in ``[start_date, today]`` is scored "as of"
+    that day and compared against what's stored. A day is (re)written when it is
+    **missing** or **stale** — the latter self-heals rows invalidated by
+    retroactive changes (an activity linked/unlinked to an old workout, a past
+    workout edited or its skip reason changed, or a formula change), the same way
+    ``metrics_engine.catch_up_metrics`` heals stale ``daily_metrics``. Days that
+    already match are left untouched, so the pass is deterministic and
+    idempotent. Returns True if any row was written.
     """
     today = date.today()
     plans = await _load_active_plans(athlete_id, session)
@@ -194,27 +203,32 @@ async def catch_up_adherence(athlete_id: str, session: AsyncSession) -> bool:
     for plan in plans:
         if plan.start_date is None or plan.start_date > today:
             continue
-        start = plan.start_date
 
-        existing_dates = {
-            d
-            for (d,) in (
+        existing = {
+            row.date: row
+            for row in (
                 await session.execute(
-                    select(PlanAdherenceDaily.date).where(
+                    select(PlanAdherenceDaily).where(
                         PlanAdherenceDaily.athlete_id == athlete_id,
                         PlanAdherenceDaily.plan_id == plan.id,
                     )
                 )
-            ).all()
+            ).scalars()
         }
 
-        # Days to compute: any missing day in [start, today] plus today itself
-        # (today is always refreshed so newly-linked activities move the score).
-        day = start
+        day = plan.start_date
         while day <= today:
-            if day == today or day not in existing_dates:
-                ps = score_plan(plan, day)
-                await _upsert_snapshot(athlete_id, plan.id, day, ps, session)
+            ps = score_plan(plan, day)
+            row = existing.get(day)
+            if row is None:
+                row = PlanAdherenceDaily(
+                    athlete_id=athlete_id, plan_id=plan.id, date=day
+                )
+                _apply_snapshot(row, ps)
+                session.add(row)
+                changed = True
+            elif _snapshot_differs(row, ps):
+                _apply_snapshot(row, ps)
                 changed = True
             day += timedelta(days=1)
 
