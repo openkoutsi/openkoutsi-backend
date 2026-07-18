@@ -326,15 +326,52 @@ class PlannedWorkout(UserBase):
     description: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     duration_min: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     target_load: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
-    completed_activity_id: Mapped[Optional[str]] = mapped_column(
-        String, ForeignKey("activities.id", ondelete="SET NULL"), nullable=True
-    )
     workout_definition_id: Mapped[Optional[str]] = mapped_column(
         String, ForeignKey("workout_definitions.id", ondelete="SET NULL"), nullable=True
     )
     skip_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     plan: Mapped["TrainingPlan"] = relationship("TrainingPlan", back_populates="workouts")
+    # A single real-world session can be recorded as several activities (an
+    # accidental stop, a break, back-to-back rides). A planned workout may
+    # therefore link to many activities; each activity links to at most one
+    # planned workout (enforced by the UniqueConstraint on the join table).
+    linked_activities: Mapped[list["Activity"]] = relationship(
+        "Activity",
+        secondary="planned_workout_activities",
+        order_by="Activity.start_time",
+        lazy="selectin",
+    )
+
+    @property
+    def is_completed(self) -> bool:
+        """A planned workout is completed once at least one activity is linked."""
+        return bool(self.linked_activities)
+
+
+class PlannedWorkoutActivity(UserBase):
+    """Join table linking a planned workout to one or more completing activities.
+
+    The ``UniqueConstraint`` on ``activity_id`` keeps an activity linked to at
+    most one planned workout, while a planned workout may hold many activities.
+    """
+
+    __tablename__ = "planned_workout_activities"
+
+    planned_workout_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("planned_workouts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    activity_id: Mapped[str] = mapped_column(
+        String,
+        ForeignKey("activities.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+    __table_args__ = (
+        UniqueConstraint("activity_id", name="uq_planned_workout_activities_activity_id"),
+    )
 
 
 class WorkoutDefinition(UserBase):

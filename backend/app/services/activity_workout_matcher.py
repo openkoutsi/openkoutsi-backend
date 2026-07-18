@@ -7,7 +7,12 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.models.user_orm import Activity, PlannedWorkout, TrainingPlan
+from backend.app.models.user_orm import (
+    Activity,
+    PlannedWorkout,
+    PlannedWorkoutActivity,
+    TrainingPlan,
+)
 from openkoutsi.sport_matching import sports_match
 
 _TSS_THRESHOLD = 0.60
@@ -19,7 +24,7 @@ async def find_and_link_workout(
     athlete_id: str,
     activity: Activity,
 ) -> Optional[PlannedWorkout]:
-    """Find a planned workout matching *activity* and set its completed_activity_id.
+    """Find a planned workout matching *activity* and link the activity to it.
 
     Matching rules (all must pass):
     - Activity date falls within the plan's [start_date, end_date]
@@ -27,7 +32,12 @@ async def find_and_link_workout(
     - Sport type compatible with workout type
     - activity.load >= 60% of planned target_load (when both present)
     - activity.duration_s >= 60% of planned duration_min in seconds (when both present)
-    - planned workout not already linked to another activity
+    - planned workout does not already have any linked activity
+
+    Auto-matching only ever attaches a single activity to an otherwise-empty
+    planned workout; additional activities that together complete a workout (for
+    example a ride accidentally split in two) are linked manually. Manual links
+    have no threshold.
 
     Returns the linked PlannedWorkout, or None if no match found.
     """
@@ -66,12 +76,16 @@ async def find_and_link_workout(
         days_elapsed = (act_date - plan.start_date).days
         week_number = days_elapsed // 7 + 1
 
+        # Only consider workouts that have no linked activity yet.
+        linked_subq = select(PlannedWorkoutActivity.planned_workout_id).where(
+            PlannedWorkoutActivity.planned_workout_id == PlannedWorkout.id
+        )
         workouts_result = await session.execute(
             select(PlannedWorkout).where(
                 PlannedWorkout.plan_id == plan.id,
                 PlannedWorkout.week_number == week_number,
                 PlannedWorkout.day_of_week == day_of_week,
-                PlannedWorkout.completed_activity_id.is_(None),
+                ~linked_subq.exists(),
             )
         )
         candidates = workouts_result.scalars().all()
@@ -80,7 +94,11 @@ async def find_and_link_workout(
             if not _matches(activity, workout):
                 continue
 
-            workout.completed_activity_id = activity.id
+            session.add(
+                PlannedWorkoutActivity(
+                    planned_workout_id=workout.id, activity_id=activity.id
+                )
+            )
             await session.commit()
             return workout
 

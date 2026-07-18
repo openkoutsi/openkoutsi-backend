@@ -21,7 +21,6 @@ def _workout(**kwargs) -> PlannedWorkout:
     w.workout_type = kwargs.get("workout_type", "threshold")
     w.target_load = kwargs.get("target_load", None)
     w.duration_min = kwargs.get("duration_min", None)
-    w.completed_activity_id = kwargs.get("completed_activity_id", None)
     return w
 
 

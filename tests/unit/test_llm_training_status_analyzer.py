@@ -32,9 +32,18 @@ def _workout(day_of_week: int, **kwargs) -> PlannedWorkout:
     w.day_of_week = day_of_week
     w.workout_type = kwargs.get("workout_type", "endurance")
     w.target_load = kwargs.get("target_load", None)
-    w.completed_activity_id = kwargs.get("completed_activity_id", None)
+    linked = kwargs.get("linked_activities", [])
+    w.linked_activities = linked
+    w.is_completed = bool(linked)
     w.skip_reason = kwargs.get("skip_reason", None)
     return w
+
+
+def _linked_activity(load=50.0, duration_s=3600):
+    a = MagicMock()
+    a.load = load
+    a.duration_s = duration_s
+    return a
 
 
 class TestThisWeekWeekdayLabels:
@@ -106,7 +115,7 @@ class TestSkipReason:
             _workout(
                 1,
                 workout_type="threshold",
-                completed_activity_id="act-1",
+                linked_activities=[_linked_activity()],
                 skip_reason="stale reason",
             ),
         ]

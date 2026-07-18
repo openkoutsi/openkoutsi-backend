@@ -203,11 +203,26 @@ def _build_status_prompt(
                         f"rest day — nothing to complete, no action required"
                     )
                     continue
-                completed = "completed" if w.completed_activity_id else "not completed"
+                is_completed = w.is_completed
+                completed = "completed" if is_completed else "not completed"
+                # When a workout was completed by several activities (for example a
+                # ride recorded in two parts), report the combined actual so the
+                # coach sees the aggregate that met the goal.
+                if is_completed:
+                    n = len(w.linked_activities)
+                    total_load = sum(a.load or 0 for a in w.linked_activities)
+                    total_min = round(
+                        sum(a.duration_s or 0 for a in w.linked_activities) / 60
+                    )
+                    if n > 1:
+                        completed = (
+                            f"completed across {n} activities "
+                            f"(combined {round(total_load)} Load, {total_min} min)"
+                        )
                 tss_str = f", target Load {w.target_load}" if w.target_load else ""
                 skip_str = (
                     f" (skipped — reason: {w.skip_reason.strip()})"
-                    if not w.completed_activity_id and w.skip_reason and w.skip_reason.strip()
+                    if not is_completed and w.skip_reason and w.skip_reason.strip()
                     else ""
                 )
                 lines.append(
