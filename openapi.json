@@ -3648,6 +3648,7 @@
           "plans"
         ],
         "summary": "Unlink Workout From Activity",
+        "description": "Unlink activities from a planned workout.\n\nWith ``activity_id`` given, only that activity is unlinked; without it, every\nactivity linked to the workout is unlinked.",
         "operationId": "unlink_workout_from_activity_api_plans__plan_id__workouts__workout_id__link_delete",
         "security": [
           {
@@ -3671,6 +3672,22 @@
             "schema": {
               "type": "string",
               "title": "Workout Id"
+            }
+          },
+          {
+            "name": "activity_id",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Activity Id"
             }
           }
         ],
@@ -8332,6 +8349,14 @@
               }
             ],
             "title": "Target Load"
+          },
+          "linked_activity_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Linked Activity Ids",
+            "default": []
           },
           "completed_activity_id": {
             "anyOf": [

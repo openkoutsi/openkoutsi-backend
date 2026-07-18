@@ -582,7 +582,10 @@ async def _export_plans(athlete: Athlete, session: AsyncSession) -> list[dict]:
                     "description": w.description,
                     "duration_min": w.duration_min,
                     "target_load": w.target_load,
-                    "completed_activity_id": w.completed_activity_id,
+                    "linked_activity_ids": [a.id for a in w.linked_activities],
+                    "completed_activity_id": (
+                        w.linked_activities[0].id if w.linked_activities else None
+                    ),
                     "workout_definition_id": w.workout_definition_id,
                     "skip_reason": w.skip_reason,
                 }

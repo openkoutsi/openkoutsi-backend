@@ -205,8 +205,8 @@ def _status_common(coaching_style, locale, adhering: bool) -> dict:
     # Current plan week is 2 (plan started Mon 2026-06-29).
     if adhering:
         week = [
-            PlannedWorkout(week_number=2, day_of_week=1, workout_type="recovery", target_load=30, completed_activity_id="a1"),
-            PlannedWorkout(week_number=2, day_of_week=3, workout_type="threshold", target_load=85, completed_activity_id="a2"),
+            PlannedWorkout(week_number=2, day_of_week=1, workout_type="recovery", target_load=30, linked_activities=[Activity(id="a1", load=30, duration_s=1800)]),
+            PlannedWorkout(week_number=2, day_of_week=3, workout_type="threshold", target_load=85, linked_activities=[Activity(id="a2", load=85, duration_s=3600)]),
             PlannedWorkout(week_number=2, day_of_week=4, workout_type="endurance", target_load=60),  # today, not yet done
             PlannedWorkout(week_number=2, day_of_week=6, workout_type="long", target_load=120),
         ]

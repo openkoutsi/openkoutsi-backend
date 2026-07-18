@@ -607,29 +607,10 @@ class TestSkipWorkout:
         assert resp.status_code == 404
 
     async def test_skip_already_completed_workout_returns_409(self, client, auth_headers, session):
-        from sqlalchemy import select
-        from backend.app.models.user_orm import PlannedWorkout, Activity, Athlete
-
         plan_id, workout_id = await self._create_plan_and_get_workout(client, auth_headers)
 
         # Insert a dummy activity and mark the workout as completed directly in the DB
-        athlete_result = await session.execute(select(Athlete))
-        athlete = athlete_result.scalar_one()
-        import uuid
-        activity = Activity(
-            id=str(uuid.uuid4()),
-            athlete_id=athlete.id,
-            name="dummy",
-            sport_type="Ride",
-            status="ok",
-        )
-        session.add(activity)
-        await session.flush()
-
-        workout_result = await session.execute(select(PlannedWorkout).where(PlannedWorkout.id == workout_id))
-        workout = workout_result.scalar_one()
-        workout.completed_activity_id = activity.id
-        await session.commit()
+        await _mark_completed(session, workout_id)
 
         resp = await client.put(
             f"/api/plans/{plan_id}/workouts/{workout_id}/skip",
@@ -661,7 +642,7 @@ async def _mark_completed(session, workout_id: str):
     """Attach a dummy activity to a planned workout to mark it completed."""
     import uuid
     from sqlalchemy import select
-    from backend.app.models.user_orm import PlannedWorkout, Activity, Athlete
+    from backend.app.models.user_orm import Activity, Athlete, PlannedWorkoutActivity
 
     athlete = (await session.execute(select(Athlete))).scalar_one()
     activity = Activity(
@@ -670,10 +651,9 @@ async def _mark_completed(session, workout_id: str):
     )
     session.add(activity)
     await session.flush()
-    workout = (await session.execute(
-        select(PlannedWorkout).where(PlannedWorkout.id == workout_id)
-    )).scalar_one()
-    workout.completed_activity_id = activity.id
+    session.add(
+        PlannedWorkoutActivity(planned_workout_id=workout_id, activity_id=activity.id)
+    )
     await session.commit()
     return activity.id
 
@@ -918,3 +898,138 @@ class TestRegeneratePlan:
     async def test_unauthenticated_returns_401(self, client):
         resp = await client.post("/api/plans/some-id/regenerate", json={})
         assert resp.status_code == 401
+
+
+async def _create_activity(client, auth_headers, *, start_time, duration_s, load):
+    resp = await client.post(
+        "/api/activities",
+        json={
+            "sport_type": "Ride",
+            "start_time": start_time,
+            "duration_s": duration_s,
+            "load": load,
+        },
+        headers=auth_headers,
+    )
+    assert resp.status_code == 201
+    return resp.json()["id"]
+
+
+class TestLinkWorkout:
+    async def _plan_and_workout(self, client, auth_headers):
+        plan = await _create_plan(client, auth_headers, name="Link Plan", weeks=1)
+        workout = next(w for w in plan["workouts"] if w["workout_type"] != "rest")
+        return plan["id"], workout["id"]
+
+    async def test_link_two_activities_completes_workout(self, client, auth_headers):
+        """Two sub-threshold activities together satisfy one planned workout."""
+        plan_id, workout_id = await self._plan_and_workout(client, auth_headers)
+        a1 = await _create_activity(
+            client, auth_headers,
+            start_time="2020-06-02T08:00:00Z", duration_s=1800, load=40,
+        )
+        a2 = await _create_activity(
+            client, auth_headers,
+            start_time="2020-06-02T10:00:00Z", duration_s=1800, load=40,
+        )
+
+        r1 = await client.put(
+            f"/api/plans/{plan_id}/workouts/{workout_id}/link",
+            json={"activity_id": a1}, headers=auth_headers,
+        )
+        assert r1.status_code == 200
+        r2 = await client.put(
+            f"/api/plans/{plan_id}/workouts/{workout_id}/link",
+            json={"activity_id": a2}, headers=auth_headers,
+        )
+        assert r2.status_code == 200
+        body = r2.json()
+        assert set(body["linked_activity_ids"]) == {a1, a2}
+        # Backward-compatible derived field points at the first linked activity.
+        assert body["completed_activity_id"] in {a1, a2}
+
+    async def test_link_is_idempotent(self, client, auth_headers):
+        plan_id, workout_id = await self._plan_and_workout(client, auth_headers)
+        a1 = await _create_activity(
+            client, auth_headers,
+            start_time="2020-06-02T08:00:00Z", duration_s=1800, load=40,
+        )
+        for _ in range(2):
+            r = await client.put(
+                f"/api/plans/{plan_id}/workouts/{workout_id}/link",
+                json={"activity_id": a1}, headers=auth_headers,
+            )
+            assert r.status_code == 200
+        assert r.json()["linked_activity_ids"] == [a1]
+
+    async def test_link_activity_already_linked_elsewhere_returns_409(self, client, auth_headers):
+        plan = await _create_plan(client, auth_headers, name="Link Plan", weeks=1)
+        workouts = [w for w in plan["workouts"] if w["workout_type"] != "rest"]
+        w1, w2 = workouts[0]["id"], workouts[1]["id"]
+        a1 = await _create_activity(
+            client, auth_headers,
+            start_time="2020-06-02T08:00:00Z", duration_s=1800, load=40,
+        )
+        r1 = await client.put(
+            f"/api/plans/{plan['id']}/workouts/{w1}/link",
+            json={"activity_id": a1}, headers=auth_headers,
+        )
+        assert r1.status_code == 200
+        r2 = await client.put(
+            f"/api/plans/{plan['id']}/workouts/{w2}/link",
+            json={"activity_id": a1}, headers=auth_headers,
+        )
+        assert r2.status_code == 409
+
+    async def test_unlink_single_activity(self, client, auth_headers):
+        plan_id, workout_id = await self._plan_and_workout(client, auth_headers)
+        a1 = await _create_activity(
+            client, auth_headers,
+            start_time="2020-06-02T08:00:00Z", duration_s=1800, load=40,
+        )
+        a2 = await _create_activity(
+            client, auth_headers,
+            start_time="2020-06-02T10:00:00Z", duration_s=1800, load=40,
+        )
+        for a in (a1, a2):
+            await client.put(
+                f"/api/plans/{plan_id}/workouts/{workout_id}/link",
+                json={"activity_id": a}, headers=auth_headers,
+            )
+
+        r = await client.delete(
+            f"/api/plans/{plan_id}/workouts/{workout_id}/link",
+            params={"activity_id": a1}, headers=auth_headers,
+        )
+        assert r.status_code == 204
+
+        plan_resp = await client.get(f"/api/plans/{plan_id}", headers=auth_headers)
+        workout = next(w for w in plan_resp.json()["workouts"] if w["id"] == workout_id)
+        assert workout["linked_activity_ids"] == [a2]
+
+    async def test_unlink_all_activities(self, client, auth_headers):
+        plan_id, workout_id = await self._plan_and_workout(client, auth_headers)
+        a1 = await _create_activity(
+            client, auth_headers,
+            start_time="2020-06-02T08:00:00Z", duration_s=1800, load=40,
+        )
+        a2 = await _create_activity(
+            client, auth_headers,
+            start_time="2020-06-02T10:00:00Z", duration_s=1800, load=40,
+        )
+        for a in (a1, a2):
+            await client.put(
+                f"/api/plans/{plan_id}/workouts/{workout_id}/link",
+                json={"activity_id": a}, headers=auth_headers,
+            )
+
+        r = await client.delete(
+            f"/api/plans/{plan_id}/workouts/{workout_id}/link",
+            headers=auth_headers,
+        )
+        assert r.status_code == 204
+
+        plan_resp = await client.get(f"/api/plans/{plan_id}", headers=auth_headers)
+        workout = next(w for w in plan_resp.json()["workouts"] if w["id"] == workout_id)
+        assert workout["linked_activity_ids"] == []
+        assert workout["completed_activity_id"] is None

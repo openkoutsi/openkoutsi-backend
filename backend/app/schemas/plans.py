@@ -1,6 +1,6 @@
 from datetime import date, datetime
-from typing import Optional
-from pydantic import BaseModel
+from typing import Any, Optional
+from pydantic import BaseModel, model_validator
 
 from openkoutsi.plan_schema import DayConfig, PlanConfig  # noqa: F401 — re-exported for API layer
 
@@ -14,10 +14,39 @@ class PlannedWorkoutResponse(BaseModel):
     description: Optional[str] = None
     duration_min: Optional[int] = None
     target_load: Optional[int] = None
+    # All activities linked to this workout (may be several when one session was
+    # recorded as multiple activities). ``completed_activity_id`` is derived from
+    # the first of these and kept for backward compatibility.
+    linked_activity_ids: list[str] = []
     completed_activity_id: Optional[str] = None
     skip_reason: Optional[str] = None
 
     model_config = {"from_attributes": True}
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_links(cls, data: Any) -> Any:
+        """Populate the link fields from the ORM ``linked_activities`` relationship."""
+        if isinstance(data, dict):
+            return data
+        linked = getattr(data, "linked_activities", None)
+        if linked is None:
+            return data
+        ids = [a.id for a in linked]
+        # Build a plain dict so the derived fields are always consistent.
+        return {
+            "id": data.id,
+            "plan_id": data.plan_id,
+            "week_number": data.week_number,
+            "day_of_week": data.day_of_week,
+            "workout_type": data.workout_type,
+            "description": data.description,
+            "duration_min": data.duration_min,
+            "target_load": data.target_load,
+            "linked_activity_ids": ids,
+            "completed_activity_id": ids[0] if ids else None,
+            "skip_reason": data.skip_reason,
+        }
 
 
 class SkipWorkoutRequest(BaseModel):

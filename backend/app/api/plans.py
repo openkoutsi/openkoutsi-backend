@@ -1,4 +1,5 @@
 from datetime import date, datetime, timedelta, timezone
+from typing import Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -10,7 +11,7 @@ from backend.app.core.deps import get_ctx_and_session
 from backend.app.db.registry import get_registry_session
 from backend.app.models.registry_orm import InstanceSettings
 from backend.app.models.user_orm import (
-    Athlete, TrainingPlan, PlannedWorkout, WorkoutDefinition,
+    Athlete, TrainingPlan, PlannedWorkout, PlannedWorkoutActivity, WorkoutDefinition,
 )
 from backend.app.models.user_orm import Activity
 from backend.app.schemas.plans import (
@@ -326,18 +327,31 @@ async def link_workout_to_activity(
     if not activity_result.scalar_one_or_none():
         raise HTTPException(404, "Activity not found")
 
-    # Reject if this activity is already linked to a different planned workout
+    # Reject if this activity is already linked to a different planned workout.
+    # A workout may hold many activities, but an activity belongs to only one.
     existing_link_result = await session.execute(
-        select(PlannedWorkout).where(
-            PlannedWorkout.completed_activity_id == body.activity_id,
-            PlannedWorkout.id != workout_id,
+        select(PlannedWorkoutActivity).where(
+            PlannedWorkoutActivity.activity_id == body.activity_id,
+            PlannedWorkoutActivity.planned_workout_id != workout_id,
         )
     )
     if existing_link_result.scalar_one_or_none():
         raise HTTPException(409, "Activity is already linked to another planned workout")
 
-    workout.completed_activity_id = body.activity_id
-    await session.commit()
+    # Idempotent: linking the same activity to this workout again is a no-op.
+    already = await session.execute(
+        select(PlannedWorkoutActivity).where(
+            PlannedWorkoutActivity.planned_workout_id == workout_id,
+            PlannedWorkoutActivity.activity_id == body.activity_id,
+        )
+    )
+    if not already.scalar_one_or_none():
+        session.add(
+            PlannedWorkoutActivity(
+                planned_workout_id=workout_id, activity_id=body.activity_id
+            )
+        )
+        await session.commit()
     await session.refresh(workout)
     return PlannedWorkoutResponse.model_validate(workout)
 
@@ -346,8 +360,14 @@ async def link_workout_to_activity(
 async def unlink_workout_from_activity(
     plan_id: str,
     workout_id: str,
+    activity_id: Optional[str] = None,
     ctx_session=Depends(get_ctx_and_session),
 ):
+    """Unlink activities from a planned workout.
+
+    With ``activity_id`` given, only that activity is unlinked; without it, every
+    activity linked to the workout is unlinked.
+    """
     ctx, session = ctx_session
     athlete = await _get_athlete(ctx.user_id, session)
 
@@ -364,7 +384,14 @@ async def unlink_workout_from_activity(
     if not workout:
         raise HTTPException(404, "Planned workout not found")
 
-    workout.completed_activity_id = None
+    conditions = [PlannedWorkoutActivity.planned_workout_id == workout_id]
+    if activity_id is not None:
+        conditions.append(PlannedWorkoutActivity.activity_id == activity_id)
+    links_result = await session.execute(
+        select(PlannedWorkoutActivity).where(*conditions)
+    )
+    for link in links_result.scalars().all():
+        await session.delete(link)
     await session.commit()
 
 
@@ -391,7 +418,7 @@ async def skip_workout(
     if not workout:
         raise HTTPException(404, "Planned workout not found")
 
-    if workout.completed_activity_id is not None:
+    if workout.is_completed:
         raise HTTPException(409, "Cannot skip a workout that has already been completed")
 
     workout.skip_reason = body.reason
@@ -479,7 +506,7 @@ async def update_workout(
     if not workout:
         raise HTTPException(404, "Planned workout not found")
 
-    if workout.completed_activity_id is not None:
+    if workout.is_completed:
         raise HTTPException(409, "Cannot edit a workout that has already been completed")
 
     for field in ("workout_type", "description", "duration_min", "target_load", "day_of_week", "week_number"):
@@ -514,7 +541,7 @@ async def delete_workout(
     if not workout:
         raise HTTPException(404, "Planned workout not found")
 
-    if workout.completed_activity_id is not None:
+    if workout.is_completed:
         raise HTTPException(409, "Cannot delete a workout that has already been completed")
 
     await session.delete(workout)
@@ -547,7 +574,7 @@ async def regenerate_plan(
     # Preserve completed workouts; drop the rest. Reassigning the delete-orphan
     # collection schedules the removed (non-completed) rows for deletion — calling
     # session.delete() while they remain in the loaded collection does not stick.
-    preserved = [pw for pw in plan.workouts if pw.completed_activity_id is not None]
+    preserved = [pw for pw in plan.workouts if pw.is_completed]
     occupied = {(pw.week_number, pw.day_of_week) for pw in preserved}
     plan.workouts = list(preserved)
     await session.flush()
