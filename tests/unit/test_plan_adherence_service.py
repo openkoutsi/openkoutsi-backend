@@ -8,8 +8,9 @@ from datetime import date, datetime, timedelta, timezone
 import pytest
 
 from backend.app.models.user_orm import (
-    Activity, PlanAdherenceDaily, PlannedWorkout, TrainingPlan,
+    Activity, PlanAdherenceDaily, PlannedWorkout, PlannedWorkoutActivity, TrainingPlan,
 )
+from sqlalchemy import select
 from backend.app.services.plan_adherence import (
     catch_up_adherence, score_plan,
 )
@@ -179,5 +180,69 @@ class TestCatchUpAdherence:
                 PlanAdherenceDaily.__table__.select()
             )).fetchall()
             assert len(rows2) == 8
+        finally:
+            svc.date = orig
+
+    async def test_self_heals_stale_snapshot_after_retroactive_link(
+        self, session, seeded_athlete
+    ):
+        """A stored day is rewritten when the underlying data changes after the
+        fact — here an activity linked to a previously-missed past workout."""
+        import backend.app.services.plan_adherence as svc
+
+        plan = await self._make_plan(session, seeded_athlete.id)
+        frozen = _START + timedelta(days=7)
+        orig = svc.date
+
+        class _D:
+            @staticmethod
+            def today():
+                return frozen
+        svc.date = _D
+        try:
+            await catch_up_adherence(seeded_athlete.id, session)
+            before = (await session.execute(
+                PlanAdherenceDaily.__table__.select().where(
+                    PlanAdherenceDaily.date == frozen
+                )
+            )).fetchone()
+            assert before.missed == 2 and before.score == pytest.approx(0.0)
+
+            # Retroactively link an on-target activity to the day-1 workout.
+            day1 = (await session.execute(
+                select(PlannedWorkout).where(
+                    PlannedWorkout.plan_id == plan.id,
+                    PlannedWorkout.day_of_week == 1,
+                )
+            )).scalar_one()
+            act = Activity(
+                athlete_id=seeded_athlete.id, sport_type="Ride",
+                load=100, duration_s=3600,
+                start_time=datetime(2025, 6, 2, 10, tzinfo=timezone.utc),
+            )
+            session.add(act)
+            await session.flush()
+            session.add(PlannedWorkoutActivity(
+                planned_workout_id=day1.id, activity_id=act.id,
+            ))
+            await session.commit()
+
+            # Self-heal: no new rows, but the stale day is rewritten.
+            changed = await catch_up_adherence(seeded_athlete.id, session)
+            assert changed is True
+            rows = (await session.execute(
+                PlanAdherenceDaily.__table__.select()
+            )).fetchall()
+            assert len(rows) == 8  # still one row per day, none added
+
+            after = (await session.execute(
+                PlanAdherenceDaily.__table__.select().where(
+                    PlanAdherenceDaily.date == frozen
+                )
+            )).fetchone()
+            # One completed on-target (100) + one missed (0), equal weight → 50.
+            assert after.completed == 1
+            assert after.missed == 1
+            assert after.score == pytest.approx(50.0)
         finally:
             svc.date = orig
