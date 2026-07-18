@@ -27,6 +27,7 @@ from backend.app.models.user_orm import (
     Athlete,
 )
 from backend.app.services.weight import effective_weight_for, load_weight_log, w_per_kg
+from backend.app.services.zone_times import compute_zone_times
 
 
 def read_fit_start_time(path: str) -> Optional[datetime]:
@@ -89,6 +90,12 @@ async def process_fit_file(
                     data=data,
                 )
             )
+
+    # Freeze time-in-zone using the athlete's zones as they are right now (issue
+    # #27). Editing zones later won't rewrite this activity's snapshot.
+    activity.zone_times = compute_zone_times(
+        stream_map, athlete.hr_zones, athlete.power_zones
+    )
 
     if power_data:
         weight_log = await load_weight_log(athlete.id, session)

@@ -358,6 +358,113 @@ class TestZonesEndpoint:
         assert resp.status_code == 401
 
 
+# ── Weekly accumulated time in zones (issue #27) ────────────────────────────────
+
+class TestWeeklyZonesEndpoint:
+    _POWER_ZONES = [
+        {"name": "Z1", "low": 0, "high": 150},
+        {"name": "Z2", "low": 151, "high": 210},
+        {"name": "Z3", "low": 211, "high": 300},
+    ]
+
+    async def _set_power_zones(self, client, auth_headers, zones=None):
+        await client.patch(
+            "/api/athlete",
+            json={"ftp": 250, "power_zones": zones or self._POWER_ZONES},
+            headers=auth_headers,
+        )
+
+    async def _make_activity(self, client, auth_headers, session, start_time, power_data):
+        resp = await client.post(
+            "/api/activities",
+            json={"sport_type": "Ride", "start_time": start_time, "duration_s": len(power_data)},
+            headers=auth_headers,
+        )
+        activity_id = resp.json()["id"]
+        session.add(ActivityStream(activity_id=activity_id, stream_type="power", data=power_data))
+        await session.commit()
+        return activity_id
+
+    async def test_empty_for_new_athlete(self, client, auth_headers):
+        resp = await client.get("/api/metrics/zones/weekly", headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    async def test_weekly_not_shadowed_by_activity_id_route(self, client, auth_headers):
+        # "weekly" must hit the weekly endpoint, not /zones/{activity_id} (404).
+        resp = await client.get("/api/metrics/zones/weekly", headers=auth_headers)
+        assert resp.status_code == 200
+        assert isinstance(resp.json(), list)
+
+    async def test_aggregates_within_a_week(self, client, auth_headers, session):
+        await self._set_power_zones(client, auth_headers)
+        # 2025-04-01 (Tue) and 2025-04-02 (Wed) → same ISO week (Mon 2025-03-31).
+        await self._make_activity(
+            client, auth_headers, session, "2025-04-01T08:00:00Z",
+            [100] * 60 + [250] * 60,  # Z1:60, Z3:60
+        )
+        await self._make_activity(
+            client, auth_headers, session, "2025-04-02T08:00:00Z",
+            [180] * 30,  # Z2:30
+        )
+        resp = await client.get("/api/metrics/zones/weekly", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["week_start"] == "2025-03-31"
+        assert data[0]["power"] == {"Z1": 60, "Z2": 30, "Z3": 60}
+
+    async def test_separate_weeks_sorted(self, client, auth_headers, session):
+        await self._set_power_zones(client, auth_headers)
+        await self._make_activity(
+            client, auth_headers, session, "2025-04-08T08:00:00Z", [250] * 45,  # Z3:45
+        )
+        await self._make_activity(
+            client, auth_headers, session, "2025-04-01T08:00:00Z", [100] * 20,  # Z1:20
+        )
+        resp = await client.get("/api/metrics/zones/weekly", headers=auth_headers)
+        data = resp.json()
+        assert [b["week_start"] for b in data] == ["2025-03-31", "2025-04-07"]
+        assert data[0]["power"] == {"Z1": 20}
+        assert data[1]["power"] == {"Z3": 45}
+
+    async def test_snapshot_frozen_against_zone_changes(self, client, auth_headers, session):
+        await self._set_power_zones(client, auth_headers)
+        await self._make_activity(
+            client, auth_headers, session, "2025-04-01T08:00:00Z",
+            [100] * 60 + [250] * 60,  # Z1:60, Z3:60 under the original zones
+        )
+        first = (await client.get("/api/metrics/zones/weekly", headers=auth_headers)).json()
+        assert first[0]["power"] == {"Z1": 60, "Z3": 60}
+
+        # Collapse everything into a single wide zone; past activity must not move.
+        await self._set_power_zones(
+            client, auth_headers, zones=[{"name": "Z1", "low": 0, "high": 500}],
+        )
+        second = (await client.get("/api/metrics/zones/weekly", headers=auth_headers)).json()
+        assert second[0]["power"] == {"Z1": 60, "Z3": 60}
+
+    async def test_date_range_filter(self, client, auth_headers, session):
+        await self._set_power_zones(client, auth_headers)
+        await self._make_activity(
+            client, auth_headers, session, "2025-04-01T08:00:00Z", [100] * 10,
+        )
+        await self._make_activity(
+            client, auth_headers, session, "2025-05-01T08:00:00Z", [250] * 10,
+        )
+        resp = await client.get(
+            "/api/metrics/zones/weekly?start=2025-04-20&end=2025-05-10",
+            headers=auth_headers,
+        )
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["power"] == {"Z3": 10}
+
+    async def test_unauthenticated_returns_401(self, client):
+        resp = await client.get("/api/metrics/zones/weekly")
+        assert resp.status_code == 401
+
+
 # ── FTP history ────────────────────────────────────────────────────────────────
 
 class TestFtpHistory:

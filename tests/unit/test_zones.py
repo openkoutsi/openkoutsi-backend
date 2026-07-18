@@ -1,5 +1,5 @@
 import pytest
-from openkoutsi.zones import Zones
+from openkoutsi.zones import Zones, time_in_zones
 
 
 class TestZones:
@@ -45,3 +45,30 @@ class TestZones:
         assert z.getZone(150) == 0
         assert z.getZone(0) == 0
         assert z.getZone(300) == 0
+
+
+class TestTimeInZones:
+    _ZONES = [
+        {"name": "Z1", "low": 0, "high": 120},
+        {"name": "Z2", "low": 121, "high": 150},
+        {"name": "Z3", "low": 151, "high": 185},
+    ]
+
+    def test_counts_one_second_per_sample(self):
+        samples = [100] * 30 + [135] * 30 + [160] * 40
+        assert time_in_zones(samples, self._ZONES) == {"Z1": 30, "Z2": 30, "Z3": 40}
+
+    def test_total_matches_sample_count(self):
+        samples = [110, 130, 170, 90]
+        assert sum(time_in_zones(samples, self._ZONES).values()) == len(samples)
+
+    def test_out_of_range_samples_clamp_into_nearest_zone(self):
+        # Below Z1 → Z1; above Z3 → Z3.
+        assert time_in_zones([-5, 999], self._ZONES) == {"Z1": 1, "Z3": 1}
+
+    def test_falls_back_to_positional_name(self):
+        zones = [{"low": 0, "high": 150}, {"low": 151, "high": 300}]
+        assert time_in_zones([100, 200], zones) == {"Z1": 1, "Z2": 1}
+
+    def test_empty_stream_returns_empty(self):
+        assert time_in_zones([], self._ZONES) == {}

@@ -12,10 +12,11 @@ from backend.app.schemas.metrics import (
     ActivitySummaryResponse,
     FitnessCurrentResponse,
     FitnessMetricResponse,
+    WeeklyZoneBucket,
 )
 from backend.app.services.metrics_engine import catch_up_metrics
+from backend.app.services.zone_times import compute_zone_times, ensure_zone_times
 from openkoutsi.sport_matching import CYCLING_SPORT_TYPES
-from openkoutsi.zones import Zones
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 
@@ -116,6 +117,68 @@ async def get_fitness_current(ctx_session=Depends(get_ctx_and_session)):
     return FitnessCurrentResponse.model_validate(metric)
 
 
+@router.get("/zones/weekly", response_model=list[WeeklyZoneBucket])
+async def get_zones_weekly(
+    start: Optional[date] = Query(None),
+    end: Optional[date] = Query(None),
+    days: Optional[int] = Query(None, ge=1, le=3650),
+    ctx_session=Depends(get_ctx_and_session),
+):
+    """Accumulated time-in-zone (power + HR) per ISO week over a period.
+
+    Sums each cycling activity's frozen ``zone_times`` snapshot into Monday-based
+    weekly buckets. Legacy activities without a snapshot are backfilled on the
+    fly (using current zones) and frozen, mirroring the fitness catch-up flow.
+
+    Declared before ``/zones/{activity_id}`` so "weekly" isn't matched as an id.
+    """
+    ctx, session = ctx_session
+    athlete = await _get_athlete(ctx.user_id, session)
+
+    if days is not None and start is None:
+        start = date.today() - timedelta(days=days)
+
+    query = select(Activity).where(
+        Activity.athlete_id == athlete.id,
+        Activity.sport_type.in_(CYCLING_SPORT_TYPES),
+        Activity.status == "processed",
+        Activity.start_time.is_not(None),
+    )
+    if start:
+        query = query.where(Activity.start_time >= datetime.combine(start, time.min))
+    if end:
+        query = query.where(Activity.start_time <= datetime.combine(end, time.max))
+
+    activities = (await session.execute(query)).scalars().all()
+
+    if await ensure_zone_times(athlete, session, activities):
+        await session.commit()
+
+    buckets: dict[date, dict[str, dict[str, int]]] = {}
+    for activity in activities:
+        if not activity.zone_times or activity.start_time is None:
+            continue
+        day = activity.start_time.date()
+        week_start = day - timedelta(days=day.weekday())  # Monday
+        bucket = buckets.setdefault(week_start, {})
+        for kind in ("hr", "power"):
+            times = activity.zone_times.get(kind)
+            if not times:
+                continue
+            dest = bucket.setdefault(kind, {})
+            for name, seconds in times.items():
+                dest[name] = dest.get(name, 0) + seconds
+
+    return [
+        WeeklyZoneBucket(
+            week_start=week_start,
+            hr=data.get("hr", {}),
+            power=data.get("power", {}),
+        )
+        for week_start, data in sorted(buckets.items())
+    ]
+
+
 @router.get("/zones/{activity_id}")
 async def get_zones(
     activity_id: str,
@@ -133,35 +196,26 @@ async def get_zones(
     if activity is None:
         raise HTTPException(status_code=404, detail="Activity not found")
 
+    # Prefer the frozen snapshot captured when the activity was processed.
+    if activity.zone_times is not None:
+        return activity.zone_times
+
     if not athlete.hr_zones and not athlete.power_zones:
         raise HTTPException(status_code=400, detail="No zones configured on athlete")
 
+    # Legacy activity with no snapshot yet: compute from streams using the
+    # current zones and freeze it, so future zone edits leave it untouched.
     streams_result = await session.execute(
         select(ActivityStream).where(ActivityStream.activity_id == activity_id)
     )
     streams = {s.stream_type: s.data for s in streams_result.scalars()}
 
-    result: dict = {}
-
-    if athlete.hr_zones and streams.get("heartrate"):
-        hr_zones = Zones(*[(z["low"], z["high"]) for z in athlete.hr_zones])
-        time_in_hr: dict[str, int] = {}
-        for v in streams["heartrate"]:
-            zone_i = hr_zones.getZone(int(v))
-            name = athlete.hr_zones[zone_i].get("name", f"Z{zone_i + 1}")
-            time_in_hr[name] = time_in_hr.get(name, 0) + 1
-        result["hr"] = time_in_hr
-
-    if athlete.power_zones and streams.get("power"):
-        pw_zones = Zones(*[(z["low"], z["high"]) for z in athlete.power_zones])
-        time_in_pw: dict[str, int] = {}
-        for v in streams["power"]:
-            zone_i = pw_zones.getZone(int(v))
-            name = athlete.power_zones[zone_i].get("name", f"Z{zone_i + 1}")
-            time_in_pw[name] = time_in_pw.get(name, 0) + 1
-        result["power"] = time_in_pw
-
-    return result
+    zone_times = compute_zone_times(streams, athlete.hr_zones, athlete.power_zones)
+    if zone_times is None:
+        return {}
+    activity.zone_times = zone_times
+    await session.commit()
+    return zone_times
 
 
 @router.get("/ftp/history", operation_id="getFtpHistory", summary="FTP history")

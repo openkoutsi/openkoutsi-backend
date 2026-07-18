@@ -55,3 +55,15 @@ class ActivitySummaryResponse(BaseModel):
     num_activities: int = 0
     total_duration_s: int = 0
     total_distance_m: float = 0.0
+
+
+class WeeklyZoneBucket(BaseModel):
+    """Accumulated time-in-zone for one ISO week (Monday-based).
+
+    ``hr`` and ``power`` map zone name → seconds, summed across all of that
+    week's activities. Either may be empty when no matching data exists.
+    """
+
+    week_start: date
+    hr: dict[str, int] = {}
+    power: dict[str, int] = {}

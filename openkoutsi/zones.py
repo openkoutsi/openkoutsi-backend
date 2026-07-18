@@ -1,5 +1,23 @@
 from dataclasses import dataclass
-from typing import List
+from typing import Iterable, List, Sequence
+
+
+def time_in_zones(samples: Iterable[float], zone_defs: Sequence[dict]) -> dict[str, int]:
+    """Accumulate time spent in each zone from a per-second sample stream.
+
+    ``samples`` is a 1 Hz stream (one value per second), so each sample counts
+    as one second. ``zone_defs`` is the athlete's zone list — ``[{"low", "high",
+    "name"}, ...]``. Returns ``{zone_name: seconds}``. Values below Z1 / above
+    the last zone are clamped into the nearest zone by ``Zones.getZone``.
+    """
+    zones = Zones(*[(z["low"], z["high"]) for z in zone_defs])
+    out: dict[str, int] = {}
+    for v in samples:
+        i = zones.getZone(int(v))
+        name = zone_defs[i].get("name", f"Z{i + 1}")
+        out[name] = out.get(name, 0) + 1
+    return out
+
 
 class Zones:
     def __init__(
