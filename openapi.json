@@ -3530,6 +3530,92 @@
         }
       }
     },
+    "/api/plans/{plan_id}/adherence": {
+      "get": {
+        "tags": [
+          "plans"
+        ],
+        "summary": "Plan adherence snapshot series",
+        "description": "Persisted daily adherence snapshots for a plan (mirrors /metrics/fitness).\n\nRuns a cheap, deterministic catch-up first so the series is fresh even for a\nuser who hasn't loaded the dashboard yet, then returns the stored trend.",
+        "operationId": "getPlanAdherence",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Plan Id"
+            }
+          },
+          {
+            "name": "start",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start"
+            }
+          },
+          {
+            "name": "end",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PlanAdherencePoint"
+                  },
+                  "title": "Response Getplanadherence"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/plans/{plan_id}/unarchive": {
       "post": {
         "tags": [
@@ -8196,6 +8282,79 @@
         ],
         "title": "PctFtpSpec"
       },
+      "PlanAdherencePoint": {
+        "properties": {
+          "date": {
+            "type": "string",
+            "format": "date",
+            "title": "Date"
+          },
+          "score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score"
+          },
+          "completed": {
+            "type": "integer",
+            "title": "Completed",
+            "default": 0
+          },
+          "missed": {
+            "type": "integer",
+            "title": "Missed",
+            "default": 0
+          },
+          "skipped": {
+            "type": "integer",
+            "title": "Skipped",
+            "default": 0
+          },
+          "pending": {
+            "type": "integer",
+            "title": "Pending",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "required": [
+          "date"
+        ],
+        "title": "PlanAdherencePoint",
+        "description": "One persisted daily adherence snapshot, for charting the trend."
+      },
+      "PlanAdherenceSummary": {
+        "properties": {
+          "completed": {
+            "type": "integer",
+            "title": "Completed",
+            "default": 0
+          },
+          "missed": {
+            "type": "integer",
+            "title": "Missed",
+            "default": 0
+          },
+          "skipped": {
+            "type": "integer",
+            "title": "Skipped",
+            "default": 0
+          },
+          "pending": {
+            "type": "integer",
+            "title": "Pending",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "title": "PlanAdherenceSummary",
+        "description": "Small breakdown of a plan's adherence, alongside the current score."
+      },
       "PlanConfig": {
         "properties": {
           "days_per_week": {
@@ -8379,6 +8538,17 @@
               }
             ],
             "title": "Skip Reason"
+          },
+          "match_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Match Score"
           }
         },
         "type": "object",
@@ -9173,6 +9343,27 @@
               }
             ],
             "title": "Generation Method"
+          },
+          "adherence_score": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Adherence Score"
+          },
+          "adherence_summary": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlanAdherenceSummary"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "type": "object",

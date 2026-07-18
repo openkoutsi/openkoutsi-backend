@@ -20,6 +20,9 @@ class PlannedWorkoutResponse(BaseModel):
     linked_activity_ids: list[str] = []
     completed_activity_id: Optional[str] = None
     skip_reason: Optional[str] = None
+    # Derived per-workout adherence match score (0–100). Null until the workout
+    # is completed or past — set by the API layer, which has the plan's dates.
+    match_score: Optional[float] = None
 
     model_config = {"from_attributes": True}
 
@@ -47,6 +50,26 @@ class PlannedWorkoutResponse(BaseModel):
             "completed_activity_id": ids[0] if ids else None,
             "skip_reason": data.skip_reason,
         }
+
+
+class PlanAdherenceSummary(BaseModel):
+    """Small breakdown of a plan's adherence, alongside the current score."""
+    completed: int = 0
+    missed: int = 0
+    skipped: int = 0
+    pending: int = 0
+
+
+class PlanAdherencePoint(BaseModel):
+    """One persisted daily adherence snapshot, for charting the trend."""
+    date: date
+    score: Optional[float] = None
+    completed: int = 0
+    missed: int = 0
+    skipped: int = 0
+    pending: int = 0
+
+    model_config = {"from_attributes": True}
 
 
 class SkipWorkoutRequest(BaseModel):
@@ -146,5 +169,9 @@ class TrainingPlanResponse(BaseModel):
     workouts: list[PlannedWorkoutResponse] = []
     config: Optional[dict] = None
     generation_method: Optional[str] = None
+    # Current "so far" adherence score (0–100) and its breakdown. Null when the
+    # plan has nothing contributing yet (empty / just-started).
+    adherence_score: Optional[float] = None
+    adherence_summary: Optional[PlanAdherenceSummary] = None
 
     model_config = {"from_attributes": True}

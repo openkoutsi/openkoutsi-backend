@@ -5,6 +5,8 @@ import json
 from datetime import date, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 
 _START = date(2025, 6, 2)  # A Monday
 
@@ -1033,3 +1035,52 @@ class TestLinkWorkout:
         workout = next(w for w in plan_resp.json()["workouts"] if w["id"] == workout_id)
         assert workout["linked_activity_ids"] == []
         assert workout["completed_activity_id"] is None
+
+
+class TestPlanAdherence:
+    """Adherence score surfaced on the plan and the snapshot series (issue #26)."""
+
+    async def test_plan_response_carries_adherence_fields(self, client, auth_headers):
+        plan = await _create_plan(client, auth_headers, name="Adherence", weeks=1)
+        plan_id = plan["id"]
+        # A cycling workout that's in the past relative to today.
+        workout = next(
+            w for w in plan["workouts"]
+            if w["workout_type"] != "rest" and w["target_load"]
+        )
+        # Match its target so the completed score is high.
+        act = await _create_activity(
+            client, auth_headers,
+            start_time="2020-06-02T08:00:00Z",
+            duration_s=(workout["duration_min"] or 60) * 60,
+            load=workout["target_load"],
+        )
+        r = await client.put(
+            f"/api/plans/{plan_id}/workouts/{workout['id']}/link",
+            json={"activity_id": act}, headers=auth_headers,
+        )
+        assert r.status_code == 200
+        # The link response carries the per-workout match score.
+        assert r.json()["match_score"] is not None
+
+        resp = await client.get(f"/api/plans/{plan_id}", headers=auth_headers)
+        body = resp.json()
+        assert body["adherence_score"] is not None
+        assert body["adherence_summary"]["completed"] >= 1
+        linked = next(w for w in body["workouts"] if w["id"] == workout["id"])
+        assert linked["match_score"] == pytest.approx(100.0)
+
+    async def test_adherence_snapshot_series(self, client, auth_headers):
+        plan = await _create_plan(client, auth_headers, name="Series", weeks=1)
+        plan_id = plan["id"]
+        resp = await client.get(f"/api/plans/{plan_id}/adherence", headers=auth_headers)
+        assert resp.status_code == 200
+        series = resp.json()
+        # A past-dated one-week plan yields one snapshot per elapsed day.
+        assert isinstance(series, list)
+        assert len(series) >= 1
+        assert {"date", "score", "completed", "missed", "skipped", "pending"} <= series[0].keys()
+
+    async def test_adherence_series_404_for_unknown_plan(self, client, auth_headers):
+        resp = await client.get("/api/plans/no-such-id/adherence", headers=auth_headers)
+        assert resp.status_code == 404
