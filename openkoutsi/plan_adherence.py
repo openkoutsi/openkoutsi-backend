@@ -33,6 +33,13 @@ DURATION_BLEND = 0.30
 # apart: at 60% under target the per-dimension deviation score is exactly 0.60.
 MATCH_THRESHOLD = 0.60
 
+# ── Completion floor ─────────────────────────────────────────────────────────
+# A workout that was actually done — even one massively over- or under-shot
+# (e.g. a planned 85-min endurance ride ridden as a 4-hour Z1/Z2 spin) — should
+# never score as low as an outright miss. Completed workouts are floored here;
+# missed and skipped workouts are unaffected (they are never "completed").
+COMPLETED_MIN_SCORE = 50.0
+
 # ── Skip-reason → forgiveness factor ─────────────────────────────────────────
 # A skipped workout contributes score 0 at weight ``(1 − f) × weight``: a fully
 # excused skip barely dents the score, a discretionary one approaches a full

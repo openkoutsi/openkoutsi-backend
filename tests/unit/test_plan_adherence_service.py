@@ -58,6 +58,17 @@ class TestScorePlan:
         ps = score_plan(_plan([w]), today=_START)
         assert ps.match_scores[w.id] == pytest.approx(100.0)
 
+    def test_completed_workout_floored_at_50_when_wildly_off(self):
+        # Planned 85-min endurance ride, ridden as a 4-hour Z1/Z2 spin: both
+        # Load and duration overshoot enough that the raw score is 0, but having
+        # actually done the session floors the match score at 50.
+        acts = [_activity(load=260, duration_s=4 * 3600)]
+        w = _workout(load=75, dur=85, activities=acts)
+        ps = score_plan(_plan([w]), today=_START)
+        assert ps.completed == 1
+        assert ps.match_scores[w.id] == pytest.approx(50.0)
+        assert ps.score == pytest.approx(50.0)
+
     def test_missed_past_workout_is_zero_full_weight(self):
         w = _workout(load=100, dur=60)  # no activities
         # today is a week later → the workout date is in the past

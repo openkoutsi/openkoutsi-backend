@@ -21,6 +21,7 @@ from sqlalchemy.orm import selectinload
 
 from backend.app.models.user_orm import PlanAdherenceDaily, PlannedWorkout, TrainingPlan
 from openkoutsi.plan_adherence import (
+    COMPLETED_MIN_SCORE,
     SUPPLEMENTAL_WEIGHT_FALLBACK,
     cycling_match_score,
     forgiveness_factor,
@@ -54,15 +55,19 @@ def workout_match_score(workout: PlannedWorkout) -> float:
     """Per-workout match score (0–100) for a *completed* workout.
 
     Cycling workouts are graded on summed Load + duration across all linked
-    activities; supplemental workouts are done/missed.
+    activities; supplemental workouts are done/missed. The result is floored at
+    ``COMPLETED_MIN_SCORE`` — having actually done the session, however far off
+    target, always beats missing it outright.
     """
     if workout_is_cycling(workout.workout_type):
         actual_load = sum((a.load or 0.0) for a in workout.linked_activities)
         actual_dur = sum((a.duration_s or 0) for a in workout.linked_activities)
-        return cycling_match_score(
+        raw = cycling_match_score(
             actual_load, actual_dur, workout.target_load, workout.duration_min
         )
-    return supplemental_match_score(True)
+    else:
+        raw = supplemental_match_score(True)
+    return max(COMPLETED_MIN_SCORE, raw)
 
 
 @dataclass

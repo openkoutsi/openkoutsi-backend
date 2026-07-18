@@ -53,6 +53,11 @@ class TestCyclingMatchScore:
     def test_no_targets_completion_only(self):
         assert cycling_match_score(0, 0, None, None) == 100.0
 
+    def test_wild_overshoot_is_raw_zero(self):
+        # The pure math is unfloored — the 50 completion floor is applied by the
+        # service layer (workout_match_score), not here.
+        assert cycling_match_score(300, 8 * 3600, 75, 85) == pytest.approx(0.0)
+
 
 class TestSupplemental:
     def test_done_is_100_missed_is_0(self):
