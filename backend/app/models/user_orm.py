@@ -114,6 +114,11 @@ class Activity(UserBase):
     load: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     intensity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     workout_category: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Accumulated time-in-zone captured at processing time, using the athlete's
+    # zone definitions in effect then. Shape: {"hr": {"Z1": secs, ...},
+    # "power": {...}}. Frozen once set — editing zones later never rewrites it,
+    # so historical weekly zone distributions stay stable (issue #27).
+    zone_times: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     labels: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String, default="pending")

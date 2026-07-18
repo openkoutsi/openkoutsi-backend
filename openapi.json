@@ -2627,6 +2627,101 @@
         ]
       }
     },
+    "/api/metrics/zones/weekly": {
+      "get": {
+        "tags": [
+          "metrics"
+        ],
+        "summary": "Get Zones Weekly",
+        "description": "Accumulated time-in-zone (power + HR) per ISO week over a period.\n\nSums each cycling activity's frozen ``zone_times`` snapshot into Monday-based\nweekly buckets. Legacy activities without a snapshot are backfilled on the\nfly (using current zones) and frozen, mirroring the fitness catch-up flow.\n\nDeclared before ``/zones/{activity_id}`` so \"weekly\" isn't matched as an id.",
+        "operationId": "get_zones_weekly_api_metrics_zones_weekly_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "start",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start"
+            }
+          },
+          {
+            "name": "end",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End"
+            }
+          },
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "maximum": 3650,
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Days"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/WeeklyZoneBucket"
+                  },
+                  "title": "Response Get Zones Weekly Api Metrics Zones Weekly Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/metrics/zones/{activity_id}": {
       "get": {
         "tags": [
@@ -9702,6 +9797,37 @@
           "starts"
         ],
         "title": "WahooPushResponse"
+      },
+      "WeeklyZoneBucket": {
+        "properties": {
+          "week_start": {
+            "type": "string",
+            "format": "date",
+            "title": "Week Start"
+          },
+          "hr": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Hr",
+            "default": {}
+          },
+          "power": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Power",
+            "default": {}
+          }
+        },
+        "type": "object",
+        "required": [
+          "week_start"
+        ],
+        "title": "WeeklyZoneBucket",
+        "description": "Accumulated time-in-zone for one ISO week (Monday-based).\n\n``hr`` and ``power`` map zone name \u2192 seconds, summed across all of that\nweek's activities. Either may be empty when no matching data exists."
       },
       "WorkoutCreate": {
         "properties": {
