@@ -131,6 +131,8 @@ class TestProcessEventCreate:
             patch("backend.app.services.metrics_engine.recalculate_from", new_callable=AsyncMock),
             patch("backend.app.services.strava_sync._populate_activity", new_callable=AsyncMock),
             patch("backend.app.services.strava_sync._repopulate_activity", new_callable=AsyncMock),
+            patch("backend.app.services.activity_workout_matcher.find_and_link_workout", new_callable=AsyncMock),
+            patch("backend.app.services.plan_adherence.catch_up_adherence", new_callable=AsyncMock),
             patch("httpx.AsyncClient", return_value=mock_http),
         ):
             await _process_event_for_user(
@@ -143,6 +145,45 @@ class TestProcessEventCreate:
     async def test_create_adds_activity_and_source(self):
         session = await self._run_create()
         assert session.add.called
+
+    async def test_create_auto_links_workout_and_recomputes_adherence(self):
+        """Regression (issue #26): webhook-ingested activities must be auto-linked
+        to planned workouts and trigger the deterministic adherence recompute."""
+        athlete = _make_athlete()
+        conn = _make_conn()
+        session = AsyncMock()
+        session.add = MagicMock()
+        session.flush = AsyncMock()
+        session.commit = AsyncMock()
+
+        dupe_check = MagicMock()
+        dupe_check.scalar_one_or_none.return_value = None
+        existing_check = MagicMock()
+        existing_check.scalar_one_or_none.return_value = None
+        session.execute = AsyncMock(side_effect=[dupe_check, existing_check])
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = _make_strava_raw()
+        mock_resp.raise_for_status = MagicMock()
+        mock_http = AsyncMock()
+        mock_http.get = AsyncMock(return_value=mock_resp)
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("backend.app.services.metrics_engine.recalculate_from", new_callable=AsyncMock),
+            patch("backend.app.services.strava_sync._populate_activity", new_callable=AsyncMock),
+            patch("backend.app.services.strava_sync._repopulate_activity", new_callable=AsyncMock),
+            patch("backend.app.services.activity_workout_matcher.find_and_link_workout", new_callable=AsyncMock) as link,
+            patch("backend.app.services.plan_adherence.catch_up_adherence", new_callable=AsyncMock) as recompute,
+            patch("httpx.AsyncClient", return_value=mock_http),
+        ):
+            await _process_event_for_user(
+                "create", "99", {"object_id": 99, "object_type": "activity"},
+                athlete, conn, "access-token-xxx", "team-1", session,
+            )
+            link.assert_awaited_once()
+            recompute.assert_awaited_once()
 
     async def test_create_idempotent_when_already_imported(self):
         session = await self._run_create(already_imported=True)

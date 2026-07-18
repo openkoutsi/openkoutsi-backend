@@ -248,6 +248,14 @@ async def _process_event_for_user(
             )
             await recalculate_from(athlete.id, start_date, session)
 
+        # Webhook-ingested activities must be auto-linked to planned workouts too
+        # (issue #26) — otherwise adherence silently under-counts. Then refresh
+        # the deterministic adherence snapshot so the score moves on ingest.
+        from backend.app.services.activity_workout_matcher import find_and_link_workout
+        from backend.app.services.plan_adherence import catch_up_adherence
+        await find_and_link_workout(session, athlete.id, activity)
+        await catch_up_adherence(athlete.id, session)
+
         app_cfg = athlete.app_settings or {}
         # Issue #9: skip instance-paid auto hooks for denied users on a gated
         # instance (only pay the registry lookup when a hook is actually enabled).

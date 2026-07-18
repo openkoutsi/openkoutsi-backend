@@ -13,10 +13,8 @@ from backend.app.models.user_orm import (
     PlannedWorkoutActivity,
     TrainingPlan,
 )
+from openkoutsi.plan_adherence import MATCH_THRESHOLD, meets_threshold
 from openkoutsi.sport_matching import sports_match
-
-_TSS_THRESHOLD = 0.60
-_DURATION_THRESHOLD = 0.60
 
 
 async def find_and_link_workout(
@@ -109,15 +107,14 @@ def _matches(activity: Activity, workout: PlannedWorkout) -> bool:
     if not sports_match(activity.sport_type, workout.workout_type):
         return False
 
-    if workout.target_load is not None and workout.target_load > 0:
-        act_tss = activity.load or 0.0
-        if act_tss < workout.target_load * _TSS_THRESHOLD:
-            return False
+    # Shared with the adherence scoring (openkoutsi.plan_adherence) so the
+    # auto-match gate and the per-workout score are defined against the same
+    # target-relative comparison and cannot drift apart.
+    if not meets_threshold(activity.load, workout.target_load, MATCH_THRESHOLD):
+        return False
 
-    if workout.duration_min is not None and workout.duration_min > 0:
-        planned_duration_s = workout.duration_min * 60
-        act_duration_s = activity.duration_s or 0
-        if act_duration_s < planned_duration_s * _DURATION_THRESHOLD:
-            return False
+    planned_duration_s = (workout.duration_min or 0) * 60
+    if not meets_threshold(activity.duration_s, planned_duration_s, MATCH_THRESHOLD):
+        return False
 
     return True

@@ -378,6 +378,13 @@ async def get_training_status(
         or athlete.training_status_date < today
     )
 
+    # Deterministic plan-adherence snapshots piggyback the daily first-read
+    # cadence (issue #26). Always-on and not gated behind the LLM subscription,
+    # so this runs regardless of auto_training_status or entitlement.
+    if stale:
+        from backend.app.services.plan_adherence import catch_up_adherence
+        await catch_up_adherence(athlete.id, session)
+
     # Recover from a stuck "pending" state: if the task hasn't completed within
     # the timeout window, reset to "error" so the user can retry.
     # A NULL updated_at with status "pending" (e.g. pre-migration row) is treated

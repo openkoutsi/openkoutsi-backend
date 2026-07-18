@@ -46,6 +46,7 @@ from backend.app.services.provider_sync import _source_priority
 from openkoutsi.training_math import calculate_load
 from openkoutsi.categorization import WorkoutCategory, classify_workout
 from backend.app.services.activity_workout_matcher import find_and_link_workout
+from backend.app.services.plan_adherence import catch_up_adherence
 
 _MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
 _FIT_MAGIC = b".FIT"
@@ -234,6 +235,7 @@ async def _bg_process_and_recalculate(
                 asyncio.create_task(analyze_training_status_bg(athlete.id, user_id))
             await find_and_link_workout(session, athlete_id, target_act)
             await recalculate_from(athlete_id, start_date, session)
+            await catch_up_adherence(athlete_id, session)
 
         except Exception:
             try:
@@ -464,6 +466,7 @@ async def create_manual_activity(
     # Workout matching and the fitness recalc are both keyed on the date.
     if payload.start_time is not None:
         await find_and_link_workout(session, athlete.id, activity)
+        await catch_up_adherence(athlete.id, session)
 
     if load is not None and payload.start_time is not None:
         start_date = (
@@ -833,6 +836,7 @@ async def reprocess_activity(
     await session.commit()
 
     await find_and_link_workout(session, athlete.id, activity)
+    await catch_up_adherence(athlete.id, session)
 
     # Update fitness metrics from this activity's date forward
     if activity.start_time is not None:

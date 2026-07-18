@@ -84,6 +84,21 @@ def _workout_category(workout_type: Optional[str]) -> Optional[str]:
     return _WORKOUT_TYPE_TO_CATEGORY.get(lower, "unknown")
 
 
+def workout_is_cycling(workout_type: Optional[str]) -> bool:
+    """Whether a planned workout should be graded as a cycling session.
+
+    Cycling-first: explicit cycling workout types and generic endurance types
+    (easy, threshold, vo2max, …) are graded on Load + duration; everything else
+    (strength, yoga, run, swim, …) is treated as supplemental (done/missed).
+    Rest days are handled by the caller and are not meaningful here.
+    """
+    category = _workout_category(workout_type)
+    if category is None:
+        # Generic endurance type — the platform is cycling-first, so grade on Load.
+        return True
+    return category == "cycling"
+
+
 def sports_match(activity_sport: Optional[str], workout_type: Optional[str]) -> bool:
     """Return True if the activity sport loosely matches the planned workout type.
 

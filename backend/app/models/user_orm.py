@@ -260,6 +260,31 @@ class DailyMetric(UserBase):
     athlete: Mapped["Athlete"] = relationship("Athlete", back_populates="daily_metrics")
 
 
+class PlanAdherenceDaily(UserBase):
+    """Daily snapshot of a training plan's adherence score (issue #26).
+
+    One row per active plan per day, mirroring the shape/pattern of
+    ``DailyMetric`` (Fitness/Fatigue/Form). ``score`` is the "so far" Load-
+    weighted adherence percentage as of ``date``; the counts are denormalised
+    for cheap charting/summaries.
+    """
+
+    __tablename__ = "plan_adherence_daily"
+
+    athlete_id: Mapped[str] = mapped_column(
+        String, ForeignKey("athletes.id", ondelete="CASCADE"), primary_key=True
+    )
+    plan_id: Mapped[str] = mapped_column(
+        String, ForeignKey("training_plans.id", ondelete="CASCADE"), primary_key=True
+    )
+    date: Mapped[date] = mapped_column(Date, primary_key=True)
+    score: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    completed: Mapped[int] = mapped_column(Integer, default=0)
+    missed: Mapped[int] = mapped_column(Integer, default=0)
+    skipped: Mapped[int] = mapped_column(Integer, default=0)
+    pending: Mapped[int] = mapped_column(Integer, default=0)
+
+
 class Goal(UserBase):
     __tablename__ = "goals"
 

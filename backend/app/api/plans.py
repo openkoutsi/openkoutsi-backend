@@ -19,7 +19,11 @@ from backend.app.schemas.plans import (
     LinkActivityRequest, PlannedWorkoutResponse, SkipWorkoutRequest,
     PlannedWorkoutCreate, PlannedWorkoutUpdate, RegeneratePlanRequest,
     GenerateUpcomingWorkoutsRequest, GenerateUpcomingWorkoutsResponse,
-    GenerateUpcomingResultItem,
+    GenerateUpcomingResultItem, PlanAdherenceSummary, PlanAdherencePoint,
+)
+from backend.app.models.user_orm import PlanAdherenceDaily
+from backend.app.services.plan_adherence import (
+    score_plan, catch_up_adherence, workout_match_score,
 )
 from backend.app.services.plan_generator import generate_plan, build_workout_rows
 from backend.app.services.llm_plan_generator import generate_plan_llm, generate_plan_weeks_llm
@@ -39,6 +43,25 @@ _GENERATE_WINDOW_DAYS = 6
 def _planned_date(start_date, week_number: int, day_of_week: int):
     """Map a planned workout's (week, day) to an absolute calendar date."""
     return start_date + timedelta(days=(week_number - 1) * 7 + (day_of_week - 1))
+
+
+def _plan_response_with_adherence(plan: TrainingPlan) -> TrainingPlanResponse:
+    """Build a TrainingPlanResponse decorated with the derived adherence scores.
+
+    Requires ``plan.workouts`` (with their linked activities) to be loaded, which
+    the plan endpoints already do. Deterministic and cheap — computed live for
+    the response; the persisted daily snapshot is written separately.
+    """
+    response = TrainingPlanResponse.model_validate(plan)
+    ps = score_plan(plan, date.today())
+    response.adherence_score = ps.score
+    response.adherence_summary = PlanAdherenceSummary(
+        completed=ps.completed, missed=ps.missed,
+        skipped=ps.skipped, pending=ps.pending,
+    )
+    for workout in response.workouts:
+        workout.match_score = ps.match_scores.get(workout.id)
+    return response
 
 
 def _plans_overlap(a_start, a_end, b_start, b_end) -> bool:
@@ -104,7 +127,7 @@ async def list_plans(
         .offset(params.offset)
         .limit(params.page_size)
     )
-    items = [TrainingPlanResponse.model_validate(p) for p in result.scalars().all()]
+    items = [_plan_response_with_adherence(p) for p in result.scalars().all()]
     return Page.build(items, total, params.page, params.page_size)
 
 
@@ -200,7 +223,7 @@ async def create_plan(
         .options(selectinload(TrainingPlan.workouts))
     )
     plan = result.scalar_one()
-    return TrainingPlanResponse.model_validate(plan)
+    return _plan_response_with_adherence(plan)
 
 
 @router.get("/{plan_id}", response_model=TrainingPlanResponse)
@@ -218,7 +241,44 @@ async def get_plan(
     plan = result.scalar_one_or_none()
     if not plan:
         raise HTTPException(404, "Plan not found")
-    return TrainingPlanResponse.model_validate(plan)
+    return _plan_response_with_adherence(plan)
+
+
+@router.get("/{plan_id}/adherence", response_model=list[PlanAdherencePoint],
+            operation_id="getPlanAdherence", summary="Plan adherence snapshot series")
+async def get_plan_adherence(
+    plan_id: str,
+    start: Optional[date] = None,
+    end: Optional[date] = None,
+    ctx_session=Depends(get_ctx_and_session),
+):
+    """Persisted daily adherence snapshots for a plan (mirrors /metrics/fitness).
+
+    Runs a cheap, deterministic catch-up first so the series is fresh even for a
+    user who hasn't loaded the dashboard yet, then returns the stored trend.
+    """
+    ctx, session = ctx_session
+    athlete = await _get_athlete(ctx.user_id, session)
+    plan_result = await session.execute(
+        select(TrainingPlan).where(
+            TrainingPlan.id == plan_id, TrainingPlan.athlete_id == athlete.id
+        )
+    )
+    if not plan_result.scalar_one_or_none():
+        raise HTTPException(404, "Plan not found")
+
+    await catch_up_adherence(athlete.id, session)
+
+    query = select(PlanAdherenceDaily).where(
+        PlanAdherenceDaily.athlete_id == athlete.id,
+        PlanAdherenceDaily.plan_id == plan_id,
+    )
+    if start:
+        query = query.where(PlanAdherenceDaily.date >= start)
+    if end:
+        query = query.where(PlanAdherenceDaily.date <= end)
+    result = await session.execute(query.order_by(PlanAdherenceDaily.date))
+    return [PlanAdherencePoint.model_validate(r) for r in result.scalars().all()]
 
 
 @router.put("/{plan_id}", response_model=TrainingPlanResponse)
@@ -255,7 +315,7 @@ async def update_plan(
 
     await session.commit()
     await session.refresh(plan)
-    return TrainingPlanResponse.model_validate(plan)
+    return _plan_response_with_adherence(plan)
 
 
 @router.post("/{plan_id}/unarchive", response_model=TrainingPlanResponse,
@@ -295,7 +355,7 @@ async def unarchive_plan(
         .options(selectinload(TrainingPlan.workouts))
     )
     plan = result.scalar_one()
-    return TrainingPlanResponse.model_validate(plan)
+    return _plan_response_with_adherence(plan)
 
 
 @router.put("/{plan_id}/workouts/{workout_id}/link", response_model=PlannedWorkoutResponse)
@@ -353,7 +413,13 @@ async def link_workout_to_activity(
         )
         await session.commit()
     await session.refresh(workout)
-    return PlannedWorkoutResponse.model_validate(workout)
+    # Linking is an ingest point — refresh the adherence snapshot so the score
+    # moves the moment the activity lands (deterministic, not LLM-gated).
+    await catch_up_adherence(athlete.id, session)
+    response = PlannedWorkoutResponse.model_validate(workout)
+    if workout.linked_activities:
+        response.match_score = workout_match_score(workout)
+    return response
 
 
 @router.delete("/{plan_id}/workouts/{workout_id}/link", status_code=204)
@@ -648,7 +714,7 @@ async def regenerate_plan(
         .options(selectinload(TrainingPlan.workouts))
     )
     plan = result.scalar_one()
-    return TrainingPlanResponse.model_validate(plan)
+    return _plan_response_with_adherence(plan)
 
 
 @router.post("/{plan_id}/generate-upcoming/workouts", response_model=GenerateUpcomingWorkoutsResponse)
