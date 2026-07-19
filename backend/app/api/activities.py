@@ -703,7 +703,12 @@ async def reprocess_activity(
     """Recompute Weighted Power/Load/Intensity/bests/intervals from stored streams using current athlete settings."""
     import io
     from sqlalchemy import delete as sa_delete
-    from openkoutsi.training_math import weighted_power, compute_power_bests, compute_distance_bests
+    from openkoutsi.training_math import (
+        weighted_power,
+        compute_power_bests,
+        compute_distance_bests,
+        compute_torque_stream,
+    )
     from openkoutsi.fit_processing import (
         auto_interval_s,
         build_auto_intervals,
@@ -728,6 +733,29 @@ async def reprocess_activity(
     stream_map = {s.stream_type: s.data for s in streams_result.scalars()}
     power_data: list[float] = stream_map.get("power") or []
     speed_data: list[float] = stream_map.get("speed") or []
+    cadence_data: list[float] = stream_map.get("cadence") or []
+
+    # Derive and persist torque from stored power + cadence so activities
+    # uploaded before torque existed pick it up on reprocess.
+    torque_data = compute_torque_stream(power_data, cadence_data)
+    await session.execute(
+        sa_delete(ActivityStream).where(
+            ActivityStream.activity_id == activity_id,
+            ActivityStream.stream_type == "torque",
+        )
+    )
+    if torque_data:
+        session.add(
+            ActivityStream(
+                id=str(uuid.uuid4()),
+                activity_id=activity_id,
+                stream_type="torque",
+                data=torque_data,
+            )
+        )
+        stream_map["torque"] = torque_data
+    else:
+        stream_map.pop("torque", None)
 
     # Recompute Weighted Power, Load, Intensity from stored streams using current athlete FTP/max_HR
     wp = (

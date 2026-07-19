@@ -57,6 +57,7 @@ class FitCapabilities:
     has_power: bool
     has_speed: bool
     has_hr: bool
+    has_cadence: bool
     covers_min_distance: bool  # long enough for at least one distance best
     duration_s: int
 
@@ -73,6 +74,7 @@ def capabilities(path: Path) -> FitCapabilities:
         has_power=bool(prof.power),
         has_speed=bool(prof.speed),
         has_hr=bool(prof.heartRate),
+        has_cadence=bool(prof.cadence),
         covers_min_distance=integrated_distance_m >= _MIN_DISTANCE_BEST_M,
         duration_s=prof.duration,
     )

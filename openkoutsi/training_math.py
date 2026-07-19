@@ -406,6 +406,25 @@ def weighted_power(power_series: list[float]) -> float | None:
     return (sum(v**4 for v in rolling) / len(rolling)) ** 0.25
 
 
+def compute_torque_stream(power: list[float], cadence: list[float]) -> list[float]:
+    """Per-second crank torque (Nm) derived from power (W) and cadence (rpm).
+
+    torque = power · 60 / (2π · cadence).  Returns 0.0 where cadence is 0 or
+    negative (coasting / no pedalling).  Returns an empty list if either input
+    is empty; the result length is the shorter of the two inputs (FIT streams
+    can differ in length).
+    """
+    if not power or not cadence:
+        return []
+    n = min(len(power), len(cadence))
+    k = 60.0 / (2.0 * math.pi)
+    out = [0.0] * n
+    for i in range(n):
+        c = cadence[i]
+        out[i] = (power[i] * k / c) if c and c > 0 else 0.0
+    return out
+
+
 def calculate_load(
     duration_s: int,
     wp: float | None,

@@ -17,6 +17,7 @@ from openkoutsi.training_math import (
     calculate_load,
     compute_power_bests,
     compute_distance_bests,
+    compute_torque_stream,
 )
 from backend.app.models.user_orm import (
     Activity,
@@ -73,12 +74,14 @@ async def process_fit_file(
     activity.status = "processed"
 
     power_data = [float(v) for v in profile.power]
+    cadence_data = [float(v) for v in profile.cadence]
     stream_map = {
         "power": power_data,
         "heartrate": [float(v) for v in profile.heartRate],
-        "cadence": [float(v) for v in profile.cadence],
+        "cadence": cadence_data,
         "speed": [v / 3.6 for v in profile.speed],  # km/h -> m/s
         "altitude": [float(v) for v in profile.altitude],
+        "torque": compute_torque_stream(power_data, cadence_data),
     }
     for stream_type, data in stream_map.items():
         if data:
