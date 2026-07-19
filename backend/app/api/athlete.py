@@ -527,6 +527,7 @@ def _export_activity(a: Activity) -> dict:
         "workout_category": a.workout_category,
         "labels": a.labels or [],
         "notes": a.notes,
+        "rpe": a.rpe,
         "status": a.status,
         "analysis_status": a.analysis_status,
         "analysis": a.analysis,

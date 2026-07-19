@@ -9,6 +9,7 @@ class ActivityUpdate(BaseModel):
     workout_category: Optional[str] = None
     labels: Optional[list[str]] = None
     notes: Optional[str] = Field(None, max_length=5000)
+    rpe: Optional[int] = Field(None, ge=1, le=10)
 
 
 class FrontendAnalysisBody(BaseModel):
@@ -86,6 +87,7 @@ class ActivityResponse(BaseModel):
     workout_category: Optional[str] = None
     labels: list[str] = []
     notes: Optional[str] = None
+    rpe: Optional[int] = None
     has_fit_file: bool = False
     status: str
     created_at: datetime
@@ -117,6 +119,7 @@ class ActivityResponse(BaseModel):
                 "workout_category": data.workout_category,
                 "labels": data.labels or [],
                 "notes": data.notes,
+                "rpe": data.rpe,
                 "has_fit_file": data.has_fit_file,
                 "status": data.status,
                 "created_at": data.created_at,
@@ -129,6 +132,19 @@ class ActivityListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class RpeQueueResponse(BaseModel):
+    """Pending RPE-rating queue for the dashboard/post-upload prompt (issue #28).
+
+    ``items`` are qualifying cycling activities ingested after the athlete's
+    ``rpe_head`` cursor that still lack an RPE, oldest-first. ``rpe_head`` is the
+    server-side cursor (an activity ``created_at`` ISO timestamp) marking the
+    boundary between already-handled and new activities.
+    """
+
+    items: list[ActivityResponse] = []
+    rpe_head: Optional[str] = None
 
 
 class ActivityStreamsResponse(BaseModel):
@@ -176,6 +192,7 @@ class ActivityDetailResponse(ActivityResponse):
             workout_category=activity.workout_category,
             labels=activity.labels or [],
             notes=activity.notes,
+            rpe=activity.rpe,
             has_fit_file=activity.has_fit_file,
             status=activity.status,
             created_at=activity.created_at,

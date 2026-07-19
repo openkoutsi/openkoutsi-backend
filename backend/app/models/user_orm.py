@@ -121,6 +121,9 @@ class Activity(UserBase):
     zone_times: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     labels: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Rate of Perceived Exertion (RPE): athlete's subjective 1–10 effort score
+    # for the ride. Nullable until the athlete rates it (issue #28).
+    rpe: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     status: Mapped[str] = mapped_column(String, default="pending")
     analysis_status: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     analysis: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

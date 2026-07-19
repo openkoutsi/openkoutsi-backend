@@ -202,6 +202,11 @@ def _build_prompt(
         lines.append(f"\nActivity labels: {', '.join(activity.labels)}")
     if getattr(activity, "notes", None) and activity.notes.strip():
         lines.append(f"\nAthlete notes: {activity.notes.strip()}")
+    if getattr(activity, "rpe", None) is not None:
+        lines.append(
+            f"\nAthlete-rated perceived effort (RPE): {activity.rpe}/10 "
+            "(subjective 1–10 scale; compare against measured intensity)"
+        )
 
     pr_lines: list[str] = []
     for duration_s, badges in (power_pr_badges or {}).items():
