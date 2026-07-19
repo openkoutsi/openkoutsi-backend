@@ -708,6 +708,154 @@ class TestActivityLabelsAndNotes:
         assert resp.json()["notes"] == "Great race, new PB!"
 
 
+# ── Activity RPE (perceived effort) ────────────────────────────────────────────
+
+class TestActivityRpe:
+    async def _create(self, client, auth_headers) -> str:
+        resp = await client.post(
+            "/api/activities",
+            json={"sport_type": "Ride", "start_time": "2025-03-01T10:00:00Z", "duration_s": 3600},
+            headers=auth_headers,
+        )
+        return resp.json()["id"]
+
+    async def test_default_rpe_null(self, client, auth_headers):
+        activity_id = await self._create(client, auth_headers)
+        resp = await client.get(f"/api/activities/{activity_id}", headers=auth_headers)
+        assert resp.json()["rpe"] is None
+
+    async def test_set_rpe(self, client, auth_headers):
+        activity_id = await self._create(client, auth_headers)
+        resp = await client.patch(
+            f"/api/activities/{activity_id}",
+            json={"rpe": 8},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["rpe"] == 8
+
+    async def test_rpe_persists_on_get(self, client, auth_headers):
+        activity_id = await self._create(client, auth_headers)
+        await client.patch(
+            f"/api/activities/{activity_id}",
+            json={"rpe": 6},
+            headers=auth_headers,
+        )
+        resp = await client.get(f"/api/activities/{activity_id}", headers=auth_headers)
+        assert resp.json()["rpe"] == 6
+
+    async def test_clear_rpe(self, client, auth_headers):
+        activity_id = await self._create(client, auth_headers)
+        await client.patch(
+            f"/api/activities/{activity_id}",
+            json={"rpe": 5},
+            headers=auth_headers,
+        )
+        resp = await client.patch(
+            f"/api/activities/{activity_id}",
+            json={"rpe": None},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["rpe"] is None
+
+    async def test_rpe_out_of_range_returns_422(self, client, auth_headers):
+        activity_id = await self._create(client, auth_headers)
+        for bad in (0, 11, -3):
+            resp = await client.patch(
+                f"/api/activities/{activity_id}",
+                json={"rpe": bad},
+                headers=auth_headers,
+            )
+            assert resp.status_code == 422
+
+    async def test_manual_entry_rpe_persisted(self, client, auth_headers):
+        # RPE supplied on manual entry is persisted, not just used to derive load.
+        resp = await client.post(
+            "/api/activities",
+            json={"sport_type": "Ride", "duration_s": 3600, "rpe": 7},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 201
+        assert resp.json()["rpe"] == 7
+
+
+# ── RPE prompt queue ───────────────────────────────────────────────────────────
+
+class TestRpeQueue:
+    async def _create(self, client, auth_headers, sport_type="Ride", rpe=None) -> dict:
+        body = {"sport_type": sport_type, "duration_s": 3600}
+        if rpe is not None:
+            body["rpe"] = rpe
+        resp = await client.post("/api/activities", json=body, headers=auth_headers)
+        assert resp.status_code == 201
+        return resp.json()
+
+    async def test_first_call_pins_head_and_returns_empty(self, client, auth_headers):
+        # Pre-existing rides should NOT be surfaced on the first ever queue load.
+        await self._create(client, auth_headers)
+        await self._create(client, auth_headers)
+        resp = await client.get("/api/activities/rpe-queue", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["items"] == []
+        assert data["rpe_head"] is not None
+
+    async def test_new_cycling_ride_after_head_is_queued(self, client, auth_headers):
+        # First call pins the cursor…
+        await client.get("/api/activities/rpe-queue", headers=auth_headers)
+        # …then a fresh ride lands and should appear in the queue.
+        created = await self._create(client, auth_headers)
+        resp = await client.get("/api/activities/rpe-queue", headers=auth_headers)
+        data = resp.json()
+        ids = [item["id"] for item in data["items"]]
+        assert created["id"] in ids
+
+    async def test_non_cycling_ride_not_queued(self, client, auth_headers):
+        await client.get("/api/activities/rpe-queue", headers=auth_headers)
+        run = await self._create(client, auth_headers, sport_type="Run")
+        resp = await client.get("/api/activities/rpe-queue", headers=auth_headers)
+        ids = [item["id"] for item in resp.json()["items"]]
+        assert run["id"] not in ids
+
+    async def test_rated_ride_not_queued(self, client, auth_headers):
+        await client.get("/api/activities/rpe-queue", headers=auth_headers)
+        rated = await self._create(client, auth_headers, rpe=7)
+        resp = await client.get("/api/activities/rpe-queue", headers=auth_headers)
+        ids = [item["id"] for item in resp.json()["items"]]
+        assert rated["id"] not in ids
+
+    async def test_commute_labelled_ride_not_queued(self, client, auth_headers):
+        await client.get("/api/activities/rpe-queue", headers=auth_headers)
+        ride = await self._create(client, auth_headers)
+        await client.patch(
+            f"/api/activities/{ride['id']}",
+            json={"labels": ["commute"]},
+            headers=auth_headers,
+        )
+        resp = await client.get("/api/activities/rpe-queue", headers=auth_headers)
+        ids = [item["id"] for item in resp.json()["items"]]
+        assert ride["id"] not in ids
+
+    async def test_advancing_head_removes_ride_from_queue(self, client, auth_headers):
+        await client.get("/api/activities/rpe-queue", headers=auth_headers)
+        ride = await self._create(client, auth_headers)
+        # Advance the cursor past this ride via PATCH /api/athlete, mirroring
+        # what the dashboard prompt does after Rate/Skip.
+        await client.patch(
+            "/api/athlete",
+            json={"app_settings": {"rpe_head": ride["created_at"]}},
+            headers=auth_headers,
+        )
+        resp = await client.get("/api/activities/rpe-queue", headers=auth_headers)
+        ids = [item["id"] for item in resp.json()["items"]]
+        assert ride["id"] not in ids
+
+    async def test_queue_requires_auth(self, client):
+        resp = await client.get("/api/activities/rpe-queue")
+        assert resp.status_code == 401
+
+
 # ── Activity raw streams ───────────────────────────────────────────────────────
 
 class TestGetActivityStreams:

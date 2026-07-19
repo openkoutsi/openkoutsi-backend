@@ -1707,6 +1707,33 @@
         }
       }
     },
+    "/api/activities/rpe-queue": {
+      "get": {
+        "tags": [
+          "activities"
+        ],
+        "summary": "Pending RPE-rating queue",
+        "description": "Qualifying cycling activities still awaiting an RPE rating (issue #28).\n\nReturns activities that are cycling sports, ingested after the athlete's\n``rpe_head`` cursor, and still lack an ``rpe`` \u2014 oldest-first (by ingestion\n``created_at``). ``commute``-labelled rides are excluded so easy spins don't\nnag.\n\nThe cursor is stored in ``app_settings.rpe_head``. On the very first call\n(cursor unset) it is pinned to the athlete's most recent activity so the\nbacklog of their entire history is *not* surfaced; only rides ingested from\nthen on are prompted. Advancing the cursor is done by the caller via\n``PATCH /api/athlete`` (set ``app_settings.rpe_head`` to the handled\nactivity's ``created_at``).",
+        "operationId": "getRpeQueue",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RpeQueueResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
     "/api/activities/{activity_id}": {
       "get": {
         "tags": [
@@ -5445,6 +5472,17 @@
             ],
             "title": "Notes"
           },
+          "rpe": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rpe"
+          },
           "has_fit_file": {
             "type": "boolean",
             "title": "Has Fit File",
@@ -5769,6 +5807,17 @@
             ],
             "title": "Notes"
           },
+          "rpe": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rpe"
+          },
           "has_fit_file": {
             "type": "boolean",
             "title": "Has Fit File",
@@ -5881,6 +5930,19 @@
               }
             ],
             "title": "Notes"
+          },
+          "rpe": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "maximum": 10.0,
+                "minimum": 1.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rpe"
           }
         },
         "type": "object",
@@ -9164,6 +9226,32 @@
           "new_password"
         ],
         "title": "ResetPasswordRequest"
+      },
+      "RpeQueueResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ActivityResponse"
+            },
+            "type": "array",
+            "title": "Items",
+            "default": []
+          },
+          "rpe_head": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rpe Head"
+          }
+        },
+        "type": "object",
+        "title": "RpeQueueResponse",
+        "description": "Pending RPE-rating queue for the dashboard/post-upload prompt (issue #28).\n\n``items`` are qualifying cycling activities ingested after the athlete's\n``rpe_head`` cursor that still lack an RPE, oldest-first. ``rpe_head`` is the\nserver-side cursor (an activity ``created_at`` ISO timestamp) marking the\nboundary between already-handled and new activities."
       },
       "SetupRequest": {
         "properties": {

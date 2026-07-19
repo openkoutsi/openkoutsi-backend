@@ -37,6 +37,7 @@ from backend.app.schemas.activities import (
     FrontendAnalysisBody,
     IntervalResponse,
     ManualActivityCreate,
+    RpeQueueResponse,
 )
 from backend.app.core.limiter import limiter
 from backend.app.services.fit_processor import process_fit_file, read_fit_start_time
@@ -45,6 +46,7 @@ from backend.app.services.pr_detection import detect_pr_badges
 from backend.app.services.provider_sync import _source_priority
 from openkoutsi.training_math import calculate_load
 from openkoutsi.categorization import WorkoutCategory, classify_workout
+from openkoutsi.sport_matching import CYCLING_SPORT_TYPES
 from backend.app.services.activity_workout_matcher import find_and_link_workout
 from backend.app.services.plan_adherence import catch_up_adherence
 
@@ -453,6 +455,7 @@ async def create_manual_activity(
         distance_m=payload.distance_m,
         elevation_m=payload.elevation_m,
         load=load,
+        rpe=payload.rpe,
         status="processed",
     )
     session.add(activity)
@@ -574,6 +577,67 @@ async def list_activities(
     )
     items = [ActivityResponse.model_validate(a) for a in items_result.scalars().all()]
     return ActivityListResponse(items=items, total=total, page=page, page_size=page_size)
+
+
+@router.get("/rpe-queue", response_model=RpeQueueResponse,
+            operation_id="getRpeQueue", summary="Pending RPE-rating queue")
+async def get_rpe_queue(ctx_session=Depends(get_ctx_and_session)):
+    """Qualifying cycling activities still awaiting an RPE rating (issue #28).
+
+    Returns activities that are cycling sports, ingested after the athlete's
+    ``rpe_head`` cursor, and still lack an ``rpe`` — oldest-first (by ingestion
+    ``created_at``). ``commute``-labelled rides are excluded so easy spins don't
+    nag.
+
+    The cursor is stored in ``app_settings.rpe_head``. On the very first call
+    (cursor unset) it is pinned to the athlete's most recent activity so the
+    backlog of their entire history is *not* surfaced; only rides ingested from
+    then on are prompted. Advancing the cursor is done by the caller via
+    ``PATCH /api/athlete`` (set ``app_settings.rpe_head`` to the handled
+    activity's ``created_at``).
+    """
+    ctx, session = ctx_session
+    athlete = await _get_athlete(ctx.user_id, session)
+
+    app_settings = dict(athlete.app_settings or {})
+    rpe_head_raw = app_settings.get("rpe_head")
+
+    if rpe_head_raw is None:
+        # First load after the feature ships: pin the cursor to the most recent
+        # activity so we don't ask the athlete to backfill their whole career.
+        latest_result = await session.execute(
+            select(func.max(Activity.created_at)).where(
+                Activity.athlete_id == athlete.id
+            )
+        )
+        latest_created_at = latest_result.scalar_one_or_none()
+        rpe_head = (
+            latest_created_at.isoformat()
+            if latest_created_at is not None
+            else datetime.now(timezone.utc).isoformat()
+        )
+        athlete.app_settings = {**app_settings, "rpe_head": rpe_head}
+        await session.commit()
+        return RpeQueueResponse(items=[], rpe_head=rpe_head)
+
+    try:
+        cursor = datetime.fromisoformat(rpe_head_raw)
+    except (TypeError, ValueError):
+        cursor = None
+
+    query = select(Activity).where(
+        Activity.athlete_id == athlete.id,
+        Activity.sport_type.in_(CYCLING_SPORT_TYPES),
+        Activity.rpe.is_(None),
+        ~_has_label_clause("commute"),
+    )
+    if cursor is not None:
+        query = query.where(Activity.created_at > cursor)
+    query = query.order_by(Activity.created_at.asc())
+
+    result = await session.execute(query)
+    items = [ActivityResponse.model_validate(a) for a in result.scalars().all()]
+    return RpeQueueResponse(items=items, rpe_head=rpe_head_raw)
 
 
 @router.get("/{activity_id}", response_model=ActivityDetailResponse)
@@ -939,6 +1003,8 @@ async def update_activity(
         activity.labels = labels
     if "notes" in payload.model_fields_set:
         activity.notes = payload.notes
+    if "rpe" in payload.model_fields_set:
+        activity.rpe = payload.rpe
 
     await session.commit()
     await session.refresh(activity)
