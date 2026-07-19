@@ -13,7 +13,7 @@ from cryptography.fernet import Fernet
 from sqlalchemy import select
 
 from backend.app.core.auth import create_access_token
-from backend.app.models.user_orm import Activity, ActivitySource, Athlete
+from backend.app.models.user_orm import Activity, ActivitySource, ActivityStream, Athlete
 
 from ._fit_fixtures import capabilities, fit_fixture_params
 
@@ -396,6 +396,16 @@ class TestFitUpload:
         else:
             assert activity.weighted_power is None
 
+        # Torque is derived and stored whenever both power and cadence are present.
+        streams_result = await session.execute(
+            select(ActivityStream).where(ActivityStream.activity_id == activity_id)
+        )
+        stored_streams = {s.stream_type for s in streams_result.scalars()}
+        if caps.has_power and caps.has_cadence:
+            assert "torque" in stored_streams
+        else:
+            assert "torque" not in stored_streams
+
     async def test_has_fit_file_false_for_manual_activity(self, client, auth_headers):
         resp = await client.post(
             "/api/activities",
@@ -767,16 +777,23 @@ class TestReprocess:
         await client.patch("/api/athlete", json={"ftp": 250}, headers=auth_headers)
         activity_id = await self._create_processed(client, auth_headers)
 
-        # Add a power stream and clear Load so we can verify reprocess sets it
+        # Add power + cadence streams and clear Load so we can verify reprocess
+        # sets it — and derives a torque stream from power + cadence.
         act_result = await session.execute(sa_select(Activity).where(Activity.id == activity_id))
         activity = act_result.scalar_one()
         activity.avg_power = 200.0
         activity.load = None
         session.add(ActivityStream(activity_id=activity_id, stream_type="power", data=[200] * 20))
+        session.add(ActivityStream(activity_id=activity_id, stream_type="cadence", data=[90] * 20))
         await session.commit()
 
         resp = await client.post(f"/api/activities/{activity_id}/reprocess", headers=auth_headers)
         assert resp.status_code == 200
+
+        # Reprocess derives and returns torque from the stored power + cadence.
+        body = resp.json()
+        assert "torque" in body["streams"]
+        assert len(body["streams"]["torque"]) == 20
 
         await session.refresh(activity)
         assert activity.load is not None

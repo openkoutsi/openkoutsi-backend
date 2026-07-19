@@ -50,6 +50,7 @@ from openkoutsi.training_math import (
     calculate_load,
     compute_distance_bests,
     compute_power_bests,
+    compute_torque_stream,
     weighted_power,
 )
 from openkoutsi.fit import summarizeWorkout, extractIntervals
@@ -666,6 +667,7 @@ def _add_streams(
         ("cadence", cadence_data),
         ("speed", speed_data),
         ("altitude", altitude_data),
+        ("torque", compute_torque_stream(power_data, cadence_data)),
     ]:
         if data:
             session.add(

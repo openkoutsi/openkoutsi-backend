@@ -7,7 +7,11 @@ import math
 
 import pytest
 
-from openkoutsi.training_math import calculate_load, weighted_power
+from openkoutsi.training_math import (
+    calculate_load,
+    compute_torque_stream,
+    weighted_power,
+)
 
 
 # ── weighted_power ──────────────────────────────────────────────────────────
@@ -72,6 +76,32 @@ class TestCalculateTss:
         expected_tss = (3600 / 3600) * math.pow((150 / lthr), 2) * 100
         assert load == pytest.approx(expected_tss, rel=1e-6)
         assert intensity is None
+
+
+# ── compute_torque_stream ───────────────────────────────────────────────────
+
+class TestComputeTorqueStream:
+    def test_known_value(self):
+        # 200 W at 90 rpm → torque = 200 * 60 / (2π * 90) ≈ 21.22 Nm
+        result = compute_torque_stream([200.0], [90.0])
+        assert result == pytest.approx([200.0 * 60.0 / (2 * math.pi * 90.0)])
+        assert result[0] == pytest.approx(21.221, abs=1e-3)
+
+    def test_zero_cadence_yields_zero(self):
+        # Coasting: no pedalling → torque defined as 0.0, not a division error.
+        assert compute_torque_stream([300.0, 0.0], [0.0, 0.0]) == [0.0, 0.0]
+
+    def test_negative_cadence_yields_zero(self):
+        assert compute_torque_stream([250.0], [-5.0]) == [0.0]
+
+    def test_empty_inputs(self):
+        assert compute_torque_stream([], []) == []
+        assert compute_torque_stream([200.0], []) == []
+        assert compute_torque_stream([], [90.0]) == []
+
+    def test_mismatched_lengths_uses_shorter(self):
+        result = compute_torque_stream([200.0, 200.0, 200.0], [90.0, 90.0])
+        assert len(result) == 2
 
     def test_power_takes_priority_over_hr(self):
         # Both Weighted Power and avg_hr provided — power-based Load must win.

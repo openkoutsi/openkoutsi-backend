@@ -19,6 +19,7 @@ Most cycling coaching tools are cloud-only SaaS. openkoutsi is different: you ru
 - **Swappable email module** — a single, provider-agnostic seam (`backend/app/services/email/`) for all email: a generic `EmailProvider` interface (outbound `send`, inbound `verify_inbound_signature`/`parse_inbound`) with `LettermintProvider` and `EuromailProvider` (euromail.dev — EU-based, inbound included on its free tier) implementations, provider selection via `EMAIL_PROVIDER`, and self-rendered inline-styled HTML + plain-text bodies. Optional — with no provider configured, email-dependent features stay unavailable rather than erroring
 - **Admin dashboard** — manage users, invitations, password resets, an admin-contact shown on the password-reset page, and instance-wide LLM settings
 - **FIT file ingestion** — upload activities directly with automatic Load, weighted power, and zone distribution analysis
+- **Derived torque stream** — when an activity has both power and cadence, a per-second crank torque stream (Nm) is computed and stored alongside them, served from the activity streams endpoints; existing activities gain it on reprocess
 - **Manual activity entry** — log workouts by hand (date, duration, distance, avg/max HR, avg power, cadence, RPE/Load) with every field optional, behaving like a `manual` data provider
 - **Workout categorization** — automatic Coggan-style zone classification with manual override
 - **Strava + Wahoo sync** — OAuth integrations with history import and webhook updates through bridge services
