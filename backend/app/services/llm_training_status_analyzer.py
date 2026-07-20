@@ -69,6 +69,10 @@ When evaluating training plan adherence, apply these rules:
 - Today's planned workouts that are not yet completed must never be treated as missed. \
 The athlete still has time to complete them. Either assume they will be done later today, \
 or encourage the athlete to get them done — but do not criticise or flag them as missed.
+- Planned workouts dated later than today (marked "upcoming") are in the future and are \
+not due yet. Never treat an upcoming workout as missed, incomplete, or a sign of poor \
+adherence. If the entire remainder of the week is still upcoming, the athlete is on track, \
+not behind — frame it as the week ahead, not a shortfall.
 - Only workouts from previous days count as missed. If past days show incomplete sessions, \
 be direct and stern about it.
 - When an incomplete workout has a skip reason attached, take it into account. A legitimate \
@@ -193,7 +197,13 @@ def _build_status_prompt(
                     week_start,
                 )
                 weekday_name = workout_date.strftime("%A")
-                today_marker = " (today)" if workout_date == today else ""
+                upcoming = workout_date > today
+                if workout_date == today:
+                    today_marker = " (today)"
+                elif upcoming:
+                    today_marker = " (upcoming)"
+                else:
+                    today_marker = ""
                 # Rest days are intentional and have nothing to perform, so they
                 # carry no completed/skipped status — otherwise "not completed"
                 # reads as a missed session to the model.
@@ -204,7 +214,14 @@ def _build_status_prompt(
                     )
                     continue
                 is_completed = w.is_completed
-                completed = "completed" if is_completed else "not completed"
+                if is_completed:
+                    completed = "completed"
+                elif upcoming:
+                    # Future sessions are not due yet; wording it as "not
+                    # completed" reads as a missed session to the model.
+                    completed = "upcoming — not due yet"
+                else:
+                    completed = "not completed"
                 # When a workout was completed by several activities (for example a
                 # ride recorded in two parts), report the combined actual so the
                 # coach sees the aggregate that met the goal.
