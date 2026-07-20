@@ -197,6 +197,63 @@ class TestRestDays:
         assert "not completed" not in prompt
 
 
+class TestUpcomingWorkouts:
+    def test_future_workout_marked_upcoming_not_missed(self):
+        # Plan starts Monday 2025-06-02; "now" is that same Monday. All other
+        # sessions in the week are in the future and must not read as missed.
+        plan_start = date(2025, 6, 2)
+        now = datetime(2025, 6, 2, 8, 0, tzinfo=ZoneInfo("Europe/Helsinki"))
+        workouts = [
+            _workout(2, workout_type="endurance", target_load=50),  # Tuesday
+            _workout(4, workout_type="intervals"),                  # Thursday
+            _workout(6, workout_type="long"),                       # Saturday
+        ]
+        prompt = _build_status_prompt(
+            athlete=_athlete(),
+            recent_activities=[],
+            current_metric=None,
+            active_plans=[(_plan(plan_start), workouts)],
+            active_goals=[],
+            now=now,
+        )
+        assert "Tuesday 2025-06-03 (upcoming): endurance" in prompt
+        assert "Thursday 2025-06-05 (upcoming)" in prompt
+        assert "Saturday 2025-06-07 (upcoming)" in prompt
+        assert "upcoming — not due yet" in prompt
+        # Future sessions must never be described as "not completed".
+        assert "not completed" not in prompt
+
+    def test_past_today_future_distinguished(self):
+        # Plan starts Monday 2025-06-02; "now" is Wednesday 2025-06-04.
+        plan_start = date(2025, 6, 2)
+        now = datetime(2025, 6, 4, 8, 0, tzinfo=ZoneInfo("Europe/Helsinki"))
+        workouts = [
+            _workout(1, workout_type="threshold"),  # Monday, past, missed
+            _workout(3, workout_type="intervals"),  # Wednesday = today
+            _workout(7, workout_type="long"),       # Sunday, upcoming
+        ]
+        prompt = _build_status_prompt(
+            athlete=_athlete(),
+            recent_activities=[],
+            current_metric=None,
+            active_plans=[(_plan(plan_start), workouts)],
+            active_goals=[],
+            now=now,
+        )
+        # Past session still reads as not completed (genuinely missed).
+        assert "Monday 2025-06-02: threshold — not completed" in prompt
+        # Today is not flagged as upcoming.
+        assert "Wednesday 2025-06-04 (today)" in prompt
+        assert "Wednesday 2025-06-04 (today): intervals — not completed" in prompt
+        # Future session is upcoming, not a shortfall.
+        assert "Sunday 2025-06-08 (upcoming): long — upcoming — not due yet" in prompt
+
+    def test_system_prompt_covers_upcoming_workouts(self):
+        prompt = _build_system_prompt()
+        assert "upcoming" in prompt
+        assert "not due yet" in prompt
+
+
 class TestMultipleActivePlans:
     # Non-overlapping active plans can coexist (issue #45); the status prompt must
     # consider all of them, not just one.
