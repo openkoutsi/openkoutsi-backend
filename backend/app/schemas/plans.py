@@ -58,6 +58,9 @@ class PlanAdherenceSummary(BaseModel):
     missed: int = 0
     skipped: int = 0
     pending: int = 0
+    # Sessions still to do from today onward: future workouts + today's un-acted
+    # workout (the ``pending`` grace bucket).
+    remaining: int = 0
 
 
 class PlanAdherencePoint(BaseModel):

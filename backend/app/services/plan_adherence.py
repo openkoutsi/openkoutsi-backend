@@ -79,6 +79,7 @@ class PlanScore:
     missed: int = 0
     skipped: int = 0
     pending: int = 0
+    future: int = 0  # non-rest workouts still ahead (dated after today)
     # Per-workout match score (0–100) keyed by workout id; None when not yet
     # scorable (rest day, future, or an empty today workout still in grace).
     match_scores: dict[str, Optional[float]] = field(default_factory=dict)
@@ -108,9 +109,11 @@ def score_plan(plan: TrainingPlan, today: date) -> PlanScore:
 
         wdate = _workout_date(plan.start_date, w.week_number, w.day_of_week)
 
-        # Future workouts are excluded from the "so far" denominator.
+        # Future workouts are excluded from the "so far" denominator, but are
+        # still counted as remaining sessions the athlete has yet to do.
         if wdate > today:
             result.match_scores[w.id] = None
+            result.future += 1
             continue
 
         is_cycling = workout_is_cycling(w.workout_type)

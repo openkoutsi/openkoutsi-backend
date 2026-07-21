@@ -82,6 +82,31 @@ class TestScorePlan:
         ps = score_plan(_plan([w]), today=_START)  # week 2 is in the future
         assert ps.score is None  # nothing contributes yet
         assert ps.match_scores[w.id] is None
+        assert ps.future == 1  # still counted as a remaining session
+
+    def test_future_counts_exclude_rest_days(self):
+        # A future rest day is not a session, so it doesn't count as remaining.
+        rest = _workout(week=2, day=1, wtype="rest")
+        ride = _workout(week=2, day=2, load=100, dur=60)
+        ps = score_plan(_plan([rest, ride]), today=_START)
+        assert ps.future == 1
+
+    def test_remaining_is_future_plus_today_pending(self):
+        # A completed past workout, today's un-acted workout, and two future
+        # workouts. "future" counts only the two ahead; the API-level remaining
+        # (future + pending) is what the athlete still has to do from today on.
+        done = _workout(week=1, day=1, load=100, dur=60,
+                        activities=[_activity(load=100, duration_s=3600)])
+        today = _workout(week=1, day=3, load=100, dur=60)  # Wed, still empty
+        soon = _workout(week=1, day=5, load=100, dur=60)   # Fri, future
+        later = _workout(week=2, day=1, load=100, dur=60)  # next week, future
+        # Freeze "today" to the Wednesday of week 1 (start Monday + 2 days).
+        ps = score_plan(_plan([done, today, soon, later]),
+                        today=_START + timedelta(days=2))
+        assert ps.completed == 1
+        assert ps.pending == 1
+        assert ps.future == 2
+        assert ps.future + ps.pending == 3  # remaining sessions from today on
 
     def test_rest_day_excluded(self):
         w = _workout(wtype="rest")

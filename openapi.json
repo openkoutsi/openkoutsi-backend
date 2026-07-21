@@ -8506,6 +8506,11 @@
             "type": "integer",
             "title": "Pending",
             "default": 0
+          },
+          "remaining": {
+            "type": "integer",
+            "title": "Remaining",
+            "default": 0
           }
         },
         "type": "object",
