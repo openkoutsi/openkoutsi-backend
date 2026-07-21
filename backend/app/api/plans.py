@@ -58,6 +58,7 @@ def _plan_response_with_adherence(plan: TrainingPlan) -> TrainingPlanResponse:
     response.adherence_summary = PlanAdherenceSummary(
         completed=ps.completed, missed=ps.missed,
         skipped=ps.skipped, pending=ps.pending,
+        remaining=ps.future + ps.pending,
     )
     for workout in response.workouts:
         workout.match_score = ps.match_scores.get(workout.id)
