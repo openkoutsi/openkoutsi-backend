@@ -24,7 +24,7 @@ from ..core.ssrf import check_url_safe
 from ..db.registry import _RegistrySessionLocal
 from ..db.user_session import get_user_session_factory
 from ..models.registry_orm import InstanceSettings
-from ..models.user_orm import Activity, Athlete, DailyMetric
+from ..models.user_orm import Activity, Athlete, DailyMetric, PlannedWorkout
 from .athlete_experience import EXPERIENCE_GUIDANCE, experience_level
 from .llm_access import record_llm_usage, usage_from_sse_data
 from .llm_client import (
@@ -65,6 +65,9 @@ You are Koutsi, an expert endurance sports coach. Analyse the following workout 
 provide actionable coaching feedback in 3-5 paragraphs. Cover: effort quality and pacing, \
 power/heart-rate relationship if data is available, the athlete's current fatigue state and \
 what it means for recovery, and 1-2 specific recommendations for the athlete's next sessions.
+If a planned workout for the day is provided, explicitly assess how well the session matched it \
+— intent, intensity and duration — and what any deviation (over- or under-doing it, or a missed \
+target) means for the athlete's training.
 Write in plain prose — no markdown headers, no bullet points, no code blocks.
 Separate each paragraph with a single blank line.
 
@@ -140,6 +143,7 @@ def _build_prompt(
     fatigue: DailyMetric | None = None,
     power_pr_badges: dict | None = None,
     distance_pr_badges: dict | None = None,
+    planned: PlannedWorkout | None = None,
 ) -> str:
     lines = [f"Workout summary for a {activity.sport_type or 'unknown sport'} session:"]
 
@@ -182,6 +186,24 @@ def _build_prompt(
         lines.append(f"  Fitness: {fatigue.fitness:.1f}")
         lines.append(f"  Fatigue: {fatigue.fatigue:.1f}")
         lines.append(f"  Form: {fatigue.form:.1f} ({_form_to_label(fatigue.form)})")
+
+    if planned is not None:
+        lines.append("\nPlanned workout scheduled for this day:")
+        if planned.workout_type:
+            lines.append(f"  Type: {planned.workout_type}")
+        if planned.description and planned.description.strip():
+            lines.append(f"  Description: {planned.description.strip()}")
+        if planned.duration_min:
+            lines.append(f"  Planned duration: {planned.duration_min} min")
+        if planned.target_load:
+            lines.append(f"  Target training load: {planned.target_load}")
+        if planned.is_completed:
+            lines.append("  This activity is linked to the planned workout above.")
+        else:
+            lines.append(
+                "  This activity is not linked to the planned workout; compare it "
+                "against the plan and note any deviation."
+            )
 
     if activity.intervals:
         lines.append("\nInterval breakdown:")
@@ -242,6 +264,7 @@ async def _stream_analysis(
     locale: str | None = None,
     power_pr_badges: dict | None = None,
     distance_pr_badges: dict | None = None,
+    planned: PlannedWorkout | None = None,
     usage_out: dict | None = None,
 ) -> AsyncIterator[str]:
     """Yield text chunks from the LLM via streaming SSE.
@@ -280,7 +303,12 @@ async def _stream_analysis(
     if analysis_context and analysis_context.strip():
         messages.append({"role": "system", "content": analysis_context.strip()})
     messages.append(
-        {"role": "user", "content": _build_prompt(activity, athlete, fatigue, power_pr_badges, distance_pr_badges)}
+        {
+            "role": "user",
+            "content": _build_prompt(
+                activity, athlete, fatigue, power_pr_badges, distance_pr_badges, planned
+            ),
+        }
     )
 
     def _payload(include_usage: bool) -> dict:
@@ -372,6 +400,14 @@ async def analyze_activity_bg(
             athlete.id, activity.id, activity.start_time, activity.sport_type, session
         )
 
+        # Include the day's planned workout (linked one if already matched,
+        # otherwise the one scheduled for the activity's date) so the coach can
+        # comment on plan adherence (issue #31).
+        from .activity_workout_matcher import resolve_planned_workout_for_activity
+        planned = await resolve_planned_workout_for_activity(
+            session, athlete.id, activity
+        )
+
         buffer: list[str] = []
         last_flush = time.monotonic()
         accumulated = ""
@@ -382,7 +418,7 @@ async def analyze_activity_bg(
             async for chunk in _stream_analysis(
                 activity, athlete, user_id, fatigue=fatigue, locale=resolved_locale,
                 power_pr_badges=power_pr_badges, distance_pr_badges=distance_pr_badges,
-                usage_out=usage_out,
+                planned=planned, usage_out=usage_out,
             ):
                 buffer.append(chunk)
                 if time.monotonic() - last_flush >= 0.5:

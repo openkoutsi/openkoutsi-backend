@@ -56,6 +56,16 @@ def _make_fatigue(fitness=50.0, fatigue=55.0, form=-5.0):
     return f
 
 
+def _make_planned(**kwargs):
+    p = MagicMock()
+    p.workout_type = kwargs.get("workout_type", "threshold")
+    p.description = kwargs.get("description", "4x8min at threshold")
+    p.duration_min = kwargs.get("duration_min", 75)
+    p.target_load = kwargs.get("target_load", 85)
+    p.is_completed = kwargs.get("is_completed", True)
+    return p
+
+
 # ── _build_system_prompt ──────────────────────────────────────────────────────
 
 class TestBuildSystemPrompt:
@@ -192,6 +202,37 @@ class TestBuildPrompt:
         act = _make_activity()
         prompt = _build_prompt(act, _make_athlete())
         assert "Personal Records" not in prompt
+
+    def test_planned_section_present_when_provided(self):
+        prompt = _build_prompt(_make_activity(), _make_athlete(), planned=_make_planned())
+        assert "Planned workout scheduled for this day" in prompt
+        assert "threshold" in prompt
+        assert "4x8min at threshold" in prompt
+        assert "75 min" in prompt
+        assert "85" in prompt  # target training load
+
+    def test_planned_section_absent_when_none(self):
+        prompt = _build_prompt(_make_activity(), _make_athlete())
+        assert "Planned workout scheduled for this day" not in prompt
+
+    def test_planned_completed_notes_linkage(self):
+        prompt = _build_prompt(
+            _make_activity(), _make_athlete(), planned=_make_planned(is_completed=True)
+        )
+        assert "linked to the planned workout" in prompt
+
+    def test_planned_not_completed_notes_deviation(self):
+        prompt = _build_prompt(
+            _make_activity(), _make_athlete(), planned=_make_planned(is_completed=False)
+        )
+        assert "not linked to the planned workout" in prompt
+
+    def test_planned_omits_empty_fields(self):
+        planned = _make_planned(description=None, duration_min=None, target_load=None)
+        prompt = _build_prompt(_make_activity(), _make_athlete(), planned=planned)
+        assert "Planned workout scheduled for this day" in prompt
+        assert "Description:" not in prompt
+        assert "Planned duration:" not in prompt
 
     def test_labels_included_when_present(self):
         act = _make_activity()
@@ -503,6 +544,9 @@ class TestAnalyzeActivityBg:
                   side_effect=_canned_stream),
             patch("backend.app.services.llm_activity_analyzer.detect_pr_badges",
                   new=AsyncMock(return_value=({}, {}))),
+            patch("backend.app.services.activity_workout_matcher."
+                  "resolve_planned_workout_for_activity",
+                  new=AsyncMock(return_value=None)),
         ):
             await analyze_activity_bg("act-1", "ath-1", "team-1")
 
@@ -550,6 +594,9 @@ class TestAnalyzeActivityBg:
                   side_effect=_failing_stream),
             patch("backend.app.services.llm_activity_analyzer.detect_pr_badges",
                   new=AsyncMock(return_value=({}, {}))),
+            patch("backend.app.services.activity_workout_matcher."
+                  "resolve_planned_workout_for_activity",
+                  new=AsyncMock(return_value=None)),
         ):
             await analyze_activity_bg("act-1", "ath-1", "team-1")
 
