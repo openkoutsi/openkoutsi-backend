@@ -62,7 +62,6 @@ def _make_planned(**kwargs):
     p.description = kwargs.get("description", "4x8min at threshold")
     p.duration_min = kwargs.get("duration_min", 75)
     p.target_load = kwargs.get("target_load", 85)
-    p.is_completed = kwargs.get("is_completed", True)
     return p
 
 
@@ -205,7 +204,7 @@ class TestBuildPrompt:
 
     def test_planned_section_present_when_provided(self):
         prompt = _build_prompt(_make_activity(), _make_athlete(), planned=_make_planned())
-        assert "Planned workout scheduled for this day" in prompt
+        assert "Planned workout this activity is linked to" in prompt
         assert "threshold" in prompt
         assert "4x8min at threshold" in prompt
         assert "75 min" in prompt
@@ -213,24 +212,12 @@ class TestBuildPrompt:
 
     def test_planned_section_absent_when_none(self):
         prompt = _build_prompt(_make_activity(), _make_athlete())
-        assert "Planned workout scheduled for this day" not in prompt
-
-    def test_planned_completed_notes_linkage(self):
-        prompt = _build_prompt(
-            _make_activity(), _make_athlete(), planned=_make_planned(is_completed=True)
-        )
-        assert "linked to the planned workout" in prompt
-
-    def test_planned_not_completed_notes_deviation(self):
-        prompt = _build_prompt(
-            _make_activity(), _make_athlete(), planned=_make_planned(is_completed=False)
-        )
-        assert "not linked to the planned workout" in prompt
+        assert "Planned workout this activity is linked to" not in prompt
 
     def test_planned_omits_empty_fields(self):
         planned = _make_planned(description=None, duration_min=None, target_load=None)
         prompt = _build_prompt(_make_activity(), _make_athlete(), planned=planned)
-        assert "Planned workout scheduled for this day" in prompt
+        assert "Planned workout this activity is linked to" in prompt
         assert "Description:" not in prompt
         assert "Planned duration:" not in prompt
 

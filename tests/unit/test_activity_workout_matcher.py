@@ -124,65 +124,37 @@ async def _persist_activity(session, athlete_id, *, sport_type="Ride", start=Non
 
 
 class TestResolvePlannedWorkoutForActivity:
-    async def test_returns_none_without_plan(self, session, seeded_athlete):
-        act = await _persist_activity(session, seeded_athlete.id)
-        assert await resolve_planned_workout_for_activity(
-            session, seeded_athlete.id, act
-        ) is None
-
-    async def test_returns_scheduled_workout_for_date_no_threshold(
-        self, session, seeded_athlete
-    ):
-        # Below the auto-match load threshold, but still surfaced for the day.
-        w = PlannedWorkout(
-            week_number=1, day_of_week=1, workout_type="threshold",
-            target_load=100, duration_min=60,
-        )
+    async def test_returns_none_when_not_linked(self, session, seeded_athlete):
+        # A planned workout exists for the activity's day, but the activity is
+        # not linked to it → nothing is surfaced (no date-based guessing).
+        w = PlannedWorkout(week_number=1, day_of_week=1, workout_type="threshold")
         await _seed_plan(session, seeded_athlete.id, [w])
         act = await _persist_activity(session, seeded_athlete.id)
-        act.load = 10.0  # nowhere near 60% of target
-        resolved = await resolve_planned_workout_for_activity(
-            session, seeded_athlete.id, act
-        )
+        assert await resolve_planned_workout_for_activity(session, act) is None
+
+    async def test_returns_linked_workout(self, session, seeded_athlete):
+        w = PlannedWorkout(week_number=1, day_of_week=1, workout_type="threshold")
+        await _seed_plan(session, seeded_athlete.id, [w])
+        act = await _persist_activity(session, seeded_athlete.id)
+        session.add(PlannedWorkoutActivity(
+            planned_workout_id=w.id, activity_id=act.id
+        ))
+        await session.commit()
+        resolved = await resolve_planned_workout_for_activity(session, act)
         assert resolved is not None
         assert resolved.id == w.id
 
-    async def test_prefers_sport_matching_candidate(self, session, seeded_athlete):
-        run = PlannedWorkout(week_number=1, day_of_week=1, workout_type="run")
-        ride = PlannedWorkout(week_number=1, day_of_week=1, workout_type="threshold")
-        await _seed_plan(session, seeded_athlete.id, [run, ride])
-        act = await _persist_activity(session, seeded_athlete.id, sport_type="Ride")
-        resolved = await resolve_planned_workout_for_activity(
-            session, seeded_athlete.id, act
-        )
-        assert resolved is not None
-        assert resolved.id == ride.id
-
-    async def test_prefers_linked_workout_over_date(self, session, seeded_athlete):
-        # A workout on Wednesday (day 3); the activity is on Monday (day 1) but is
-        # explicitly linked to the Wednesday workout → the link wins.
-        mon = PlannedWorkout(week_number=1, day_of_week=1, workout_type="threshold")
-        wed = PlannedWorkout(week_number=1, day_of_week=3, workout_type="endurance")
-        await _seed_plan(session, seeded_athlete.id, [mon, wed])
-        act = await _persist_activity(session, seeded_athlete.id)
-        session.add(PlannedWorkoutActivity(
-            planned_workout_id=wed.id, activity_id=act.id
-        ))
-        await session.commit()
-        resolved = await resolve_planned_workout_for_activity(
-            session, seeded_athlete.id, act
-        )
-        assert resolved is not None
-        assert resolved.id == wed.id
-
-    async def test_returns_none_for_date_outside_plan(self, session, seeded_athlete):
+    async def test_ignores_link_belonging_to_another_activity(
+        self, session, seeded_athlete
+    ):
+        # The reported bug: the day's key session is completed by one ride; a
+        # later unlinked commute spin must NOT be evaluated against it.
         w = PlannedWorkout(week_number=1, day_of_week=1, workout_type="threshold")
         await _seed_plan(session, seeded_athlete.id, [w])
-        # Activity a week before the plan starts.
-        act = await _persist_activity(
-            session, seeded_athlete.id,
-            start=datetime(2025, 5, 26, 10, tzinfo=timezone.utc),
-        )
-        assert await resolve_planned_workout_for_activity(
-            session, seeded_athlete.id, act
-        ) is None
+        key_ride = await _persist_activity(session, seeded_athlete.id)
+        session.add(PlannedWorkoutActivity(
+            planned_workout_id=w.id, activity_id=key_ride.id
+        ))
+        await session.commit()
+        commute = await _persist_activity(session, seeded_athlete.id)
+        assert await resolve_planned_workout_for_activity(session, commute) is None
