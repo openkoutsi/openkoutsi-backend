@@ -105,26 +105,22 @@ async def find_and_link_workout(
 
 async def resolve_planned_workout_for_activity(
     session: AsyncSession,
-    athlete_id: str,
     activity: Activity,
 ) -> Optional[PlannedWorkout]:
-    """Resolve the planned workout an activity should be analysed against.
+    """Return the planned workout an activity is explicitly linked to, if any.
 
-    Prefers an already-linked planned workout (via ``PlannedWorkoutActivity``);
-    otherwise falls back to the workout scheduled for the activity's date in an
-    active plan — with **no** load/duration threshold, so a session that
-    deviated from plan still surfaces its intended workout.
+    The activity analyser includes this as context so the coach can comment on
+    plan adherence (issue #31). We deliberately surface only an *explicit* link
+    (via ``PlannedWorkoutActivity``) and never guess a mapping from the
+    activity's date: guessing wrongly attributes, for example, an easy commute
+    spin to the day's key session that another ride already completed.
 
-    Unlike :func:`find_and_link_workout` this never writes: it only reads the
-    planned workout so the activity analyser can include it as context (issue
-    #31). Resolving by date (rather than relying solely on the link) matters
-    because on the FIT-upload path analysis is dispatched before auto-linking
-    runs, so the link is frequently not yet present when analysis starts.
+    Unlike :func:`find_and_link_workout` this never writes — it only reads the
+    linked planned workout.
 
-    Returns the resolved PlannedWorkout, or None if none applies.
+    Returns the linked PlannedWorkout, or None if the activity is not linked.
     """
-    # 1. Already linked → use that workout directly.
-    linked_result = await session.execute(
+    result = await session.execute(
         select(PlannedWorkout)
         .join(
             PlannedWorkoutActivity,
@@ -133,57 +129,7 @@ async def resolve_planned_workout_for_activity(
         .where(PlannedWorkoutActivity.activity_id == activity.id)
         .limit(1)
     )
-    linked = linked_result.scalar_one_or_none()
-    if linked is not None:
-        return linked
-
-    if activity.start_time is None:
-        return None
-
-    act_date = (
-        activity.start_time.date()
-        if hasattr(activity.start_time, "date")
-        else activity.start_time
-    )
-    # isoweekday(): Monday=1, Sunday=7 — matches PlannedWorkout.day_of_week
-    day_of_week = act_date.isoweekday()
-
-    plans_result = await session.execute(
-        select(TrainingPlan).where(
-            TrainingPlan.athlete_id == athlete_id,
-            TrainingPlan.status == "active",
-        )
-    )
-    plans = plans_result.scalars().all()
-
-    # Among same-day candidates prefer one whose sport matches the activity;
-    # otherwise fall back to the first scheduled workout for the day.
-    fallback: Optional[PlannedWorkout] = None
-    for plan in plans:
-        if plan.start_date is None:
-            continue
-        if act_date < plan.start_date:
-            continue
-        if plan.end_date is not None and act_date > plan.end_date:
-            continue
-
-        days_elapsed = (act_date - plan.start_date).days
-        week_number = days_elapsed // 7 + 1
-
-        workouts_result = await session.execute(
-            select(PlannedWorkout).where(
-                PlannedWorkout.plan_id == plan.id,
-                PlannedWorkout.week_number == week_number,
-                PlannedWorkout.day_of_week == day_of_week,
-            )
-        )
-        for workout in workouts_result.scalars().all():
-            if sports_match(activity.sport_type, workout.workout_type):
-                return workout
-            if fallback is None:
-                fallback = workout
-
-    return fallback
+    return result.scalar_one_or_none()
 
 
 def _matches(activity: Activity, workout: PlannedWorkout) -> bool:

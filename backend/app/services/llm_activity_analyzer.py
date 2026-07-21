@@ -65,7 +65,7 @@ You are Koutsi, an expert endurance sports coach. Analyse the following workout 
 provide actionable coaching feedback in 3-5 paragraphs. Cover: effort quality and pacing, \
 power/heart-rate relationship if data is available, the athlete's current fatigue state and \
 what it means for recovery, and 1-2 specific recommendations for the athlete's next sessions.
-If a planned workout for the day is provided, explicitly assess how well the session matched it \
+If the activity is linked to a planned workout, explicitly assess how well the session matched it \
 — intent, intensity and duration — and what any deviation (over- or under-doing it, or a missed \
 target) means for the athlete's training.
 Write in plain prose — no markdown headers, no bullet points, no code blocks.
@@ -188,7 +188,7 @@ def _build_prompt(
         lines.append(f"  Form: {fatigue.form:.1f} ({_form_to_label(fatigue.form)})")
 
     if planned is not None:
-        lines.append("\nPlanned workout scheduled for this day:")
+        lines.append("\nPlanned workout this activity is linked to:")
         if planned.workout_type:
             lines.append(f"  Type: {planned.workout_type}")
         if planned.description and planned.description.strip():
@@ -197,13 +197,6 @@ def _build_prompt(
             lines.append(f"  Planned duration: {planned.duration_min} min")
         if planned.target_load:
             lines.append(f"  Target training load: {planned.target_load}")
-        if planned.is_completed:
-            lines.append("  This activity is linked to the planned workout above.")
-        else:
-            lines.append(
-                "  This activity is not linked to the planned workout; compare it "
-                "against the plan and note any deviation."
-            )
 
     if activity.intervals:
         lines.append("\nInterval breakdown:")
@@ -400,13 +393,12 @@ async def analyze_activity_bg(
             athlete.id, activity.id, activity.start_time, activity.sport_type, session
         )
 
-        # Include the day's planned workout (linked one if already matched,
-        # otherwise the one scheduled for the activity's date) so the coach can
-        # comment on plan adherence (issue #31).
+        # Include the planned workout this activity is linked to (if any) so the
+        # coach can comment on plan adherence (issue #31). Only an explicit link
+        # is used — we never guess a mapping from the date, which would wrongly
+        # attribute e.g. a commute spin to a key session another ride completed.
         from .activity_workout_matcher import resolve_planned_workout_for_activity
-        planned = await resolve_planned_workout_for_activity(
-            session, athlete.id, activity
-        )
+        planned = await resolve_planned_workout_for_activity(session, activity)
 
         buffer: list[str] = []
         last_flush = time.monotonic()
