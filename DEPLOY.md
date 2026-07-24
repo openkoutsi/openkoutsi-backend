@@ -200,6 +200,12 @@ uv run python backend/scripts/migrate_user_dbs.py        # add --dry-run to prev
 
 This step is only needed when upgrading an existing deployment — new installs handle schema creation automatically on first startup.
 
+> **Note (issue #29):** the latest per-user migration `015_plan_week_meta` adds a
+> nullable `week_meta` column to `training_plans`. It is applied automatically by
+> the entrypoint's per-user migration loop (or the helper script above); no new
+> environment variables are required. Existing plans keep working — `week_meta`
+> stays `null` until a plan is (re)generated.
+
 #### Registry and usage databases
 
 The registry DB and the dedicated **LLM-usage** DB (issue #9) are created

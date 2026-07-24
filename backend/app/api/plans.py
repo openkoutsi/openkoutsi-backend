@@ -25,7 +25,10 @@ from backend.app.models.user_orm import PlanAdherenceDaily
 from backend.app.services.plan_adherence import (
     score_plan, catch_up_adherence, workout_match_score,
 )
-from backend.app.services.plan_generator import generate_plan, build_workout_rows
+from backend.app.services.plan_generator import (
+    generate_plan, build_workout_rows, week_meta_for,
+)
+from openkoutsi.plan_schema import clamp_plan_params
 from backend.app.services.llm_plan_generator import generate_plan_llm, generate_plan_weeks_llm
 from backend.app.services.llm_workout_generator import (
     generate_workout_definition_llm, WorkoutGenerationError,
@@ -142,6 +145,10 @@ async def create_plan(
 
     athlete = await _get_athlete(ctx.user_id, session)
 
+    # Clamp structure parameters (progression %, cadence, hours band, …) to sane
+    # bounds before generation and persistence.
+    config = clamp_plan_params(body.config) if body.config else None
+
     # Archive existing active plans, but only those whose date range overlaps
     # the new plan — a new plan covering a different period leaves earlier
     # plans active.
@@ -160,8 +167,9 @@ async def create_plan(
             goal=body.goal,
             weeks=body.weeks,
             status="active",
-            config=body.config.model_dump() if body.config else None,
+            config=config.model_dump() if config else None,
             generation_method="llm",
+            week_meta=week_meta_for(config, body.weeks),
         )
         session.add(plan)
         await session.flush()
@@ -180,7 +188,7 @@ async def create_plan(
         await session.commit()
         await session.refresh(plan)
     elif body.use_llm:
-        if not body.config:
+        if not config:
             raise HTTPException(400, "A plan config (training days and types) is required for LLM generation")
         instance_result = await registry_session.execute(select(InstanceSettings).limit(1))
         instance = instance_result.scalar_one_or_none()
@@ -190,7 +198,7 @@ async def create_plan(
         try:
             plan = await generate_plan_llm(
                 athlete=athlete,
-                config=body.config,
+                config=config,
                 name=body.name,
                 start_date=body.start_date,
                 num_weeks=body.weeks,
@@ -214,7 +222,7 @@ async def create_plan(
             num_weeks=body.weeks,
             goal=body.goal,
             session=session,
-            config=body.config,
+            config=config,
         )
 
     # Reload with workouts
@@ -635,6 +643,7 @@ async def regenerate_plan(
     if not plan:
         raise HTTPException(404, "Plan not found")
 
+    config = clamp_plan_params(body.config) if body.config else None
     num_weeks = body.weeks if body.weeks is not None else (plan.weeks or 8)
     goal = body.goal if body.goal is not None else plan.goal
 
@@ -665,7 +674,7 @@ async def regenerate_plan(
                     target_load=day.target_load,
                 )
     elif body.use_llm:
-        if not body.config:
+        if not config:
             raise HTTPException(400, "A plan config (training days and types) is required for LLM generation")
         instance_result = await registry_session.execute(select(InstanceSettings).limit(1))
         instance = instance_result.scalar_one_or_none()
@@ -675,7 +684,7 @@ async def regenerate_plan(
         try:
             weeks_data = await generate_plan_weeks_llm(
                 athlete=athlete,
-                config=body.config,
+                config=config,
                 num_weeks=num_weeks,
                 goal=goal,
                 session=session,
@@ -695,15 +704,16 @@ async def regenerate_plan(
                 _add(week_num, **day)
     else:
         plan.generation_method = "rule_based"
-        for pw in build_workout_rows(plan.id, num_weeks, goal, body.config):
+        for pw in build_workout_rows(plan.id, num_weeks, goal, config):
             if (pw.week_number, pw.day_of_week) in occupied:
                 continue
             plan.workouts.append(pw)
 
     plan.weeks = num_weeks
     plan.goal = goal
-    if body.config is not None:
-        plan.config = body.config.model_dump()
+    if config is not None:
+        plan.config = config.model_dump()
+        plan.week_meta = week_meta_for(config, num_weeks)
     if plan.start_date:
         plan.end_date = plan.start_date + timedelta(weeks=num_weeks) - timedelta(days=1)
 

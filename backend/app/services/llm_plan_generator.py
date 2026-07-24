@@ -30,6 +30,7 @@ from .llm_client import (
     resolve_llm_config,
 )
 from .llm_schemas import PLAN_RESPONSE_FORMAT
+from openkoutsi.plan_builder import week_meta_from_weeks
 
 log = logging.getLogger(__name__)
 
@@ -76,7 +77,16 @@ Rules:
 - Every week must have exactly 7 workouts, one per day_of_week (1-7)
 - Days not scheduled as training should be "rest" with null duration and load
 - Load and duration_min must be null for rest days, integers otherwise
-- Scale Load and duration progressively across weeks (base building, recovery every 4th week, taper at end)
+- The description MUST match the day's duration_min and target_load (e.g. don't
+  write "3×20 min" for a 45-minute session). Spell out the interval structure.
+- Progress Load/duration by the requested weekly percentage across the build
+  weeks of each block, then insert a recovery week; repeat. Taper at the very end.
+- Threshold and VO2max are hard: never schedule them on back-to-back days, and
+  keep hard days within the requested weekly cap. A session like 3×15 min at
+  100% FTP is very demanding — use it sparingly, not every week; vary interval
+  length and intensity instead of always prescribing the maximum.
+- You may optionally include a per-week "week_type" ("build" | "recovery" |
+  "taper") and a short "week_focus" note describing that week's purpose.
 """
 
 
@@ -102,10 +112,29 @@ def _build_user_prompt(
         f"Periodization style: {config.periodization}",
         f"Intensity preference: {config.intensity_preference}",
         f"Training days per week: {config.days_per_week}",
+        f"Weekly progression: about {config.weekly_progression_pct:.0f}% more "
+        f"load/time per build week",
+        f"Build/recovery cadence: {config.build_weeks} build weeks, then 1 "
+        f"recovery week",
         "",
         "Scheduled training days:",
     ] + scheduled
 
+    if config.weekly_hours_min is not None and config.weekly_hours_max is not None:
+        lines += [
+            "",
+            f"Available training time: {config.weekly_hours_min:g}–"
+            f"{config.weekly_hours_max:g} hours per week. Keep each week's total "
+            f"ride time within this band — recovery weeks near the low end, peak "
+            f"build weeks near the high end.",
+        ]
+    if config.weekly_base_load:
+        lines += [
+            f"The athlete also accumulates about {config.weekly_base_load} Load "
+            f"per week from non-workout riding (e.g. commuting) on top of the "
+            f"prescribed sessions — account for it so the total stays reasonable, "
+            f"but do not add it into the prescribed workout loads.",
+        ]
     if goal:
         lines += ["", f"Goal/event: {goal}"]
     if config.long_description:
@@ -256,6 +285,7 @@ async def generate_plan_llm(
         status="active",
         config=config.model_dump(),
         generation_method="llm",
+        week_meta=week_meta_from_weeks(config, weeks_data),
     )
     session.add(plan)
     await session.flush()

@@ -101,6 +101,10 @@ Rules:
 - Prefer percent-of-FTP targets so the workout scales to the athlete.
 - Start with a warmup and end with a cooldown.
 - Make the total time and intensity roughly match the requested duration and Load.
+- Keep intervals realistic for the athlete's level. Threshold work (~95–105% FTP)
+  is demanding — a set like 3×15 min at 100% FTP is very hard; prefer sensible
+  rep lengths with adequate recovery rather than always maximising volume and
+  intensity.
 """
 
 

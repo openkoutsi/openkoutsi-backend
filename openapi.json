@@ -8550,6 +8550,48 @@
               }
             ],
             "title": "Long Description"
+          },
+          "weekly_progression_pct": {
+            "type": "number",
+            "title": "Weekly Progression Pct",
+            "default": 7.0
+          },
+          "build_weeks": {
+            "type": "integer",
+            "title": "Build Weeks",
+            "default": 3
+          },
+          "recovery_week_factor": {
+            "type": "number",
+            "title": "Recovery Week Factor",
+            "default": 0.6
+          },
+          "weekly_base_load": {
+            "type": "integer",
+            "title": "Weekly Base Load",
+            "default": 0
+          },
+          "weekly_hours_min": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weekly Hours Min"
+          },
+          "weekly_hours_max": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weekly Hours Max"
           }
         },
         "type": "object",
@@ -8558,6 +8600,69 @@
           "day_configs"
         ],
         "title": "PlanConfig"
+      },
+      "PlanWeekMeta": {
+        "properties": {
+          "week_number": {
+            "type": "integer",
+            "title": "Week Number"
+          },
+          "week_type": {
+            "type": "string",
+            "title": "Week Type"
+          },
+          "focus": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Focus"
+          },
+          "target_load": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Load"
+          },
+          "target_hours": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Hours"
+          },
+          "base_load": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Load"
+          }
+        },
+        "type": "object",
+        "required": [
+          "week_number",
+          "week_type"
+        ],
+        "title": "PlanWeekMeta",
+        "description": "Per-week plan metadata surfaced in the plan header/summary (issue #29)."
       },
       "PlannedWorkoutCreate": {
         "properties": {
@@ -9531,6 +9636,20 @@
               }
             ],
             "title": "Generation Method"
+          },
+          "week_meta": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/PlanWeekMeta"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Week Meta"
           },
           "adherence_score": {
             "anyOf": [

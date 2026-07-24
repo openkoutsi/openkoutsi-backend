@@ -339,6 +339,9 @@ class TrainingPlan(UserBase):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     config: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     generation_method: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Per-week metadata (build vs recovery week, focus note, target weekly
+    # Load/hours, base Load) — a list of dicts, populated at generation time.
+    week_meta: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
 
     athlete: Mapped["Athlete"] = relationship("Athlete", back_populates="training_plans")
     workouts: Mapped[list["PlannedWorkout"]] = relationship(
