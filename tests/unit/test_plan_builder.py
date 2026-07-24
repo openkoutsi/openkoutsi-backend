@@ -264,6 +264,28 @@ class TestConsistentDescriptions:
         longer = describe_workout("threshold", 120, intensity_preference="moderate")
         assert short != longer
 
+    @staticmethod
+    def _described_minutes(text: str) -> int:
+        import re
+        m = re.search(
+            r"(\d+)×(\d+) min .*?(\d+) min easy between; "
+            r"(\d+) min warm-up and (\d+) min cool-down",
+            text,
+        )
+        assert m, f"unexpected interval text: {text!r}"
+        reps, rep, rest, warmup, cooldown = map(int, m.groups())
+        return warmup + cooldown + reps * rep + max(0, reps - 1) * rest
+
+    def test_short_hard_session_description_fits_duration(self):
+        # A short threshold/VO2max day must not describe more minutes than the
+        # prescribed duration (regression for review item #2).
+        for wtype in ("threshold", "vo2max"):
+            for duration in (20, 25, 30, 40, 55, 75):
+                text = describe_workout(
+                    wtype, duration, intensity_preference="high", block_index=2,
+                )
+                assert self._described_minutes(text) <= duration, (wtype, duration, text)
+
 
 class TestHardDayGuardrail:
     def test_back_to_back_hard_days_are_eased(self):

@@ -129,7 +129,7 @@ def intensity_multiplier(intensity_preference: str) -> float:
 
 def _cfg_int(config: PlanConfig, name: str, default: int) -> int:
     value = getattr(config, name, None)
-    return int(value) if value else default
+    return int(value) if value is not None else default
 
 
 def _cfg_float(config: PlanConfig, name: str, default: float) -> float:
@@ -261,12 +261,22 @@ def _interval_text(
     block_index: int,
 ) -> str:
     rep, rest, low, high, cap = shape.get(intensity_preference, shape["moderate"])
-    warmup, cooldown = 10, 10
     # Early blocks start a touch easier at the top end.
     if block_index == 0:
         high = max(low, high - 3)
-    work_budget = max(duration_min - warmup - cooldown, rep)
-    reps = max(2, min(round(work_budget / (rep + rest)), cap // rep))
+    # Scale the warm-up/cool-down down for short sessions so the described
+    # structure never exceeds the prescribed duration (a 20-minute threshold day
+    # can't hold a 15-minute rep plus a 10+10 warm-up/cool-down).
+    warmup = cooldown = max(5, min(10, round(duration_min * 0.15)))
+    avail = max(duration_min - warmup - cooldown, 5)
+    if avail < rep + rest:
+        # Not enough room for a full rep plus recovery: one shortened rep.
+        reps = 1
+        rep = max(5, min(rep, avail))
+    else:
+        # N reps need N·rep + (N−1)·rest of work time (last rep has no trailing
+        # recovery). Cap by the type's total at-intensity budget.
+        reps = max(1, min((avail + rest) // (rep + rest), cap // rep))
     return (
         f"{reps}×{rep} min {label} ({low}–{high}% FTP), {rest} min easy between; "
         f"{warmup} min warm-up and {cooldown} min cool-down."

@@ -1161,3 +1161,72 @@ class TestPlanWeekMeta:
         assert resp.status_code == 201
         # Stored config is clamped to the allowed maximum.
         assert resp.json()["config"]["weekly_progression_pct"] == 12.0
+
+
+class TestLlmWeekMeta:
+    """week_meta for LLM plans must summarise the actual generated weeks, not a
+    rule-based rebuild (review item #1, backend PR #67)."""
+
+    # Empty day_configs: a rule-based rebuild would yield all-rest weeks (load 0),
+    # so this proves the summary comes from the LLM weeks, not the builder.
+    _CONFIG = {
+        "days_per_week": 0,
+        "day_configs": [],
+        "periodization": "base_building",
+        "intensity_preference": "moderate",
+        "build_weeks": 2,
+        "weekly_base_load": 30,
+    }
+
+    def _week(self, threshold_load: int, long_load: int) -> list[dict]:
+        days = [
+            {"day_of_week": d, "workout_type": "rest", "description": None,
+             "duration_min": None, "target_load": None}
+            for d in range(1, 8)
+        ]
+        days[1] = {"day_of_week": 2, "workout_type": "threshold",
+                   "description": "intervals", "duration_min": 60, "target_load": threshold_load}
+        days[5] = {"day_of_week": 6, "workout_type": "long",
+                   "description": "long ride", "duration_min": 120, "target_load": long_load}
+        return days
+
+    def _llm_weeks(self) -> list[list[dict]]:
+        return [self._week(80, 100), self._week(90, 110), self._week(40, 60)]
+
+    async def test_prebuilt_llm_week_meta_matches_workouts(self, client, auth_headers):
+        llm_weeks = self._llm_weeks()
+        resp = await client.post(
+            "/api/plans",
+            json={"name": "Prebuilt", "start_date": str(_START), "weeks": 3,
+                  "config": self._CONFIG, "llm_weeks": llm_weeks},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["generation_method"] == "llm"
+        meta = data["week_meta"]
+        assert meta is not None and len(meta) == 3
+        for i, m in enumerate(meta):
+            expected_load = sum((d["target_load"] or 0) for d in llm_weeks[i])
+            assert m["target_load"] == expected_load
+            assert m["target_load"] > 0  # not the all-rest rule-based rebuild
+            assert m["target_hours"] == pytest.approx(180 / 60)  # 60 + 120 min
+            assert m["base_load"] == 30
+        # Week 3 (recovery) should be lighter than week 2 (build).
+        assert meta[2]["target_load"] < meta[1]["target_load"]
+
+    async def test_regenerate_prebuilt_llm_week_meta_matches_workouts(self, client, auth_headers):
+        plan = await _create_plan(client, auth_headers, weeks=3)
+        llm_weeks = self._llm_weeks()
+        resp = await client.post(
+            f"/api/plans/{plan['id']}/regenerate",
+            json={"config": self._CONFIG, "weeks": 3, "llm_weeks": llm_weeks},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        meta = resp.json()["week_meta"]
+        assert meta is not None and len(meta) == 3
+        for i, m in enumerate(meta):
+            expected_load = sum((d["target_load"] or 0) for d in llm_weeks[i])
+            assert m["target_load"] == expected_load
+            assert m["target_load"] > 0

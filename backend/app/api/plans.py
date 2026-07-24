@@ -29,6 +29,28 @@ from backend.app.services.plan_generator import (
     generate_plan, build_workout_rows, week_meta_for,
 )
 from openkoutsi.plan_schema import clamp_plan_params
+from openkoutsi.plan_builder import week_meta_from_weeks
+
+
+def _llm_weeks_to_day_dicts(llm_weeks) -> list[list[dict]]:
+    """Flatten posted, pre-built LLM weeks into the day dicts week_meta needs.
+
+    Only ``duration_min``/``target_load`` are read by the week summary, but the
+    other fields are carried through so the shape matches the generator output.
+    """
+    return [
+        [
+            {
+                "day_of_week": d.day_of_week,
+                "workout_type": d.workout_type,
+                "description": d.description,
+                "duration_min": d.duration_min,
+                "target_load": d.target_load,
+            }
+            for d in week
+        ]
+        for week in llm_weeks
+    ]
 from backend.app.services.llm_plan_generator import generate_plan_llm, generate_plan_weeks_llm
 from backend.app.services.llm_workout_generator import (
     generate_workout_definition_llm, WorkoutGenerationError,
@@ -159,6 +181,13 @@ async def create_plan(
     if body.llm_weeks:
         # Frontend already called the LLM — persist the pre-built weeks directly.
         end_date = body.start_date + timedelta(weeks=body.weeks) - timedelta(days=1)
+        # Summarise week_meta from the actual LLM weeks (not a rule-based rebuild),
+        # so the reported Load/hours match the workouts the athlete sees.
+        llm_week_meta = (
+            week_meta_from_weeks(config, _llm_weeks_to_day_dicts(body.llm_weeks))
+            if config
+            else None
+        )
         plan = TrainingPlan(
             athlete_id=athlete.id,
             name=body.name,
@@ -169,7 +198,7 @@ async def create_plan(
             status="active",
             config=config.model_dump() if config else None,
             generation_method="llm",
-            week_meta=week_meta_for(config, body.weeks),
+            week_meta=llm_week_meta,
         )
         session.add(plan)
         await session.flush()
@@ -662,8 +691,13 @@ async def regenerate_plan(
             week_number=week_num, day_of_week=day_of_week, **fields,
         ))
 
+    # When regenerating via the LLM (pre-built or server-side), keep the actual
+    # generated weeks so week_meta is summarised from them, not a rule-based rebuild.
+    llm_weeks_data: list[list[dict]] | None = None
+
     if body.llm_weeks:
         plan.generation_method = "llm"
+        llm_weeks_data = _llm_weeks_to_day_dicts(body.llm_weeks)
         for week_num, week_days in enumerate(body.llm_weeks, start=1):
             for day in week_days:
                 _add(
@@ -699,6 +733,7 @@ async def regenerate_plan(
         except Exception as exc:
             raise HTTPException(503, f"LLM plan generation failed: {exc}") from exc
         plan.generation_method = "llm"
+        llm_weeks_data = weeks_data
         for week_num, week_days in enumerate(weeks_data, start=1):
             for day in week_days:
                 _add(week_num, **day)
@@ -713,7 +748,12 @@ async def regenerate_plan(
     plan.goal = goal
     if config is not None:
         plan.config = config.model_dump()
-        plan.week_meta = week_meta_for(config, num_weeks)
+        # Summarise LLM regenerations from the actual generated weeks; only the
+        # rule-based path derives week_meta from a fresh rule-based build.
+        if llm_weeks_data is not None:
+            plan.week_meta = week_meta_from_weeks(config, llm_weeks_data)
+        else:
+            plan.week_meta = week_meta_for(config, num_weeks)
     if plan.start_date:
         plan.end_date = plan.start_date + timedelta(weeks=num_weeks) - timedelta(days=1)
 
