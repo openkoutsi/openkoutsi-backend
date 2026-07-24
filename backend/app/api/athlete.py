@@ -32,6 +32,7 @@ from backend.app.models.user_orm import (
 )
 from backend.app.schemas.athlete import AthleteResponse, AthleteUpdate, TrainingStatusBody, TrainingStatusResponse
 from backend.app.services.athlete_experience import VALID_EXPERIENCE_LEVELS
+from openkoutsi.plan_schema import HOURS_BOUNDS
 
 _MAX_AVATAR_BYTES = 5 * 1024 * 1024  # 5 MB
 
@@ -243,6 +244,45 @@ async def update_athlete(
             else:
                 # Empty/blank clears the setting (merged-None deletes the key).
                 new_settings["experience_level"] = None
+
+        # Default weekly training-hours availability (a range), reused to prefill
+        # the plan-generation dialog. Each endpoint is an optional number in the
+        # allowed hours band; blank/None clears it.
+        for _hours_key in ("weekly_hours_min", "weekly_hours_max"):
+            if _hours_key in new_settings:
+                raw_hours = new_settings.get(_hours_key)
+                if raw_hours in (None, ""):
+                    new_settings[_hours_key] = None
+                    continue
+                try:
+                    hours = float(raw_hours)
+                except (TypeError, ValueError):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid {_hours_key}: must be a number.",
+                    )
+                lo, hi = HOURS_BOUNDS
+                if not (lo <= hours <= hi):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid {_hours_key}: must be between {lo:g} and {hi:g} hours.",
+                    )
+                new_settings[_hours_key] = hours
+        merged_min = new_settings.get(
+            "weekly_hours_min", (athlete.app_settings or {}).get("weekly_hours_min")
+        )
+        merged_max = new_settings.get(
+            "weekly_hours_max", (athlete.app_settings or {}).get("weekly_hours_max")
+        )
+        if (
+            merged_min is not None
+            and merged_max is not None
+            and float(merged_min) > float(merged_max)
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="weekly_hours_min cannot be greater than weekly_hours_max.",
+            )
 
         if "llm_api_key" in new_settings:
             raw_key = new_settings.pop("llm_api_key")
@@ -580,6 +620,7 @@ async def _export_plans(athlete: Athlete, session: AsyncSession) -> list[dict]:
             "status": p.status,
             "config": p.config or {},
             "generation_method": p.generation_method,
+            "week_meta": p.week_meta or [],
             "created_at": _iso(p.created_at),
             "planned_workouts": [
                 {

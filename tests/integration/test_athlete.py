@@ -158,6 +158,59 @@ class TestExperienceLevel:
         assert "experience_level" not in resp.json()["app_settings"]
 
 
+class TestWeeklyHoursDefault:
+    """Default weekly training-hours availability, stored in app_settings (#29)."""
+
+    async def test_valid_range_round_trips(self, client, auth_headers):
+        resp = await client.patch(
+            "/api/athlete",
+            json={"app_settings": {"weekly_hours_min": 4, "weekly_hours_max": 6}},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        settings = resp.json()["app_settings"]
+        assert settings["weekly_hours_min"] == 4
+        assert settings["weekly_hours_max"] == 6
+
+    async def test_inverted_range_rejected(self, client, auth_headers):
+        resp = await client.patch(
+            "/api/athlete",
+            json={"app_settings": {"weekly_hours_min": 8, "weekly_hours_max": 4}},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 400
+
+    async def test_out_of_bounds_rejected(self, client, auth_headers):
+        resp = await client.patch(
+            "/api/athlete",
+            json={"app_settings": {"weekly_hours_max": 100}},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 400
+
+    async def test_non_numeric_rejected(self, client, auth_headers):
+        resp = await client.patch(
+            "/api/athlete",
+            json={"app_settings": {"weekly_hours_min": "lots"}},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 400
+
+    async def test_empty_clears_value(self, client, auth_headers):
+        await client.patch(
+            "/api/athlete",
+            json={"app_settings": {"weekly_hours_min": 4, "weekly_hours_max": 6}},
+            headers=auth_headers,
+        )
+        resp = await client.patch(
+            "/api/athlete",
+            json={"app_settings": {"weekly_hours_min": ""}},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        assert "weekly_hours_min" not in resp.json()["app_settings"]
+
+
 class TestLlmApiKeyHandling:
     """The LLM API key must be encrypted at rest and never returned to the client."""
 

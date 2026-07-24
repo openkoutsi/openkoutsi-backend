@@ -52,6 +52,18 @@ class PlannedWorkoutResponse(BaseModel):
         }
 
 
+class PlanWeekMeta(BaseModel):
+    """Per-week plan metadata surfaced in the plan header/summary (issue #29)."""
+    week_number: int
+    week_type: str  # "build" | "recovery" | "taper"
+    focus: Optional[str] = None
+    target_load: Optional[int] = None
+    target_hours: Optional[float] = None
+    base_load: Optional[int] = None
+
+    model_config = {"from_attributes": True}
+
+
 class PlanAdherenceSummary(BaseModel):
     """Small breakdown of a plan's adherence, alongside the current score."""
     completed: int = 0
@@ -172,6 +184,8 @@ class TrainingPlanResponse(BaseModel):
     workouts: list[PlannedWorkoutResponse] = []
     config: Optional[dict] = None
     generation_method: Optional[str] = None
+    # Per-week metadata (build vs recovery week, focus note, weekly Load/hours).
+    week_meta: Optional[list[PlanWeekMeta]] = None
     # Current "so far" adherence score (0–100) and its breakdown. Null when the
     # plan has nothing contributing yet (empty / just-started).
     adherence_score: Optional[float] = None

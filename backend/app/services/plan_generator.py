@@ -9,7 +9,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.models.user_orm import TrainingPlan, PlannedWorkout
 from openkoutsi.plan_schema import PlanConfig
-from openkoutsi.plan_builder import week_template, build_week_from_config
+from openkoutsi.plan_builder import (
+    week_template, build_week_from_config, build_all_week_meta,
+)
+
+
+def week_meta_for(config: Optional[PlanConfig], num_weeks: int) -> Optional[list[dict]]:
+    """Per-week metadata for a config-driven plan (None for the legacy path)."""
+    if config is None:
+        return None
+    return build_all_week_meta(config, num_weeks)
 
 
 def build_workout_rows(
@@ -54,6 +63,7 @@ async def generate_plan(
         status="active",
         config=config.model_dump() if config else None,
         generation_method="rule_based",
+        week_meta=week_meta_for(config, num_weeks),
     )
     session.add(plan)
     await session.flush()
