@@ -14,7 +14,7 @@ from backend.app.services.llm_workout_generator import (
     _build_user_prompt,
     _parse_steps,
 )
-from backend.app.api.plans import _planned_date
+from backend.app.services.plan_adherence import workout_date
 from backend.app.models.user_orm import PlannedWorkout
 
 
@@ -134,9 +134,9 @@ class TestBuildUserPrompt:
 class TestPlannedDate:
     def test_first_day_is_start_date(self):
         start = date(2025, 6, 2)  # Monday
-        assert _planned_date(start, 1, 1) == start
+        assert workout_date(start, 1, 1) == start
 
     def test_week_and_day_offset(self):
         start = date(2025, 6, 2)
         # Week 2, Wednesday → +7 days +2 days
-        assert _planned_date(start, 2, 3) == date(2025, 6, 11)
+        assert workout_date(start, 2, 3) == date(2025, 6, 11)

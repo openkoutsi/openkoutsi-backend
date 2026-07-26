@@ -646,14 +646,40 @@ class TestFitnessForecast:
         resp = await client.get("/api/metrics/fitness/forecast")
         assert resp.status_code == 401
 
-    async def test_nothing_is_persisted(self, client, auth_headers, session):
+    async def test_the_projection_itself_is_never_persisted(self, client, auth_headers, session):
+        # The endpoint catches metrics up first, so it may write a row for today
+        # — but no projected day may ever reach the DB.
         ath_resp = await client.get("/api/athlete", headers=auth_headers)
         await self._seed_plan(session, ath_resp.json()["id"], loads=[100] * 7)
 
         await client.get("/api/metrics/fitness/forecast?days=30", headers=auth_headers)
 
         stored = (await session.execute(select(DailyMetric))).scalars().all()
-        assert stored == []
+        assert all(m.date <= date.today() for m in stored)
+
+    async def test_result_does_not_depend_on_catch_up_having_run_first(
+        self, client, auth_headers, session
+    ):
+        """The forecast catches up itself, so client call order can't change it.
+
+        Without that, an athlete whose metrics were a few days stale got a
+        different (and always fresher-looking) series depending on whether the
+        dashboard had been visited first.
+        """
+        ath_resp = await client.get("/api/athlete", headers=auth_headers)
+        athlete_id = ath_resp.json()["id"]
+        session.add(DailyMetric(
+            athlete_id=athlete_id, date=date.today() - timedelta(days=5),
+            fitness=50.0, fatigue=40.0, form=10.0, load_day=0.0,
+        ))
+        await self._seed_plan(session, athlete_id, loads=[100] * 7)
+
+        cold = await client.get("/api/metrics/fitness/forecast?days=14", headers=auth_headers)
+        await client.post("/api/metrics/catch-up", headers=auth_headers)
+        warm = await client.get("/api/metrics/fitness/forecast?days=14", headers=auth_headers)
+
+        assert cold.status_code == 200
+        assert cold.json() == warm.json()
 
     async def test_historical_endpoint_is_unchanged(self, client, auth_headers, session):
         """Regression guard: adding the forecast must not alter GET /metrics/fitness."""

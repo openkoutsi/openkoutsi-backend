@@ -66,11 +66,6 @@ router = APIRouter(prefix="/plans", tags=["plans"])
 _GENERATE_WINDOW_DAYS = 6
 
 
-def _planned_date(start_date, week_number: int, day_of_week: int):
-    """Map a planned workout's (week, day) to an absolute calendar date."""
-    return workout_date(start_date, week_number, day_of_week)
-
-
 def _plan_response_with_adherence(plan: TrainingPlan) -> TrainingPlanResponse:
     """Build a TrainingPlanResponse decorated with the derived adherence scores.
 
@@ -825,7 +820,7 @@ async def generate_upcoming_workouts(
     # Select in-window planned workouts, ordered by date.
     selected: list[tuple[PlannedWorkout, date]] = []
     for pw in plan.workouts:
-        pdate = _planned_date(plan.start_date, pw.week_number, pw.day_of_week)
+        pdate = workout_date(plan.start_date, pw.week_number, pw.day_of_week)
         if window_start <= pdate <= window_end:
             selected.append((pw, pdate))
     selected.sort(key=lambda item: item[1])

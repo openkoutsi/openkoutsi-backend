@@ -21,7 +21,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from backend.app.models.user_orm import DailyMetric, TrainingPlan
+from backend.app.models.user_orm import DailyMetric, PlannedWorkout, TrainingPlan
 from backend.app.services.plan_adherence import workout_date
 from openkoutsi.fatigue_metrics import compute_daily_metrics
 
@@ -31,18 +31,30 @@ from openkoutsi.fatigue_metrics import compute_daily_metrics
 DEFAULT_FORECAST_DAYS = 90
 MAX_FORECAST_DAYS = 365
 
+# How far back a seed may be picked up. Callers normally catch metrics up first,
+# so the seed is today and no bridge is needed; this bounds the fallback. Beyond
+# it, the honest seed is the 0.0/0.0 an athlete with no history already gets —
+# the same 180 days (and the same "seed error < 2% after 180 days" reasoning) as
+# ``metrics_engine._RECALCULATE_LOOKBACK_DAYS``. Without a bound, a returning
+# athlete's years-old row would drive thousands of iterations to return 365 rows.
+_MAX_BRIDGE_DAYS = 180
+
 
 async def _seed(
     athlete_id: str, today: date, session: AsyncSession
 ) -> tuple[float, float, date]:
     """Seed Fitness/Fatigue from the most recent ``DailyMetric`` up to *today*.
 
-    Returns ``(fitness, fatigue, seed_date)``. An athlete with no history seeds
-    ``0.0 / 0.0`` at *today*.
+    Returns ``(fitness, fatigue, seed_date)``. An athlete with no history — or
+    none within ``_MAX_BRIDGE_DAYS`` — seeds ``0.0 / 0.0`` at *today*.
     """
     result = await session.execute(
         select(DailyMetric)
-        .where(DailyMetric.athlete_id == athlete_id, DailyMetric.date <= today)
+        .where(
+            DailyMetric.athlete_id == athlete_id,
+            DailyMetric.date <= today,
+            DailyMetric.date >= today - timedelta(days=_MAX_BRIDGE_DAYS),
+        )
         .order_by(DailyMetric.date.desc())
         .limit(1)
     )
@@ -77,9 +89,17 @@ async def planned_load_by_date(
             TrainingPlan.athlete_id == athlete_id,
             TrainingPlan.status == "active",
         )
-        # Only the workouts themselves are needed — unlike plan_adherence, the
-        # projection has no use for the linked activities.
-        .options(selectinload(TrainingPlan.workouts))
+        # Only the workouts themselves are needed. ``linked_activities`` is
+        # declared ``lazy="selectin"``, so it would otherwise hydrate every
+        # column of every linked activity (``analysis`` blob included) for a
+        # sum that never touches them — ``noload`` is what actually stops it.
+        .options(
+            selectinload(TrainingPlan.workouts).noload(PlannedWorkout.linked_activities)
+        )
+        # Sessions run with expire_on_commit=False, so a plan already loaded in
+        # this session could hand back a stale workouts collection — the same
+        # reason plan_adherence._load_active_plans carries this.
+        .execution_options(populate_existing=True)
     )
 
     load_by_date: dict[date, float] = {}
@@ -112,6 +132,9 @@ async def forecast_fitness(
     stopping there: the decaying tail is what detraining looks like, and it
     keeps the chart from ending abruptly mid-taper.
 
+    Pure read — callers wanting the seed caught up to today should run
+    ``catch_up_metrics`` first, as the endpoint does.
+
     Returns the same per-day dicts as :func:`compute_daily_metrics`
     (``date``, ``fitness``, ``fatigue``, ``form``, ``load_day``).
     """
@@ -119,16 +142,19 @@ async def forecast_fitness(
     horizon = today + timedelta(days=days)
 
     fitness, fatigue, seed_date = await _seed(athlete_id, today, session)
+    bridge_start = seed_date + timedelta(days=1)
     load_by_date = await planned_load_by_date(
-        athlete_id, today + timedelta(days=1), horizon, session
+        athlete_id, bridge_start, horizon, session
     )
 
-    # Start from the day after the seed rather than the day after today: when the
-    # last stored metric predates today (catch-up hasn't run yet), the gap is
-    # bridged by zero-load decay instead of being silently skipped.
+    # Start from the day after the seed rather than the day after today. When the
+    # seed predates today (catch-up hasn't run), those days are projected from
+    # the plan like any other — fetching load from the seed rather than from
+    # today is what keeps the bridge from decaying through days the plan says are
+    # training days, which would leave the athlete looking fresher than they are.
     rows = compute_daily_metrics(
         load_by_date,
-        seed_date + timedelta(days=1),
+        bridge_start,
         horizon,
         fitness,
         fatigue,

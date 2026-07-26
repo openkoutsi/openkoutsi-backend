@@ -2660,7 +2660,7 @@
           "metrics"
         ],
         "summary": "Get Fitness Forecast",
-        "description": "Project Fitness/Fatigue/Form forward from the athlete's planned workouts.\n\nCovers ``[today + 1, today + days]``. Computed on read from the currently\nactive plans \u2014 nothing is stored, so the projection always reflects the plan\nas it stands right now. Kept separate from ``GET /metrics/fitness`` so the\nhistorical contract is untouched and the caller decides whether to\nconcatenate the two series.",
+        "description": "Project Fitness/Fatigue/Form forward from the athlete's planned workouts.\n\nCovers ``[today + 1, today + days]``. The projection itself is never stored,\nso it always reflects the plans as they stand right now. Kept separate from\n``GET /metrics/fitness`` so the historical contract is untouched and the\ncaller decides whether to concatenate the two series.\n\nMetrics are caught up first, exactly as the dashboard does via\n``POST /metrics/catch-up``, so the projection is always seeded from today\nrather than from whatever the last stored day happened to be. Without it the\nanswer would depend on whether the client had hit catch-up beforehand.",
         "operationId": "get_fitness_forecast_api_metrics_fitness_forecast_get",
         "security": [
           {

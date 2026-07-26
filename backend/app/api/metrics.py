@@ -130,15 +130,20 @@ async def get_fitness_forecast(
 ):
     """Project Fitness/Fatigue/Form forward from the athlete's planned workouts.
 
-    Covers ``[today + 1, today + days]``. Computed on read from the currently
-    active plans — nothing is stored, so the projection always reflects the plan
-    as it stands right now. Kept separate from ``GET /metrics/fitness`` so the
-    historical contract is untouched and the caller decides whether to
-    concatenate the two series.
+    Covers ``[today + 1, today + days]``. The projection itself is never stored,
+    so it always reflects the plans as they stand right now. Kept separate from
+    ``GET /metrics/fitness`` so the historical contract is untouched and the
+    caller decides whether to concatenate the two series.
+
+    Metrics are caught up first, exactly as the dashboard does via
+    ``POST /metrics/catch-up``, so the projection is always seeded from today
+    rather than from whatever the last stored day happened to be. Without it the
+    answer would depend on whether the client had hit catch-up beforehand.
     """
     ctx, session = ctx_session
     athlete = await _get_athlete(ctx.user_id, session)
 
+    await catch_up_metrics(athlete.id, session)
     rows = await forecast_fitness(athlete.id, session, days=days)
     return [FitnessForecastResponse(**row) for row in rows]
 

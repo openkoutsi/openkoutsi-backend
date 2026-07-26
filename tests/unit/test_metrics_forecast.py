@@ -9,6 +9,7 @@ import pytest
 
 from backend.app.models.user_orm import DailyMetric, PlannedWorkout, TrainingPlan
 from backend.app.services.metrics_forecast import (
+    _MAX_BRIDGE_DAYS,
     forecast_fitness,
     planned_load_by_date,
 )
@@ -178,9 +179,42 @@ class TestForecastFitness:
         assert all(row["fatigue"] == 0.0 for row in rows)
         assert all(row["form"] == 0.0 for row in rows)
 
-    async def test_stale_seed_is_bridged_by_decay(self, session, seeded_athlete):
-        # Last stored metric is a week old (catch-up hasn't run). The gap must be
-        # decayed through, not skipped, and the series must still start tomorrow.
+    async def test_stale_seed_bridges_across_the_plan_not_through_rest(
+        self, session, seeded_athlete
+    ):
+        # Regression: the bridge across a stale seed used to fetch planned load
+        # only from today onwards, so the gap decayed as pure rest even when the
+        # plan prescribed work there — always in the "you're fresher than you
+        # are" direction. The gap must carry the plan's prescribed load.
+        session.add(
+            DailyMetric(
+                athlete_id=seeded_athlete.id, date=_TODAY - timedelta(days=7),
+                fitness=50.0, fatigue=40.0, form=10.0, load_day=0.0,
+            )
+        )
+        # A plan starting a week before today, prescribing 100 Load every day —
+        # so it covers the whole bridge as well as the days ahead.
+        await _make_plan(
+            session, seeded_athlete.id,
+            [(week, day, 100) for week in range(1, 4) for day in range(1, 8)],
+            start=_TODAY - timedelta(days=7),
+            weeks=3,
+        )
+
+        rows = await forecast_fitness(seeded_athlete.id, session, days=5, today=_TODAY)
+
+        # Training through the gap keeps fatigue up; a rest bridge would have all
+        # but erased it (7-day constant over 8 days) and made Form look positive.
+        assert rows[0]["fatigue"] > 40.0
+        assert rows[0]["form"] < 0.0
+
+    async def test_stale_seed_with_no_plan_decays_through_the_gap(
+        self, session, seeded_athlete
+    ):
+        # Last stored metric is a week old (catch-up hasn't run). With no plan
+        # covering the gap there is nothing to project, so it decays — but the
+        # days must be decayed through, not skipped, and the series must still
+        # start tomorrow.
         session.add(
             DailyMetric(
                 athlete_id=seeded_athlete.id, date=_TODAY - timedelta(days=7),
@@ -197,6 +231,45 @@ class TestForecastFitness:
         # further than fitness (42-day constant).
         assert rows[0]["fitness"] < 50.0
         assert rows[0]["fatigue"] < 20.0
+
+    async def test_seed_older_than_the_bridge_bound_is_ignored(
+        self, session, seeded_athlete
+    ):
+        # A returning athlete's years-old row must not seed the recurrence: past
+        # the bound the honest seed is 0/0, and running the bridge from it would
+        # be thousands of iterations of numerically spent state.
+        session.add(
+            DailyMetric(
+                athlete_id=seeded_athlete.id,
+                date=_TODAY - timedelta(days=_MAX_BRIDGE_DAYS + 1),
+                fitness=80.0, fatigue=70.0, form=10.0, load_day=0.0,
+            )
+        )
+        await session.commit()
+
+        rows = await forecast_fitness(seeded_athlete.id, session, days=3, today=_TODAY)
+
+        assert rows[0]["date"] == _TODAY + timedelta(days=1)
+        assert all(row["fitness"] == 0.0 for row in rows)
+        assert all(row["fatigue"] == 0.0 for row in rows)
+
+    async def test_seed_just_inside_the_bridge_bound_is_used(
+        self, session, seeded_athlete
+    ):
+        session.add(
+            DailyMetric(
+                athlete_id=seeded_athlete.id,
+                date=_TODAY - timedelta(days=_MAX_BRIDGE_DAYS),
+                fitness=80.0, fatigue=70.0, form=10.0, load_day=0.0,
+            )
+        )
+        await session.commit()
+
+        rows = await forecast_fitness(seeded_athlete.id, session, days=3, today=_TODAY)
+
+        # Carried forward and decayed over the bridge — Fitness is well down from
+        # 80 after 180 days of rest, but has not reached zero.
+        assert 0.0 < rows[0]["fitness"] < 80.0
 
     async def test_future_metric_rows_do_not_seed_the_forecast(
         self, session, seeded_athlete
