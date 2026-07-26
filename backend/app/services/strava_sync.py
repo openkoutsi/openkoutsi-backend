@@ -253,8 +253,10 @@ async def _process_event_for_user(
         # the deterministic adherence snapshot so the score moves on ingest.
         from backend.app.services.activity_workout_matcher import find_and_link_workout
         from backend.app.services.plan_adherence import catch_up_adherence
+        from backend.app.services.achievements import recompute_achievements_safe
         await find_and_link_workout(session, athlete.id, activity)
         await catch_up_adherence(athlete.id, session)
+        await recompute_achievements_safe(athlete.id, session)
 
         app_cfg = athlete.app_settings or {}
         # Issue #9: skip instance-paid auto hooks for denied users on a gated

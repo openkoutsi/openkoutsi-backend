@@ -68,10 +68,37 @@ _WORKOUT_TYPE_TO_CATEGORY: dict[str, str] = {
 }
 
 
-def _activity_category(sport_type: Optional[str]) -> Optional[str]:
+def activity_category(sport_type: Optional[str]) -> Optional[str]:
+    """Canonical sport category for an activity's ``sport_type``, or None.
+
+    ``None`` for an unrecognised sport is the safe answer *for matching* —
+    better to leave an activity unlinked than to attach it to the wrong planned
+    workout. Use :func:`counting_category` where an unknown sport should still
+    count as a sport.
+    """
     if not sport_type:
         return None
     return _ACTIVITY_SPORT_TO_CATEGORY.get(sport_type)
+
+
+def counting_category(sport_type: Optional[str]) -> Optional[str]:
+    """Sport identity for *counting distinct sports* (issue #33).
+
+    Same folding as :func:`activity_category` — a Ride, a GravelRide and a
+    MountainBikeRide are one sport, not three — but an unmapped sport falls back
+    to its raw ``sport_type`` instead of vanishing. The map covers the common
+    types, not the long tail (InlineSkate, Elliptical, RockClimbing,
+    StandUpPaddling, …), and for matching that omission is harmless; for counting
+    it would leave a genuinely multi-sport athlete stuck at one sport with
+    nothing on screen to explain why.
+
+    Note the map now serves two features with different needs: folding a new
+    ``sport_type`` into an existing category to fix a *matching* bug also merges
+    it for *counting*, which can re-date or revoke a multisport badge.
+    """
+    if not sport_type:
+        return None
+    return _ACTIVITY_SPORT_TO_CATEGORY.get(sport_type) or sport_type
 
 
 def _workout_category(workout_type: Optional[str]) -> Optional[str]:
@@ -106,7 +133,7 @@ def sports_match(activity_sport: Optional[str], workout_type: Optional[str]) -> 
     (cycling, running, swimming).  Sport-specific workout types only match their sport.
     Non-endurance activities (yoga, walking, strength) never match generic types.
     """
-    act_cat = _activity_category(activity_sport)
+    act_cat = activity_category(activity_sport)
     wo_cat = _workout_category(workout_type)
 
     if act_cat is None:

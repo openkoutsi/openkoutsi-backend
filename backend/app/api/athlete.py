@@ -22,6 +22,7 @@ from backend.app.api.power import all_time_power_bests
 from backend.app.models.message_orm import Message
 from backend.app.models.registry_orm import InstanceSettings, ProviderConnection, User
 from backend.app.models.user_orm import (
+    AchievementUnlock,
     Activity,
     Athlete,
     DailyMetric,
@@ -424,6 +425,11 @@ async def get_training_status(
     if stale:
         from backend.app.services.plan_adherence import catch_up_adherence
         await catch_up_adherence(athlete.id, session)
+        # Achievements piggyback the same daily first-read cadence (issue #33),
+        # so streaks stay current for an athlete who hasn't uploaded in a while.
+        # Deferred import for the same reason as catch_up_adherence above.
+        from backend.app.services.achievements import recompute_achievements_safe
+        await recompute_achievements_safe(athlete.id, session)
 
     # Recover from a stuck "pending" state: if the task hasn't completed within
     # the timeout window, reset to "error" so the user can retry.
@@ -723,6 +729,29 @@ async def _export_weight_log(athlete: Athlete, session: AsyncSession) -> list[di
     ]
 
 
+async def _export_achievements(athlete: Athlete, session: AsyncSession) -> list[dict]:
+    """Earned achievement tiers (issue #33).
+
+    The catalogue itself is code, not data, so only the unlocks are exported —
+    the ids are the stable machine keys the API uses.
+    """
+    result = await session.execute(
+        select(AchievementUnlock)
+        .where(AchievementUnlock.athlete_id == athlete.id)
+        .order_by(AchievementUnlock.achieved_on)
+    )
+    return [
+        {
+            "achievement_id": u.achievement_id,
+            "tier": u.tier,
+            "achieved_on": _iso(u.achieved_on),
+            "created_at": _iso(u.created_at),
+            "context": u.context,
+        }
+        for u in result.scalars().all()
+    ]
+
+
 @router.get("/export",
             operation_id="exportAthlete", summary="Export all athlete data as a zip")
 async def export_athlete(
@@ -762,6 +791,7 @@ async def export_athlete(
         "personal_records.json": personal_records,
         "inbox.json": await _export_inbox(session),
         "weight_log.json": await _export_weight_log(athlete, session),
+        "achievements.json": await _export_achievements(athlete, session),
     }
 
     buf = io.BytesIO()

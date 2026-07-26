@@ -5241,6 +5241,84 @@
         }
       }
     },
+    "/api/achievements": {
+      "get": {
+        "tags": [
+          "achievements"
+        ],
+        "summary": "Achievements, progress and streaks",
+        "description": "Catalogue, earned tiers, progress toward the locked ones, and streaks.\n\nAchievements whose data requirement the athlete cannot meet (elevation\nwithout a barometric FIT, Load without power or HR) are left out of the\ncatalogue entirely rather than shown permanently locked.",
+        "operationId": "getAchievements",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AchievementsResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
+    "/api/achievements/streaks": {
+      "get": {
+        "tags": [
+          "achievements"
+        ],
+        "summary": "Current and longest streaks",
+        "description": "Just the streaks, for the dashboard card.",
+        "operationId": "getStreaks",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/StreakResponse"
+                  },
+                  "type": "array",
+                  "title": "Response Getstreaks"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
+    "/api/achievements/seen": {
+      "post": {
+        "tags": [
+          "achievements"
+        ],
+        "summary": "Clear the new-achievement marker",
+        "description": "Mark every unlock as seen, so the UI stops flagging them as new.\n\nPurely a UI marker \u2014 it has no bearing on the inbox message, which is emitted\nonce by the reconcile that first inserted the row.",
+        "operationId": "markAchievementsSeen",
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ]
+      }
+    },
     "/api/version": {
       "get": {
         "summary": "Get Version",
@@ -5279,6 +5357,148 @@
           "value"
         ],
         "title": "AbsoluteSpec"
+      },
+      "AchievementDefinition": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "category": {
+            "type": "string",
+            "title": "Category"
+          },
+          "tiers": {
+            "items": {
+              "type": "number"
+            },
+            "type": "array",
+            "title": "Tiers"
+          },
+          "unit": {
+            "type": "string",
+            "title": "Unit"
+          },
+          "requires": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Requires"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "category",
+          "tiers",
+          "unit"
+        ],
+        "title": "AchievementDefinition",
+        "description": "One catalogue entry, as the frontend needs it to render a badge."
+      },
+      "AchievementUnlockResponse": {
+        "properties": {
+          "achievement_id": {
+            "type": "string",
+            "title": "Achievement Id"
+          },
+          "tier": {
+            "type": "number",
+            "title": "Tier"
+          },
+          "achieved_on": {
+            "type": "string",
+            "format": "date",
+            "title": "Achieved On"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
+          },
+          "seen": {
+            "type": "boolean",
+            "title": "Seen",
+            "default": false
+          },
+          "context": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Context"
+          }
+        },
+        "type": "object",
+        "required": [
+          "achievement_id",
+          "tier",
+          "achieved_on"
+        ],
+        "title": "AchievementUnlockResponse",
+        "description": "An earned tier."
+      },
+      "AchievementsResponse": {
+        "properties": {
+          "catalogue": {
+            "items": {
+              "$ref": "#/components/schemas/AchievementDefinition"
+            },
+            "type": "array",
+            "title": "Catalogue"
+          },
+          "unlocked": {
+            "items": {
+              "$ref": "#/components/schemas/AchievementUnlockResponse"
+            },
+            "type": "array",
+            "title": "Unlocked"
+          },
+          "progress": {
+            "additionalProperties": {
+              "type": "number"
+            },
+            "type": "object",
+            "title": "Progress"
+          },
+          "streaks": {
+            "items": {
+              "$ref": "#/components/schemas/StreakResponse"
+            },
+            "type": "array",
+            "title": "Streaks"
+          },
+          "disabled": {
+            "type": "boolean",
+            "title": "Disabled",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "catalogue",
+          "unlocked",
+          "progress",
+          "streaks"
+        ],
+        "title": "AchievementsResponse"
       },
       "ActivityDetailResponse": {
         "properties": {
@@ -9438,6 +9658,35 @@
           "reason"
         ],
         "title": "SkipWorkoutRequest"
+      },
+      "StreakResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "current": {
+            "type": "integer",
+            "title": "Current"
+          },
+          "longest": {
+            "type": "integer",
+            "title": "Longest"
+          },
+          "in_progress": {
+            "type": "boolean",
+            "title": "In Progress",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "current",
+          "longest"
+        ],
+        "title": "StreakResponse",
+        "description": "Current and best run for one streak type."
       },
       "TimeDuration": {
         "properties": {
