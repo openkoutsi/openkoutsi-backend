@@ -56,8 +56,19 @@ class StreakResponse(BaseModel):
 class AchievementsResponse(BaseModel):
     catalogue: list[AchievementDefinition]
     unlocked: list[AchievementUnlockResponse]
-    # achievement_id → current value in the definition's unit, for "42 / 50"
-    # progress rendering on locked badges.
+    # achievement_id → the value the tiers are compared against, in the
+    # definition's unit. Render as "{progress} / {next locked tier}".
+    #
+    # It is *not* clamped to the next tier, so three exceptions are worth knowing
+    # about before rendering:
+    #   - `plan_flawless` counts flawless plans against a single tier of 1, so it
+    #     can read 3 against a maximum of 1. Only render progress toward a tier
+    #     that is still locked and the case disappears.
+    #   - `comeback` is 0 or 1 — it has no partial state to show.
+    #   - streaks report the *current* run, which during an unfinished period is
+    #     last period's run (see `StreakResponse.in_progress`). A streak can
+    #     therefore read 4/4 while tier 4 is still locked: this week hasn't
+    #     closed yet.
     progress: dict[str, float]
     streaks: list[StreakResponse]
     # True when the athlete has opted out; the UI hides the feature entirely.

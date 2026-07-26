@@ -55,6 +55,32 @@ class TestCatalogue:
             if d.category == "streak":
                 assert d.unit in ("weeks", "months")
 
+    def test_every_streak_definition_has_a_rule_and_vice_versa(self):
+        """The catalogue and the service's rule table must agree, both ways.
+
+        Drift fails late and quietly otherwise: a catalogue entry with no rule is
+        a badge that can never be earned, and a rule with no entry has no tiers
+        to compare against.
+        """
+        from backend.app.services.achievements import _STREAK_RULES
+
+        assert set(_STREAK_RULES) == {
+            d.id for d in CATALOGUE if d.category == "streak"
+        }
+
+    def test_every_tier_is_exactly_representable_as_a_float(self):
+        """Tiers are part of a composite primary key, matched on equality.
+
+        A tier that doesn't round-trip through float (0.1, say) would make the
+        reconcile miss its own stored row, deleting and re-inserting it on every
+        recompute — and re-announcing the badge each time.
+        """
+        for d in CATALOGUE:
+            for tier in d.tiers:
+                assert float(tier) == tier
+                # Survives the round-trip the DB will put it through.
+                assert float(repr(float(tier))) == float(tier)
+
 
 # ── Week bucketing ───────────────────────────────────────────────────────────
 

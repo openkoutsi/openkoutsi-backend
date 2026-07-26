@@ -17,12 +17,11 @@ import logging
 import time
 from datetime import date, datetime, timedelta, timezone
 from typing import AsyncIterator
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-
 import httpx
 from sqlalchemy import select
 
 from ..core.ssrf import check_url_safe
+from ..core.timezones import local_now
 from ..db.registry import _RegistrySessionLocal
 from ..db.user_session import get_user_session_factory
 from ..models.registry_orm import InstanceSettings
@@ -99,12 +98,14 @@ _COACHING_STYLE_PROMPTS: dict[str, str] = {
 
 
 def _local_now(tz_str: str | None) -> datetime:
-    if tz_str:
-        try:
-            return datetime.now(ZoneInfo(tz_str))
-        except ZoneInfoNotFoundError:
-            pass
-    return datetime.now(timezone.utc)
+    """Kept as the historical import site; the rules live in one shared place.
+
+    ``llm_goal_guidance`` and ``api/athlete`` already import this name, so it
+    stays — but it now delegates, so the UTC fallback and the set of exceptions
+    swallowed are decided once (``backend.app.core.timezones``) rather than
+    drifting per consumer.
+    """
+    return local_now(tz_str)
 
 
 def _build_system_prompt(locale: str | None = None, coaching_style: str | None = None) -> str:

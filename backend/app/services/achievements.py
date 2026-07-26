@@ -21,13 +21,14 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
-from typing import Callable, Iterable, Optional
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from typing import Callable, Optional
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from backend.app.core.timezones import resolve_zone
 from backend.app.models.user_orm import (
     AchievementUnlock,
     Activity,
@@ -56,7 +57,7 @@ from openkoutsi.achievements import (
     streak_tier_dates,
     threshold_tier_dates,
 )
-from openkoutsi.sport_matching import activity_category
+from openkoutsi.sport_matching import counting_category
 
 log = logging.getLogger(__name__)
 
@@ -95,13 +96,7 @@ def _local_day(dt: Optional[datetime], tz: Optional[ZoneInfo]) -> Optional[date]
 
 
 def _zone(athlete: Athlete) -> Optional[ZoneInfo]:
-    tz_str = (athlete.app_settings or {}).get("timezone")
-    if not tz_str:
-        return None
-    try:
-        return ZoneInfo(tz_str)
-    except (ZoneInfoNotFoundError, ValueError):
-        return None
+    return resolve_zone((athlete.app_settings or {}).get("timezone"))
 
 
 @dataclass
@@ -116,19 +111,35 @@ class AchievementComputation:
     streaks: dict[str, StreakState] = field(default_factory=dict)
     # requirement keys the athlete's data actually supports ("distance", …)
     available: set[str] = field(default_factory=set)
-    # achievement_id → deep-link payload for the earning activity, when there is one
-    context: dict[str, dict] = field(default_factory=dict)
+    # achievement_id → {tier: deep-link payload}. Keyed by tier, not just by
+    # achievement: the ride that earned a 2-hour badge is usually not the one
+    # that earned the 5-hour badge, and a single payload per achievement would
+    # point every tier at whichever one happened to be biggest.
+    context: dict[str, dict[float, dict]] = field(default_factory=dict)
 
     def is_available(self, achievement_id: str) -> bool:
-        requires = CATALOGUE_BY_ID[achievement_id].requires
-        return requires is None or requires in self.available
+        """Whether the athlete's data can ever satisfy this achievement.
+
+        Unknown ids read as unavailable rather than raising — a catalogue/rules
+        mismatch should hide a badge, not 500 the achievements page.
+        """
+        definition = CATALOGUE_BY_ID.get(achievement_id)
+        if definition is None:
+            return False
+        return definition.requires is None or definition.requires in self.available
 
 
 def _first_activity_reaching(
     facts: list[ActivityFact], value_of: Callable[[ActivityFact], float], tier: float
 ) -> Optional[str]:
-    """Id of the earliest activity whose value clears *tier* (for deep-linking)."""
-    for fact in sorted(facts, key=lambda f: f.day):
+    """Id of the earliest activity whose value clears *tier* (for deep-linking).
+
+    Ties broken on ``activity_id`` so two same-day rides that both clear the tier
+    always resolve to the same one — otherwise the stored deep link would depend
+    on the order the DB happened to return rows, and two recomputes over
+    identical data could disagree.
+    """
+    for fact in sorted(facts, key=lambda f: (f.day, f.activity_id or "")):
         if value_of(fact) >= tier:
             return fact.activity_id
     return None
@@ -168,7 +179,7 @@ async def _load_facts(
                 distance_m=row.distance_m or 0.0,
                 elevation_m=row.elevation_m or 0.0,
                 load=row.load or 0.0,
-                sport=activity_category(row.sport_type),
+                sport=counting_category(row.sport_type),
                 has_rpe=row.rpe is not None,
                 has_notes=bool((row.notes or "").strip()),
                 labels=labels,
@@ -179,7 +190,15 @@ async def _load_facts(
 
 
 def _tiers(achievement_id: str) -> tuple[float, ...]:
-    return CATALOGUE_BY_ID[achievement_id].tiers
+    """Tiers for an id, empty for an unknown one.
+
+    ``_STREAK_RULES`` and the catalogue have to agree; ``test_achievements_math``
+    asserts they do. Returning empty rather than raising means that if they ever
+    drift anyway, the badge quietly can't be earned instead of 500-ing the
+    achievements page.
+    """
+    definition = CATALOGUE_BY_ID.get(achievement_id)
+    return definition.tiers if definition else ()
 
 
 def _compute_activity_rules(
@@ -267,24 +286,29 @@ def _compute_activity_rules(
         )
 
     # ── Deep links for the single-activity badges ────────────────────────────
+    # Resolved per tier, so the 2-hour badge links to the first 2-hour ride and
+    # the 5-hour badge to the first 5-hour one.
     for achievement_id, value_of in (
         ("long_activity", lambda f: f.duration_s / 3600),
         ("single_ride_distance", lambda f: f.distance_m / 1000),
         ("single_ride_elevation", lambda f: f.elevation_m),
         ("everesting", lambda f: f.elevation_m),
     ):
-        earned = comp.tier_dates.get(achievement_id) or {}
-        if not earned:
-            continue
-        best_tier = max(earned)
-        activity_id = _first_activity_reaching(facts, value_of, best_tier)
-        if activity_id:
-            comp.context[achievement_id] = {"activity_id": activity_id}
+        per_tier: dict[float, dict] = {}
+        for tier in (comp.tier_dates.get(achievement_id) or {}):
+            activity_id = _first_activity_reaching(facts, value_of, tier)
+            if activity_id:
+                per_tier[float(tier)] = {"activity_id": activity_id}
+        if per_tier:
+            comp.context[achievement_id] = per_tier
 
     if returned:
-        match = next((f for f in facts if f.day == returned), None)
-        if match and match.activity_id:
-            comp.context["comeback"] = {"activity_id": match.activity_id}
+        candidates = sorted(
+            (f for f in facts if f.day == returned),
+            key=lambda f: f.activity_id or "",
+        )
+        if candidates and candidates[0].activity_id:
+            comp.context["comeback"] = {1.0: {"activity_id": candidates[0].activity_id}}
 
     # ── Availability ─────────────────────────────────────────────────────────
     if any(f.distance_m for f in facts):
@@ -304,6 +328,12 @@ async def _compute_plan_rules(
     scored directly with :func:`score_plan` as of its end date. Reusing that one
     function means a badge can never disagree with the adherence number shown on
     the plan page.
+
+    Completion is deliberately **date-and-content based, not status based**:
+    ``plan.status`` is never read. A plan counts once its end date has passed and
+    at least one of its sessions was actually done. Archiving is how the app
+    makes room for an overlapping plan, not a statement about whether the work
+    happened — a block you rode and then archived is still a block you rode.
     """
     result = await session.execute(
         select(TrainingPlan)
@@ -354,7 +384,7 @@ async def _compute_plan_rules(
     comp.progress["plan_adherence"] = max((s for _, s in scores), default=0.0)
 
     for achievement_id, plan_id in plan_context.items():
-        comp.context[achievement_id] = {"plan_id": plan_id}
+        comp.context[achievement_id] = {1.0: {"plan_id": plan_id}}
 
 
 async def _compute_goal_rules(
@@ -405,22 +435,29 @@ async def compute_achievements(
 
 
 async def recompute_achievements(
-    athlete_id: str, session: AsyncSession, today: Optional[date] = None
-) -> list[AchievementUnlock]:
+    athlete_id: str,
+    session: AsyncSession,
+    today: Optional[date] = None,
+    athlete: Optional[Athlete] = None,
+) -> tuple[list[AchievementUnlock], Optional[AchievementComputation]]:
     """Reconcile stored unlocks with what the athlete's data currently earns.
 
-    Inserts newly earned tiers, corrects an ``achieved_on`` that history has
-    moved (back-filling an old ride makes a badge *older*, not newer), and
-    deletes tiers the data no longer supports. Idempotent: a second run over
-    unchanged data writes nothing.
+    Inserts newly earned tiers, corrects an ``achieved_on`` or a ``context`` that
+    history has moved (back-filling an old ride makes a badge *older*, not
+    newer), and deletes tiers the data no longer supports. Idempotent: a second
+    run over unchanged data writes nothing.
 
-    Returns the rows created by this call, so the caller can notify on them.
+    Returns ``(created_rows, computation)`` — the rows are what the caller
+    notifies on, and handing back the computation lets a read endpoint render
+    the response without scanning the athlete's whole history a second time.
+    Pass *athlete* when the caller already has the row.
     """
-    athlete = (
-        await session.execute(select(Athlete).where(Athlete.id == athlete_id))
-    ).scalar_one_or_none()
+    if athlete is None:
+        athlete = (
+            await session.execute(select(Athlete).where(Athlete.id == athlete_id))
+        ).scalar_one_or_none()
     if athlete is None or not gamification_enabled(athlete):
-        return []
+        return [], None
 
     comp = await compute_achievements(athlete, session, today)
 
@@ -435,18 +472,24 @@ async def recompute_achievements(
         ).scalars()
     }
 
+    # Note there is deliberately no `is_available` filter here: availability
+    # governs what the API *shows*, not what was earned. An athlete with no
+    # elevation data has no elevation tier dates anyway, so filtering again would
+    # only add a way for a transient data gap to revoke and then re-grant a tier
+    # — and each re-grant is a fresh row, which means a fresh inbox message.
     earned: dict[tuple[str, float], date] = {}
-    for definition in CATALOGUE:
-        if not comp.is_available(definition.id):
+    for achievement_id, tiers in comp.tier_dates.items():
+        if achievement_id not in CATALOGUE_BY_ID:
             continue
-        for tier, when in (comp.tier_dates.get(definition.id) or {}).items():
-            earned[(definition.id, float(tier))] = when
+        for tier, when in tiers.items():
+            earned[(achievement_id, float(tier))] = when
 
     created: list[AchievementUnlock] = []
     changed = False
 
     for key, when in earned.items():
         achievement_id, tier = key
+        context = comp.context.get(achievement_id, {}).get(tier)
         row = existing.get(key)
         if row is None:
             row = AchievementUnlock(
@@ -454,15 +497,20 @@ async def recompute_achievements(
                 achievement_id=achievement_id,
                 tier=tier,
                 achieved_on=when,
-                notified=False,
-                context=comp.context.get(achievement_id),
+                context=context,
             )
             session.add(row)
             created.append(row)
             changed = True
-        elif row.achieved_on != when:
-            row.achieved_on = when
-            changed = True
+        else:
+            # Context is re-derived, not just filled in once: a deep link to a
+            # since-deleted activity would otherwise stay a dead link forever.
+            if row.achieved_on != when:
+                row.achieved_on = when
+                changed = True
+            if row.context != context:
+                row.context = context
+                changed = True
 
     for key, row in existing.items():
         if key not in earned:
@@ -472,32 +520,33 @@ async def recompute_achievements(
     if changed:
         await session.commit()
     if created:
-        await _notify(athlete, created, session)
-    return created
+        await _notify(athlete, created)
+    return created, comp
 
 
-async def _notify(
-    athlete: Athlete, created: list[AchievementUnlock], session: AsyncSession
-) -> None:
+async def _notify(athlete: Athlete, created: list[AchievementUnlock]) -> None:
     """Put one inbox message in front of the athlete for a batch of unlocks.
 
     One message per *recompute*, not per tier: importing a season of history at
     once can earn a dozen tiers, and a dozen separate messages would read as
     spam. A single unlock names itself; a batch is summarised by count, and the
     frontend picks the template from ``count``.
+
+    Deduplication is structural rather than flag-based: a recompute over
+    unchanged data inserts nothing, so there is nothing to announce. The one case
+    that does re-announce is a genuine revoke-then-re-earn — delete the ride that
+    earned a badge and upload it again and the badge is announced afresh. That is
+    an accepted consequence of unlocks being a pure function of the data, and it
+    takes a deliberate act by the athlete to trigger.
+
+    Runs on its own session so a delivery failure cannot leave the caller's
+    session dirty; ``notify_user`` writes to the same per-user DB.
     """
     try:
         data: dict = {"count": len(created)}
         if len(created) == 1:
             data["achievement_id"] = created[0].achievement_id
             data["tier"] = created[0].tier
-
-        # Flag first: a message we fail to deliver is a far smaller problem than
-        # one delivered again on every subsequent recompute.
-        for row in created:
-            row.notified = True
-        await session.commit()
-
         await notify_user(athlete.global_user_id, ACHIEVEMENT_UNLOCKED, data)
     except Exception:
         log.warning(
@@ -509,9 +558,23 @@ async def recompute_achievements_safe(athlete_id: str, session: AsyncSession) ->
     """Fire-and-forget wrapper for the ingest paths.
 
     Achievements are a nice-to-have on top of an upload; a failure here must
-    never fail the upload itself or block a sync, so it is logged and swallowed.
+    never fail the upload itself or block a sync.
+
+    Swallowing the exception is not enough for that, because the caller carries
+    on using this same session: a failure part-way through leaves the reconcile's
+    pending adds and deletes in the identity map (which the caller's next commit
+    would then persist), and a failure *during* commit leaves the session needing
+    a rollback, so the caller's next statement raises ``PendingRollbackError``.
+    Rolling back here is what actually isolates the caller.
+
+    Precondition: every call site commits its own work before calling this, so
+    the rollback can only ever discard achievement state.
     """
     try:
         await recompute_achievements(athlete_id, session)
     except Exception:
         log.warning("Achievement recompute failed for athlete %s", athlete_id, exc_info=True)
+        try:
+            await session.rollback()
+        except Exception:
+            log.warning("Rollback after failed achievement recompute failed", exc_info=True)

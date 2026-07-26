@@ -41,7 +41,6 @@ def upgrade() -> None:
             sa.Column("tier", sa.Float(), nullable=False),
             sa.Column("achieved_on", sa.Date(), nullable=False),
             sa.Column("created_at", sa.DateTime(timezone=True), nullable=True),
-            sa.Column("notified", sa.Boolean(), nullable=False, server_default="0"),
             sa.Column("seen", sa.Boolean(), nullable=False, server_default="0"),
             sa.Column("context", sa.JSON(), nullable=True),
             sa.ForeignKeyConstraint(

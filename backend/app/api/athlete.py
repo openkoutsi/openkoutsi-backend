@@ -427,6 +427,7 @@ async def get_training_status(
         await catch_up_adherence(athlete.id, session)
         # Achievements piggyback the same daily first-read cadence (issue #33),
         # so streaks stay current for an athlete who hasn't uploaded in a while.
+        # Deferred import for the same reason as catch_up_adherence above.
         from backend.app.services.achievements import recompute_achievements_safe
         await recompute_achievements_safe(athlete.id, session)
 

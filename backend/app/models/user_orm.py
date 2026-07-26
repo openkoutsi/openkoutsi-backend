@@ -319,16 +319,24 @@ class AchievementUnlock(UserBase):
         String, ForeignKey("athletes.id", ondelete="CASCADE"), primary_key=True
     )
     achievement_id: Mapped[str] = mapped_column(String, primary_key=True)
+    # Float so a future fractional tier (a 3.0 W/kg badge) fits without a
+    # migration. The reconcile matches stored rows to computed ones on tier
+    # *equality*, so every catalogue tier must be exactly representable as a
+    # float — a value like 2.5 is fine, 0.1 is not. A non-representable tier
+    # would never match, so every recompute would delete and re-insert the row,
+    # announcing the badge again on every single upload.
+    # ``test_achievements_math`` asserts the catalogue holds to this.
     tier: Mapped[float] = mapped_column(Float, primary_key=True)
     achieved_on: Mapped[date] = mapped_column(Date, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
-    # Two distinct flags: ``notified`` is set once the server has emitted the
-    # inbox message, ``seen`` once the athlete has actually looked at the badge
-    # in the UI. Conflating them would let opening the achievements page
-    # suppress an inbox message that was never sent.
-    notified: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Whether the athlete has looked at this badge in the UI. There is no
+    # matching "notified" flag: the inbox message is driven by which rows a
+    # reconcile *inserted*, and a reconcile over unchanged data inserts nothing,
+    # so a stored flag would have had nothing left to dedupe.
     seen: Mapped[bool] = mapped_column(Boolean, default=False)
-    # Optional deep-link payload, e.g. {"activity_id": …} or {"plan_id": …}.
+    # Optional deep-link payload for this specific tier, e.g. {"activity_id": …}
+    # or {"plan_id": …}. Re-derived on every reconcile, so a link to a deleted
+    # activity doesn't linger.
     context: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
 

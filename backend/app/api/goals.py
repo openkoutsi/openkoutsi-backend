@@ -18,6 +18,7 @@ from backend.app.schemas.goals import (
     GoalUpdate,
 )
 from backend.app.schemas.pagination import Page, PageParams, paginate_params
+from backend.app.services.achievements import recompute_achievements_safe
 
 router = APIRouter(prefix="/goals", tags=["goals"])
 
@@ -92,7 +93,6 @@ async def update_goal(
     await session.refresh(goal)
     # Marking a goal achieved can unlock a badge (issue #33); un-marking it
     # takes the badge back, since unlocks track the data rather than events.
-    from backend.app.services.achievements import recompute_achievements_safe
     await recompute_achievements_safe(athlete.id, session)
     return goal
 

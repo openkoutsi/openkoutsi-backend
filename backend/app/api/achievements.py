@@ -56,8 +56,13 @@ async def get_achievements(ctx_session=Depends(get_ctx_and_session)):
             catalogue=[], unlocked=[], progress={}, streaks=[], disabled=True
         )
 
-    await recompute_achievements(athlete.id, session)
-    comp = await compute_achievements(athlete, session)
+    # One pass: the reconcile hands back the computation it already built, so a
+    # read scans the athlete's history once rather than twice.
+    _, comp = await recompute_achievements(athlete.id, session, athlete=athlete)
+    if comp is None:
+        return AchievementsResponse(
+            catalogue=[], unlocked=[], progress={}, streaks=[], disabled=True
+        )
 
     catalogue = [
         AchievementDefinition(
@@ -113,13 +118,21 @@ async def get_streaks(ctx_session=Depends(get_ctx_and_session)):
     ]
 
 
+# Deliberately no staleness gate on the reads above, unlike
+# ``get_training_status``. Some achievements turn on time passing rather than on
+# an upload — a plan becomes "completed" the day after its end date, and a streak
+# lapses when a week closes — so a read that skipped the recompute would show
+# stale badges to an athlete who simply hasn't ridden lately. Now that a read
+# costs one pass rather than two, paying it is the cheaper trade.
+
+
 @router.post("/seen", status_code=204,
              operation_id="markAchievementsSeen", summary="Clear the new-achievement marker")
 async def mark_seen(ctx_session=Depends(get_ctx_and_session)):
     """Mark every unlock as seen, so the UI stops flagging them as new.
 
-    Deliberately separate from ``notified``: dismissing the marker here must not
-    cancel an inbox message the server hasn't sent yet.
+    Purely a UI marker — it has no bearing on the inbox message, which is emitted
+    once by the reconcile that first inserted the row.
     """
     ctx, session = ctx_session
     athlete = await _get_athlete(ctx.user_id, session)

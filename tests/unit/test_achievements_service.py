@@ -27,6 +27,16 @@ from backend.app.services.achievements import (
 _TODAY = date(2026, 7, 22)  # A Wednesday
 
 
+async def _recompute(session, athlete, today=_TODAY):
+    """Run a reconcile and hand back just the newly created rows.
+
+    ``recompute_achievements`` returns ``(created, computation)`` so a read
+    endpoint can reuse the computation; the tests only care about the rows.
+    """
+    created, _ = await recompute_achievements(athlete.id, session, today=today)
+    return created
+
+
 def _activity(session, athlete, *, day, **kwargs):
     act = Activity(
         athlete_id=athlete.id,
@@ -53,7 +63,7 @@ class TestBasicUnlocks:
         _activity(session, seeded_athlete, day=_TODAY, duration_s=3600)
         await session.commit()
 
-        created = await recompute_achievements(seeded_athlete.id, session, today=_TODAY)
+        created = await _recompute(session, seeded_athlete)
 
         ids = {(u.achievement_id, u.tier) for u in created}
         assert ("activity_count", 1.0) in ids
@@ -68,7 +78,7 @@ class TestBasicUnlocks:
         _activity(session, seeded_athlete, day=earned_on, duration_s=3600)
         await session.commit()
 
-        await recompute_achievements(seeded_athlete.id, session, today=_TODAY)
+        await _recompute(session, seeded_athlete)
 
         stored = await _unlocks(session, seeded_athlete)
         # Not today — the day the ride actually happened.
@@ -84,7 +94,7 @@ class TestBasicUnlocks:
             )
         await session.commit()
 
-        await recompute_achievements(seeded_athlete.id, session, today=_TODAY)
+        await _recompute(session, seeded_athlete)
 
         stored = await _unlocks(session, seeded_athlete)
         assert ("long_activity", 2.0) not in stored
@@ -97,7 +107,7 @@ class TestBasicUnlocks:
         )
         await session.commit()
 
-        await recompute_achievements(seeded_athlete.id, session, today=_TODAY)
+        await _recompute(session, seeded_athlete)
 
         stored = await _unlocks(session, seeded_athlete)
         assert ("everesting", 8848.0) in stored
@@ -110,7 +120,7 @@ class TestBasicUnlocks:
         _activity(session, seeded_athlete, day=_TODAY, duration_s=3600, labels=["race"])
         await session.commit()
 
-        await recompute_achievements(seeded_athlete.id, session, today=_TODAY)
+        await _recompute(session, seeded_athlete)
 
         stored = await _unlocks(session, seeded_athlete)
         assert ("race_day", 1.0) in stored
@@ -122,10 +132,10 @@ class TestSelfHealing:
         _activity(session, seeded_athlete, day=_TODAY, duration_s=3600)
         await session.commit()
 
-        first = await recompute_achievements(seeded_athlete.id, session, today=_TODAY)
+        first = await _recompute(session, seeded_athlete)
         assert first
 
-        second = await recompute_achievements(seeded_athlete.id, session, today=_TODAY)
+        second = await _recompute(session, seeded_athlete)
         assert second == []  # nothing new the second time round
 
     async def test_idempotent_run_does_not_move_achieved_on(
@@ -134,10 +144,10 @@ class TestSelfHealing:
         _activity(session, seeded_athlete, day=_TODAY - timedelta(days=5), duration_s=3600)
         await session.commit()
 
-        await recompute_achievements(seeded_athlete.id, session, today=_TODAY)
+        await _recompute(session, seeded_athlete)
         before = (await _unlocks(session, seeded_athlete))[("activity_count", 1.0)].achieved_on
 
-        await recompute_achievements(seeded_athlete.id, session, today=_TODAY)
+        await _recompute(session, seeded_athlete)
         after = (await _unlocks(session, seeded_athlete))[("activity_count", 1.0)].achieved_on
 
         assert before == after
@@ -147,12 +157,12 @@ class TestSelfHealing:
     ):
         act = _activity(session, seeded_athlete, day=_TODAY, duration_s=3600)
         await session.commit()
-        await recompute_achievements(seeded_athlete.id, session, today=_TODAY)
+        await _recompute(session, seeded_athlete)
         assert ("activity_count", 1.0) in await _unlocks(session, seeded_athlete)
 
         await session.delete(act)
         await session.commit()
-        await recompute_achievements(seeded_athlete.id, session, today=_TODAY)
+        await _recompute(session, seeded_athlete)
 
         assert await _unlocks(session, seeded_athlete) == {}
 
@@ -162,7 +172,7 @@ class TestSelfHealing:
         """Importing an old ride should age a badge, not re-date it to today."""
         _activity(session, seeded_athlete, day=_TODAY, duration_s=3600)
         await session.commit()
-        await recompute_achievements(seeded_athlete.id, session, today=_TODAY)
+        await _recompute(session, seeded_athlete)
         assert (await _unlocks(session, seeded_athlete))[
             ("activity_count", 1.0)
         ].achieved_on == _TODAY
@@ -170,11 +180,157 @@ class TestSelfHealing:
         older = _TODAY - timedelta(days=365)
         _activity(session, seeded_athlete, day=older, duration_s=3600)
         await session.commit()
-        await recompute_achievements(seeded_athlete.id, session, today=_TODAY)
+        await _recompute(session, seeded_athlete)
 
         assert (await _unlocks(session, seeded_athlete))[
             ("activity_count", 1.0)
         ].achieved_on == older
+
+
+class TestFailureIsolation:
+    async def test_a_failed_recompute_leaves_the_session_usable(
+        self, session, seeded_athlete, monkeypatch
+    ):
+        """The "can never fail an upload" guarantee needs a rollback, not just a
+        swallowed exception — the caller keeps using this same session."""
+        from backend.app.services import achievements as svc
+
+        _activity(session, seeded_athlete, day=_TODAY, duration_s=3600)
+        await session.commit()
+
+        async def boom(*args, **kwargs):
+            raise RuntimeError("computation exploded")
+
+        monkeypatch.setattr(svc, "compute_achievements", boom)
+        await svc.recompute_achievements_safe(seeded_athlete.id, session)
+
+        # The caller's next statement must not raise PendingRollbackError.
+        rows = (await session.execute(select(Activity))).scalars().all()
+        assert len(rows) == 1
+
+    async def test_a_failed_recompute_does_not_leak_partial_rows(
+        self, session, seeded_athlete, monkeypatch
+    ):
+        """Rows added before the failure must not ride along on the caller's commit."""
+        from backend.app.services import achievements as svc
+
+        _activity(session, seeded_athlete, day=_TODAY, duration_s=3600)
+        await session.commit()
+
+        athlete_id = seeded_athlete.id
+        real_commit = session.commit
+        calls = {"n": 0}
+
+        async def fail_on_reconcile_commit():
+            calls["n"] += 1
+            raise RuntimeError("commit exploded")
+
+        monkeypatch.setattr(session, "commit", fail_on_reconcile_commit)
+        await svc.recompute_achievements_safe(athlete_id, session)
+        monkeypatch.setattr(session, "commit", real_commit)
+
+        assert calls["n"] == 1
+        # The reconcile's pending inserts were rolled back, not left to be
+        # committed by whatever the caller does next.
+        await session.commit()
+        rows = (
+            await session.execute(
+                select(AchievementUnlock).where(
+                    AchievementUnlock.athlete_id == athlete_id
+                )
+            )
+        ).scalars().all()
+        assert rows == []
+
+
+class TestContext:
+    async def test_each_tier_links_to_the_activity_that_earned_it(
+        self, session, seeded_athlete
+    ):
+        """A 5-hour first ride earns tiers 2–5; tier 2 must not claim the 5h ride
+        was the first 2-hour one only because it was the biggest."""
+        short = _activity(session, seeded_athlete, day=_TODAY - timedelta(days=30), duration_s=2 * 3600)
+        await session.flush()
+        long = _activity(session, seeded_athlete, day=_TODAY, duration_s=5 * 3600)
+        await session.commit()
+
+        await _recompute(session, seeded_athlete)
+
+        stored = await _unlocks(session, seeded_athlete)
+        assert stored[("long_activity", 2.0)].context["activity_id"] == short.id
+        assert stored[("long_activity", 5.0)].context["activity_id"] == long.id
+
+    async def test_context_is_refreshed_rather_than_left_dangling(
+        self, session, seeded_athlete
+    ):
+        """A deep link to a deleted activity must be re-derived, not kept."""
+        first = _activity(
+            session, seeded_athlete, day=_TODAY - timedelta(days=30), duration_s=3 * 3600,
+        )
+        await session.flush()
+        second = _activity(session, seeded_athlete, day=_TODAY, duration_s=3 * 3600)
+        await session.commit()
+        await _recompute(session, seeded_athlete)
+        assert (await _unlocks(session, seeded_athlete))[
+            ("long_activity", 2.0)
+        ].context["activity_id"] == first.id
+
+        await session.delete(first)
+        await session.commit()
+        await _recompute(session, seeded_athlete)
+
+        assert (await _unlocks(session, seeded_athlete))[
+            ("long_activity", 2.0)
+        ].context["activity_id"] == second.id
+
+
+class TestSportCounting:
+    async def test_unmapped_sports_still_count_as_distinct_sports(
+        self, session, seeded_athlete
+    ):
+        """The category map covers the common types, not the long tail — an
+        athlete doing cycling plus two unmapped sports is still multisport."""
+        _activity(session, seeded_athlete, day=_TODAY, duration_s=3600, sport_type="Ride")
+        _activity(
+            session, seeded_athlete, day=_TODAY, duration_s=3600, sport_type="RockClimbing",
+        )
+        _activity(
+            session, seeded_athlete, day=_TODAY, duration_s=3600, sport_type="StandUpPaddling",
+        )
+        await session.commit()
+
+        comp = await compute_achievements(seeded_athlete, session, today=_TODAY)
+
+        assert comp.progress["multisport"] == 3
+
+    async def test_variants_of_one_sport_still_fold_together(
+        self, session, seeded_athlete
+    ):
+        for sport in ("Ride", "GravelRide", "MountainBikeRide"):
+            _activity(
+                session, seeded_athlete, day=_TODAY, duration_s=3600, sport_type=sport,
+            )
+        await session.commit()
+
+        comp = await compute_achievements(seeded_athlete, session, today=_TODAY)
+
+        assert comp.progress["multisport"] == 1
+
+
+class TestMalformedSettings:
+    @pytest.mark.parametrize("tz", [3, ["Europe/Helsinki"], "Not/AZone", {"a": 1}])
+    async def test_an_unusable_timezone_falls_back_to_utc_instead_of_raising(
+        self, session, seeded_athlete, tz
+    ):
+        """app_settings is free-form, so `timezone` can hold anything a client
+        sent. The achievements page must not 500 because of it."""
+        seeded_athlete.app_settings = {"timezone": tz}
+        _activity(session, seeded_athlete, day=_TODAY, duration_s=3600)
+        await session.commit()
+
+        comp = await compute_achievements(seeded_athlete, session, today=_TODAY)
+
+        assert comp.progress["activity_count"] == 1
 
 
 class TestOptOut:
@@ -183,7 +339,7 @@ class TestOptOut:
         _activity(session, seeded_athlete, day=_TODAY, duration_s=3600)
         await session.commit()
 
-        created = await recompute_achievements(seeded_athlete.id, session, today=_TODAY)
+        created = await _recompute(session, seeded_athlete)
 
         assert created == []
         assert await _unlocks(session, seeded_athlete) == {}
@@ -191,16 +347,16 @@ class TestOptOut:
     async def test_re_enabling_restores_the_same_unlocks(self, session, seeded_athlete):
         _activity(session, seeded_athlete, day=_TODAY, duration_s=3600)
         await session.commit()
-        await recompute_achievements(seeded_athlete.id, session, today=_TODAY)
+        await _recompute(session, seeded_athlete)
         before = set(await _unlocks(session, seeded_athlete))
 
         seeded_athlete.app_settings = {"gamification": False}
         await session.commit()
-        await recompute_achievements(seeded_athlete.id, session, today=_TODAY)
+        await _recompute(session, seeded_athlete)
 
         seeded_athlete.app_settings = {"gamification": True}
         await session.commit()
-        await recompute_achievements(seeded_athlete.id, session, today=_TODAY)
+        await _recompute(session, seeded_athlete)
 
         assert set(await _unlocks(session, seeded_athlete)) == before
 
@@ -353,7 +509,7 @@ class TestPlanAndGoalRules:
     ):
         await self._finished_plan(session, seeded_athlete, linked=True)
 
-        await recompute_achievements(seeded_athlete.id, session, today=_TODAY)
+        await _recompute(session, seeded_athlete)
 
         stored = await _unlocks(session, seeded_athlete)
         assert ("plans_completed", 1.0) in stored
@@ -364,7 +520,7 @@ class TestPlanAndGoalRules:
     ):
         await self._finished_plan(session, seeded_athlete, linked=False)
 
-        await recompute_achievements(seeded_athlete.id, session, today=_TODAY)
+        await _recompute(session, seeded_athlete)
 
         stored = await _unlocks(session, seeded_athlete)
         assert ("plans_completed", 1.0) not in stored
@@ -394,7 +550,7 @@ class TestPlanAndGoalRules:
         )
         await session.commit()
 
-        await recompute_achievements(seeded_athlete.id, session, today=_TODAY)
+        await _recompute(session, seeded_athlete)
 
         stored = await _unlocks(session, seeded_athlete)
         assert ("goals_reached", 1.0) in stored

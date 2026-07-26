@@ -5305,7 +5305,7 @@
           "achievements"
         ],
         "summary": "Clear the new-achievement marker",
-        "description": "Mark every unlock as seen, so the UI stops flagging them as new.\n\nDeliberately separate from ``notified``: dismissing the marker here must not\ncancel an inbox message the server hasn't sent yet.",
+        "description": "Mark every unlock as seen, so the UI stops flagging them as new.\n\nPurely a UI marker \u2014 it has no bearing on the inbox message, which is emitted\nonce by the reconcile that first inserted the row.",
         "operationId": "markAchievementsSeen",
         "responses": {
           "204": {

@@ -22,6 +22,7 @@ from backend.app.schemas.plans import (
     GenerateUpcomingResultItem, PlanAdherenceSummary, PlanAdherencePoint,
 )
 from backend.app.models.user_orm import PlanAdherenceDaily
+from backend.app.services.achievements import recompute_achievements_safe
 from backend.app.services.plan_adherence import (
     score_plan, catch_up_adherence, workout_match_score,
 )
@@ -353,9 +354,8 @@ async def update_plan(
 
     await session.commit()
     await session.refresh(plan)
-    # Editing a plan's dates or status changes whether it counts as finished,
-    # so the plan achievements (issue #33) may need to move with it.
-    from backend.app.services.achievements import recompute_achievements_safe
+    # Editing a plan's dates changes whether it counts as finished, so the plan
+    # achievements (issue #33) may need to move with it.
     await recompute_achievements_safe(athlete.id, session)
     return _plan_response_with_adherence(plan)
 
@@ -397,8 +397,11 @@ async def unarchive_plan(
         .options(selectinload(TrainingPlan.workouts))
     )
     plan = result.scalar_one()
-    from backend.app.services.achievements import recompute_achievements_safe
-    await recompute_achievements_safe(athlete.id, session)
+    # No achievement recompute here: plan completion is date-and-content based
+    # and never reads `plan.status`, so archiving or unarchiving cannot change a
+    # single unlock. Archiving isn't a standalone endpoint anyway — it happens
+    # inside plan creation — so hooking only unarchive would be asymmetric as
+    # well as pointless.
     return _plan_response_with_adherence(plan)
 
 
