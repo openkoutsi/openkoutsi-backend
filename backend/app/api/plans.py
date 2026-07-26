@@ -24,7 +24,7 @@ from backend.app.schemas.plans import (
 from backend.app.models.user_orm import PlanAdherenceDaily
 from backend.app.services.achievements import recompute_achievements_safe
 from backend.app.services.plan_adherence import (
-    score_plan, catch_up_adherence, workout_match_score,
+    score_plan, catch_up_adherence, workout_date, workout_match_score,
 )
 from backend.app.services.plan_generator import (
     generate_plan, build_workout_rows, week_meta_for,
@@ -64,11 +64,6 @@ router = APIRouter(prefix="/plans", tags=["plans"])
 
 # Workouts are generated for the upcoming week (today → +6 days) by default.
 _GENERATE_WINDOW_DAYS = 6
-
-
-def _planned_date(start_date, week_number: int, day_of_week: int):
-    """Map a planned workout's (week, day) to an absolute calendar date."""
-    return start_date + timedelta(days=(week_number - 1) * 7 + (day_of_week - 1))
 
 
 def _plan_response_with_adherence(plan: TrainingPlan) -> TrainingPlanResponse:
@@ -825,7 +820,7 @@ async def generate_upcoming_workouts(
     # Select in-window planned workouts, ordered by date.
     selected: list[tuple[PlannedWorkout, date]] = []
     for pw in plan.workouts:
-        pdate = _planned_date(plan.start_date, pw.week_number, pw.day_of_week)
+        pdate = workout_date(plan.start_date, pw.week_number, pw.day_of_week)
         if window_start <= pdate <= window_end:
             selected.append((pw, pdate))
     selected.sort(key=lambda item: item[1])

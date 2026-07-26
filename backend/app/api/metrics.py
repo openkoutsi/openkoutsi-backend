@@ -11,10 +11,16 @@ from backend.app.models.user_orm import Activity, ActivityStream, Athlete, Daily
 from backend.app.schemas.metrics import (
     ActivitySummaryResponse,
     FitnessCurrentResponse,
+    FitnessForecastResponse,
     FitnessMetricResponse,
     WeeklyZoneBucket,
 )
 from backend.app.services.metrics_engine import catch_up_metrics
+from backend.app.services.metrics_forecast import (
+    DEFAULT_FORECAST_DAYS,
+    MAX_FORECAST_DAYS,
+    forecast_fitness,
+)
 from backend.app.services.zone_times import compute_zone_times, ensure_zone_times
 from openkoutsi.sport_matching import CYCLING_SPORT_TYPES
 
@@ -115,6 +121,31 @@ async def get_fitness_current(ctx_session=Depends(get_ctx_and_session)):
             date=today, fitness=0.0, fatigue=0.0, form=0.0, load_day=0.0
         )
     return FitnessCurrentResponse.model_validate(metric)
+
+
+@router.get("/fitness/forecast", response_model=list[FitnessForecastResponse])
+async def get_fitness_forecast(
+    days: int = Query(DEFAULT_FORECAST_DAYS, ge=1, le=MAX_FORECAST_DAYS),
+    ctx_session=Depends(get_ctx_and_session),
+):
+    """Project Fitness/Fatigue/Form forward from the athlete's planned workouts.
+
+    Covers ``[today + 1, today + days]``. The projection itself is never stored,
+    so it always reflects the plans as they stand right now. Kept separate from
+    ``GET /metrics/fitness`` so the historical contract is untouched and the
+    caller decides whether to concatenate the two series.
+
+    Metrics are caught up first, exactly as the dashboard does via
+    ``POST /metrics/catch-up``, so the projection is always seeded from today
+    rather than from whatever the last stored day happened to be. Without it the
+    answer would depend on whether the client had hit catch-up beforehand.
+    """
+    ctx, session = ctx_session
+    athlete = await _get_athlete(ctx.user_id, session)
+
+    await catch_up_metrics(athlete.id, session)
+    rows = await forecast_fitness(athlete.id, session, days=days)
+    return [FitnessForecastResponse(**row) for row in rows]
 
 
 @router.get("/zones/weekly", response_model=list[WeeklyZoneBucket])

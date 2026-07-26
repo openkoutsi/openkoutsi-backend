@@ -8,7 +8,9 @@ from unittest.mock import patch
 
 from sqlalchemy import select
 
-from backend.app.models.user_orm import Activity, ActivityStream, DailyMetric, Athlete
+from backend.app.models.user_orm import (
+    Activity, ActivityStream, DailyMetric, Athlete, PlannedWorkout, TrainingPlan,
+)
 
 
 class TestGetFitness:
@@ -532,3 +534,173 @@ class TestFitnessDateRange:
         resp = await client.get("/api/metrics/fitness/current", headers=auth_headers)
         assert resp.status_code == 200
         assert resp.json()["fitness"] == 55.0
+
+
+class TestFitnessForecast:
+    """GET /api/metrics/fitness/forecast — the forward projection (issue #34)."""
+
+    async def _seed_plan(self, session, athlete_id, *, loads, status="active",
+                         plan_id="p-forecast", start=None):
+        """Active plan starting tomorrow, with ``loads`` as week 1 days 1..n."""
+        start = start or (date.today() + timedelta(days=1))
+        session.add(TrainingPlan(
+            id=plan_id, athlete_id=athlete_id, name="Forecast plan",
+            start_date=start, end_date=start + timedelta(days=6),
+            weeks=1, status=status,
+        ))
+        for day, load in enumerate(loads, start=1):
+            session.add(PlannedWorkout(
+                id=f"{plan_id}-d{day}", plan_id=plan_id,
+                week_number=1, day_of_week=day,
+                workout_type="endurance", target_load=load,
+            ))
+        await session.commit()
+        return start
+
+    async def test_returns_only_dates_after_today(self, client, auth_headers):
+        resp = await client.get("/api/metrics/fitness/forecast?days=7", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+
+        today = date.today()
+        assert len(data) == 7
+        assert data[0]["date"] == str(today + timedelta(days=1))
+        assert data[-1]["date"] == str(today + timedelta(days=7))
+        assert all(date.fromisoformat(d["date"]) > today for d in data)
+
+    async def test_defaults_to_90_days(self, client, auth_headers):
+        resp = await client.get("/api/metrics/fitness/forecast", headers=auth_headers)
+        assert resp.status_code == 200
+        assert len(resp.json()) == 90
+
+    async def test_rows_are_marked_projected_and_labelled(self, client, auth_headers, session):
+        ath_resp = await client.get("/api/athlete", headers=auth_headers)
+        session.add(DailyMetric(
+            athlete_id=ath_resp.json()["id"], date=date.today(),
+            fitness=60.0, fatigue=20.0, form=40.0, load_day=0.0,
+        ))
+        await session.commit()
+
+        resp = await client.get("/api/metrics/fitness/forecast?days=3", headers=auth_headers)
+        data = resp.json()
+
+        assert all(d["projected"] is True for d in data)
+        # Form well above the "peak" threshold, and rising as fatigue decays.
+        assert data[0]["form_label"] == "peak"
+
+    async def test_planned_load_appears_in_the_projection(self, client, auth_headers, session):
+        ath_resp = await client.get("/api/athlete", headers=auth_headers)
+        start = await self._seed_plan(
+            session, ath_resp.json()["id"], loads=[60, None, 80, None, None, 120, None],
+        )
+
+        resp = await client.get("/api/metrics/fitness/forecast?days=10", headers=auth_headers)
+        by_date = {d["date"]: d for d in resp.json()}
+
+        assert by_date[str(start)]["daily_load"] == 60.0
+        assert by_date[str(start + timedelta(days=2))]["daily_load"] == 80.0
+        # A day with no prescribed load is a rest day, not a gap.
+        assert by_date[str(start + timedelta(days=1))]["daily_load"] == 0.0
+        assert by_date[str(start + timedelta(days=6))]["fitness"] > 0.0
+
+    async def test_no_active_plan_is_pure_decay(self, client, auth_headers, session):
+        ath_resp = await client.get("/api/athlete", headers=auth_headers)
+        session.add(DailyMetric(
+            athlete_id=ath_resp.json()["id"], date=date.today(),
+            fitness=70.0, fatigue=50.0, form=20.0, load_day=0.0,
+        ))
+        await session.commit()
+
+        resp = await client.get("/api/metrics/fitness/forecast?days=21", headers=auth_headers)
+        data = resp.json()
+
+        assert all(d["daily_load"] == 0.0 for d in data)
+        fitness = [d["fitness"] for d in data]
+        assert fitness == sorted(fitness, reverse=True)
+        assert fitness[0] < 70.0
+
+    async def test_archived_plan_does_not_contribute(self, client, auth_headers, session):
+        ath_resp = await client.get("/api/athlete", headers=auth_headers)
+        await self._seed_plan(
+            session, ath_resp.json()["id"], loads=[100] * 7, status="archived",
+        )
+
+        resp = await client.get("/api/metrics/fitness/forecast?days=10", headers=auth_headers)
+        assert all(d["daily_load"] == 0.0 for d in resp.json())
+
+    async def test_other_athletes_plans_are_not_projected(self, client, auth_headers, session):
+        other = Athlete(id=f"other-{uuid.uuid4().hex[:8]}", global_user_id="other-user", ftp_tests=[])
+        session.add(other)
+        await session.commit()
+        await self._seed_plan(session, other.id, loads=[150] * 7, plan_id="p-other")
+
+        resp = await client.get("/api/metrics/fitness/forecast?days=10", headers=auth_headers)
+        assert all(d["daily_load"] == 0.0 for d in resp.json())
+
+    async def test_days_bounds_enforced(self, client, auth_headers):
+        assert (await client.get("/api/metrics/fitness/forecast?days=0", headers=auth_headers)).status_code == 422
+        assert (await client.get("/api/metrics/fitness/forecast?days=366", headers=auth_headers)).status_code == 422
+        assert (await client.get("/api/metrics/fitness/forecast?days=365", headers=auth_headers)).status_code == 200
+
+    async def test_unauthenticated_returns_401(self, client):
+        resp = await client.get("/api/metrics/fitness/forecast")
+        assert resp.status_code == 401
+
+    async def test_the_projection_itself_is_never_persisted(self, client, auth_headers, session):
+        # The endpoint catches metrics up first, so it may write a row for today
+        # — but no projected day may ever reach the DB.
+        ath_resp = await client.get("/api/athlete", headers=auth_headers)
+        await self._seed_plan(session, ath_resp.json()["id"], loads=[100] * 7)
+
+        await client.get("/api/metrics/fitness/forecast?days=30", headers=auth_headers)
+
+        stored = (await session.execute(select(DailyMetric))).scalars().all()
+        assert all(m.date <= date.today() for m in stored)
+
+    async def test_result_does_not_depend_on_catch_up_having_run_first(
+        self, client, auth_headers, session
+    ):
+        """The forecast catches up itself, so client call order can't change it.
+
+        Without that, an athlete whose metrics were a few days stale got a
+        different (and always fresher-looking) series depending on whether the
+        dashboard had been visited first.
+        """
+        ath_resp = await client.get("/api/athlete", headers=auth_headers)
+        athlete_id = ath_resp.json()["id"]
+        session.add(DailyMetric(
+            athlete_id=athlete_id, date=date.today() - timedelta(days=5),
+            fitness=50.0, fatigue=40.0, form=10.0, load_day=0.0,
+        ))
+        await self._seed_plan(session, athlete_id, loads=[100] * 7)
+
+        cold = await client.get("/api/metrics/fitness/forecast?days=14", headers=auth_headers)
+        await client.post("/api/metrics/catch-up", headers=auth_headers)
+        warm = await client.get("/api/metrics/fitness/forecast?days=14", headers=auth_headers)
+
+        assert cold.status_code == 200
+        assert cold.json() == warm.json()
+
+    async def test_historical_endpoint_is_unchanged(self, client, auth_headers, session):
+        """Regression guard: adding the forecast must not alter GET /metrics/fitness."""
+        ath_resp = await client.get("/api/athlete", headers=auth_headers)
+        athlete_id = ath_resp.json()["id"]
+        today = date.today()
+
+        session.add(DailyMetric(
+            athlete_id=athlete_id, date=today,
+            fitness=30.0, fatigue=40.0, form=-10.0, load_day=80.0,
+        ))
+        await self._seed_plan(session, athlete_id, loads=[100] * 7)
+
+        resp = await client.get("/api/metrics/fitness", headers=auth_headers)
+        data = resp.json()
+
+        assert data == [{
+            "date": str(today),
+            "fitness": 30.0,
+            "fatigue": 40.0,
+            "form": -10.0,
+            "load_day": 80.0,
+            "daily_load": 80.0,
+        }]

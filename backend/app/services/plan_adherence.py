@@ -32,7 +32,7 @@ from openkoutsi.plan_adherence import (
 from openkoutsi.sport_matching import workout_is_cycling
 
 
-def _workout_date(start_date: date, week_number: int, day_of_week: int) -> date:
+def workout_date(start_date: date, week_number: int, day_of_week: int) -> date:
     """Map a planned workout's (week, day) to an absolute calendar date."""
     return start_date + timedelta(days=(week_number - 1) * 7 + (day_of_week - 1))
 
@@ -107,7 +107,7 @@ def score_plan(plan: TrainingPlan, today: date) -> PlanScore:
             result.match_scores[w.id] = None
             continue
 
-        wdate = _workout_date(plan.start_date, w.week_number, w.day_of_week)
+        wdate = workout_date(plan.start_date, w.week_number, w.day_of_week)
 
         # Future workouts are excluded from the "so far" denominator, but are
         # still counted as remaining sessions the athlete has yet to do.
