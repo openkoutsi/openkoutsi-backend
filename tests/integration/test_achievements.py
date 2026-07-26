@@ -66,6 +66,67 @@ class TestGetAchievements:
         assert "total_distance" in ids
         assert "everesting" not in ids
 
+    async def test_unlocked_never_contains_an_id_the_catalogue_omits(
+        self, client, auth_headers, monkeypatch
+    ):
+        """`unlocked` must be filtered by availability like its three siblings.
+
+        With today's catalogue the property holds by coincidence: every gated
+        achievement's lowest tier needs the very data that gates it, so an
+        unavailable achievement has no tier dates and no row. That makes the
+        happy path untestable — so this constructs the case the coincidence
+        rules out, by gating an achievement on data its tiers don't need.
+
+        Without the filter the athlete receives an `achievement_id` the frontend
+        has no definition, tiers or unit for.
+        """
+        from dataclasses import replace
+
+        from openkoutsi import achievements as catalogue_mod
+        from backend.app.api import achievements as api_mod
+
+        # activity_count is earned from any activity, but now claims to need
+        # elevation — exactly the shape a future "created a plan" badge would have.
+        gated = replace(catalogue_mod.CATALOGUE_BY_ID["activity_count"], requires="elevation")
+        monkeypatch.setitem(catalogue_mod.CATALOGUE_BY_ID, "activity_count", gated)
+        monkeypatch.setattr(
+            api_mod,
+            "CATALOGUE",
+            tuple(gated if d.id == "activity_count" else d for d in catalogue_mod.CATALOGUE),
+        )
+
+        # No elevation anywhere, so "elevation" is unavailable — but the ride
+        # still earns activity_count, and the reconcile still persists it.
+        await _log_ride(client, auth_headers, day=date.today(), distance_m=20_000)
+
+        body = (await client.get("/api/achievements", headers=auth_headers)).json()
+
+        catalogue_ids = {d["id"] for d in body["catalogue"]}
+        assert "activity_count" not in catalogue_ids
+        unlocked_ids = {u["achievement_id"] for u in body["unlocked"]}
+        assert unlocked_ids <= catalogue_ids, unlocked_ids - catalogue_ids
+        assert set(body["progress"]) <= catalogue_ids
+        assert {s["id"] for s in body["streaks"]} <= catalogue_ids
+
+    async def test_the_response_stays_consistent_as_data_comes_and_goes(
+        self, client, auth_headers
+    ):
+        """The same property over real data, before and after a climb is removed."""
+        climb = await _log_ride(
+            client, auth_headers, day=date.today(), distance_m=40_000, elevation_m=1_200,
+        )
+        await _log_ride(
+            client, auth_headers, day=date.today() - timedelta(days=1), distance_m=20_000,
+        )
+
+        for _ in range(2):
+            body = (await client.get("/api/achievements", headers=auth_headers)).json()
+            catalogue_ids = {d["id"] for d in body["catalogue"]}
+            assert {u["achievement_id"] for u in body["unlocked"]} <= catalogue_ids
+            await client.delete(
+                f"/api/activities/{climb.json()['id']}", headers=auth_headers
+            )
+
     async def test_elevation_badges_appear_once_a_climb_is_recorded(
         self, client, auth_headers
     ):

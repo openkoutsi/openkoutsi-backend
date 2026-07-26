@@ -84,7 +84,17 @@ async def get_achievements(ctx_session=Depends(get_ctx_and_session)):
 
     return AchievementsResponse(
         catalogue=catalogue,
-        unlocked=[AchievementUnlockResponse.model_validate(r) for r in rows],
+        # Filtered like its three siblings below, so the response is internally
+        # consistent by construction: every `unlocked` id has a `catalogue` entry
+        # to render it with. The reconcile deliberately persists unlocks without
+        # regard to availability, so nothing else guarantees that. The row stays
+        # in the DB (and in the data export) — only the rendering is gated, which
+        # is what availability has always meant.
+        unlocked=[
+            AchievementUnlockResponse.model_validate(r)
+            for r in rows
+            if r.achievement_id in available_ids
+        ],
         progress={k: v for k, v in comp.progress.items() if k in available_ids},
         streaks=[
             StreakResponse(
