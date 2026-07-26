@@ -18,7 +18,8 @@ from backend.app.models.registry_orm import User
 log = logging.getLogger(__name__)
 
 # ── Message types ────────────────────────────────────────────────────────────
-INVITE_USED = "invite_used"     # someone registered via an invite link
+INVITE_USED = "invite_used"                     # someone registered via an invite link
+ACHIEVEMENT_UNLOCKED = "achievement_unlocked"   # one or more achievement tiers earned
 
 
 async def notify_user(user_id: str, type: str, data: dict) -> None:

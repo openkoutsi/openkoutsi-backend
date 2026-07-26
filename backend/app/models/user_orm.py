@@ -293,6 +293,45 @@ class PlanAdherenceDaily(UserBase):
     pending: Mapped[int] = mapped_column(Integer, default=0)
 
 
+class AchievementUnlock(UserBase):
+    """One earned achievement tier (issue #33).
+
+    Unlocks are *derived state*, like ``DailyMetric`` and ``PlanAdherenceDaily``:
+    the recompute in ``backend.app.services.achievements`` treats this table as a
+    projection of the athlete's current data and rewrites it in place, so a
+    deleted activity can revoke a tier rather than leaving a badge the data no
+    longer supports.
+
+    The two timestamps do different jobs. ``achieved_on`` is derived from the
+    history — the day the criterion was actually first met — so back-filling an
+    old ride moves it *earlier* instead of re-dating the unlock to today.
+    ``created_at`` is wall-clock and only says when we first noticed, which is
+    what the "new" marker and the inbox notification key off.
+
+    The catalogue itself lives in code (``openkoutsi.achievements``), not in
+    rows: ``achievement_id`` is a stable machine key whose display name is an
+    i18n string in the web app, so no user-facing prose is stored here.
+    """
+
+    __tablename__ = "achievement_unlocks"
+
+    athlete_id: Mapped[str] = mapped_column(
+        String, ForeignKey("athletes.id", ondelete="CASCADE"), primary_key=True
+    )
+    achievement_id: Mapped[str] = mapped_column(String, primary_key=True)
+    tier: Mapped[float] = mapped_column(Float, primary_key=True)
+    achieved_on: Mapped[date] = mapped_column(Date, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # Two distinct flags: ``notified`` is set once the server has emitted the
+    # inbox message, ``seen`` once the athlete has actually looked at the badge
+    # in the UI. Conflating them would let opening the achievements page
+    # suppress an inbox message that was never sent.
+    notified: Mapped[bool] = mapped_column(Boolean, default=False)
+    seen: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Optional deep-link payload, e.g. {"activity_id": …} or {"plan_id": …}.
+    context: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+
 class Goal(UserBase):
     __tablename__ = "goals"
 

@@ -353,6 +353,10 @@ async def update_plan(
 
     await session.commit()
     await session.refresh(plan)
+    # Editing a plan's dates or status changes whether it counts as finished,
+    # so the plan achievements (issue #33) may need to move with it.
+    from backend.app.services.achievements import recompute_achievements_safe
+    await recompute_achievements_safe(athlete.id, session)
     return _plan_response_with_adherence(plan)
 
 
@@ -393,6 +397,8 @@ async def unarchive_plan(
         .options(selectinload(TrainingPlan.workouts))
     )
     plan = result.scalar_one()
+    from backend.app.services.achievements import recompute_achievements_safe
+    await recompute_achievements_safe(athlete.id, session)
     return _plan_response_with_adherence(plan)
 
 

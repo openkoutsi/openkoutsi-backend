@@ -90,6 +90,10 @@ async def update_goal(
 
     await session.commit()
     await session.refresh(goal)
+    # Marking a goal achieved can unlock a badge (issue #33); un-marking it
+    # takes the badge back, since unlocks track the data rather than events.
+    from backend.app.services.achievements import recompute_achievements_safe
+    await recompute_achievements_safe(athlete.id, session)
     return goal
 
 

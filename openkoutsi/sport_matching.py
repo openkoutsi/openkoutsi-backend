@@ -68,7 +68,12 @@ _WORKOUT_TYPE_TO_CATEGORY: dict[str, str] = {
 }
 
 
-def _activity_category(sport_type: Optional[str]) -> Optional[str]:
+def activity_category(sport_type: Optional[str]) -> Optional[str]:
+    """Canonical sport category for an activity's ``sport_type``, or None.
+
+    Public because the achievement rules count *distinct sports* (issue #33), and
+    a Ride, a GravelRide and a MountainBikeRide are one sport, not three.
+    """
     if not sport_type:
         return None
     return _ACTIVITY_SPORT_TO_CATEGORY.get(sport_type)
@@ -106,7 +111,7 @@ def sports_match(activity_sport: Optional[str], workout_type: Optional[str]) -> 
     (cycling, running, swimming).  Sport-specific workout types only match their sport.
     Non-endurance activities (yoga, walking, strength) never match generic types.
     """
-    act_cat = _activity_category(activity_sport)
+    act_cat = activity_category(activity_sport)
     wo_cat = _workout_category(workout_type)
 
     if act_cat is None:
