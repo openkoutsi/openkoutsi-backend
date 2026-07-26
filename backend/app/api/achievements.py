@@ -68,6 +68,7 @@ async def get_achievements(ctx_session=Depends(get_ctx_and_session)):
         AchievementDefinition(
             id=d.id, category=d.category, tiers=list(d.tiers),
             unit=d.unit, requires=d.requires,
+            threshold=d.threshold, threshold_unit=d.threshold_unit,
         )
         for d in CATALOGUE
         if comp.is_available(d.id)

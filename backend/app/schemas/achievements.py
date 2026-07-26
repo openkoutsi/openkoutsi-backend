@@ -23,6 +23,14 @@ class AchievementDefinition(BaseModel):
     # Data dependency ("distance", "elevation", "load", "plan"); null when the
     # achievement is always reachable.
     requires: Optional[str] = None
+    # For streaks: what makes a single period qualify — 5 `hours` a week, 100
+    # `km` a week — as opposed to `tiers`, which count the qualifying periods.
+    # Served so the UI can state the rule without keeping its own copy of the
+    # number; a client that hardcodes it will silently disagree with the engine
+    # the day the threshold changes. Null for non-streaks and for the two
+    # "active" streaks, which need only a single activity.
+    threshold: Optional[float] = None
+    threshold_unit: Optional[str] = None
 
 
 class AchievementUnlockResponse(BaseModel):

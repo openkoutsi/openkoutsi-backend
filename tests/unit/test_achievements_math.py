@@ -68,6 +68,60 @@ class TestCatalogue:
             d.id for d in CATALOGUE if d.category == "streak"
         }
 
+    def test_advertised_streak_threshold_is_the_one_enforced(self):
+        """The number the API publishes must be the number `qualifies_*` uses.
+
+        The UI states the rule from `threshold` ("Train 5 hours or more each
+        week") instead of hardcoding it, so a definition advertising a threshold
+        the predicate doesn't enforce would have the app telling athletes a rule
+        the engine ignores — silently, since nothing else compares the two.
+
+        Checks the boundary from both sides: exactly at the threshold qualifies,
+        a hair under does not.
+        """
+        from backend.app.services.achievements import _STREAK_RULES
+
+        # How a bucket is built for each threshold unit.
+        builders = {
+            "hours": lambda v: PeriodBucket(
+                start=date(2026, 1, 5), count=1, seconds=round(v * 3600)
+            ),
+            "km": lambda v: PeriodBucket(
+                start=date(2026, 1, 5), count=1, metres=v * 1000
+            ),
+            "metres": lambda v: PeriodBucket(
+                start=date(2026, 1, 5), count=1, elevation_m=v
+            ),
+            "sports": lambda v: PeriodBucket(
+                start=date(2026, 1, 5), count=int(v),
+                sports=frozenset(f"sport{i}" for i in range(int(v))),
+            ),
+        }
+
+        for definition in CATALOGUE:
+            if definition.threshold is None:
+                continue
+            qualifies, _ = _STREAK_RULES[definition.id]
+            build = builders[definition.threshold_unit]
+
+            assert qualifies(build(definition.threshold)), (
+                f"{definition.id} advertises {definition.threshold} "
+                f"{definition.threshold_unit} but that does not qualify"
+            )
+            # One unit below the threshold, in whatever the unit is.
+            under = definition.threshold - (1 if definition.threshold_unit == "sports" else 0.01)
+            assert not qualifies(build(under)), (
+                f"{definition.id} qualifies below its advertised threshold"
+            )
+
+    def test_only_streaks_carry_a_threshold(self):
+        """`threshold` describes what makes a *period* qualify, so it is
+        meaningless on a cumulative or single-activity achievement."""
+        for d in CATALOGUE:
+            if d.threshold is not None:
+                assert d.category == "streak"
+                assert d.threshold_unit, f"{d.id} has a threshold but no unit"
+
     def test_every_tier_is_exactly_representable_as_a_float(self):
         """Tiers are part of a composite primary key, matched on equality.
 

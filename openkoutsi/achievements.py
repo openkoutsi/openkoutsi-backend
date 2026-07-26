@@ -54,6 +54,14 @@ class AchievementDef:
     elevation is FIT-only, Load needs a power meter or HR. Badges whose
     requirement is unmet are hidden rather than shown permanently locked, so a
     heart-rate-only rider isn't taunted by a wall of unreachable tiers.
+
+    ``threshold``/``threshold_unit`` describe what makes a single *period*
+    qualify for a streak — 5 hours a week, 100 km a week — as opposed to
+    ``tiers``, which count the qualifying periods. They are set from the
+    ``STREAK_*`` constants below rather than retyped, and served over the API so
+    the UI can say "Train 5 hours or more each week" without keeping its own
+    copy of the number. Without that, changing a constant would silently leave
+    the app telling athletes a rule the engine no longer enforces.
     """
 
     id: str
@@ -61,6 +69,8 @@ class AchievementDef:
     tiers: tuple[float, ...]
     unit: str
     requires: Optional[str] = None
+    threshold: Optional[float] = None
+    threshold_unit: Optional[str] = None
 
 
 CATALOGUE: tuple[AchievementDef, ...] = (
@@ -108,14 +118,25 @@ CATALOGUE: tuple[AchievementDef, ...] = (
     AchievementDef("plan_adherence", "plan", (80, 90, 95), "percent", requires="plan"),
     AchievementDef("goals_reached", "goal", (1, 5, 10), "count"),
     # ── Streaks (weekly and coarser — never daily) ────────────────────────────
+    # `threshold` comes straight from the constants above, so the rule the API
+    # advertises and the rule `qualifies_*` enforces cannot drift apart.
+    # The two "active" streaks need only a single activity, so they have none.
     AchievementDef("streak_active_weeks", "streak", (4, 8, 12, 26, 52), "weeks"),
-    AchievementDef("streak_volume_weeks", "streak", (4, 8, 12), "weeks"),
-    AchievementDef("streak_multisport_weeks", "streak", (4, 8, 12), "weeks"),
+    AchievementDef(
+        "streak_volume_weeks", "streak", (4, 8, 12), "weeks",
+        threshold=STREAK_VOLUME_HOURS, threshold_unit="hours",
+    ),
+    AchievementDef(
+        "streak_multisport_weeks", "streak", (4, 8, 12), "weeks",
+        threshold=STREAK_MULTISPORT_SPORTS, threshold_unit="sports",
+    ),
     AchievementDef(
         "streak_distance_weeks", "streak", (4, 8, 12), "weeks", requires="distance",
+        threshold=STREAK_DISTANCE_KM, threshold_unit="km",
     ),
     AchievementDef(
         "streak_climbing_weeks", "streak", (4, 8, 12), "weeks", requires="elevation",
+        threshold=STREAK_CLIMBING_M, threshold_unit="metres",
     ),
     AchievementDef("streak_active_months", "streak", (3, 6, 12, 24), "months"),
 )
