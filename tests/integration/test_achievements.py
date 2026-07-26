@@ -27,10 +27,39 @@ class TestGetAchievements:
         assert (await client.get("/api/achievements")).status_code == 401
 
     async def test_catalogue_carries_no_display_text(self, client, auth_headers):
-        """Names live in the web app's i18n files, never in the API payload."""
+        """Names live in the web app's i18n files, never in the API payload.
+
+        The key set is pinned exactly, on purpose: adding a field here should
+        force a deliberate decision about whether it is display text. Numbers
+        and machine keys are fine — prose is not, because it can't be localised.
+        """
         body = (await client.get("/api/achievements", headers=auth_headers)).json()
         for definition in body["catalogue"]:
-            assert set(definition) == {"id", "category", "tiers", "unit", "requires"}
+            assert set(definition) == {
+                "id", "category", "tiers", "unit", "requires",
+                "threshold", "threshold_unit",
+            }
+
+    async def test_streak_definitions_publish_their_qualifying_threshold(
+        self, client, auth_headers
+    ):
+        """The UI states the rule from these, rather than hardcoding 5 h / 100 km."""
+        await _log_ride(
+            client, auth_headers, day=date.today(), distance_m=40_000, elevation_m=900,
+        )
+
+        body = (await client.get("/api/achievements", headers=auth_headers)).json()
+        by_id = {d["id"]: d for d in body["catalogue"]}
+
+        assert by_id["streak_volume_weeks"]["threshold"] == 5
+        assert by_id["streak_volume_weeks"]["threshold_unit"] == "hours"
+        assert by_id["streak_distance_weeks"]["threshold"] == 100
+        assert by_id["streak_climbing_weeks"]["threshold"] == 1000
+        assert by_id["streak_multisport_weeks"]["threshold"] == 2
+        # A streak needing only one activity has no threshold to state.
+        assert by_id["streak_active_weeks"]["threshold"] is None
+        # Neither do the non-streak achievements.
+        assert by_id["activity_count"]["threshold"] is None
 
     async def test_logging_a_ride_unlocks_the_first_tier(self, client, auth_headers):
         await _log_ride(client, auth_headers, day=date.today())
