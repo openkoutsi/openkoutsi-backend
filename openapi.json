@@ -2654,6 +2654,61 @@
         ]
       }
     },
+    "/api/metrics/fitness/forecast": {
+      "get": {
+        "tags": [
+          "metrics"
+        ],
+        "summary": "Get Fitness Forecast",
+        "description": "Project Fitness/Fatigue/Form forward from the athlete's planned workouts.\n\nCovers ``[today + 1, today + days]``. Computed on read from the currently\nactive plans \u2014 nothing is stored, so the projection always reflects the plan\nas it stands right now. Kept separate from ``GET /metrics/fitness`` so the\nhistorical contract is untouched and the caller decides whether to\nconcatenate the two series.",
+        "operationId": "get_fitness_forecast_api_metrics_fitness_forecast_get",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 365,
+              "minimum": 1,
+              "default": 90,
+              "title": "Days"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/FitnessForecastResponse"
+                  },
+                  "title": "Response Get Fitness Forecast Api Metrics Fitness Forecast Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/metrics/zones/weekly": {
       "get": {
         "tags": [
@@ -6800,6 +6855,63 @@
           "form"
         ],
         "title": "FitnessCurrentResponse"
+      },
+      "FitnessForecastResponse": {
+        "properties": {
+          "date": {
+            "type": "string",
+            "format": "date",
+            "title": "Date"
+          },
+          "fitness": {
+            "type": "number",
+            "title": "Fitness"
+          },
+          "fatigue": {
+            "type": "number",
+            "title": "Fatigue"
+          },
+          "form": {
+            "type": "number",
+            "title": "Form"
+          },
+          "load_day": {
+            "type": "number",
+            "title": "Load Day",
+            "default": 0.0
+          },
+          "daily_load": {
+            "type": "number",
+            "title": "Daily Load",
+            "default": 0.0
+          },
+          "projected": {
+            "type": "boolean",
+            "title": "Projected",
+            "default": true
+          },
+          "form_label": {
+            "type": "string",
+            "enum": [
+              "peak",
+              "fresh",
+              "neutral",
+              "tired",
+              "overreached"
+            ],
+            "title": "Form Label",
+            "default": "neutral"
+          }
+        },
+        "type": "object",
+        "required": [
+          "date",
+          "fitness",
+          "fatigue",
+          "form"
+        ],
+        "title": "FitnessForecastResponse",
+        "description": "One projected day of the Fitness/Fatigue/Form forecast (issue #34).\n\nDeliberately shares ``FitnessMetricResponse``'s shape so the frontend can\nconcatenate the projected series straight onto the historical one. The\n``projected`` marker is what distinguishes a modeled day from a measured\none; it is always ``True`` here."
       },
       "FitnessMetricResponse": {
         "properties": {

@@ -49,6 +49,24 @@ class FitnessCurrentResponse(FitnessMetricResponse):
         return self
 
 
+class FitnessForecastResponse(FitnessMetricResponse):
+    """One projected day of the Fitness/Fatigue/Form forecast (issue #34).
+
+    Deliberately shares ``FitnessMetricResponse``'s shape so the frontend can
+    concatenate the projected series straight onto the historical one. The
+    ``projected`` marker is what distinguishes a modeled day from a measured
+    one; it is always ``True`` here.
+    """
+
+    projected: bool = True
+    form_label: FormLabel = "neutral"
+
+    @model_validator(mode="after")
+    def _compute_form(self) -> "FitnessForecastResponse":
+        self.form_label = _form_to_label(self.form)
+        return self
+
+
 class ActivitySummaryResponse(BaseModel):
     """Totals for cycling activities over a selected time period."""
 
