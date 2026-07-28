@@ -61,6 +61,17 @@ async def _insert_activity_with_power(
     )
 
     from openkoutsi.training_math import compute_power_bests
+    from backend.app.services.weight import (
+        effective_weight_for,
+        load_weight_log,
+        w_per_kg,
+    )
+
+    # Snapshot the weight in force on the activity's date, exactly as the real
+    # processing path does — the stored value is what the power curve reads back.
+    weight = effective_weight_for(
+        await load_weight_log(athlete.id, session), activity.start_time.date()
+    )
 
     bests = compute_power_bests(power_stream)
     for duration_s, power_w in bests.items():
@@ -71,6 +82,8 @@ async def _insert_activity_with_power(
                 duration_s=duration_s,
                 power_w=power_w,
                 activity_start_time=activity.start_time,
+                weight_kg=weight,
+                w_per_kg=w_per_kg(power_w, weight),
             )
         )
 
@@ -361,6 +374,53 @@ class TestPowerBestsWkg:
         assert len([e for e in watts.json()["bests"] if e["duration_s"] == 60]) == 1
 
         wkg = await client.get("/api/metrics/bests/power?metric=wkg", headers=auth_headers)
+        assert [e for e in wkg.json()["bests"] if e["duration_s"] == 60] == []
+
+    async def test_new_weigh_in_does_not_restate_older_efforts(
+        self, client, auth_headers, session
+    ):
+        """A weigh-in applies from its date onward; history keeps its own weight."""
+        athlete = await _get_athlete(client, auth_headers, session)
+        await _set_weight(session, athlete, "2025-05-01", 80.0)
+        await _insert_activity_with_power(
+            session, athlete, [300.0] * 60, "2025-06-01T10:00:00+00:00"
+        )
+
+        # Athlete drops 10 kg and logs it. The old effort was ridden at 80 kg and
+        # must keep saying so, rather than being re-scored at the new weight.
+        await _set_weight(session, athlete, "2025-07-01", 70.0)
+        await client.patch(
+            "/api/athlete", json={"weight_kg": 70.0}, headers=auth_headers
+        )
+
+        wkg = await client.get(
+            "/api/metrics/bests/power?metric=wkg", headers=auth_headers
+        )
+        entry = [e for e in wkg.json()["bests"] if e["duration_s"] == 60][0]
+        assert entry["weight_kg"] == pytest.approx(80.0)
+        assert entry["w_per_kg"] == pytest.approx(300.0 / 80.0, abs=0.001)
+
+    async def test_first_weigh_in_does_not_reach_back_to_older_efforts(
+        self, client, auth_headers, session
+    ):
+        """No weight at the time of the effort stays 'no weight', not today's."""
+        athlete = await _get_athlete(client, auth_headers, session)
+        await _insert_activity_with_power(
+            session, athlete, [300.0] * 60, "2025-01-01T10:00:00+00:00"
+        )
+
+        await client.patch(
+            "/api/athlete", json={"weight_kg": 70.0}, headers=auth_headers
+        )
+
+        watts = await client.get("/api/metrics/bests/power", headers=auth_headers)
+        entry = [e for e in watts.json()["bests"] if e["duration_s"] == 60][0]
+        assert entry["weight_kg"] is None
+        assert entry["w_per_kg"] is None
+
+        wkg = await client.get(
+            "/api/metrics/bests/power?metric=wkg", headers=auth_headers
+        )
         assert [e for e in wkg.json()["bests"] if e["duration_s"] == 60] == []
 
     async def test_invalid_metric_rejected(self, client, auth_headers):

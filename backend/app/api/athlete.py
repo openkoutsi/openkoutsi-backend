@@ -307,11 +307,14 @@ async def update_athlete(
         athlete.app_settings = {k: v for k, v in merged.items() if v is not None}
 
     if weight_changed:
-        # A new/updated weight-log entry shifts the effective weight for a range
-        # of past activities, so re-derive the stored W/kg on their power bests.
-        from backend.app.services.weight import recompute_power_best_weights
+        # A weigh-in applies from its own date onward only: power bests that
+        # already carry a weight keep it, so past activities stay attributed to
+        # whatever the athlete weighed back then (or to no weight at all). This
+        # pass just fills in rows still missing a weight — e.g. efforts recorded
+        # earlier today, before the first-ever weigh-in landed.
+        from backend.app.services.weight import backfill_missing_power_best_weights
 
-        await recompute_power_best_weights(athlete.id, session)
+        await backfill_missing_power_best_weights(athlete.id, session)
 
     athlete.updated_at = datetime.now(timezone.utc)
     await session.commit()

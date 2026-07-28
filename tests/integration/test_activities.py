@@ -1188,6 +1188,63 @@ class TestReprocess:
         resp2 = await client.get("/api/metrics/fitness/current", headers=auth_headers)
         assert resp2.status_code == 200
 
+    async def test_reprocess_keeps_the_weight_snapshotted_on_power_bests(
+        self, client, auth_headers, session
+    ):
+        """Rebuilding bests must not re-attribute an old effort to a newer weight."""
+        from datetime import date
+
+        from backend.app.models.user_orm import (
+            Activity,
+            ActivityPowerBest,
+            ActivityStream,
+            WeightLog,
+        )
+        from sqlalchemy import select as sa_select
+
+        activity_id = await self._create_processed(client, auth_headers)
+        act_result = await session.execute(
+            sa_select(Activity).where(Activity.id == activity_id)
+        )
+        activity = act_result.scalar_one()
+        session.add(
+            ActivityStream(activity_id=activity_id, stream_type="power", data=[200] * 20)
+        )
+        # The effort was ridden at 80 kg…
+        session.add(
+            ActivityPowerBest(
+                activity_id=activity_id,
+                athlete_id=activity.athlete_id,
+                duration_s=1,
+                power_w=200.0,
+                activity_start_time=activity.start_time,
+                weight_kg=80.0,
+                w_per_kg=2.5,
+            )
+        )
+        # …and the only weight now on record is a later, lighter one.
+        session.add(
+            WeightLog(
+                athlete_id=activity.athlete_id,
+                effective_date=date(2025, 6, 1),
+                weight_kg=70.0,
+            )
+        )
+        await session.commit()
+
+        resp = await client.post(
+            f"/api/activities/{activity_id}/reprocess", headers=auth_headers
+        )
+        assert resp.status_code == 200
+
+        rebuilt = await session.execute(
+            sa_select(ActivityPowerBest).where(
+                ActivityPowerBest.activity_id == activity_id
+            )
+        )
+        weights = {b.weight_kg for b in rebuilt.scalars().all()}
+        assert weights == {80.0}
+
     async def test_reprocess_nonexistent_returns_404(self, client, auth_headers):
         resp = await client.post(
             "/api/activities/nonexistent-id/reprocess",

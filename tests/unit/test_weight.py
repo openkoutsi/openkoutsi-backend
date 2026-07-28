@@ -5,8 +5,8 @@ import pytest
 
 from backend.app.models.user_orm import Activity, ActivityPowerBest, Athlete, WeightLog
 from backend.app.services.weight import (
+    backfill_missing_power_best_weights,
     effective_weight_for,
-    recompute_power_best_weights,
     w_per_kg,
 )
 
@@ -54,44 +54,90 @@ async def _seed_best(session, athlete_id, start, power_w, weight_kg=None):
     return best
 
 
-async def test_recompute_reattributes_weight_after_history_change(session):
+async def test_backfill_fills_rows_stored_without_a_weight(session):
     athlete = Athlete(id="a1", global_user_id="u1")
     session.add(athlete)
     await session.flush()
 
     older = datetime(2025, 2, 1, tzinfo=timezone.utc)
     newer = datetime(2025, 6, 15, tzinfo=timezone.utc)
-    # Bests initially stored with no weight (e.g. imported before any weigh-in).
+    # Bests initially stored with no weight (e.g. a mass import that ran before
+    # the weight history was available).
     b_old = await _seed_best(session, athlete.id, older, 300.0)
     b_new = await _seed_best(session, athlete.id, newer, 280.0)
     assert b_old.w_per_kg is None and b_new.w_per_kg is None
 
-    # Add dated weight history, then recompute.
     session.add(WeightLog(athlete_id=athlete.id, effective_date=date(2025, 1, 1), weight_kg=75.0))
     session.add(WeightLog(athlete_id=athlete.id, effective_date=date(2025, 6, 1), weight_kg=70.0))
     await session.flush()
 
-    await recompute_power_best_weights(athlete.id, session)
+    await backfill_missing_power_best_weights(athlete.id, session)
 
+    # Each row gets the weight in force on its own activity's date.
     assert b_old.weight_kg == 75.0
     assert b_old.w_per_kg == pytest.approx(300.0 / 75.0)
     assert b_new.weight_kg == 70.0
     assert b_new.w_per_kg == pytest.approx(280.0 / 70.0)
 
 
-async def test_recompute_clears_weight_when_no_entry_predates_activity(session):
+async def test_backfill_leaves_weight_none_when_no_entry_predates_activity(session):
+    """A weigh-in is never back-attributed to activities that predate it."""
     athlete = Athlete(id="a2", global_user_id="u2")
     session.add(athlete)
     await session.flush()
 
     start = datetime(2025, 1, 1, tzinfo=timezone.utc)
-    best = await _seed_best(session, athlete.id, start, 300.0, weight_kg=99.0)
+    best = await _seed_best(session, athlete.id, start, 300.0)
 
     # Only weight entries that are *after* the activity exist → no effective weight.
     session.add(WeightLog(athlete_id=athlete.id, effective_date=date(2025, 6, 1), weight_kg=70.0))
     await session.flush()
 
-    await recompute_power_best_weights(athlete.id, session)
+    await backfill_missing_power_best_weights(athlete.id, session)
+
+    assert best.weight_kg is None
+    assert best.w_per_kg is None
+
+
+async def test_backfill_never_rewrites_an_existing_snapshot(session):
+    """New weigh-ins apply forward only — stored weights are left untouched.
+
+    Covers both directions of the old recompute pass: it must not overwrite a
+    row with a newer weight, and it must not clear one whose weight has since
+    been dropped from the log.
+    """
+    athlete = Athlete(id="a3", global_user_id="u3")
+    session.add(athlete)
+    await session.flush()
+
+    older = datetime(2025, 2, 1, tzinfo=timezone.utc)
+    b_old = await _seed_best(session, athlete.id, older, 300.0, weight_kg=80.0)
+    # An activity whose weight was recorded even though nothing in the log
+    # predates it (e.g. the entry was later corrected to a different date).
+    orphan = datetime(2025, 3, 1, tzinfo=timezone.utc)
+    b_orphan = await _seed_best(session, athlete.id, orphan, 250.0, weight_kg=99.0)
+
+    session.add(WeightLog(athlete_id=athlete.id, effective_date=date(2025, 6, 1), weight_kg=70.0))
+    await session.flush()
+
+    await backfill_missing_power_best_weights(athlete.id, session)
+
+    assert b_old.weight_kg == 80.0
+    assert b_old.w_per_kg == pytest.approx(300.0 / 80.0)
+    assert b_orphan.weight_kg == 99.0
+    assert b_orphan.w_per_kg == pytest.approx(250.0 / 99.0)
+
+
+async def test_backfill_is_a_noop_without_any_weight_history(session):
+    athlete = Athlete(id="a4", global_user_id="u4")
+    session.add(athlete)
+    await session.flush()
+
+    best = await _seed_best(
+        session, athlete.id, datetime(2025, 2, 1, tzinfo=timezone.utc), 300.0
+    )
+
+    await backfill_missing_power_best_weights(athlete.id, session)
 
     assert best.weight_kg is None
     assert best.w_per_kg is None

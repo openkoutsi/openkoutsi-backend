@@ -851,9 +851,23 @@ async def reprocess_activity(
             w_per_kg,
         )
 
-        weight_log = await load_weight_log(athlete.id, session)
-        act_date = activity.start_time.date() if activity.start_time else None
-        weight = effective_weight_for(weight_log, act_date)
+        # Carry the weight already snapshotted on this activity across the
+        # rebuild, so reprocessing never re-attributes an old effort to a weight
+        # the athlete only logged later. Only when the rows never had one (or
+        # this is the first processing) do we look it up from the log.
+        prev = await session.execute(
+            select(ActivityPowerBest.weight_kg)
+            .where(
+                ActivityPowerBest.activity_id == activity_id,
+                ActivityPowerBest.weight_kg.is_not(None),
+            )
+            .limit(1)
+        )
+        weight = prev.scalar_one_or_none()
+        if weight is None:
+            weight_log = await load_weight_log(athlete.id, session)
+            act_date = activity.start_time.date() if activity.start_time else None
+            weight = effective_weight_for(weight_log, act_date)
         await session.execute(
             sa_delete(ActivityPowerBest).where(ActivityPowerBest.activity_id == activity_id)
         )

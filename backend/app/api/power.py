@@ -17,7 +17,7 @@ from backend.app.schemas.power import (
     PowerModelsResponse,
 )
 from backend.app.services.power_profile import rank1_bests
-from backend.app.services.weight import effective_weight_for, load_weight_log, w_per_kg
+from backend.app.services.weight import w_per_kg
 from openkoutsi.training_math import (
     CP3_FIT_DURATIONS,
     CP_FIT_DURATIONS,
@@ -60,16 +60,12 @@ async def all_time_power_bests(
     """Top-3 best efforts per standard duration for an athlete.
 
     ``metric="watts"`` ranks each duration by absolute power; ``metric="wkg"``
-    ranks by watts-per-kg using the effective bodyweight at the time of each
-    effort, and omits efforts with no known weight. Ordered by (duration_s asc,
-    rank asc); durations with no qualifying data are omitted. Pass ``days`` to
-    restrict to a rolling window; omit for all-time. Shared by the
-    ``/bests/power`` route and the data export.
+    ranks by watts-per-kg using the bodyweight snapshotted on each effort when
+    its activity was processed, and omits efforts with no known weight. Ordered
+    by (duration_s asc, rank asc); durations with no qualifying data are omitted.
+    Pass ``days`` to restrict to a rolling window; omit for all-time. Shared by
+    the ``/bests/power`` route and the data export.
     """
-    # Effective weight is recomputed from the log on read, so the curve reflects
-    # the current weight history even if the stored per-row values are stale.
-    weight_log = await load_weight_log(athlete.id, session)
-
     cutoff = (
         datetime.now(timezone.utc) - timedelta(days=days)
         if days is not None
@@ -88,15 +84,13 @@ async def all_time_power_bests(
     )
     records = rows.all()
 
-    def _weight(best: ActivityPowerBest) -> Optional[float]:
-        act_date = best.activity_start_time.date() if best.activity_start_time else None
-        return effective_weight_for(weight_log, act_date)
-
     entries: list[PowerBestEntry] = []
     for _, group in groupby(records, key=lambda r: r[0].duration_s):
         candidates = []
         for best, activity_name in group:
-            weight = _weight(best)
+            # The weight frozen onto the row at processing time — a later
+            # weigh-in must not restate what an old effort was worth in W/kg.
+            weight = best.weight_kg
             wkg = w_per_kg(best.power_w, weight)
             if metric == "wkg" and wkg is None:
                 # No contemporaneous weight — can't rank this effort by W/kg.
@@ -144,8 +138,10 @@ async def get_power_bests(
     Return the top-3 best efforts for each standard duration,
     ordered by (duration_s asc, rank asc).  Durations with no data are omitted.
 
-    Pass ?metric=wkg to rank by watts-per-kg using the effective bodyweight at
-    the time of each effort (efforts with no known weight are omitted); the
+    Pass ?metric=wkg to rank by watts-per-kg using the bodyweight recorded for
+    each effort when its activity was processed (efforts with no known weight
+    are omitted).  That weight is a snapshot: a later weigh-in applies to
+    activities from its own date onward and never restates older ones.  The
     default ?metric=watts ranks by absolute power.  Pass ?days=90/180/365 to
     restrict to a rolling window; omit for all-time.
     """
