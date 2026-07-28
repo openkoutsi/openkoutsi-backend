@@ -2,6 +2,8 @@
 
 from datetime import date, datetime, timedelta, timezone
 
+from openkoutsi.achievements import CATALOGUE_BY_ID
+
 
 def _iso(day: date, hour: int = 10) -> str:
     return datetime(day.year, day.month, day.day, hour, tzinfo=timezone.utc).isoformat()
@@ -303,6 +305,18 @@ class TestInboxNotification:
         assert len(unlocked) == 1
         assert unlocked[0]["data"]["count"] >= 1
 
+    async def test_the_message_names_the_badge_that_was_earned(
+        self, client, auth_headers
+    ):
+        """The whole point of the message: which badge, not how many."""
+        await _log_ride(client, auth_headers, day=date.today())
+
+        messages = (await client.get("/api/messages", headers=auth_headers)).json()
+        msg = [m for m in messages["items"] if m["type"] == "achievement_unlocked"][0]
+
+        assert "Getting started" in msg["body"]
+        assert msg["title"]
+
     async def test_a_batch_of_unlocks_produces_one_message_not_many(
         self, client, auth_headers
     ):
@@ -317,6 +331,38 @@ class TestInboxNotification:
         unlocked = [m for m in messages["items"] if m["type"] == "achievement_unlocked"]
         assert len(unlocked) == 1
         assert unlocked[0]["data"]["count"] > 1
+
+    async def test_a_batch_message_lists_every_badge(self, client, auth_headers):
+        """One message for the batch, but it still has to account for all of it."""
+        await _log_ride(
+            client, auth_headers, day=date.today(),
+            duration_s=6 * 3600, distance_m=180_000, elevation_m=2_500,
+        )
+
+        messages = (await client.get("/api/messages", headers=auth_headers)).json()
+        msg = [m for m in messages["items"] if m["type"] == "achievement_unlocked"][0]
+
+        earned = msg["data"]["achievements"]
+        assert len(earned) == msg["data"]["count"]
+        assert all(e["id"] in CATALOGUE_BY_ID for e in earned)
+        # Every badge in the payload is accounted for in the text, one line each.
+        assert msg["title"] == f"{len(earned)} achievements unlocked"
+        assert len(msg["body"].splitlines()) == len(earned) + 1
+        for name in ("Long hauler", "Distance rider", "Climber"):
+            assert name in msg["body"]
+
+    async def test_the_batch_is_listed_in_a_stable_order(self, client, auth_headers):
+        """A recompute must not reshuffle the list it already sent."""
+        await _log_ride(
+            client, auth_headers, day=date.today(),
+            duration_s=6 * 3600, distance_m=180_000, elevation_m=2_500,
+        )
+
+        messages = (await client.get("/api/messages", headers=auth_headers)).json()
+        msg = [m for m in messages["items"] if m["type"] == "achievement_unlocked"][0]
+
+        earned = [(e["id"], e["tier"]) for e in msg["data"]["achievements"]]
+        assert earned == sorted(earned)
 
     async def test_repeat_reads_do_not_re_notify(self, client, auth_headers):
         await _log_ride(client, auth_headers, day=date.today())

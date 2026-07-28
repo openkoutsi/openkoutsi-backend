@@ -20,8 +20,20 @@ class Message(UserBase):
     """An in-app message in a user's inbox.
 
     Lives in the per-user DB, so the file itself identifies the recipient — no
-    recipient column is needed. Text is not stored pre-rendered: `type` + the
-    structured `data` payload let the frontend render localized strings.
+    recipient column is needed.
+
+    Text is stored pre-rendered, in `title` and `body`, written by
+    `backend.app.services.message_text` at send time. Messages used to carry
+    only `type` + `data` and be rendered from an i18n template in the web app,
+    which meant a message could never say more than the template the frontend
+    happened to ship — the achievement notification could only count badges, not
+    name them. `locale` records which language the text was rendered in, so
+    translated rendering can be added later without a migration.
+
+    `type` and `data` are still stored, but as machine-readable metadata (icon
+    selection, deep links, the GDPR export) rather than as the source of the
+    text. All three text columns are nullable because messages written before
+    this change have none.
     """
 
     __tablename__ = "messages"
@@ -29,5 +41,8 @@ class Message(UserBase):
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
     type: Mapped[str] = mapped_column(String, nullable=False)
     data: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    title: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    body: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    locale: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     read_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

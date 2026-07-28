@@ -706,6 +706,9 @@ async def _export_inbox(session: AsyncSession) -> list[dict]:
             "id": m.id,
             "type": m.type,
             "data": m.data or {},
+            "title": m.title,
+            "body": m.body,
+            "locale": m.locale,
             "read_at": _iso(m.read_at),
             "created_at": _iso(m.created_at),
         }
