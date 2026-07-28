@@ -194,6 +194,10 @@ class ActivityDetailResponse(ActivityResponse):
     # date. Both null — and no `w_bal` in `streams` — when CP couldn't be fit.
     cp_w: Optional[float] = None
     w_prime_j: Optional[float] = None
+    # How many duration bests the CP fit used. Low values mean the fit was made
+    # against a thin power profile — typically an old ride processed early in a
+    # provider backlog import, before the surrounding history existed.
+    cp_fit_points: Optional[int] = None
     analysis_status: Optional[str] = None
     analysis: Optional[str] = None
 
@@ -230,6 +234,7 @@ class ActivityDetailResponse(ActivityResponse):
             decoupling_reason=activity.decoupling_reason,
             cp_w=activity.cp_w,
             w_prime_j=activity.w_prime_j,
+            cp_fit_points=activity.cp_fit_points,
             workout_category=activity.workout_category,
             labels=activity.labels or [],
             notes=activity.notes,

@@ -123,6 +123,11 @@ _DECOUPLING_REASON_TEXT: dict[str, str] = {
     "degenerate_hr": "the heart-rate data was unusable",
     "variable_effort": "this was interval or otherwise surging riding, where the "
                        "measurement describes the intervals rather than aerobic durability",
+    "uneven_pacing": "the two halves were ridden at markedly different intensities "
+                     "(a ramp or negative split), so any drift figure would reflect "
+                     "the pacing choice rather than aerobic durability",
+    "stream_mismatch": "the power and heart-rate recordings don't line up well enough "
+                       "to pair them sample by sample",
 }
 
 

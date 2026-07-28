@@ -134,6 +134,12 @@ class Activity(UserBase):
     # which case no `w_bal` stream is stored either.
     cp_w: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     w_prime_j: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # How many duration bests the CP fit had available. A provider backlog import
+    # walks newest-first, so an old ride can be processed while almost nothing on
+    # or before its date exists yet — this records that, so those rides stay
+    # findable for a future re-fit instead of being indistinguishable from a
+    # well-supported one. Set even when the fit was rejected.
+    cp_fit_points: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     labels: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # Rate of Perceived Exertion (RPE): athlete's subjective 1–10 effort score

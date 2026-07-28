@@ -46,11 +46,13 @@ from openkoutsi.fit_processing import (
 )
 from backend.app.services.providers.registry import PROVIDERS
 from backend.app.services.weight import effective_weight_for, load_weight_log, w_per_kg
+from backend.app.services.aerobic_metrics import apply_aerobic_metrics
 from openkoutsi.training_math import (
     calculate_load,
     compute_distance_bests,
     compute_power_bests,
     compute_torque_stream,
+    variability_index,
     weighted_power,
 )
 from openkoutsi.fit import summarizeWorkout, extractIntervals
@@ -561,7 +563,7 @@ async def _fill_from_source(
             activity.intensity = intensity
             activity.status = "processed"
 
-            vi = (np_val / activity.avg_power) if (np_val and activity.avg_power) else None
+            vi = variability_index(np_val, activity.avg_power)
             category = classify_workout(intensity, vi)
             activity.workout_category = category.value if category else None
 
@@ -578,6 +580,7 @@ async def _fill_from_source(
                 "speed": speed_ms,
                 "altitude": alt_data,
             }
+            await _apply_aerobic(activity, athlete, session, stream_map)
             _add_intervals(activity, session, fit_bytes, profile.start_time, stream_map)
         else:
             # FIT parse failed — use summary metadata only
@@ -635,7 +638,7 @@ async def _fill_from_source(
     activity.intensity = intensity
     activity.status = "processed"
 
-    vi = (np_val / activity.avg_power) if (np_val and activity.avg_power) else None
+    vi = variability_index(np_val, activity.avg_power)
     category = classify_workout(intensity, vi)
     activity.workout_category = category.value if category else None
 
@@ -645,11 +648,46 @@ async def _fill_from_source(
     _add_power_bests(activity, athlete, session, power_data, weight_log)
     _add_distance_bests(activity, athlete, session, speed_data)
 
+    await _apply_aerobic(activity, athlete, session, {
+        "power": power_data,
+        "heartrate": hr_data,
+        "cadence": cadence_data,
+        "speed": speed_data,
+        "altitude": altitude_data,
+    })
+
     await session.commit()
     await session.refresh(activity)
 
 
 # ── Stream / bests helpers ────────────────────────────────────────────────────
+
+
+async def _apply_aerobic(
+    activity: Activity,
+    athlete: Athlete,
+    session: AsyncSession,
+    stream_map: dict[str, list],
+) -> None:
+    """Derive the aerobic metrics and persist the W' balance stream.
+
+    Both provider paths need this, and so do the upload and reprocess paths in
+    the API layer — see ``services.aerobic_metrics`` for why it lives in one
+    place. Must run after ``_add_power_bests``: autoflush is what lets the
+    date-restricted CP fit see the ride's own efforts.
+    """
+    w_bal_data = await apply_aerobic_metrics(activity, athlete, stream_map, session)
+    if not w_bal_data:
+        return
+    stream_map["w_bal"] = w_bal_data
+    session.add(
+        ActivityStream(
+            id=str(uuid.uuid4()),
+            activity_id=activity.id,
+            stream_type="w_bal",
+            data=w_bal_data,
+        )
+    )
 
 
 def _add_streams(

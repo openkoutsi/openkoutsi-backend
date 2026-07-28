@@ -4,7 +4,10 @@ Stores the aerobic decoupling figure (or a reason code explaining why one would
 be misleading for this ride) and the CP/W' snapshot the activity's ``w_bal``
 stream was integrated with. The CP/W' pair is frozen at processing time, in the
 same spirit as ``zone_times``, so a ride's W' story doesn't silently change as
-the athlete's power curve moves.
+the athlete's power curve moves. ``cp_fit_points`` records how many duration
+bests that fit had available, so rides fit against a nearly-empty profile — what
+a reverse-chronological provider backlog import produces — stay findable for a
+future re-fit.
 
 Efficiency factor and variability index are deliberately *not* stored: both are
 pure ratios of columns already on the row (weighted power / avg HR and weighted
@@ -28,6 +31,7 @@ _COLUMNS: tuple[tuple[str, sa.types.TypeEngine], ...] = (
     ("decoupling_reason", sa.String()),
     ("cp_w", sa.Float()),
     ("w_prime_j", sa.Float()),
+    ("cp_fit_points", sa.Integer()),
 )
 
 

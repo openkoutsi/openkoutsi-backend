@@ -2715,7 +2715,7 @@
           "metrics"
         ],
         "summary": "Aerobic efficiency trend",
-        "description": "Aerobic efficiency (weighted power per heartbeat) for each steady endurance\nride, oldest first \u2014 the trend that shows aerobic progress a rising Fitness\nnumber alone doesn't.\n\nRestricted to cycling rides of at least 20 minutes that have both weighted\npower and average heart rate, and that were steady enough for the number to\nmean something: the same \"not an interval session\" test the decoupling gate\nuses (variability index at or below 1.10, and not categorized as VO2max,\nanaerobic or sprint work). Each ride's decoupling figure rides along when it\nhas one.\n\nComputed on read from stored columns \u2014 nothing extra is persisted, so the\ntrend covers the athlete's whole history immediately.",
+        "description": "Aerobic efficiency (weighted power per heartbeat) for each steady endurance\nride, oldest first \u2014 the trend that shows aerobic progress a rising Fitness\nnumber alone doesn't.\n\nRestricted to cycling rides of at least 20 minutes that have both weighted\npower and average heart rate, and that were steady enough for the number to\nmean something: the same \"not an interval session\" test the decoupling gate\nuses (variability index at or below 1.10, and not categorized as VO2max,\nanaerobic or sprint work). Each ride's decoupling figure rides along when it\nhas one.\n\nComputed on read from stored columns \u2014 nothing extra is persisted, so the\ntrend covers the athlete's whole history immediately. Capped at the most\nrecent 1000 qualifying rides.",
         "operationId": "getEfficiencyTrend",
         "security": [
           {
@@ -5977,6 +5977,17 @@
               }
             ],
             "title": "W Prime J"
+          },
+          "cp_fit_points": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cp Fit Points"
           },
           "analysis_status": {
             "anyOf": [

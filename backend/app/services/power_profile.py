@@ -14,7 +14,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.models.user_orm import ActivityPowerBest
-from openkoutsi.training_math import CP_FIT_DURATIONS, estimate_cp_wprime
+from openkoutsi.training_math import (
+    CP_FIT_DURATIONS,
+    cp_wprime_plausible,
+    estimate_cp_wprime,
+)
 
 
 async def rank1_bests(
@@ -58,7 +62,7 @@ async def rank1_bests(
 
 async def cp_wprime_as_of(
     athlete_id: str, session: AsyncSession, as_of: datetime | None
-) -> tuple[float | None, float | None]:
+) -> tuple[float | None, float | None, int]:
     """Fit CP (watts) and W' (joules) from the bests available on ``as_of``.
 
     Applying today's all-time CP to a ride from two years ago would be
@@ -66,11 +70,22 @@ async def cp_wprime_as_of(
     restricted to efforts recorded on or before the date in question. Passing
     ``None`` fits the athlete's whole history.
 
-    Returns ``(None, None)`` when there aren't enough bests to fit, which the
-    caller treats as "no W' balance for this activity" rather than substituting
-    a guess.
+    Returns ``(cp, w_prime, n_points)`` where ``n_points`` is how many duration
+    bests the fit had to work with. Returns ``(None, None, n_points)`` when
+    there aren't enough bests to fit **or when the fit is not physiologically
+    plausible** — the OLS intercept is unconstrained, so a rider who only ever
+    rides steady routinely fits a negative or near-zero W'. Rejecting here keeps
+    "no CP → no columns, no stream" as the single failure mode, so the stored
+    columns can never disagree with the presence of the stream.
+
+    ``n_points`` is returned even on rejection: it is what makes a fit against a
+    nearly-empty profile (a reverse-chronological backlog import) findable after
+    the fact instead of indistinguishable from a well-supported one.
     """
     bests = await rank1_bests(
         athlete_id, session, CP_FIT_DURATIONS, until=as_of
     )
-    return estimate_cp_wprime(bests)
+    cp, w_prime = estimate_cp_wprime(bests)
+    if not cp_wprime_plausible(cp, w_prime):
+        return None, None, len(bests)
+    return cp, w_prime, len(bests)

@@ -907,10 +907,15 @@ class TestAerobicMetrics:
     # 1200 seconds carry every CP-fit best and fit exactly to W = 195·t + 15000,
     # i.e. CP = 195 W and W' = 15 kJ. The remainder sits below CP so W' balance
     # visibly reconstitutes. 4000 s clears the one-hour decoupling minimum.
+    #
+    # `CRUISE_W` is chosen to keep the two halves' mean power within the
+    # decoupling gate's 10% pacing tolerance while staying under CP — the ride
+    # has to read as *steadily paced* for a decoupling figure to be produced at
+    # all, which is the whole point of the gate.
     HARD_OPENER_S = 120
     OPENER_W = 320.0
     STEADY_W = 195.0     # equals the CP the bests fit to
-    CRUISE_W = 170.0     # below CP → reconstitution
+    CRUISE_W = 185.0     # below CP → reconstitution, within the pacing tolerance
     CP_PREFIX_S = 1200
     TOTAL_S = 4000
 
@@ -1105,6 +1110,59 @@ class TestAerobicMetrics:
         assert body["variability_index"] > 1.10
         assert body["decoupling_pct"] is None
         assert body["decoupling_reason"] == "variable_effort"
+
+    async def test_cp_fit_points_records_how_thin_the_profile_was(
+        self, client, auth_headers, session
+    ):
+        """A backlog import fits old rides against almost nothing — record that."""
+        activity_id = await self._seed(client, auth_headers, session)
+        body = (await client.post(
+            f"/api/activities/{activity_id}/reprocess", headers=auth_headers
+        )).json()
+        # This ride's own bests cover all six CP-fit durations.
+        assert body["cp_fit_points"] == 6
+
+    async def test_dateless_activity_gets_no_cp_snapshot(
+        self, client, auth_headers, session
+    ):
+        """No date means no 'as of', and an all-time fit would be the anachronism."""
+        from sqlalchemy import select as sa_select
+
+        activity_id = await self._seed(client, auth_headers, session)
+        activity = (
+            await session.execute(sa_select(Activity).where(Activity.id == activity_id))
+        ).scalar_one()
+        activity.start_time = None
+        await session.commit()
+
+        body = (await client.post(
+            f"/api/activities/{activity_id}/reprocess", headers=auth_headers
+        )).json()
+        assert body["cp_w"] is None
+        assert body["w_prime_j"] is None
+        assert "w_bal" not in body["streams"]
+
+    async def test_sparse_recording_gets_no_w_bal_stream(
+        self, client, auth_headers, session
+    ):
+        """W' balance integrates per sample; a non-1 Hz file would be wrong by the ratio."""
+        from sqlalchemy import select as sa_select
+
+        activity_id = await self._seed(client, auth_headers, session)
+        activity = (
+            await session.execute(sa_select(Activity).where(Activity.id == activity_id))
+        ).scalar_one()
+        # Same samples, four times the elapsed time — smart recording, or a ride
+        # with most of its duration unrecorded.
+        activity.duration_s = self.TOTAL_S * 4
+        await session.commit()
+
+        body = (await client.post(
+            f"/api/activities/{activity_id}/reprocess", headers=auth_headers
+        )).json()
+        assert "w_bal" not in body["streams"]
+        # The CP snapshot is still recorded — only the integration is refused.
+        assert body["cp_w"] is not None
 
     async def test_manual_activity_gets_derived_ratios_without_reprocess(
         self, client, auth_headers

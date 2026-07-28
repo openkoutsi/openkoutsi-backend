@@ -159,6 +159,12 @@ async def get_fitness_forecast(
 # of riding before a point joins the trend.
 EFFICIENCY_MIN_DURATION_S = 1200
 
+# Hard cap on points returned. This is a trend chart — nobody scrolls back a
+# decade in it — and an uncapped all-time query on a long-tenured athlete is
+# unbounded work per request. The most recent rides are the ones that matter, so
+# the cap takes from the newest end and the result is reversed for display.
+EFFICIENCY_MAX_POINTS = 1000
+
 
 @router.get("/efficiency", response_model=list[EfficiencyPoint],
             operation_id="getEfficiencyTrend", summary="Aerobic efficiency trend")
@@ -179,12 +185,24 @@ async def get_efficiency_trend(
     has one.
 
     Computed on read from stored columns — nothing extra is persisted, so the
-    trend covers the athlete's whole history immediately.
+    trend covers the athlete's whole history immediately. Capped at the most
+    recent 1000 qualifying rides.
     """
     ctx, session = ctx_session
     athlete = await _get_athlete(ctx.user_id, session)
 
-    query = select(Activity).where(
+    # Select the columns rather than the entity: this reads seven fields, and
+    # hydrating full ORM rows would deserialise each activity's `zone_times`
+    # JSON and every other column for nothing.
+    query = select(
+        Activity.id,
+        Activity.start_time,
+        Activity.duration_s,
+        Activity.weighted_power,
+        Activity.avg_power,
+        Activity.avg_hr,
+        Activity.decoupling_pct,
+    ).where(
         Activity.athlete_id == athlete.id,
         Activity.sport_type.in_(CYCLING_SPORT_TYPES),
         Activity.start_time.is_not(None),
@@ -200,25 +218,30 @@ async def get_efficiency_trend(
         cutoff = datetime.combine(date.today() - timedelta(days=days), time.min)
         query = query.where(Activity.start_time >= cutoff)
 
-    result = await session.execute(query.order_by(Activity.start_time))
+    # Take the cap from the newest end, then flip to the oldest-first order the
+    # chart wants — truncating the recent end would be the wrong half to lose.
+    result = await session.execute(
+        query.order_by(Activity.start_time.desc()).limit(EFFICIENCY_MAX_POINTS)
+    )
 
     points: list[EfficiencyPoint] = []
-    for activity in result.scalars().all():
-        vi = variability_index(activity.weighted_power, activity.avg_power)
+    for row in result.all():
+        vi = variability_index(row.weighted_power, row.avg_power)
         if vi is None or vi > DECOUPLING_MAX_VI:
             continue
-        ef = efficiency_factor(activity.weighted_power, activity.avg_hr)
+        ef = efficiency_factor(row.weighted_power, row.avg_hr)
         if ef is None:
             continue
         points.append(
             EfficiencyPoint(
-                activity_id=activity.id,
-                date=activity.start_time.date(),
-                duration_s=activity.duration_s,
+                activity_id=row.id,
+                date=row.start_time.date(),
+                duration_s=row.duration_s,
                 efficiency_factor=round(ef, 3),
-                decoupling_pct=activity.decoupling_pct,
+                decoupling_pct=row.decoupling_pct,
             )
         )
+    points.reverse()
     return points
 
 
