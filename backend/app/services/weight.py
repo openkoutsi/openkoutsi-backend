@@ -4,8 +4,15 @@ The athlete's weight over time lives in the ``WeightLog`` table (one entry per
 day, written whenever the profile weight is edited).  Several features need the
 *effective* weight at the time of a past activity — the most recent logged
 weight on or before that activity's date.  This module is the single source of
-truth for that lookup, plus a pass that (re)derives the stored W/kg on every
-power-best row when the weight history changes.
+truth for that lookup, plus a pass that fills in a power best's weight when it
+was stored without one.
+
+Weight on a power best is a **snapshot**, not a derived value: it is captured
+when the activity is processed and is never rewritten afterwards.  A new weigh-in
+therefore only applies to activities from that day onward — an older activity
+keeps whatever the athlete weighed at the time, or no weight at all if none was
+logged back then.  (Same reasoning as the frozen ``Activity.zone_times``: editing
+today's profile must not silently rewrite the history of past rides.)
 """
 from __future__ import annotations
 
@@ -56,21 +63,32 @@ def w_per_kg(power_w: Optional[float], weight_kg: Optional[float]) -> Optional[f
     return power_w / weight_kg
 
 
-async def recompute_power_best_weights(athlete_id: str, session: AsyncSession) -> None:
-    """Re-derive weight_kg / w_per_kg on every power-best row for an athlete.
+async def backfill_missing_power_best_weights(athlete_id: str, session: AsyncSession) -> None:
+    """Fill weight_kg / w_per_kg on power-best rows that were stored without one.
 
-    Effective weight depends only on the weight log (not on other activities),
-    so this is order-independent and safe after a reverse-chronological mass
-    import.  Call it after a bulk sync and whenever the weight history changes,
-    since editing/adding a log entry shifts the effective weight for a range of
-    past activities.  The caller is responsible for committing the session.
+    Only rows with no weight yet are touched, and only when the log holds an
+    entry on or before the activity's date — a row that already carries a weight
+    keeps it, and a row with no contemporaneous weight stays empty.  So this can
+    never rewrite an activity's W/kg history; it only repairs rows created before
+    the weight was known (a reverse-chronological mass import, or a first
+    weigh-in recorded later the same day).
+
+    Effective weight depends only on the weight log (not on other activities), so
+    this is order-independent.  The caller commits the session.
     """
     weight_log = await load_weight_log(athlete_id, session)
+    if not weight_log:
+        return
     rows = await session.execute(
-        select(ActivityPowerBest).where(ActivityPowerBest.athlete_id == athlete_id)
+        select(ActivityPowerBest).where(
+            ActivityPowerBest.athlete_id == athlete_id,
+            ActivityPowerBest.weight_kg.is_(None),
+        )
     )
     for best in rows.scalars():
         act_date = best.activity_start_time.date() if best.activity_start_time else None
         weight = effective_weight_for(weight_log, act_date)
+        if weight is None:
+            continue
         best.weight_kg = weight
         best.w_per_kg = w_per_kg(best.power_w, weight)
