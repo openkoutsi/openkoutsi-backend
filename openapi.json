@@ -2978,7 +2978,7 @@
           "metrics"
         ],
         "summary": "All-time power bests",
-        "description": "Return the top-3 best efforts for each standard duration,\nordered by (duration_s asc, rank asc).  Durations with no data are omitted.\n\nPass ?metric=wkg to rank by watts-per-kg using the effective bodyweight at\nthe time of each effort (efforts with no known weight are omitted); the\ndefault ?metric=watts ranks by absolute power.  Pass ?days=90/180/365 to\nrestrict to a rolling window; omit for all-time.",
+        "description": "Return the top-3 best efforts for each standard duration,\nordered by (duration_s asc, rank asc).  Durations with no data are omitted.\n\nPass ?metric=wkg to rank by watts-per-kg using the bodyweight recorded for\neach effort when its activity was processed (efforts with no known weight\nare omitted).  That weight is a snapshot: a later weigh-in applies to\nactivities from its own date onward and never restates older ones.  The\ndefault ?metric=watts ranks by absolute power.  Pass ?days=90/180/365 to\nrestrict to a rolling window; omit for all-time.",
         "operationId": "getPowerBests",
         "security": [
           {
