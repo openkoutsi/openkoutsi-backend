@@ -2709,6 +2709,69 @@
         }
       }
     },
+    "/api/metrics/efficiency": {
+      "get": {
+        "tags": [
+          "metrics"
+        ],
+        "summary": "Aerobic efficiency trend",
+        "description": "Aerobic efficiency (weighted power per heartbeat) for each steady endurance\nride, oldest first \u2014 the trend that shows aerobic progress a rising Fitness\nnumber alone doesn't.\n\nRestricted to cycling rides of at least 20 minutes that have both weighted\npower and average heart rate, and that were steady enough for the number to\nmean something: the same \"not an interval session\" test the decoupling gate\nuses (variability index at or below 1.10, and not categorized as VO2max,\nanaerobic or sprint work). Each ride's decoupling figure rides along when it\nhas one.\n\nComputed on read from stored columns \u2014 nothing extra is persisted, so the\ntrend covers the athlete's whole history immediately.",
+        "operationId": "getEfficiencyTrend",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "maximum": 3650,
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Restrict to rides from the past N days. Omit for all-time.",
+              "title": "Days"
+            },
+            "description": "Restrict to rides from the past N days. Omit for all-time."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/EfficiencyPoint"
+                  },
+                  "title": "Response Getefficiencytrend"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/metrics/zones/weekly": {
       "get": {
         "tags": [
@@ -5739,6 +5802,50 @@
             ],
             "title": "Intensity"
           },
+          "efficiency_factor": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Efficiency Factor"
+          },
+          "variability_index": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Variability Index"
+          },
+          "decoupling_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decoupling Pct"
+          },
+          "decoupling_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decoupling Reason"
+          },
           "workout_category": {
             "anyOf": [
               {
@@ -5848,6 +5955,28 @@
             "type": "array",
             "title": "Intervals",
             "default": []
+          },
+          "cp_w": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cp W"
+          },
+          "w_prime_j": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "W Prime J"
           },
           "analysis_status": {
             "anyOf": [
@@ -6073,6 +6202,50 @@
               }
             ],
             "title": "Intensity"
+          },
+          "efficiency_factor": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Efficiency Factor"
+          },
+          "variability_index": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Variability Index"
+          },
+          "decoupling_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decoupling Pct"
+          },
+          "decoupling_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decoupling Reason"
           },
           "workout_category": {
             "anyOf": [
@@ -6776,6 +6949,53 @@
           "meters"
         ],
         "title": "DistanceDuration"
+      },
+      "EfficiencyPoint": {
+        "properties": {
+          "activity_id": {
+            "type": "string",
+            "title": "Activity Id"
+          },
+          "date": {
+            "type": "string",
+            "format": "date",
+            "title": "Date"
+          },
+          "duration_s": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration S"
+          },
+          "efficiency_factor": {
+            "type": "number",
+            "title": "Efficiency Factor"
+          },
+          "decoupling_pct": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decoupling Pct"
+          }
+        },
+        "type": "object",
+        "required": [
+          "activity_id",
+          "date",
+          "efficiency_factor"
+        ],
+        "title": "EfficiencyPoint",
+        "description": "One steady endurance ride in the aerobic efficiency trend (issue #37).\n\nEfficiency factor is weighted power per heartbeat; rising over time at a\nconstant training load is aerobic progress the Fitness/Fatigue model can't\nsee. ``decoupling_pct`` rides along where the activity has one, so the same\nchart can show durability alongside efficiency."
       },
       "ExportFormatInfo": {
         "properties": {

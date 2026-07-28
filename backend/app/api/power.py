@@ -16,6 +16,7 @@ from backend.app.schemas.power import (
     PowerModelPoint,
     PowerModelsResponse,
 )
+from backend.app.services.power_profile import rank1_bests
 from backend.app.services.weight import effective_weight_for, load_weight_log, w_per_kg
 from openkoutsi.training_math import (
     CP3_FIT_DURATIONS,
@@ -178,24 +179,10 @@ async def get_ftp_estimate(
         else None
     )
 
-    where_clauses = [
-        ActivityPowerBest.athlete_id == athlete.id,
-        ActivityPowerBest.duration_s.in_(CP_FIT_DURATIONS),
-    ]
-    if cutoff is not None:
-        where_clauses.append(ActivityPowerBest.activity_start_time >= cutoff)
-
-    rows = await session.execute(
-        select(ActivityPowerBest.duration_s, ActivityPowerBest.power_w)
-        .where(*where_clauses)
-        .order_by(ActivityPowerBest.duration_s, ActivityPowerBest.power_w.desc())
-    )
-
     # Keep the single best (rank-1) power per duration.
-    rank1: dict[int, float] = {}
-    for duration_s, power_w in rows.all():
-        if duration_s not in rank1:
-            rank1[duration_s] = power_w
+    rank1 = await rank1_bests(
+        athlete.id, session, CP_FIT_DURATIONS, since=cutoff
+    )
 
     twenty_min_power = rank1.get(1200)
     ftp_simple_raw = estimate_ftp_simple(twenty_min_power)
@@ -330,20 +317,10 @@ async def get_power_models(
         else None
     )
 
-    where_clauses = [ActivityPowerBest.athlete_id == athlete.id]
-    if cutoff is not None:
-        where_clauses.append(ActivityPowerBest.activity_start_time >= cutoff)
-
-    rows = await session.execute(
-        select(ActivityPowerBest.duration_s, ActivityPowerBest.power_w)
-        .where(*where_clauses)
-        .order_by(ActivityPowerBest.duration_s, ActivityPowerBest.power_w.desc())
+    # Keep the single best (rank-1) power per duration. Unlike the FTP estimate
+    # this fits over every duration, not just the 2–20 minute CP window.
+    rank1 = await rank1_bests(
+        athlete.id, session, POWER_BEST_DURATIONS, since=cutoff
     )
-
-    # Keep the single best (rank-1) power per duration.
-    rank1: dict[int, float] = {}
-    for duration_s, power_w in rows.all():
-        if duration_s not in rank1:
-            rank1[duration_s] = power_w
 
     return PowerModelsResponse(models=build_power_models(rank1), days=days)

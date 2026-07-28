@@ -119,6 +119,21 @@ class Activity(UserBase):
     # "power": {...}}. Frozen once set — editing zones later never rewrites it,
     # so historical weekly zone distributions stay stable (issue #27).
     zone_times: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # Aerobic decoupling (issue #37): how far the power:HR ratio drifted between
+    # the first and second half of the ride, as a percentage. NULL when the ride
+    # doesn't support a meaningful figure (too short, no HR, interval session);
+    # `decoupling_reason` then carries a stable reason code — see
+    # `openkoutsi.training_math.decoupling_unavailable_reason`. Exactly one of
+    # the two is set.
+    decoupling_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    decoupling_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # CP (watts) and W' (joules) the `w_bal` stream was integrated with, fit from
+    # the athlete's power bests as they stood *on this activity's date*. Frozen
+    # like `zone_times`: a ride's W' story shouldn't silently change months later
+    # as the athlete's power curve moves. Both NULL when CP couldn't be fit, in
+    # which case no `w_bal` stream is stored either.
+    cp_w: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    w_prime_j: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     labels: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # Rate of Perceived Exertion (RPE): athlete's subjective 1–10 effort score

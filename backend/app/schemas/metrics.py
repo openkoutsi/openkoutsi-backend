@@ -75,6 +75,22 @@ class ActivitySummaryResponse(BaseModel):
     total_distance_m: float = 0.0
 
 
+class EfficiencyPoint(BaseModel):
+    """One steady endurance ride in the aerobic efficiency trend (issue #37).
+
+    Efficiency factor is weighted power per heartbeat; rising over time at a
+    constant training load is aerobic progress the Fitness/Fatigue model can't
+    see. ``decoupling_pct`` rides along where the activity has one, so the same
+    chart can show durability alongside efficiency.
+    """
+
+    activity_id: str
+    date: date
+    duration_s: Optional[int] = None
+    efficiency_factor: float
+    decoupling_pct: Optional[float] = None
+
+
 class WeeklyZoneBucket(BaseModel):
     """Accumulated time-in-zone for one ISO week (Monday-based).
 

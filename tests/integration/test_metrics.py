@@ -282,6 +282,107 @@ class TestActivitySummary:
         assert resp.status_code == 401
 
 
+# ── Aerobic efficiency trend ───────────────────────────────────────────────────
+
+class TestEfficiencyTrend:
+    """Issue #37 — GET /api/metrics/efficiency."""
+
+    async def _add_ride(
+        self, client, auth_headers, session, *,
+        days_ago=5, sport_type="Ride", duration_s=3600,
+        avg_power=200.0, weighted_power=206.0, avg_hr=140.0,
+        workout_category="endurance", decoupling_pct=None,
+    ):
+        start = (date.today() - timedelta(days=days_ago)).isoformat() + "T10:00:00Z"
+        resp = await client.post(
+            "/api/activities",
+            json={"sport_type": sport_type, "start_time": start, "duration_s": duration_s},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 201
+        activity_id = resp.json()["id"]
+
+        activity = (
+            await session.execute(select(Activity).where(Activity.id == activity_id))
+        ).scalar_one()
+        activity.avg_power = avg_power
+        activity.weighted_power = weighted_power
+        activity.avg_hr = avg_hr
+        activity.workout_category = workout_category
+        activity.decoupling_pct = decoupling_pct
+        await session.commit()
+        return activity_id
+
+    async def test_empty_for_new_athlete(self, client, auth_headers):
+        resp = await client.get("/api/metrics/efficiency", headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    async def test_returns_point_for_steady_ride(self, client, auth_headers, session):
+        activity_id = await self._add_ride(
+            client, auth_headers, session, decoupling_pct=3.4
+        )
+        resp = await client.get("/api/metrics/efficiency", headers=auth_headers)
+        assert resp.status_code == 200
+        points = resp.json()
+        assert len(points) == 1
+        assert points[0]["activity_id"] == activity_id
+        assert points[0]["efficiency_factor"] == round(206.0 / 140.0, 3)
+        assert points[0]["decoupling_pct"] == 3.4
+        assert points[0]["duration_s"] == 3600
+
+    async def test_ordered_oldest_first(self, client, auth_headers, session):
+        await self._add_ride(client, auth_headers, session, days_ago=2)
+        await self._add_ride(client, auth_headers, session, days_ago=30)
+        points = (await client.get("/api/metrics/efficiency", headers=auth_headers)).json()
+        assert [p["date"] for p in points] == sorted(p["date"] for p in points)
+
+    async def test_excludes_interval_rides(self, client, auth_headers, session):
+        # High variability index — the ride was too surgy for the number to mean
+        # anything, the same test the decoupling gate applies.
+        await self._add_ride(
+            client, auth_headers, session, avg_power=180.0, weighted_power=260.0
+        )
+        assert (await client.get("/api/metrics/efficiency", headers=auth_headers)).json() == []
+
+    async def test_excludes_interval_categories(self, client, auth_headers, session):
+        for category in ("vo2max", "anaerobic", "sprint"):
+            await self._add_ride(
+                client, auth_headers, session, workout_category=category
+            )
+        assert (await client.get("/api/metrics/efficiency", headers=auth_headers)).json() == []
+
+    async def test_excludes_non_cycling(self, client, auth_headers, session):
+        await self._add_ride(client, auth_headers, session, sport_type="Run")
+        assert (await client.get("/api/metrics/efficiency", headers=auth_headers)).json() == []
+
+    async def test_excludes_rides_without_heart_rate(self, client, auth_headers, session):
+        await self._add_ride(client, auth_headers, session, avg_hr=None)
+        assert (await client.get("/api/metrics/efficiency", headers=auth_headers)).json() == []
+
+    async def test_excludes_very_short_rides(self, client, auth_headers, session):
+        await self._add_ride(client, auth_headers, session, duration_s=600)
+        assert (await client.get("/api/metrics/efficiency", headers=auth_headers)).json() == []
+
+    async def test_includes_uncategorized_steady_rides(self, client, auth_headers, session):
+        await self._add_ride(client, auth_headers, session, workout_category=None)
+        assert len(
+            (await client.get("/api/metrics/efficiency", headers=auth_headers)).json()
+        ) == 1
+
+    async def test_days_filter(self, client, auth_headers, session):
+        await self._add_ride(client, auth_headers, session, days_ago=5)
+        await self._add_ride(client, auth_headers, session, days_ago=200)
+        points = (
+            await client.get("/api/metrics/efficiency?days=30", headers=auth_headers)
+        ).json()
+        assert len(points) == 1
+
+    async def test_unauthenticated_returns_401(self, client):
+        resp = await client.get("/api/metrics/efficiency")
+        assert resp.status_code == 401
+
+
 # ── Zones ──────────────────────────────────────────────────────────────────────
 
 class TestZonesEndpoint:

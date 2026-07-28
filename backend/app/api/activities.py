@@ -44,7 +44,8 @@ from backend.app.services.fit_processor import process_fit_file, read_fit_start_
 from backend.app.services.metrics_engine import recalculate_from
 from backend.app.services.pr_detection import detect_pr_badges
 from backend.app.services.provider_sync import _source_priority
-from openkoutsi.training_math import calculate_load
+from backend.app.services.aerobic_metrics import apply_aerobic_metrics
+from openkoutsi.training_math import calculate_load, variability_index
 from openkoutsi.categorization import WorkoutCategory, classify_workout
 from openkoutsi.sport_matching import CYCLING_SPORT_TYPES
 from backend.app.services.activity_workout_matcher import find_and_link_workout
@@ -920,13 +921,34 @@ async def reprocess_activity(
         session.add(ActivityInterval(id=str(uuid.uuid4()), activity_id=activity_id, **iv))
 
     # Recalculate workout category
-    vi = (
-        (activity.weighted_power / activity.avg_power)
-        if (activity.weighted_power and activity.avg_power)
-        else None
-    )
+    vi = variability_index(activity.weighted_power, activity.avg_power)
     category = classify_workout(activity.intensity, vi)
     activity.workout_category = category.value if category else None
+
+    # Re-derive the aerobic metrics and W' balance from the stored streams, so
+    # activities processed before this existed pick them up on reprocess — the
+    # same backfill route torque uses. Runs after the category is recalculated
+    # (the decoupling gate reads it) and after the power bests are rebuilt (the
+    # CP fit sees them via autoflush).
+    w_bal_data = await apply_aerobic_metrics(activity, athlete, stream_map, session)
+    await session.execute(
+        sa_delete(ActivityStream).where(
+            ActivityStream.activity_id == activity_id,
+            ActivityStream.stream_type == "w_bal",
+        )
+    )
+    if w_bal_data:
+        session.add(
+            ActivityStream(
+                id=str(uuid.uuid4()),
+                activity_id=activity_id,
+                stream_type="w_bal",
+                data=w_bal_data,
+            )
+        )
+        stream_map["w_bal"] = w_bal_data
+    else:
+        stream_map.pop("w_bal", None)
 
     await session.commit()
 

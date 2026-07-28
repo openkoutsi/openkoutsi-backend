@@ -10,6 +10,7 @@ from backend.app.db.user_session import get_user_session_factory
 from backend.app.models.user_orm import Activity, ActivityStream, Athlete, DailyMetric
 from backend.app.schemas.metrics import (
     ActivitySummaryResponse,
+    EfficiencyPoint,
     FitnessCurrentResponse,
     FitnessForecastResponse,
     FitnessMetricResponse,
@@ -23,6 +24,12 @@ from backend.app.services.metrics_forecast import (
 )
 from backend.app.services.zone_times import compute_zone_times, ensure_zone_times
 from openkoutsi.sport_matching import CYCLING_SPORT_TYPES
+from openkoutsi.training_math import (
+    DECOUPLING_EXCLUDED_CATEGORIES,
+    DECOUPLING_MAX_VI,
+    efficiency_factor,
+    variability_index,
+)
 
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 
@@ -146,6 +153,73 @@ async def get_fitness_forecast(
     await catch_up_metrics(athlete.id, session)
     rows = await forecast_fitness(athlete.id, session, days=days)
     return [FitnessForecastResponse(**row) for row in rows]
+
+
+# Efficiency factor over a very short ride is noise; require a reasonable block
+# of riding before a point joins the trend.
+EFFICIENCY_MIN_DURATION_S = 1200
+
+
+@router.get("/efficiency", response_model=list[EfficiencyPoint],
+            operation_id="getEfficiencyTrend", summary="Aerobic efficiency trend")
+async def get_efficiency_trend(
+    days: Optional[int] = Query(None, ge=1, le=3650, description="Restrict to rides from the past N days. Omit for all-time."),
+    ctx_session=Depends(get_ctx_and_session),
+):
+    """
+    Aerobic efficiency (weighted power per heartbeat) for each steady endurance
+    ride, oldest first — the trend that shows aerobic progress a rising Fitness
+    number alone doesn't.
+
+    Restricted to cycling rides of at least 20 minutes that have both weighted
+    power and average heart rate, and that were steady enough for the number to
+    mean something: the same "not an interval session" test the decoupling gate
+    uses (variability index at or below 1.10, and not categorized as VO2max,
+    anaerobic or sprint work). Each ride's decoupling figure rides along when it
+    has one.
+
+    Computed on read from stored columns — nothing extra is persisted, so the
+    trend covers the athlete's whole history immediately.
+    """
+    ctx, session = ctx_session
+    athlete = await _get_athlete(ctx.user_id, session)
+
+    query = select(Activity).where(
+        Activity.athlete_id == athlete.id,
+        Activity.sport_type.in_(CYCLING_SPORT_TYPES),
+        Activity.start_time.is_not(None),
+        Activity.weighted_power.is_not(None),
+        Activity.avg_hr.is_not(None),
+        Activity.avg_power.is_not(None),
+        Activity.duration_s >= EFFICIENCY_MIN_DURATION_S,
+        # NOT IN is NULL for an uncategorized ride, so spell out the null case.
+        Activity.workout_category.not_in(sorted(DECOUPLING_EXCLUDED_CATEGORIES))
+        | Activity.workout_category.is_(None),
+    )
+    if days is not None:
+        cutoff = datetime.combine(date.today() - timedelta(days=days), time.min)
+        query = query.where(Activity.start_time >= cutoff)
+
+    result = await session.execute(query.order_by(Activity.start_time))
+
+    points: list[EfficiencyPoint] = []
+    for activity in result.scalars().all():
+        vi = variability_index(activity.weighted_power, activity.avg_power)
+        if vi is None or vi > DECOUPLING_MAX_VI:
+            continue
+        ef = efficiency_factor(activity.weighted_power, activity.avg_hr)
+        if ef is None:
+            continue
+        points.append(
+            EfficiencyPoint(
+                activity_id=activity.id,
+                date=activity.start_time.date(),
+                duration_s=activity.duration_s,
+                efficiency_factor=round(ef, 3),
+                decoupling_pct=activity.decoupling_pct,
+            )
+        )
+    return points
 
 
 @router.get("/zones/weekly", response_model=list[WeeklyZoneBucket])
