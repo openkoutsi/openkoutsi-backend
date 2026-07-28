@@ -200,11 +200,13 @@ uv run python backend/scripts/migrate_user_dbs.py        # add --dry-run to prev
 
 This step is only needed when upgrading an existing deployment — new installs handle schema creation automatically on first startup.
 
-> **Note (issue #29):** the latest per-user migration `015_plan_week_meta` adds a
-> nullable `week_meta` column to `training_plans`. It is applied automatically by
-> the entrypoint's per-user migration loop (or the helper script above); no new
-> environment variables are required. Existing plans keep working — `week_meta`
-> stays `null` until a plan is (re)generated.
+> **Note:** the latest per-user migration `017_message_title_body` adds nullable
+> `title`, `body` and `locale` columns to `messages`, which now carry their own
+> rendered text instead of being rebuilt from a template in the web app. It is
+> applied automatically by the entrypoint's per-user migration loop (or the
+> helper script above); no new environment variables are required. Messages sent
+> before the upgrade keep working — their `title` and `body` stay `null` and the
+> web app shows them as earlier notifications until they are deleted.
 
 #### Registry and usage databases
 

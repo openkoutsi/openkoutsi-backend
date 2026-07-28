@@ -49,6 +49,38 @@ async def test_list_and_unread_count(client, auth_headers):
     assert cnt.json()["count"] == 2
 
 
+async def test_messages_carry_their_own_text(client, auth_headers):
+    """The inbox renders `title`/`body` straight through, so they have to be
+    on the wire — the web app no longer has templates to fall back on."""
+    await notifications.notify_user(
+        _TEST_USER_ID, notifications.INVITE_USED, {"username": "ana"}
+    )
+    msg = (await client.get(_PREFIX, headers=auth_headers)).json()["items"][0]
+
+    assert msg["title"] == "Invite used"
+    assert msg["body"] == "ana joined via an invite link."
+    assert msg["locale"] == "en"
+
+
+async def test_mark_read_returns_the_text_too(client, auth_headers):
+    await _seed(_TEST_USER_ID, 1)
+    msg_id = (await client.get(_PREFIX, headers=auth_headers)).json()["items"][0]["id"]
+
+    resp = await client.post(f"{_PREFIX}/{msg_id}/read", headers=auth_headers)
+    assert resp.json()["title"] == "Invite used"
+
+
+async def test_a_caller_may_supply_its_own_copy(client, auth_headers):
+    """The escape hatch for messages that aren't type-driven."""
+    await notifications.notify_user(
+        _TEST_USER_ID, "broadcast", {}, title="Maintenance", body="Back at 09:00."
+    )
+    msg = (await client.get(_PREFIX, headers=auth_headers)).json()["items"][0]
+
+    assert msg["title"] == "Maintenance"
+    assert msg["body"] == "Back at 09:00."
+
+
 async def test_mark_read(client, auth_headers):
     await _seed(_TEST_USER_ID, 1)
     msg_id = (await client.get(_PREFIX, headers=auth_headers)).json()["items"][0]["id"]

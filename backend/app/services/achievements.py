@@ -529,8 +529,9 @@ async def _notify(athlete: Athlete, created: list[AchievementUnlock]) -> None:
 
     One message per *recompute*, not per tier: importing a season of history at
     once can earn a dozen tiers, and a dozen separate messages would read as
-    spam. A single unlock names itself; a batch is summarised by count, and the
-    frontend picks the template from ``count``.
+    spam. The whole batch is passed through, so the message can name every badge
+    earned rather than just counting them — ``notify_user`` renders the text via
+    ``message_text``.
 
     Deduplication is structural rather than flag-based: a recompute over
     unchanged data inserts nothing, so there is nothing to announce. The one case
@@ -543,10 +544,15 @@ async def _notify(athlete: Athlete, created: list[AchievementUnlock]) -> None:
     session dirty; ``notify_user`` writes to the same per-user DB.
     """
     try:
-        data: dict = {"count": len(created)}
-        if len(created) == 1:
-            data["achievement_id"] = created[0].achievement_id
-            data["tier"] = created[0].tier
+        # Sorted so a message lists badges in the same order every time, however
+        # the reconcile happened to walk them.
+        data: dict = {
+            "count": len(created),
+            "achievements": [
+                {"id": u.achievement_id, "tier": u.tier}
+                for u in sorted(created, key=lambda u: (u.achievement_id, u.tier))
+            ],
+        }
         await notify_user(athlete.global_user_id, ACHIEVEMENT_UNLOCKED, data)
     except Exception:
         log.warning(
