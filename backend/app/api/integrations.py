@@ -10,7 +10,7 @@ data is written to the user's own DB on sync.
 """
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query
@@ -211,6 +211,7 @@ async def _bg_provider_sync(user_id: str, provider: str) -> None:
     from backend.app.db.registry import _RegistrySessionLocal
     from backend.app.db.user_session import get_user_session_factory, init_user_db
     from backend.app.services.metrics_engine import recalculate_from
+    from backend.app.services.aerobic_metrics import refit_cp_snapshots
     from backend.app.services.weight import backfill_missing_power_best_weights
 
     # Step 1: Refresh the token once from the registry.
@@ -248,6 +249,17 @@ async def _bg_provider_sync(user_id: str, provider: str) -> None:
                 # that the full history is imported. Rows that already have a
                 # weight are left alone — the import must not restate history.
                 await backfill_missing_power_best_weights(athlete.id, session)
+                # Re-fit the CP/W' snapshots the import froze against a
+                # nearly-empty power profile (issue #77). The sync walks
+                # newest-first while the fit only looks *backwards* in time, so
+                # during the walk every ride is judged against a bests table that
+                # holds nothing but newer rides. Now that the table is complete,
+                # each ride can get the as-of fit it should have had.
+                await refit_cp_snapshots(
+                    athlete.id,
+                    session,
+                    since=datetime.combine(earliest, time.min, tzinfo=timezone.utc),
+                )
                 await session.commit()
 
             log.info(
