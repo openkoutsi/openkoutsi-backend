@@ -1,6 +1,15 @@
 from dataclasses import dataclass
 from typing import Iterable, List, Sequence
 
+# The canonical zone models. Zone lists used to be arbitrary-length, which made
+# anything built on top of them (see ``intensity_distribution``) guess at what a
+# given zone meant. They are now fixed: seven power zones (Coggan) and five HR
+# zones, both running Z1 (recovery) → Zn (maximal). The API rejects other
+# lengths; snapshots frozen before that still carry whatever count they were
+# computed with, so readers must degrade rather than assume.
+POWER_ZONE_COUNT = 7  # Z1 Recovery … Z7 Neuromuscular
+HR_ZONE_COUNT = 5  # Z1 Recovery … Z5 VO2max
+
 
 def time_in_zones(samples: Iterable[float], zone_defs: Sequence[dict]) -> dict[str, int]:
     """Accumulate time spent in each zone from a per-second sample stream.

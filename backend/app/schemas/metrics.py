@@ -101,3 +101,55 @@ class WeeklyZoneBucket(BaseModel):
     week_start: date
     hr: dict[str, int] = {}
     power: dict[str, int] = {}
+
+
+IntensityBasis = Literal["power", "hr"]
+IntensityMethod = Literal["time", "session"]
+IntensityShape = Literal["polarized", "pyramidal", "threshold", "predominantly_low"]
+
+
+class IntensityBand(BaseModel):
+    """One of the three intensity bands over a block (issue #38).
+
+    ``band`` is 1 (below LT1), 2 (between LT1 and LT2) or 3 (above LT2).
+    ``pct`` is the band's share **in the unit the method counts in**: seconds
+    for ``method=time``, sessions for ``method=session``. ``seconds`` is
+    reported either way, but for the session method it is context rather than
+    the basis of the percentage — a VO2max session counts as one hard session
+    whatever fraction of it was spent coasting.
+    """
+
+    band: int
+    seconds: int = 0
+    pct: float = 0.0
+    sessions: Optional[int] = None
+
+
+class IntensityCoverage(BaseModel):
+    """How much of the window actually reached the distribution.
+
+    A shape computed from 6 of 40 rides is not wrong so much as unfounded, so
+    the numbers travel with the result rather than being implied by it.
+    """
+
+    activities_total: int = 0
+    activities_used: int = 0
+    seconds_total: int = 0
+
+
+class IntensityDistributionResponse(BaseModel):
+    """Intensity distribution over a training block (issue #38).
+
+    ``basis`` is ``None`` for ``method=session``: session counting works off
+    each activity's workout category, so the power/HR distinction does not
+    apply. ``classification`` is ``None`` when the window has no usable data.
+    """
+
+    start: Optional[date] = None
+    end: Optional[date] = None
+    basis: Optional[IntensityBasis] = None
+    method: IntensityMethod
+    bands: list[IntensityBand] = []
+    classification: Optional[IntensityShape] = None
+    coverage: IntensityCoverage = IntensityCoverage()
+    zone_definitions_changed: bool = False

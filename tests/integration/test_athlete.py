@@ -93,12 +93,60 @@ class TestUpdateAthlete:
 
     async def test_update_hr_zones(self, client, auth_headers):
         zones = [
-            {"low": 0, "high": 130, "name": "Z1"},
-            {"low": 130, "high": 155, "name": "Z2"},
+            {"low": 0, "high": 120, "name": "Z1"},
+            {"low": 120, "high": 140, "name": "Z2"},
+            {"low": 140, "high": 160, "name": "Z3"},
+            {"low": 160, "high": 172, "name": "Z4"},
+            {"low": 172, "high": 200, "name": "Z5"},
         ]
         resp = await client.patch("/api/athlete", json={"hr_zones": zones}, headers=auth_headers)
         assert resp.status_code == 200
-        assert len(resp.json()["hr_zones"]) == 2
+        assert len(resp.json()["hr_zones"]) == 5
+
+    async def test_wrong_zone_count_rejected(self, client, auth_headers):
+        # Zone lists are fixed at five HR / seven power zones (issue #38): the
+        # three-band intensity mapping reads them positionally, so a short list
+        # would silently mean something different.
+        resp = await client.patch(
+            "/api/athlete",
+            json={"hr_zones": [
+                {"low": 0, "high": 130, "name": "Z1"},
+                {"low": 130, "high": 155, "name": "Z2"},
+            ]},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 422
+
+        resp = await client.patch(
+            "/api/athlete",
+            json={"power_zones": [{"low": 0, "high": 300, "name": "Z1"}]},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 422
+
+    async def test_overlapping_zones_rejected(self, client, auth_headers):
+        # Previously this passed validation here and only blew up later, while
+        # processing an activity.
+        zones = [
+            {"low": 0, "high": 120, "name": "Z1"},
+            {"low": 100, "high": 140, "name": "Z2"},  # overlaps Z1
+            {"low": 140, "high": 160, "name": "Z3"},
+            {"low": 160, "high": 172, "name": "Z4"},
+            {"low": 172, "high": 200, "name": "Z5"},
+        ]
+        resp = await client.patch("/api/athlete", json={"hr_zones": zones}, headers=auth_headers)
+        assert resp.status_code == 422
+
+    async def test_inverted_zone_bounds_rejected(self, client, auth_headers):
+        zones = [
+            {"low": 0, "high": 120, "name": "Z1"},
+            {"low": 140, "high": 130, "name": "Z2"},  # high below low
+            {"low": 140, "high": 160, "name": "Z3"},
+            {"low": 160, "high": 172, "name": "Z4"},
+            {"low": 172, "high": 200, "name": "Z5"},
+        ]
+        resp = await client.patch("/api/athlete", json={"hr_zones": zones}, headers=auth_headers)
+        assert resp.status_code == 422
 
     async def test_unauthenticated_returns_401(self, client):
         resp = await client.patch("/api/athlete", json={"ftp": 300})

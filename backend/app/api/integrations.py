@@ -28,6 +28,7 @@ from backend.app.models.registry_orm import ProviderConnection
 from backend.app.models.user_orm import Activity, ActivitySource, Athlete
 from backend.app.services.provider_sync import ensure_fresh_token, sync_provider_activities
 from backend.app.services.providers.registry import PROVIDERS
+from openkoutsi.zones import HR_ZONE_COUNT, POWER_ZONE_COUNT
 
 log = logging.getLogger(__name__)
 
@@ -301,6 +302,7 @@ async def sync_zones(
         raise HTTPException(status_code=422, detail="no_zones_returned")
 
     updated: list[str] = []
+    skipped: list[str] = []
 
     if zone_data.ftp is not None:
         if zone_data.ftp != athlete.ftp:
@@ -314,18 +316,31 @@ async def sync_zones(
             athlete.ftp_tests = ftp_tests
         updated.append("ftp")
 
+    # Providers return whatever the athlete configured on their side — Strava
+    # hands back however many zones they set up, Wahoo whatever ``zone_count``
+    # says. openkoutsi's zone model is fixed (issue #38), and a wrong-length
+    # list would break the three-band mapping that reads it. Skip it and say so
+    # rather than padding or truncating the athlete's real settings into a
+    # shape they never chose.
     if zone_data.hr_zones is not None:
-        athlete.hr_zones = zone_data.hr_zones
-        updated.append("hr_zones")
+        if len(zone_data.hr_zones) == HR_ZONE_COUNT:
+            athlete.hr_zones = zone_data.hr_zones
+            updated.append("hr_zones")
+        else:
+            skipped.append("hr_zones")
 
     if zone_data.power_zones is not None:
-        athlete.power_zones = zone_data.power_zones
-        updated.append("power_zones")
+        if len(zone_data.power_zones) == POWER_ZONE_COUNT:
+            athlete.power_zones = zone_data.power_zones
+            updated.append("power_zones")
+        else:
+            skipped.append("power_zones")
 
     await session.commit()
 
     return {
         "updated": updated,
+        "skipped": skipped,
         "ftp": athlete.ftp,
         "hr_zones": athlete.hr_zones,
         "power_zones": athlete.power_zones,

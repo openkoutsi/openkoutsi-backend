@@ -2867,6 +2867,131 @@
         }
       }
     },
+    "/api/metrics/intensity-distribution": {
+      "get": {
+        "tags": [
+          "metrics"
+        ],
+        "summary": "Intensity distribution over a training block",
+        "description": "Three-band intensity distribution and its shape over a period.\n\nWeekly zones say what last week held; this says what a *block* came out as\n\u2014 polarized, pyramidal, threshold-heavy, or almost all easy. Defaults to\nthe last 12 weeks.\n\n``method=time`` sums the frozen ``zone_times`` snapshots and reports\npercentages of time. ``method=session`` counts each ride whole by its\nworkout category and reports percentages of sessions. They disagree by\ndesign: warm-ups and coast-downs pull the time method toward pyramidal.\n\n``basis`` selects power or HR zones, preferring power when both exist; it\ndoes not apply to ``method=session`` and is echoed as ``null`` there.",
+        "operationId": "getIntensityDistribution",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "start",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Start"
+            }
+          },
+          {
+            "name": "end",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "format": "date"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "End"
+            }
+          },
+          {
+            "name": "days",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "maximum": 3650,
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Days"
+            }
+          },
+          {
+            "name": "basis",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "power",
+                    "hr"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Basis"
+            }
+          },
+          {
+            "name": "method",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "enum": [
+                "time",
+                "session"
+              ],
+              "type": "string",
+              "default": "time",
+              "title": "Method"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IntensityDistributionResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/metrics/zones/{activity_id}": {
       "get": {
         "tags": [
@@ -7881,6 +8006,158 @@
           "admin_contact"
         ],
         "title": "InstanceSettingsResponse"
+      },
+      "IntensityBand": {
+        "properties": {
+          "band": {
+            "type": "integer",
+            "title": "Band"
+          },
+          "seconds": {
+            "type": "integer",
+            "title": "Seconds",
+            "default": 0
+          },
+          "pct": {
+            "type": "number",
+            "title": "Pct",
+            "default": 0.0
+          },
+          "sessions": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sessions"
+          }
+        },
+        "type": "object",
+        "required": [
+          "band"
+        ],
+        "title": "IntensityBand",
+        "description": "One of the three intensity bands over a block (issue #38).\n\n``band`` is 1 (below LT1), 2 (between LT1 and LT2) or 3 (above LT2).\n``pct`` is the band's share **in the unit the method counts in**: seconds\nfor ``method=time``, sessions for ``method=session``. ``seconds`` is\nreported either way, but for the session method it is context rather than\nthe basis of the percentage \u2014 a VO2max session counts as one hard session\nwhatever fraction of it was spent coasting."
+      },
+      "IntensityCoverage": {
+        "properties": {
+          "activities_total": {
+            "type": "integer",
+            "title": "Activities Total",
+            "default": 0
+          },
+          "activities_used": {
+            "type": "integer",
+            "title": "Activities Used",
+            "default": 0
+          },
+          "seconds_total": {
+            "type": "integer",
+            "title": "Seconds Total",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "title": "IntensityCoverage",
+        "description": "How much of the window actually reached the distribution.\n\nA shape computed from 6 of 40 rides is not wrong so much as unfounded, so\nthe numbers travel with the result rather than being implied by it."
+      },
+      "IntensityDistributionResponse": {
+        "properties": {
+          "start": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start"
+          },
+          "end": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End"
+          },
+          "basis": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "power",
+                  "hr"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Basis"
+          },
+          "method": {
+            "type": "string",
+            "enum": [
+              "time",
+              "session"
+            ],
+            "title": "Method"
+          },
+          "bands": {
+            "items": {
+              "$ref": "#/components/schemas/IntensityBand"
+            },
+            "type": "array",
+            "title": "Bands",
+            "default": []
+          },
+          "classification": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "polarized",
+                  "pyramidal",
+                  "threshold",
+                  "predominantly_low"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Classification"
+          },
+          "coverage": {
+            "$ref": "#/components/schemas/IntensityCoverage",
+            "default": {
+              "activities_total": 0,
+              "activities_used": 0,
+              "seconds_total": 0
+            }
+          },
+          "zone_definitions_changed": {
+            "type": "boolean",
+            "title": "Zone Definitions Changed",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "method"
+        ],
+        "title": "IntensityDistributionResponse",
+        "description": "Intensity distribution over a training block (issue #38).\n\n``basis`` is ``None`` for ``method=session``: session counting works off\neach activity's workout category, so the power/HR distinction does not\napply. ``classification`` is ``None`` when the window has no usable data."
       },
       "IntervalResponse": {
         "properties": {
