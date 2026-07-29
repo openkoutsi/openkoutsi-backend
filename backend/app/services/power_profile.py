@@ -60,6 +60,54 @@ async def rank1_bests(
     return rank1
 
 
+def fit_cp_wprime(bests: dict[int, float]) -> tuple[float | None, float | None, int]:
+    """Fit CP/W' from a rank-1 bests dict, rejecting implausible results.
+
+    Returns ``(cp, w_prime, n_points)``. ``(None, None, n_points)`` when there
+    aren't enough bests to fit, or when the fit isn't physiologically believable
+    — the OLS intercept is unconstrained, so a rider who only ever rides steady
+    routinely fits a negative or near-zero W'.
+
+    Shared by the per-activity query path (:func:`cp_wprime_as_of`) and the
+    whole-history re-fit, so the two can't disagree about what a usable fit is.
+    """
+    cp, w_prime = estimate_cp_wprime(bests)
+    if not cp_wprime_plausible(cp, w_prime):
+        return None, None, len(bests)
+    return cp, w_prime, len(bests)
+
+
+async def cp_fit_bests_ordered(
+    athlete_id: str, session: AsyncSession
+) -> list[tuple[datetime, int, float]]:
+    """Every CP-fit-duration best as ``(activity_start_time, duration_s, watts)``, oldest first.
+
+    Lets a caller walk the athlete's history forward and maintain the rank-1
+    profile incrementally with a running maximum, instead of issuing one
+    :func:`rank1_bests` query per activity. That is what keeps a whole-history
+    re-fit linear in the number of activities rather than quadratic — the same
+    trap #69 describes for the achievement recompute, and one worth not walking
+    into on the import path.
+
+    Efforts with no ``activity_start_time`` are omitted: they can't be placed on
+    the timeline, so they can't contribute to an "as of" fit.
+    """
+    rows = await session.execute(
+        select(
+            ActivityPowerBest.activity_start_time,
+            ActivityPowerBest.duration_s,
+            ActivityPowerBest.power_w,
+        )
+        .where(
+            ActivityPowerBest.athlete_id == athlete_id,
+            ActivityPowerBest.duration_s.in_(CP_FIT_DURATIONS),
+            ActivityPowerBest.activity_start_time.is_not(None),
+        )
+        .order_by(ActivityPowerBest.activity_start_time)
+    )
+    return [(t, d, p) for t, d, p in rows.all()]
+
+
 async def cp_wprime_as_of(
     athlete_id: str, session: AsyncSession, as_of: datetime | None
 ) -> tuple[float | None, float | None, int]:
@@ -85,7 +133,4 @@ async def cp_wprime_as_of(
     bests = await rank1_bests(
         athlete_id, session, CP_FIT_DURATIONS, until=as_of
     )
-    cp, w_prime = estimate_cp_wprime(bests)
-    if not cp_wprime_plausible(cp, w_prime):
-        return None, None, len(bests)
-    return cp, w_prime, len(bests)
+    return fit_cp_wprime(bests)
