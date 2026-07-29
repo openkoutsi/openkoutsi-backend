@@ -3,6 +3,24 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
+from openkoutsi.training_math import efficiency_factor, variability_index
+
+
+def _aerobic_ratios(activity) -> dict[str, float | None]:
+    """Efficiency factor and variability index, derived from stored columns.
+
+    Both are pure ratios of ``weighted_power`` / ``avg_hr`` / ``avg_power``, so
+    they are computed on read rather than persisted: nothing can drift out of
+    sync with its operands, and activities processed before these metrics
+    existed carry them without needing a reprocess.
+    """
+    ef = efficiency_factor(activity.weighted_power, activity.avg_hr)
+    vi = variability_index(activity.weighted_power, activity.avg_power)
+    return {
+        "efficiency_factor": round(ef, 3) if ef is not None else None,
+        "variability_index": round(vi, 3) if vi is not None else None,
+    }
+
 
 class ActivityUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=200)
@@ -84,6 +102,16 @@ class ActivityResponse(BaseModel):
     avg_cadence: Optional[float] = None
     load: Optional[float] = None
     intensity: Optional[float] = None
+    # Aerobic response metrics (issue #37). `efficiency_factor` (weighted power
+    # per heartbeat) and `variability_index` (weighted / average power) are
+    # derived on read from the columns above. `decoupling_pct` is the stored
+    # power:HR drift over the ride; when it is null `decoupling_reason` says why
+    # a figure would be misleading — one of `too_short`, `no_power`, `no_hr`,
+    # `degenerate_hr`, `variable_effort`.
+    efficiency_factor: Optional[float] = None
+    variability_index: Optional[float] = None
+    decoupling_pct: Optional[float] = None
+    decoupling_reason: Optional[str] = None
     workout_category: Optional[str] = None
     labels: list[str] = []
     notes: Optional[str] = None
@@ -116,6 +144,9 @@ class ActivityResponse(BaseModel):
                 "avg_cadence": data.avg_cadence,
                 "load": data.load,
                 "intensity": data.intensity,
+                **_aerobic_ratios(data),
+                "decoupling_pct": data.decoupling_pct,
+                "decoupling_reason": data.decoupling_reason,
                 "workout_category": data.workout_category,
                 "labels": data.labels or [],
                 "notes": data.notes,
@@ -158,6 +189,15 @@ class ActivityDetailResponse(ActivityResponse):
     power_pr_badges: dict[int, dict[str, str]] = {}
     distance_pr_badges: dict[int, dict[str, str]] = {}
     intervals: list[IntervalResponse] = []
+    # CP (watts) and W' (joules) the `w_bal` stream was integrated with, frozen
+    # at processing time from the athlete's power bests as of this activity's
+    # date. Both null — and no `w_bal` in `streams` — when CP couldn't be fit.
+    cp_w: Optional[float] = None
+    w_prime_j: Optional[float] = None
+    # How many duration bests the CP fit used. Low values mean the fit was made
+    # against a thin power profile — typically an old ride processed early in a
+    # provider backlog import, before the surrounding history existed.
+    cp_fit_points: Optional[int] = None
     analysis_status: Optional[str] = None
     analysis: Optional[str] = None
 
@@ -189,6 +229,12 @@ class ActivityDetailResponse(ActivityResponse):
             avg_cadence=activity.avg_cadence,
             load=activity.load,
             intensity=activity.intensity,
+            **_aerobic_ratios(activity),
+            decoupling_pct=activity.decoupling_pct,
+            decoupling_reason=activity.decoupling_reason,
+            cp_w=activity.cp_w,
+            w_prime_j=activity.w_prime_j,
+            cp_fit_points=activity.cp_fit_points,
             workout_category=activity.workout_category,
             labels=activity.labels or [],
             notes=activity.notes,

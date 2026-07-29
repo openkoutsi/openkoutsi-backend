@@ -893,6 +893,302 @@ class TestGetActivityStreams:
         assert resp.json()["streams"] == {}
 
 
+# ── Aerobic metrics: decoupling, efficiency factor, VI, W' balance ─────────────
+
+class TestAerobicMetrics:
+    """Issue #37 — the aerobic response metrics on the activity endpoints.
+
+    Reprocess is the pipeline under test here: it is both the backfill route for
+    activities processed before these metrics existed and the cheapest way to
+    drive the same `apply_aerobic_metrics` step the FIT processor uses.
+    """
+
+    # A hard 120-second opener followed by steady riding, arranged so the first
+    # 1200 seconds carry every CP-fit best and fit exactly to W = 195·t + 15000,
+    # i.e. CP = 195 W and W' = 15 kJ. The remainder sits below CP so W' balance
+    # visibly reconstitutes. 4000 s clears the one-hour decoupling minimum.
+    #
+    # `CRUISE_W` is chosen to keep the two halves' mean power within the
+    # decoupling gate's 10% pacing tolerance while staying under CP — the ride
+    # has to read as *steadily paced* for a decoupling figure to be produced at
+    # all, which is the whole point of the gate.
+    HARD_OPENER_S = 120
+    OPENER_W = 320.0
+    STEADY_W = 195.0     # equals the CP the bests fit to
+    CRUISE_W = 185.0     # below CP → reconstitution, within the pacing tolerance
+    CP_PREFIX_S = 1200
+    TOTAL_S = 4000
+
+    def _power_stream(self) -> list[float]:
+        return (
+            [self.OPENER_W] * self.HARD_OPENER_S
+            + [self.STEADY_W] * (self.CP_PREFIX_S - self.HARD_OPENER_S)
+            + [self.CRUISE_W] * (self.TOTAL_S - self.CP_PREFIX_S)
+        )
+
+    def _hr_stream(self) -> list[float]:
+        # Drifts upward in the second half, with jitter so it isn't degenerate.
+        half = self.TOTAL_S // 2
+        return (
+            [140.0 + (i % 3) for i in range(half)]
+            + [148.0 + (i % 3) for i in range(self.TOTAL_S - half)]
+        )
+
+    async def _seed(self, client, auth_headers, session, *, power=True, hr=True) -> str:
+        from sqlalchemy import select as sa_select
+
+        await client.patch("/api/athlete", json={"ftp": 250}, headers=auth_headers)
+        create = await client.post(
+            "/api/activities",
+            json={
+                "sport_type": "Ride",
+                "start_time": "2025-03-01T10:00:00Z",
+                "duration_s": self.TOTAL_S,
+            },
+            headers=auth_headers,
+        )
+        assert create.status_code == 201
+        activity_id = create.json()["id"]
+
+        activity = (
+            await session.execute(sa_select(Activity).where(Activity.id == activity_id))
+        ).scalar_one()
+        if power:
+            stream = self._power_stream()
+            activity.avg_power = sum(stream) / len(stream)
+            session.add(ActivityStream(
+                activity_id=activity_id, stream_type="power", data=stream
+            ))
+        if hr:
+            activity.avg_hr = 144.0
+            session.add(ActivityStream(
+                activity_id=activity_id, stream_type="heartrate", data=self._hr_stream()
+            ))
+        await session.commit()
+        return activity_id
+
+    async def test_detail_carries_all_four_metrics(self, client, auth_headers, session):
+        activity_id = await self._seed(client, auth_headers, session)
+        resp = await client.post(
+            f"/api/activities/{activity_id}/reprocess", headers=auth_headers
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+
+        assert body["efficiency_factor"] == pytest.approx(
+            body["weighted_power"] / 144.0, rel=1e-2
+        )
+        assert body["variability_index"] > 1.0
+        assert body["decoupling_pct"] is not None
+        assert body["decoupling_reason"] is None
+        # CP/W' snapshot fit from this ride's own bests: W = 195·t + 15000.
+        assert body["cp_w"] == pytest.approx(195.0, abs=1.0)
+        assert body["w_prime_j"] == pytest.approx(15000.0, abs=100)
+
+    async def test_w_bal_stream_present_and_bounded(self, client, auth_headers, session):
+        activity_id = await self._seed(client, auth_headers, session)
+        await client.post(f"/api/activities/{activity_id}/reprocess", headers=auth_headers)
+
+        resp = await client.get(
+            f"/api/activities/{activity_id}/streams", headers=auth_headers
+        )
+        assert resp.status_code == 200
+        w_bal = resp.json()["streams"]["w_bal"]
+        assert len(w_bal) == self.TOTAL_S
+        assert all(0 <= v <= 15000 + 1 for v in w_bal)
+        # The opener spends the whole 15 kJ tank; the sub-CP cruise refills it.
+        assert w_bal[self.HARD_OPENER_S - 1] < w_bal[0]
+        assert w_bal[self.CP_PREFIX_S - 1] == pytest.approx(0, abs=1)
+        assert w_bal[-1] > w_bal[self.CP_PREFIX_S - 1]
+
+    async def test_reprocess_backfills_an_older_activity(self, client, auth_headers, session):
+        """An activity processed before this landed gains all four on reprocess."""
+        from sqlalchemy import select as sa_select
+
+        activity_id = await self._seed(client, auth_headers, session)
+        activity = (
+            await session.execute(sa_select(Activity).where(Activity.id == activity_id))
+        ).scalar_one()
+        # Simulate the pre-#37 state: no aerobic columns, no w_bal stream.
+        activity.decoupling_pct = None
+        activity.decoupling_reason = None
+        activity.cp_w = None
+        activity.w_prime_j = None
+        await session.commit()
+
+        body = (await client.post(
+            f"/api/activities/{activity_id}/reprocess", headers=auth_headers
+        )).json()
+        assert body["decoupling_pct"] is not None
+        assert body["cp_w"] is not None
+        assert "w_bal" in body["streams"]
+
+    async def test_no_cp_means_no_w_bal_stream(self, client, auth_headers, session):
+        """Too little power data to fit CP → no stream and no invented W'."""
+        from sqlalchemy import select as sa_select
+
+        await client.patch("/api/athlete", json={"ftp": 250}, headers=auth_headers)
+        create = await client.post(
+            "/api/activities",
+            json={"sport_type": "Ride", "start_time": "2025-04-01T10:00:00Z", "duration_s": 60},
+            headers=auth_headers,
+        )
+        activity_id = create.json()["id"]
+        activity = (
+            await session.execute(sa_select(Activity).where(Activity.id == activity_id))
+        ).scalar_one()
+        activity.avg_power = 200.0
+        session.add(ActivityStream(
+            activity_id=activity_id, stream_type="power", data=[200.0] * 60
+        ))
+        await session.commit()
+
+        body = (await client.post(
+            f"/api/activities/{activity_id}/reprocess", headers=auth_headers
+        )).json()
+        assert body["cp_w"] is None
+        assert body["w_prime_j"] is None
+        assert "w_bal" not in body["streams"]
+
+    async def test_power_only_activity_reports_missing_hr(self, client, auth_headers, session):
+        activity_id = await self._seed(client, auth_headers, session, hr=False)
+        body = (await client.post(
+            f"/api/activities/{activity_id}/reprocess", headers=auth_headers
+        )).json()
+        assert body["decoupling_pct"] is None
+        assert body["decoupling_reason"] == "no_hr"
+        assert body["efficiency_factor"] is None
+        assert body["variability_index"] is not None
+        # W' balance only needs power, so it is still produced.
+        assert "w_bal" in body["streams"]
+
+    async def test_hr_only_activity_reports_missing_power(self, client, auth_headers, session):
+        activity_id = await self._seed(client, auth_headers, session, power=False)
+        body = (await client.post(
+            f"/api/activities/{activity_id}/reprocess", headers=auth_headers
+        )).json()
+        assert body["decoupling_pct"] is None
+        assert body["decoupling_reason"] == "no_power"
+        assert body["cp_w"] is None
+        assert "w_bal" not in body["streams"]
+
+    async def test_interval_session_gets_a_reason_not_a_number(
+        self, client, auth_headers, session
+    ):
+        """A punchy ride stores NULL with `variable_effort`, never a misleading figure."""
+        from sqlalchemy import select as sa_select
+
+        await client.patch("/api/athlete", json={"ftp": 250}, headers=auth_headers)
+        create = await client.post(
+            "/api/activities",
+            json={
+                "sport_type": "Ride",
+                "start_time": "2025-05-01T10:00:00Z",
+                "duration_s": self.TOTAL_S,
+            },
+            headers=auth_headers,
+        )
+        activity_id = create.json()["id"]
+        # 30 s on / 30 s off: weighted power far above average power → high VI.
+        surging = [400.0 if (i // 30) % 2 == 0 else 60.0 for i in range(self.TOTAL_S)]
+        activity = (
+            await session.execute(sa_select(Activity).where(Activity.id == activity_id))
+        ).scalar_one()
+        activity.avg_power = sum(surging) / len(surging)
+        activity.avg_hr = 150.0
+        session.add(ActivityStream(
+            activity_id=activity_id, stream_type="power", data=surging
+        ))
+        session.add(ActivityStream(
+            activity_id=activity_id, stream_type="heartrate", data=self._hr_stream()
+        ))
+        await session.commit()
+
+        body = (await client.post(
+            f"/api/activities/{activity_id}/reprocess", headers=auth_headers
+        )).json()
+        assert body["variability_index"] > 1.10
+        assert body["decoupling_pct"] is None
+        assert body["decoupling_reason"] == "variable_effort"
+
+    async def test_cp_fit_points_records_how_thin_the_profile_was(
+        self, client, auth_headers, session
+    ):
+        """A backlog import fits old rides against almost nothing — record that."""
+        activity_id = await self._seed(client, auth_headers, session)
+        body = (await client.post(
+            f"/api/activities/{activity_id}/reprocess", headers=auth_headers
+        )).json()
+        # This ride's own bests cover all six CP-fit durations.
+        assert body["cp_fit_points"] == 6
+
+    async def test_dateless_activity_gets_no_cp_snapshot(
+        self, client, auth_headers, session
+    ):
+        """No date means no 'as of', and an all-time fit would be the anachronism."""
+        from sqlalchemy import select as sa_select
+
+        activity_id = await self._seed(client, auth_headers, session)
+        activity = (
+            await session.execute(sa_select(Activity).where(Activity.id == activity_id))
+        ).scalar_one()
+        activity.start_time = None
+        await session.commit()
+
+        body = (await client.post(
+            f"/api/activities/{activity_id}/reprocess", headers=auth_headers
+        )).json()
+        assert body["cp_w"] is None
+        assert body["w_prime_j"] is None
+        assert "w_bal" not in body["streams"]
+
+    async def test_sparse_recording_gets_no_w_bal_stream(
+        self, client, auth_headers, session
+    ):
+        """W' balance integrates per sample; a non-1 Hz file would be wrong by the ratio."""
+        from sqlalchemy import select as sa_select
+
+        activity_id = await self._seed(client, auth_headers, session)
+        activity = (
+            await session.execute(sa_select(Activity).where(Activity.id == activity_id))
+        ).scalar_one()
+        # Same samples, four times the elapsed time — smart recording, or a ride
+        # with most of its duration unrecorded.
+        activity.duration_s = self.TOTAL_S * 4
+        await session.commit()
+
+        body = (await client.post(
+            f"/api/activities/{activity_id}/reprocess", headers=auth_headers
+        )).json()
+        assert "w_bal" not in body["streams"]
+        # The CP snapshot is still recorded — only the integration is refused.
+        assert body["cp_w"] is not None
+
+    async def test_manual_activity_gets_derived_ratios_without_reprocess(
+        self, client, auth_headers
+    ):
+        """EF and VI are derived on read, so they need no processing at all."""
+        resp = await client.post(
+            "/api/activities",
+            json={
+                "sport_type": "Ride",
+                "start_time": "2025-06-01T10:00:00Z",
+                "duration_s": 3600,
+                "avg_power": 200,
+                "avg_hr": 140,
+            },
+            headers=auth_headers,
+        )
+        assert resp.status_code == 201
+        detail = (await client.get(
+            f"/api/activities/{resp.json()['id']}", headers=auth_headers
+        )).json()
+        # A manual entry has no weighted power, so neither ratio is available.
+        assert detail["efficiency_factor"] is None
+        assert detail["variability_index"] is None
+        assert detail["decoupling_reason"] is None
+
+
 # ── Reprocess intervals ────────────────────────────────────────────────────────
 
 class TestReprocess:

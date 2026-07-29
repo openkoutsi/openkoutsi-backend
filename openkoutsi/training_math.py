@@ -425,6 +425,288 @@ def compute_torque_stream(power: list[float], cadence: list[float]) -> list[floa
     return out
 
 
+# ---------------------------------------------------------------------------
+# Aerobic response metrics (issue #37)
+#
+# Efficiency factor and variability index are pure ratios of values openkoutsi
+# already stores per activity, so they are derived on read rather than
+# persisted.  Aerobic decoupling and W' balance need the per-second streams.
+# All are plain-Python and O(n) — no numpy/scipy in this module.
+# ---------------------------------------------------------------------------
+
+
+def efficiency_factor(
+    weighted_power: float | None, avg_hr: float | None
+) -> float | None:
+    """
+    Aerobic efficiency: weighted power (W) per beat of average heart rate.
+
+    Rising over time at a constant training load means the athlete is producing
+    more power for the same cardiac cost — aerobic progress the Fitness/Fatigue
+    model cannot see.  Returns None unless both inputs are present and positive.
+    """
+    if not weighted_power or not avg_hr or weighted_power <= 0 or avg_hr <= 0:
+        return None
+    return weighted_power / avg_hr
+
+
+def variability_index(
+    weighted_power: float | None, avg_power: float | None
+) -> float | None:
+    """
+    Weighted power / average power — how punchy the ride was.
+
+    1.0 is perfectly steady; values above ~1.10 indicate interval or otherwise
+    surging riding (the same threshold `categorization.classify_workout` uses).
+    Returns None unless both inputs are present and positive.
+    """
+    if not weighted_power or not avg_power or weighted_power <= 0 or avg_power <= 0:
+        return None
+    return weighted_power / avg_power
+
+
+def _half_power(segment: list[float]) -> float | None:
+    """Representative power for one half of a decoupling split.
+
+    Weighted power is the defensible choice on variable terrain, but it needs
+    the 30-second rolling window; shorter halves fall back to the arithmetic
+    mean.  Returns None for an empty or zero-power segment.
+    """
+    if not segment:
+        return None
+    value = weighted_power(segment) if len(segment) >= 30 else None
+    if value is None:
+        value = sum(segment) / len(segment)
+    return value if value > 0 else None
+
+
+def aerobic_decoupling(
+    power: list[float], heartrate: list[float]
+) -> float | None:
+    """
+    Power:HR decoupling (Pw:HR drift) as a percentage.
+
+    Splits the ride into two equal halves, takes the power-to-heart-rate ratio
+    of each, and returns how far the second half drifted from the first:
+
+        (ratio_first - ratio_second) / ratio_first * 100
+
+    A positive number means heart rate climbed relative to power — the classic
+    sign of fading aerobic durability.  Streams of unequal length are truncated
+    to the shorter one; on an odd number of samples the middle sample is
+    dropped so both halves stay the same length.
+
+    Returns None if either half has no usable power or heart rate.  This is raw
+    math with no validity checks — see `decoupling_unavailable_reason` for
+    whether the answer is meaningful at all.
+    """
+    n = min(len(power), len(heartrate))
+    half = n // 2
+    if half == 0:
+        return None
+
+    def ratio(lo: int, hi: int) -> float | None:
+        p = _half_power(power[lo:hi])
+        hr_slice = [v for v in heartrate[lo:hi] if v > 0]
+        if p is None or not hr_slice:
+            return None
+        return p / (sum(hr_slice) / len(hr_slice))
+
+    first = ratio(0, half)
+    second = ratio(n - half, n)
+    # A relative floor rather than `first == 0`: the ratio blows up continuously
+    # as the first half's power approaches zero, so the function stays safe on
+    # its own terms instead of relying on the caller's variability gate to have
+    # already excluded the extremes.
+    if first is None or second is None:
+        return None
+    if first < DECOUPLING_MIN_RATIO * max(second, first):
+        return None
+    return (first - second) / first * 100
+
+
+# Decoupling over a short ride is noise: the conventional minimum is roughly an
+# hour of steady riding.
+DECOUPLING_MIN_DURATION_S = 3600
+
+# Categories whose whole point is repeated hard efforts. A power:HR drift number
+# over one of these describes the intervals, not the athlete's durability.
+DECOUPLING_EXCLUDED_CATEGORIES = frozenset({"vo2max", "anaerobic", "sprint"})
+
+# Above this variability index the ride was too surgy for the two-half split to
+# mean anything (same threshold `classify_workout` uses to spot interval work).
+DECOUPLING_MAX_VI = 1.10
+
+# Above this relative difference between the two halves' mean power the ride was
+# ridden as a ramp or a negative split. Pw:HR assumes steady output, and a rider
+# who simply rode the back half harder produces a large drift number that reads
+# as a durability verdict when it is really a pacing choice.
+DECOUPLING_MAX_HALF_POWER_DELTA = 0.10
+
+# The two streams are paired sample-for-sample, but the FIT parser appends each
+# channel independently, so a strap dropout shifts heart rate against power
+# rather than leaving a gap. A length difference beyond this fraction of the
+# shorter stream means the pairing can't be trusted.
+DECOUPLING_MAX_LENGTH_MISMATCH = 0.05
+
+# Smallest first-half ratio, relative to the larger of the two halves, that the
+# percentage formula can be evaluated at without amplifying noise.
+DECOUPLING_MIN_RATIO = 0.05
+
+
+def _positive_in_both_halves(stream: list[float], n: int) -> bool:
+    """Does ``stream`` carry a positive sample in each half of the split?
+
+    The whole-stream check isn't enough: a power meter that dies at halfway
+    leaves a stream that is non-empty overall but unusable for a two-half
+    comparison.
+    """
+    half = n // 2
+    if half == 0:
+        return False
+    return any(v > 0 for v in stream[:half]) and any(v > 0 for v in stream[n - half:n])
+
+
+def decoupling_unavailable_reason(
+    duration_s: int | None,
+    power: list[float] | None,
+    heartrate: list[float] | None,
+    workout_category: str | None = None,
+    vi: float | None = None,
+) -> str | None:
+    """
+    Why a decoupling figure would be misleading for this activity, or None if
+    it is worth computing.
+
+    Presenting a decoupling number for a hard interval session is worse than
+    showing nothing, so the caller stores NULL and surfaces the reason instead
+    of a figure the athlete would over-read.  Reason codes are stable strings
+    the API and web app key their explanations off:
+
+    ``no_power``, ``no_hr``, ``stream_mismatch``, ``too_short``,
+    ``degenerate_hr``, ``variable_effort``, ``uneven_pacing``.
+
+    Data problems are reported before qualification problems, so the athlete is
+    told the thing actually blocking the measurement.
+    """
+    power = power or []
+    heartrate = heartrate or []
+    n = min(len(power), len(heartrate))
+
+    # Content-aware, not just emptiness: a paired-but-silent meter records a
+    # full stream of zeros, and calling that a heart-rate problem would send the
+    # athlete (and the LLM coach) after the wrong thing entirely.
+    #
+    # Whole-stream checks come first. The per-half checks below divide by the
+    # *shared* length, so a missing heart-rate stream would otherwise make the
+    # power half-check fail and misreport a fine power meter as absent.
+    if not any(v > 0 for v in power):
+        return "no_power"
+    if not any(v > 0 for v in heartrate):
+        return "no_hr"
+    if not _positive_in_both_halves(power, n):
+        return "no_power"
+    if not _positive_in_both_halves(heartrate, n):
+        return "no_hr"
+
+    shorter = n
+    if shorter and abs(len(power) - len(heartrate)) > DECOUPLING_MAX_LENGTH_MISMATCH * shorter:
+        return "stream_mismatch"
+
+    # Both clocks matter: `duration_s` is elapsed time from the FIT header, while
+    # the halves are split by sample count. A ride with four hours elapsed but
+    # forty minutes recorded clears the elapsed check and then gets split into
+    # two twenty-minute halves.
+    if (duration_s or 0) < DECOUPLING_MIN_DURATION_S:
+        return "too_short"
+    if n < DECOUPLING_MIN_DURATION_S:
+        return "too_short"
+
+    beats = [v for v in heartrate if v > 0]
+    if not beats or min(beats) == max(beats):
+        return "degenerate_hr"
+
+    if workout_category in DECOUPLING_EXCLUDED_CATEGORIES:
+        return "variable_effort"
+    if vi is not None and vi > DECOUPLING_MAX_VI:
+        return "variable_effort"
+
+    # Variability index catches surging but is blind to a monotonic ramp, which
+    # is precisely the shape that produces a large spurious drift number.
+    half = n // 2
+    first_mean = sum(power[:half]) / half
+    second_mean = sum(power[n - half:n]) / half
+    reference = max(first_mean, second_mean)
+    if reference > 0 and abs(first_mean - second_mean) / reference > DECOUPLING_MAX_HALF_POWER_DELTA:
+        return "uneven_pacing"
+
+    return None
+
+
+# Physiologically plausible bounds for a cycling CP/W' fit. The linear work-time
+# model is an ordinary least-squares fit with no constraint on its intercept, so
+# a rider whose short bests sit below the line — anyone who only ever rides
+# steady — fits a negative or near-zero W' as a matter of course. A W' of a few
+# hundred joules is not a small anaerobic reserve, it is a failed fit, and the
+# balance curve it produces craters in seconds and means nothing.
+CP_PLAUSIBLE_W = (50.0, 600.0)
+W_PRIME_PLAUSIBLE_J = (5_000.0, 50_000.0)
+
+
+def cp_wprime_plausible(cp: float | None, w_prime: float | None) -> bool:
+    """Is this CP/W' pair physiologically believable for a cyclist?
+
+    Used to reject a fit outright rather than persist numbers that look like
+    measurements. See ``CP_PLAUSIBLE_W`` / ``W_PRIME_PLAUSIBLE_J``.
+    """
+    if cp is None or w_prime is None:
+        return False
+    return (
+        CP_PLAUSIBLE_W[0] <= cp <= CP_PLAUSIBLE_W[1]
+        and W_PRIME_PLAUSIBLE_J[0] <= w_prime <= W_PRIME_PLAUSIBLE_J[1]
+    )
+
+
+def w_bal_stream(
+    power: list[float], cp: float | None, w_prime: float | None
+) -> list[float]:
+    """
+    Per-second W' balance (joules remaining) from a power stream.
+
+    Uses the differential form: above CP the athlete spends anaerobic capacity
+    at (P - CP) joules per second; below CP it is reconstituted in proportion to
+    how depleted the tank already is, which gives the exponential recovery of
+    the Skiba model without its O(n^2) integral.
+
+        P >  CP:  bal -= (P - CP)
+        P <= CP:  bal += (CP - P) * (W' - bal) / W'
+
+    Starts full at W' and is clamped to [0, W'] — a rider who empties the tank
+    holds at zero rather than going negative.  Returns an empty list when there
+    is no power stream, or when CP/W' are missing or implausible, since a W'
+    curve built on a guessed W' would be fiction.
+
+    **Assumes a 1 Hz power stream.** The arithmetic is joules per *sample* and
+    only equals joules per second at one sample per second; on a file recorded
+    at another rate (Garmin smart recording, for instance) the depletion rate is
+    wrong by the sampling ratio and the error accumulates across the ride.
+    Nothing here resamples — the caller is responsible for checking.
+    """
+    if not power or not cp_wprime_plausible(cp, w_prime):
+        return []
+
+    balance = w_prime
+    out: list[float] = []
+    for p in power:
+        if p > cp:
+            balance -= p - cp
+        else:
+            balance += (cp - p) * (w_prime - balance) / w_prime
+        balance = 0.0 if balance < 0 else (w_prime if balance > w_prime else balance)
+        out.append(balance)
+    return out
+
+
 def calculate_load(
     duration_s: int,
     wp: float | None,

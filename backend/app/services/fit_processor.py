@@ -18,6 +18,7 @@ from openkoutsi.training_math import (
     compute_power_bests,
     compute_distance_bests,
     compute_torque_stream,
+    variability_index,
 )
 from backend.app.models.user_orm import (
     Activity,
@@ -27,6 +28,7 @@ from backend.app.models.user_orm import (
     ActivityStream,
     Athlete,
 )
+from backend.app.services.aerobic_metrics import apply_aerobic_metrics
 from backend.app.services.weight import effective_weight_for, load_weight_log, w_per_kg
 from backend.app.services.zone_times import compute_zone_times
 
@@ -73,6 +75,14 @@ async def process_fit_file(
     activity.intensity = intensity
     activity.status = "processed"
 
+    # Categorize before deriving the aerobic metrics: the decoupling gate uses
+    # the category (and the same variability index) to spot interval sessions,
+    # where a power:HR drift number would describe the intervals rather than the
+    # athlete's durability.
+    vi = variability_index(wp, activity.avg_power)
+    category = classify_workout(intensity, vi)
+    activity.workout_category = category.value if category else None
+
     power_data = [float(v) for v in profile.power]
     cadence_data = [float(v) for v in profile.cadence]
     stream_map = {
@@ -118,6 +128,22 @@ async def process_fit_file(
                 )
             )
 
+    # Aerobic decoupling, the CP/W' snapshot and the W' balance stream (issue
+    # #37). Runs after the power bests are added so the CP fit — which is
+    # restricted to bests as of this activity's date — includes this ride's own
+    # efforts.
+    w_bal_data = await apply_aerobic_metrics(activity, athlete, stream_map, session)
+    if w_bal_data:
+        stream_map["w_bal"] = w_bal_data
+        session.add(
+            ActivityStream(
+                id=str(uuid.uuid4()),
+                activity_id=activity.id,
+                stream_type="w_bal",
+                data=w_bal_data,
+            )
+        )
+
     speed_data_ms = stream_map["speed"]
     if speed_data_ms:
         dbests = compute_distance_bests(speed_data_ms)
@@ -145,10 +171,6 @@ async def process_fit_file(
     intervals = compute_interval_stats(raw_intervals, profile.start_time, stream_map, is_auto)
     for iv in intervals:
         session.add(ActivityInterval(id=str(uuid.uuid4()), activity_id=activity.id, **iv))
-
-    vi = (wp / activity.avg_power) if (wp and activity.avg_power) else None
-    category = classify_workout(intensity, vi)
-    activity.workout_category = category.value if category else None
 
     await session.commit()
     await session.refresh(activity)

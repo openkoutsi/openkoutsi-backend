@@ -32,6 +32,8 @@ def _make_activity(**kwargs):
     act.load = kwargs.get("load", 75.0)
     act.avg_hr = kwargs.get("avg_hr", 155)
     act.max_hr = kwargs.get("max_hr", 178)
+    act.decoupling_pct = kwargs.get("decoupling_pct", None)
+    act.decoupling_reason = kwargs.get("decoupling_reason", None)
     act.intervals = kwargs.get("intervals", [])
     act.labels = kwargs.get("labels", [])
     act.notes = kwargs.get("notes", None)
@@ -164,6 +166,36 @@ class TestBuildPrompt:
                               weighted_power=None, load=None, avg_hr=None, max_hr=None)
         prompt = _build_prompt(act, _make_athlete(ftp=None, max_hr=None))
         assert "Ride" in prompt  # at minimum sport type is present
+
+    def test_includes_derived_aerobic_ratios(self):
+        # Efficiency factor 235/155 = 1.52 W/bpm; variability index 235/220 = 1.07.
+        prompt = _build_prompt(_make_activity(), _make_athlete())
+        assert "Efficiency factor: 1.52 W/bpm" in prompt
+        assert "Variability index: 1.07" in prompt
+
+    def test_omits_aerobic_ratios_without_operands(self):
+        act = _make_activity(weighted_power=None, avg_hr=None)
+        prompt = _build_prompt(act, _make_athlete())
+        assert "Efficiency factor" not in prompt
+        assert "Variability index" not in prompt
+
+    def test_includes_decoupling_when_measured(self):
+        act = _make_activity(decoupling_pct=3.4)
+        prompt = _build_prompt(act, _make_athlete())
+        assert "Aerobic decoupling: 3.4%" in prompt
+
+    def test_explains_why_decoupling_is_absent(self):
+        """The coach must be told why, not left to speculate about a number."""
+        act = _make_activity(decoupling_reason="variable_effort")
+        prompt = _build_prompt(act, _make_athlete())
+        assert "not measured for this ride" in prompt
+        assert "interval" in prompt
+        assert "do not speculate" in prompt
+
+    def test_unknown_decoupling_reason_falls_back_to_the_code(self):
+        act = _make_activity(decoupling_reason="something_new")
+        prompt = _build_prompt(act, _make_athlete())
+        assert "something_new" in prompt
 
     def test_includes_intervals(self):
         iv = MagicMock()

@@ -37,6 +37,7 @@ from .llm_client import (
 from .pr_detection import detect_pr_badges
 
 from openkoutsi.sport_matching import CYCLING_SPORT_TYPES
+from openkoutsi.training_math import efficiency_factor, variability_index
 
 if TYPE_CHECKING:
     pass
@@ -113,6 +114,23 @@ def _build_system_prompt(
     return prompt
 
 
+# Plain-language renderings of the decoupling gate's reason codes, so the coach
+# knows why the figure is missing rather than inventing one.
+_DECOUPLING_REASON_TEXT: dict[str, str] = {
+    "too_short": "the ride was too short for a meaningful drift measurement",
+    "no_power": "no power data",
+    "no_hr": "no heart-rate data",
+    "degenerate_hr": "the heart-rate data was unusable",
+    "variable_effort": "this was interval or otherwise surging riding, where the "
+                       "measurement describes the intervals rather than aerobic durability",
+    "uneven_pacing": "the two halves were ridden at markedly different intensities "
+                     "(a ramp or negative split), so any drift figure would reflect "
+                     "the pacing choice rather than aerobic durability",
+    "stream_mismatch": "the power and heart-rate recordings don't line up well enough "
+                       "to pair them sample by sample",
+}
+
+
 _WINDOW_LABELS: dict[str, str] = {
     "all_time": "all-time",
     "12mo": "12-month",
@@ -172,6 +190,38 @@ def _build_prompt(
         lines.append(f"  Average heart rate: {activity.avg_hr:.0f} bpm")
     if activity.max_hr:
         lines.append(f"  Peak heart rate: {activity.max_hr:.0f} bpm")
+
+    # Aerobic response metrics (issue #37). A coach that can say "3% drift over
+    # three hours, your durability is holding up" is markedly more credible than
+    # one working from load and duration alone.
+    vi = variability_index(activity.weighted_power, activity.avg_power)
+    if vi is not None:
+        lines.append(
+            f"  Variability index: {vi:.2f} "
+            "(weighted power / average power; 1.00 is perfectly steady, "
+            "above 1.10 means surging or interval riding)"
+        )
+    ef = efficiency_factor(activity.weighted_power, activity.avg_hr)
+    if ef is not None:
+        lines.append(
+            f"  Efficiency factor: {ef:.2f} W/bpm "
+            "(weighted power per heartbeat; rising over time at the same "
+            "training load indicates improving aerobic fitness)"
+        )
+    if activity.decoupling_pct is not None:
+        lines.append(
+            f"  Aerobic decoupling: {activity.decoupling_pct:.1f}% "
+            "(how far the power:heart-rate ratio drifted from the first half of "
+            "the ride to the second; under ~5% is generally considered good "
+            "aerobic durability, though heat, dehydration and caffeine also "
+            "push it up)"
+        )
+    elif activity.decoupling_reason:
+        lines.append(
+            "  Aerobic decoupling: not measured for this ride "
+            f"({_DECOUPLING_REASON_TEXT.get(activity.decoupling_reason, activity.decoupling_reason)}) "
+            "— do not speculate about a drift figure"
+        )
     if athlete.ftp:
         lines.append(f"  Athlete FTP: {athlete.ftp} W")
     if athlete.max_hr:
