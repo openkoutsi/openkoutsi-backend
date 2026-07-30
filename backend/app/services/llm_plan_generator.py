@@ -23,6 +23,11 @@ from ..models.registry_orm import InstanceSettings
 from ..models.user_orm import TrainingPlan, PlannedWorkout, Athlete, DailyMetric
 from ..schemas.plans import PlanConfig
 from .athlete_experience import EXPERIENCE_GUIDANCE, experience_level
+from .intensity_distribution import (
+    DEFAULT_WINDOW_DAYS,
+    compute_intensity_distribution,
+    summarize_for_prompt,
+)
 from .llm_access import record_llm_usage
 from .llm_client import (
     call_llm_with_optional_schema,
@@ -97,6 +102,7 @@ def _build_user_prompt(
     ftp: Optional[int],
     fitness: Optional[float],
     experience: Optional[str] = None,
+    distribution: Optional[str] = None,
 ) -> str:
     day_names = {1: "Monday", 2: "Tuesday", 3: "Wednesday", 4: "Thursday",
                  5: "Friday", 6: "Saturday", 7: "Sunday"}
@@ -145,6 +151,11 @@ def _build_user_prompt(
         lines += [f"Current fitness: {fitness:.1f} Load/day"]
     if experience:
         lines += [f"Athlete self-reported experience level: {experience}"]
+    if distribution:
+        # What the athlete has actually been doing, as opposed to what the
+        # config asks for. A plan written against a block that already ran
+        # threshold-heavy is a different plan (issue #38).
+        lines += [f"Recent training (last 12 weeks): {distribution}"]
 
     lines += [
         "",
@@ -217,8 +228,20 @@ async def generate_plan_weeks_llm(
     if latest_metric:
         fitness = latest_metric.fitness
 
+    # What the athlete has actually been doing over the last block (issue #38).
+    today = date.today()
+    distribution = summarize_for_prompt(
+        await compute_intensity_distribution(
+            athlete,
+            session,
+            start=today - timedelta(days=DEFAULT_WINDOW_DAYS),
+            end=today,
+        )
+    )
+
     user_prompt = _build_user_prompt(
-        config, goal, num_weeks, athlete.ftp, fitness, experience_level(athlete.app_settings)
+        config, goal, num_weeks, athlete.ftp, fitness,
+        experience_level(athlete.app_settings), distribution,
     )
 
     # Call LLM (with the strict schema by default) and one retry on parse failure

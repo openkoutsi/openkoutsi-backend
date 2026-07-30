@@ -72,3 +72,28 @@ class TestTimeInZones:
 
     def test_empty_stream_returns_empty(self):
         assert time_in_zones([], self._ZONES) == {}
+
+
+class TestGapFallback:
+    """A value in a gap belongs to the zone below it, not the top one."""
+
+    _GAPPED = [(0, 150), (160, 210), (211, 300), (301, 330), (331, 360), (361, 400), (401, 9999)]
+
+    def test_value_in_a_gap_takes_the_zone_below(self):
+        # This used to fall through to `len(zones) - 1`, booking recovery-pace
+        # riding as Z7 because of a 9 W gap between Z1 and Z2.
+        assert Zones(*self._GAPPED).getZone(155) == 0
+
+    def test_gap_higher_up_takes_the_zone_below_it(self):
+        zones = Zones((0, 100), (100, 200), (250, 300))
+        assert zones.getZone(220) == 1
+
+    def test_below_the_first_zone_still_clamps_up(self):
+        assert Zones(*self._GAPPED).getZone(-5) == 0
+
+    def test_above_the_last_zone_still_clamps_down(self):
+        assert Zones(*self._GAPPED).getZone(20000) == 6
+
+    def test_contiguous_zones_are_unaffected(self):
+        zones = Zones((0, 100), (100, 200), (200, 300))
+        assert [zones.getZone(v) for v in (50, 150, 250)] == [0, 1, 2]

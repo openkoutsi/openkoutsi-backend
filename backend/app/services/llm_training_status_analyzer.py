@@ -26,8 +26,12 @@ from ..db.registry import _RegistrySessionLocal
 from ..db.user_session import get_user_session_factory
 from ..models.registry_orm import InstanceSettings
 from ..models.user_orm import Activity, Athlete, DailyMetric, Goal, PlannedWorkout, TrainingPlan
-from ..schemas.metrics import _form_to_label
+from ..schemas.metrics import IntensityDistributionResponse, _form_to_label
 from .athlete_experience import EXPERIENCE_GUIDANCE, experience_level
+from .intensity_distribution import (
+    DEFAULT_WINDOW_DAYS,
+    compute_intensity_distribution,
+)
 from .llm_access import record_llm_usage, usage_from_sse_data
 from .llm_client import (
     apply_body_extras,
@@ -120,6 +124,47 @@ def _build_system_prompt(locale: str | None = None, coaching_style: str | None =
     return prompt
 
 
+_SHAPE_TEXT = {
+    "polarized": "polarized — mostly easy, with the hard work genuinely hard",
+    "pyramidal": "pyramidal — easy base, less tempo/threshold, least hard work",
+    "threshold": "threshold-heavy — a large share of moderate, grey-zone work",
+    "predominantly_low": "almost entirely low intensity, with very little above LT1",
+}
+
+
+def _distribution_lines(distribution: IntensityDistributionResponse | None) -> list[str]:
+    """Render the block's intensity distribution for the prompt.
+
+    Gives the coach the shape of the last twelve weeks, so it can say "you've
+    spent eight weeks in a threshold distribution — that's why your form is
+    flat" instead of reasoning from daily load alone. The method and coverage
+    travel with the numbers: a distribution without its method stated is
+    meaningless, and one drawn from a handful of rides shouldn't be argued from.
+    """
+    if distribution is None or distribution.classification is None:
+        return []
+
+    bands = {b.band: b for b in distribution.bands}
+    lines = ["\nIntensity distribution (last 12 weeks, by time in zones):"]
+    lines.append(f"  Shape: {_SHAPE_TEXT.get(distribution.classification, distribution.classification)}")
+    lines.append(f"  Below LT1 (easy): {bands[1].pct:.0f}%")
+    lines.append(f"  LT1–LT2 (tempo/threshold): {bands[2].pct:.0f}%")
+    lines.append(f"  Above LT2 (hard): {bands[3].pct:.0f}%")
+
+    coverage = distribution.coverage
+    if coverage.activities_used < coverage.activities_total:
+        lines.append(
+            f"  Based on {coverage.activities_used} of {coverage.activities_total} "
+            "rides — the rest had no usable zone data."
+        )
+    if distribution.zone_definitions_changed:
+        lines.append(
+            "  Note: the athlete's zones or FTP changed inside this window, so "
+            "the band boundaries are not consistent across the whole period."
+        )
+    return lines
+
+
 def _build_status_prompt(
     athlete: Athlete,
     recent_activities: list[Activity],
@@ -127,6 +172,7 @@ def _build_status_prompt(
     active_plans: list[tuple[TrainingPlan, list[PlannedWorkout]]],
     active_goals: list[Goal],
     now: datetime,
+    distribution: IntensityDistributionResponse | None = None,
 ) -> str:
     today = now.date()
     tz_label = now.strftime("%Z") or "UTC"
@@ -148,6 +194,8 @@ def _build_status_prompt(
         lines.append(
             f"  Form: {current_metric.form:.1f} ({_form_to_label(current_metric.form)})"
         )
+
+    lines.extend(_distribution_lines(distribution))
 
     lines.append("\nLast 28 days of training:")
     if recent_activities:
@@ -272,6 +320,7 @@ async def _stream_status_analysis(
     locale: str | None = None,
     coaching_style: str | None = None,
     usage_out: dict | None = None,
+    distribution: IntensityDistributionResponse | None = None,
 ) -> AsyncIterator[str]:
     """Yield text chunks from the LLM via streaming SSE.
 
@@ -301,7 +350,7 @@ async def _stream_status_analysis(
 
     prompt = _build_status_prompt(
         athlete, recent_activities, current_metric, active_plans,
-        active_goals, now,
+        active_goals, now, distribution,
     )
     messages: list[dict] = [
         {"role": "system", "content": _build_system_prompt(locale, coaching_style)},
@@ -450,6 +499,16 @@ async def analyze_training_status_bg(
             )
             active_goals = list(goals_result.scalars().all())
 
+            # Intensity distribution over the last block (issue #38). Uses the
+            # default time-in-zone method so the coach's numbers match the
+            # chart the athlete is looking at.
+            distribution = await compute_intensity_distribution(
+                athlete,
+                session,
+                start=today - timedelta(days=DEFAULT_WINDOW_DAYS),
+                end=today,
+            )
+
             buffer: list[str] = []
             last_flush = time.monotonic()
             accumulated = ""
@@ -462,7 +521,7 @@ async def analyze_training_status_bg(
                     recent_activities, current_metric,
                     active_plans, active_goals,
                     now, locale=resolved_locale, coaching_style=coaching_style,
-                    usage_out=usage_out,
+                    usage_out=usage_out, distribution=distribution,
                 ):
                     buffer.append(chunk)
                     if time.monotonic() - last_flush >= 0.5:

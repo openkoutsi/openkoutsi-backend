@@ -14,7 +14,15 @@ from backend.app.schemas.metrics import (
     FitnessCurrentResponse,
     FitnessForecastResponse,
     FitnessMetricResponse,
+    IntensityBasis,
+    IntensityDistributionResponse,
+    IntensityMethod,
     WeeklyZoneBucket,
+)
+from backend.app.services.intensity_distribution import (
+    backfill_window_snapshots,
+    compute_intensity_distribution,
+    resolve_window,
 )
 from backend.app.services.metrics_engine import catch_up_metrics
 from backend.app.services.metrics_forecast import (
@@ -305,6 +313,54 @@ async def get_zones_weekly(
         )
         for week_start, data in sorted(buckets.items())
     ]
+
+
+@router.get(
+    "/intensity-distribution",
+    response_model=IntensityDistributionResponse,
+    operation_id="getIntensityDistribution",
+    summary="Intensity distribution over a training block",
+)
+async def get_intensity_distribution(
+    start: Optional[date] = Query(None),
+    end: Optional[date] = Query(None),
+    days: Optional[int] = Query(None, ge=1, le=3650),
+    basis: Optional[IntensityBasis] = Query(None),
+    method: IntensityMethod = Query("time"),
+    ctx_session=Depends(get_ctx_and_session),
+):
+    """Three-band intensity distribution and its shape over a period.
+
+    Weekly zones say what last week held; this says what a *block* came out as
+    — polarized, pyramidal, threshold-heavy, or almost all easy. Defaults to
+    the last 12 weeks.
+
+    ``method=time`` sums the frozen ``zone_times`` snapshots and reports
+    percentages of time. ``method=session`` counts each ride whole by its
+    workout category and reports percentages of sessions. They disagree by
+    design: warm-ups and coast-downs pull the time method toward pyramidal.
+
+    ``basis`` selects power or HR zones, preferring power when both exist; it
+    does not apply to ``method=session`` and is echoed as ``null`` there.
+    """
+    ctx, session = ctx_session
+    athlete = await _get_athlete(ctx.user_id, session)
+
+    try:
+        start, end = resolve_window(start, end, days)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # Freezing missing snapshots is this endpoint's business, not the
+    # distribution service's: the service is also called from the plan
+    # generator, on a session holding uncommitted deletions that a commit here
+    # would make permanent. The write stays where the transaction is owned.
+    if method == "time":
+        await backfill_window_snapshots(athlete, session, start, end)
+
+    return await compute_intensity_distribution(
+        athlete, session, start=start, end=end, basis=basis, method=method
+    )
 
 
 @router.get("/zones/{activity_id}")

@@ -11,12 +11,31 @@ import pytest
 from backend.app.models.registry_orm import ProviderConnection
 from backend.app.models.user_orm import Athlete
 from backend.app.services.providers.base import ZoneData
+from openkoutsi.zones import HR_ZONE_NAMES, POWER_ZONE_NAMES
 from backend.app.services.providers.strava import StravaProviderClient, _normalize_strava_zones
 from backend.app.services.providers.wahoo import _normalize_wahoo_zones
 
 # IDs from conftest.py
 _TEST_USER_ID = "test-user-00000000"
 _TEST_ATHLETE_ID = "test-athlete-0000"
+
+# The fixed zone model (issue #38) — seven power zones, five HR zones. These
+# carry provider-style names, because that is what a provider actually returns;
+# the endpoint relabels them to the canonical names on the way in.
+_PROVIDER_HR_ZONES = [
+    {"name": f"Z{i}", "low": low, "high": high}
+    for i, (low, high) in enumerate(
+        [(0, 120), (120, 140), (140, 160), (160, 172), (172, 200)], start=1
+    )
+]
+
+_PROVIDER_POWER_ZONES = [
+    {"name": f"Z{i}", "low": low, "high": high}
+    for i, (low, high) in enumerate(
+        [(0, 165), (165, 225), (225, 261), (261, 285), (285, 318), (318, 360), (360, 9999)],
+        start=1,
+    )
+]
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -192,8 +211,8 @@ class TestSyncZonesEndpoint:
 
         mock_zone_data = ZoneData(
             ftp=300,
-            hr_zones=[{"name": "Z1", "low": 0, "high": 120}],
-            power_zones=[{"name": "Z1", "low": 0, "high": 165}],
+            hr_zones=_PROVIDER_HR_ZONES,
+            power_zones=_PROVIDER_POWER_ZONES,
         )
 
         with patch.object(StravaProviderClient, "fetch_zones", new_callable=AsyncMock, return_value=mock_zone_data):
@@ -204,14 +223,51 @@ class TestSyncZonesEndpoint:
         assert "ftp" in body["updated"]
         assert "hr_zones" in body["updated"]
         assert "power_zones" in body["updated"]
+        assert body["skipped"] == []
         assert body["ftp"] == 300
 
         from sqlalchemy import select
         result = await session.execute(select(Athlete).where(Athlete.id == _TEST_ATHLETE_ID))
         athlete = result.scalar_one()
         assert athlete.ftp == 300
-        assert athlete.hr_zones == [{"name": "Z1", "low": 0, "high": 120}]
-        assert athlete.power_zones == [{"name": "Z1", "low": 0, "high": 165}]
+        # Boundaries are the provider's; names are relabelled to the canonical
+        # ones so the positional band mapping can rely on them (issue #38).
+        assert [z["low"] for z in athlete.hr_zones] == [z["low"] for z in _PROVIDER_HR_ZONES]
+        assert [z["name"] for z in athlete.hr_zones] == list(HR_ZONE_NAMES)
+        assert [z["high"] for z in athlete.power_zones] == [
+            z["high"] for z in _PROVIDER_POWER_ZONES
+        ]
+        assert [z["name"] for z in athlete.power_zones] == list(POWER_ZONE_NAMES)
+
+    async def test_sync_zones_skips_wrong_zone_counts(
+        self, client, session, registry_session, auth_headers
+    ):
+        # Providers hand back whatever the athlete configured on their side.
+        # openkoutsi's zone model is fixed (issue #38), so a wrong-length list
+        # is reported as skipped rather than padded into a shape the athlete
+        # never chose.
+        await _add_connection(registry_session, "strava")
+
+        mock_zone_data = ZoneData(
+            ftp=300,
+            hr_zones=[{"name": "Z1", "low": 0, "high": 120}],
+            power_zones=_PROVIDER_POWER_ZONES,
+        )
+
+        with patch.object(StravaProviderClient, "fetch_zones", new_callable=AsyncMock, return_value=mock_zone_data):
+            resp = await client.post("/api/integrations/strava/sync-zones", headers=auth_headers)
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["skipped"] == ["hr_zones"]
+        assert "power_zones" in body["updated"]
+        assert "hr_zones" not in body["updated"]
+
+        from sqlalchemy import select
+        result = await session.execute(select(Athlete).where(Athlete.id == _TEST_ATHLETE_ID))
+        athlete = result.scalar_one()
+        assert athlete.hr_zones is None
+        assert [z["name"] for z in athlete.power_zones] == list(POWER_ZONE_NAMES)
 
     async def test_sync_zones_appends_ftp_history(self, client, session, registry_session, auth_headers):
         from backend.app.services.providers.wahoo import WahooClient
