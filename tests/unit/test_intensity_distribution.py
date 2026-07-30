@@ -103,12 +103,52 @@ class TestBandsFromZoneTimes:
             BAND_LOW: 0, BAND_MODERATE: 0, BAND_HIGH: 45
         }
 
+    def test_unparseable_name_excludes_the_activity(self):
+        # "VO2max" used to yield zone 2 from the embedded digit, filing ten
+        # minutes of VO2max work below LT1 and reading the ride as
+        # predominantly_low. Refusing to place it is the honest answer: the
+        # activity drops out of coverage instead of reporting a wrong shape.
+        snapshot = {"power": {"Z1 Recovery": 1000, "Z2 Endurance": 2000, "VO2max": 600}}
+        assert bands_from_zone_times(snapshot, "power") == {
+            BAND_LOW: 0, BAND_MODERATE: 0, BAND_HIGH: 0
+        }
+
+    def test_out_of_range_number_does_not_rescale_the_model(self):
+        # "Sweet Spot 88-94%" parsed as zone 88, which rescaled the band
+        # boundaries for every *other* zone in the snapshot and inverted the
+        # distribution — one bad name poisoning the whole window.
+        snapshot = {
+            "power": {
+                "Z1 Recovery": 1000,
+                "Z2 Endurance": 2000,
+                "Sweet Spot 88-94%": 900,
+                "Z5 VO2max": 800,
+            }
+        }
+        assert bands_from_zone_times(snapshot, "power") == {
+            BAND_LOW: 0, BAND_MODERATE: 0, BAND_HIGH: 0
+        }
+
+    def test_digitless_names_are_not_guessed_from_alphabetical_order(self):
+        # These sorted alphabetically and were then read as zone order, which
+        # re-introduced exactly the partial-snapshot bug the numbering fixes.
+        snapshot = {"power": {"Recovery": 1000, "Endurance": 2000, "Threshold": 500}}
+        assert bands_from_zone_times(snapshot, "power") == {
+            BAND_LOW: 0, BAND_MODERATE: 0, BAND_HIGH: 0
+        }
+
+    def test_accepted_name_spellings(self):
+        for key in ("Z3 Tempo", "Z3", "z3", "Zone 3", "3 Tempo"):
+            assert bands_from_zone_times({"power": {key: 60}}, "power") == {
+                BAND_LOW: 0, BAND_MODERATE: 60, BAND_HIGH: 0
+            }, key
+
     def test_ordering_is_numeric_not_lexicographic(self):
-        # "Z10" must land in the top band, not beside "Z1".
+        # "Z10" must land in the top band, not beside "Z1". Ten is within the
+        # accepted range for a seven-zone model, so the bands widen
+        # proportionally rather than the snapshot being refused.
         snapshot = {"power": {"Z1": 1, "Z2": 2, "Z3": 3, "Z4": 4, "Z5": 5, "Z6": 6, "Z10": 10}}
         totals = bands_from_zone_times(snapshot, "power")
-        # Z10 proves a ten-zone list, so the bands widen proportionally: the
-        # bottom three zones are easy and Z10's time is unambiguously hard.
         assert totals == {BAND_LOW: 6, BAND_MODERATE: 15, BAND_HIGH: 10}
 
     def test_other_basis_is_ignored(self):

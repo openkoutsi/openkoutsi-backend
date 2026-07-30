@@ -83,7 +83,27 @@ def band_for_zone_index(index: int, zone_count: int, basis: str) -> int:
     return BAND_HIGH
 
 
-_ZONE_NUMBER = re.compile(r"\d+")
+# Anchored deliberately. An unanchored ``\d+`` takes the first digit run
+# *anywhere* in the name, and zone names were free-form before the model was
+# fixed, so it mis-parsed real ones: ``VO2max`` read as zone 2 and filed hard
+# work below LT1, and ``Sweet Spot 88-94%`` read as zone 88, which rescaled the
+# band boundaries for every other zone in the same snapshot and inverted the
+# distribution. Anchoring accepts ``Z1 Recovery``, ``Zone 1``, ``1 Recovery``
+# and ``Z1``, and refuses the rest outright rather than guessing at them.
+_ZONE_NUMBER = re.compile(r"^\s*(?:zone\s*|z\s*)?(\d+)", re.IGNORECASE)
+
+# A parsed number this far above the canonical count is not a zone number —
+# it's a percentage or a wattage that happened to lead the name. Refuse it
+# rather than letting one value redefine the model for the whole snapshot.
+_MAX_ZONE_NUMBER_FACTOR = 2
+
+
+def zone_number(name: str) -> int | None:
+    """The 1-based zone number leading ``name``, or ``None`` if it has none."""
+    match = _ZONE_NUMBER.match(name)
+    if match is None:
+        return None
+    return int(match.group(1))
 
 
 def _zone_sort_key(name: str) -> tuple[int, int, str]:
@@ -91,25 +111,18 @@ def _zone_sort_key(name: str) -> tuple[int, int, str]:
 
     Snapshots are keyed by zone *name*, and those names vary by where the zones
     came from: ``"Z1 Recovery"`` from the app's defaults, bare ``"Z1"`` from
-    provider sync. Sorting on the leading number recovers the ascending order
-    the positional mapping depends on. Names with no number sort last, so an
-    unrecognisable snapshot degrades predictably instead of scrambling.
+    provider sync. Names with no parseable number sort last; nothing is derived
+    from their position, they only need a deterministic order.
     """
-    match = _ZONE_NUMBER.search(name)
-    if match is None:
+    number = zone_number(name)
+    if number is None:
         return (1, 0, name)
-    return (0, int(match.group()), name)
+    return (0, number, name)
 
 
 def sort_zone_names(names) -> list[str]:
     """Snapshot keys in ascending zone order."""
     return sorted(names, key=_zone_sort_key)
-
-
-def zone_number(name: str, fallback: int) -> int:
-    """The 1-based zone number in ``name``, or ``fallback`` when it has none."""
-    match = _ZONE_NUMBER.search(name)
-    return int(match.group()) if match else fallback
 
 
 def bands_from_zone_times(zone_times: Mapping | None, basis: str) -> dict[int, int]:
@@ -123,6 +136,13 @@ def bands_from_zone_times(zone_times: Mapping | None, basis: str) -> dict[int, i
     ride actually touched. An easy ride that never left Z1–Z3 stores three keys;
     reading those as a three-zone model would promote Z3 into the top band and
     report a recovery spin as high intensity.
+
+    A snapshot carrying any name the mapping can't place returns **all zeros**,
+    which drops the activity out of ``activities_used`` and shows up as honest
+    coverage. Snapshots frozen before zone names were normalised can hold
+    anything the athlete typed, and there is no order to recover from names
+    like ``Recovery, Endurance, Threshold`` — guessing from their position
+    would just be alphabetical order wearing a confident label.
     """
     if basis not in _CANONICAL_COUNTS:
         raise ValueError(f"unknown basis: {basis!r}")
@@ -132,10 +152,13 @@ def bands_from_zone_times(zone_times: Mapping | None, basis: str) -> dict[int, i
     if not times:
         return totals
 
+    limit = _CANONICAL_COUNTS[basis] * _MAX_ZONE_NUMBER_FACTOR
     indexed: list[tuple[int, int]] = []  # (zone index, seconds)
-    for position, name in enumerate(sort_zone_names(times)):
-        index = max(zone_number(name, position + 1) - 1, 0)
-        indexed.append((index, int(times.get(name) or 0)))
+    for name in sort_zone_names(times):
+        number = zone_number(name)
+        if number is None or number < 1 or number > limit:
+            return {band: 0 for band in BANDS}
+        indexed.append((number - 1, int(times.get(name) or 0)))
 
     # Assume the canonical model unless the snapshot proves it had more zones.
     zone_count = max(_CANONICAL_COUNTS[basis], max(i for i, _ in indexed) + 1)

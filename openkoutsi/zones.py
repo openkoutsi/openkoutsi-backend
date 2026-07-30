@@ -10,6 +10,29 @@ from typing import Iterable, List, Sequence
 POWER_ZONE_COUNT = 7  # Z1 Recovery … Z7 Neuromuscular
 HR_ZONE_COUNT = 5  # Z1 Recovery … Z5 VO2max
 
+# Canonical zone names. The API owns these: names are normalised on write, so
+# the athlete's text is a label rather than data. That matters because the
+# frozen ``zone_times`` snapshot is keyed by name, and anything reading a
+# snapshot has to recover the zone's position from it — an invariant that
+# cannot be left to whatever an athlete typed into a free-text field.
+POWER_ZONE_NAMES = (
+    "Z1 Recovery",
+    "Z2 Endurance",
+    "Z3 Tempo",
+    "Z4 Threshold",
+    "Z5 VO2max",
+    "Z6 Anaerobic",
+    "Z7 Neuromuscular",
+)
+
+HR_ZONE_NAMES = (
+    "Z1 Recovery",
+    "Z2 Endurance",
+    "Z3 Tempo",
+    "Z4 Threshold",
+    "Z5 VO2max",
+)
+
 
 def time_in_zones(samples: Iterable[float], zone_defs: Sequence[dict]) -> dict[str, int]:
     """Accumulate time spent in each zone from a per-second sample stream.
@@ -46,9 +69,17 @@ class Zones:
         for i, (lower, upper) in enumerate(self.zones):
             if v >= lower and v <= upper:
                 return i
-        # Below Z1 → clamp to Z1; above last zone → clamp to last zone.
+        # Below Z1 → clamp to Z1.
         if v < self.zones[0][0]:
             return 0
+        # Landing in a gap between two zones means the nearest zone *below* it,
+        # not the top one. Falling through to the last zone booked easy samples
+        # as maximal effort: a 3 W gap between Z1 and Z2 filed recovery-pace
+        # riding as Z7. New gaps are rejected on write, but snapshots are
+        # backfilled from zone lists saved before that rule existed.
+        for i in range(len(self.zones) - 1, -1, -1):
+            if v > self.zones[i][1]:
+                return i
         return len(self.zones) - 1
 
 

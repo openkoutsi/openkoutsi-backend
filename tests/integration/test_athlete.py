@@ -124,6 +124,111 @@ class TestUpdateAthlete:
         )
         assert resp.status_code == 422
 
+    async def test_zone_names_are_normalised(self, client, auth_headers):
+        # The invariant this feature rests on is positional, and the name is
+        # what carries position to everything that reads a zone_times snapshot.
+        # Validating count and ordering while leaving names free-form enforced
+        # everything except the field that mattered: a natural list like
+        # "Recovery, Endurance, Tempo, …" passed and then mis-mapped.
+        from openkoutsi.zones import HR_ZONE_NAMES
+
+        zones = [
+            {"low": 0, "high": 120, "name": "Recovery"},
+            {"low": 120, "high": 140, "name": "Endurance"},
+            {"low": 140, "high": 160, "name": "Tempo"},
+            {"low": 160, "high": 172, "name": "VO2max"},
+            {"low": 172, "high": 200, "name": "Sweet Spot 88-94%"},
+        ]
+        resp = await client.patch(
+            "/api/athlete", json={"hr_zones": zones}, headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        stored = resp.json()["hr_zones"]
+        assert [z["name"] for z in stored] == list(HR_ZONE_NAMES)
+        # Boundaries are the athlete's; only the labels are the API's.
+        assert [z["low"] for z in stored] == [0, 120, 140, 160, 172]
+
+    async def test_missing_zone_names_are_filled_in(self, client, auth_headers):
+        zones = [
+            {"low": 0, "high": 120},
+            {"low": 120, "high": 140},
+            {"low": 140, "high": 160},
+            {"low": 160, "high": 172},
+            {"low": 172, "high": 200},
+        ]
+        resp = await client.patch(
+            "/api/athlete", json={"hr_zones": zones}, headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["hr_zones"][0]["name"] == "Z1 Recovery"
+
+    async def test_gap_between_zones_rejected(self, client, auth_headers):
+        # A value in a gap belongs to no zone, and used to be attributed to the
+        # top one — a 9 bpm gap filed easy riding as VO2max.
+        zones = [
+            {"low": 0, "high": 120, "name": "Z1"},
+            {"low": 130, "high": 140, "name": "Z2"},  # 121-129 belongs to nothing
+            {"low": 140, "high": 160, "name": "Z3"},
+            {"low": 160, "high": 172, "name": "Z4"},
+            {"low": 172, "high": 200, "name": "Z5"},
+        ]
+        resp = await client.patch("/api/athlete", json={"hr_zones": zones}, headers=auth_headers)
+        assert resp.status_code == 422
+
+    async def test_both_contiguity_conventions_accepted(self, client, auth_headers):
+        # `low == prev.high` and `low == prev.high + 1` are both in use,
+        # depending on whether the upper bound reads as inclusive.
+        touching = [
+            {"low": 0, "high": 120, "name": "Z1"},
+            {"low": 120, "high": 140, "name": "Z2"},
+            {"low": 140, "high": 160, "name": "Z3"},
+            {"low": 160, "high": 172, "name": "Z4"},
+            {"low": 172, "high": 200, "name": "Z5"},
+        ]
+        assert (await client.patch(
+            "/api/athlete", json={"hr_zones": touching}, headers=auth_headers,
+        )).status_code == 200
+
+        offset = [
+            {"low": 0, "high": 120, "name": "Z1"},
+            {"low": 121, "high": 140, "name": "Z2"},
+            {"low": 141, "high": 160, "name": "Z3"},
+            {"low": 161, "high": 172, "name": "Z4"},
+            {"low": 173, "high": 200, "name": "Z5"},
+        ]
+        assert (await client.patch(
+            "/api/athlete", json={"hr_zones": offset}, headers=auth_headers,
+        )).status_code == 200
+
+    async def test_negative_zone_bound_rejected(self, client, auth_headers):
+        zones = [
+            {"low": -10, "high": 120, "name": "Z1"},
+            {"low": 120, "high": 140, "name": "Z2"},
+            {"low": 140, "high": 160, "name": "Z3"},
+            {"low": 160, "high": 172, "name": "Z4"},
+            {"low": 172, "high": 200, "name": "Z5"},
+        ]
+        resp = await client.patch("/api/athlete", json={"hr_zones": zones}, headers=auth_headers)
+        assert resp.status_code == 422
+
+    async def test_top_power_zone_sentinel_still_accepted(self, client, auth_headers):
+        from openkoutsi.zones import POWER_ZONE_NAMES
+
+        zones = [
+            {"low": 0, "high": 137, "name": "Z1"},
+            {"low": 137, "high": 187, "name": "Z2"},
+            {"low": 187, "high": 217, "name": "Z3"},
+            {"low": 217, "high": 237, "name": "Z4"},
+            {"low": 237, "high": 265, "name": "Z5"},
+            {"low": 265, "high": 300, "name": "Z6"},
+            {"low": 300, "high": 9999, "name": "Z7"},
+        ]
+        resp = await client.patch(
+            "/api/athlete", json={"power_zones": zones}, headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        assert [z["name"] for z in resp.json()["power_zones"]] == list(POWER_ZONE_NAMES)
+
     async def test_overlapping_zones_rejected(self, client, auth_headers):
         # Previously this passed validation here and only blew up later, while
         # processing an activity.

@@ -11308,22 +11308,26 @@
         "properties": {
           "low": {
             "type": "integer",
+            "maximum": 10000.0,
+            "minimum": 0.0,
             "title": "Low"
           },
           "high": {
             "type": "integer",
+            "maximum": 10000.0,
+            "minimum": 0.0,
             "title": "High"
           },
           "name": {
             "type": "string",
-            "title": "Name"
+            "title": "Name",
+            "default": ""
           }
         },
         "type": "object",
         "required": [
           "low",
-          "high",
-          "name"
+          "high"
         ],
         "title": "ZoneSchema"
       },

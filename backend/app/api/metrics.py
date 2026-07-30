@@ -20,6 +20,7 @@ from backend.app.schemas.metrics import (
     WeeklyZoneBucket,
 )
 from backend.app.services.intensity_distribution import (
+    backfill_window_snapshots,
     compute_intensity_distribution,
     resolve_window,
 )
@@ -345,7 +346,17 @@ async def get_intensity_distribution(
     ctx, session = ctx_session
     athlete = await _get_athlete(ctx.user_id, session)
 
-    start, end = resolve_window(start, end, days)
+    try:
+        start, end = resolve_window(start, end, days)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    # Freezing missing snapshots is this endpoint's business, not the
+    # distribution service's: the service is also called from the plan
+    # generator, on a session holding uncommitted deletions that a commit here
+    # would make permanent. The write stays where the transaction is owned.
+    if method == "time":
+        await backfill_window_snapshots(athlete, session, start, end)
 
     return await compute_intensity_distribution(
         athlete, session, start=start, end=end, basis=basis, method=method

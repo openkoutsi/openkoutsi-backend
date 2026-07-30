@@ -11,6 +11,7 @@ import pytest
 from backend.app.models.registry_orm import ProviderConnection
 from backend.app.models.user_orm import Athlete
 from backend.app.services.providers.base import ZoneData
+from openkoutsi.zones import HR_ZONE_NAMES, POWER_ZONE_NAMES
 from backend.app.services.providers.strava import StravaProviderClient, _normalize_strava_zones
 from backend.app.services.providers.wahoo import _normalize_wahoo_zones
 
@@ -18,15 +19,17 @@ from backend.app.services.providers.wahoo import _normalize_wahoo_zones
 _TEST_USER_ID = "test-user-00000000"
 _TEST_ATHLETE_ID = "test-athlete-0000"
 
-# The fixed zone model (issue #38) — seven power zones, five HR zones.
-_CANONICAL_HR_ZONES = [
+# The fixed zone model (issue #38) — seven power zones, five HR zones. These
+# carry provider-style names, because that is what a provider actually returns;
+# the endpoint relabels them to the canonical names on the way in.
+_PROVIDER_HR_ZONES = [
     {"name": f"Z{i}", "low": low, "high": high}
     for i, (low, high) in enumerate(
         [(0, 120), (120, 140), (140, 160), (160, 172), (172, 200)], start=1
     )
 ]
 
-_CANONICAL_POWER_ZONES = [
+_PROVIDER_POWER_ZONES = [
     {"name": f"Z{i}", "low": low, "high": high}
     for i, (low, high) in enumerate(
         [(0, 165), (165, 225), (225, 261), (261, 285), (285, 318), (318, 360), (360, 9999)],
@@ -208,8 +211,8 @@ class TestSyncZonesEndpoint:
 
         mock_zone_data = ZoneData(
             ftp=300,
-            hr_zones=_CANONICAL_HR_ZONES,
-            power_zones=_CANONICAL_POWER_ZONES,
+            hr_zones=_PROVIDER_HR_ZONES,
+            power_zones=_PROVIDER_POWER_ZONES,
         )
 
         with patch.object(StravaProviderClient, "fetch_zones", new_callable=AsyncMock, return_value=mock_zone_data):
@@ -227,8 +230,14 @@ class TestSyncZonesEndpoint:
         result = await session.execute(select(Athlete).where(Athlete.id == _TEST_ATHLETE_ID))
         athlete = result.scalar_one()
         assert athlete.ftp == 300
-        assert athlete.hr_zones == _CANONICAL_HR_ZONES
-        assert athlete.power_zones == _CANONICAL_POWER_ZONES
+        # Boundaries are the provider's; names are relabelled to the canonical
+        # ones so the positional band mapping can rely on them (issue #38).
+        assert [z["low"] for z in athlete.hr_zones] == [z["low"] for z in _PROVIDER_HR_ZONES]
+        assert [z["name"] for z in athlete.hr_zones] == list(HR_ZONE_NAMES)
+        assert [z["high"] for z in athlete.power_zones] == [
+            z["high"] for z in _PROVIDER_POWER_ZONES
+        ]
+        assert [z["name"] for z in athlete.power_zones] == list(POWER_ZONE_NAMES)
 
     async def test_sync_zones_skips_wrong_zone_counts(
         self, client, session, registry_session, auth_headers
@@ -242,7 +251,7 @@ class TestSyncZonesEndpoint:
         mock_zone_data = ZoneData(
             ftp=300,
             hr_zones=[{"name": "Z1", "low": 0, "high": 120}],
-            power_zones=_CANONICAL_POWER_ZONES,
+            power_zones=_PROVIDER_POWER_ZONES,
         )
 
         with patch.object(StravaProviderClient, "fetch_zones", new_callable=AsyncMock, return_value=mock_zone_data):
@@ -258,7 +267,7 @@ class TestSyncZonesEndpoint:
         result = await session.execute(select(Athlete).where(Athlete.id == _TEST_ATHLETE_ID))
         athlete = result.scalar_one()
         assert athlete.hr_zones is None
-        assert athlete.power_zones == _CANONICAL_POWER_ZONES
+        assert [z["name"] for z in athlete.power_zones] == list(POWER_ZONE_NAMES)
 
     async def test_sync_zones_appends_ftp_history(self, client, session, registry_session, auth_headers):
         from backend.app.services.providers.wahoo import WahooClient

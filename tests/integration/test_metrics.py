@@ -534,7 +534,7 @@ class TestWeeklyZonesEndpoint:
         data = resp.json()
         assert len(data) == 1
         assert data[0]["week_start"] == "2025-03-31"
-        assert data[0]["power"] == {"Z1": 60, "Z2": 30, "Z3": 60}
+        assert data[0]["power"] == {"Z1 Recovery": 60, "Z2 Endurance": 30, "Z3 Tempo": 60}
 
     async def test_separate_weeks_sorted(self, client, auth_headers, session):
         await self._set_power_zones(client, auth_headers)
@@ -547,8 +547,8 @@ class TestWeeklyZonesEndpoint:
         resp = await client.get("/api/metrics/zones/weekly", headers=auth_headers)
         data = resp.json()
         assert [b["week_start"] for b in data] == ["2025-03-31", "2025-04-07"]
-        assert data[0]["power"] == {"Z1": 20}
-        assert data[1]["power"] == {"Z3": 45}
+        assert data[0]["power"] == {"Z1 Recovery": 20}
+        assert data[1]["power"] == {"Z3 Tempo": 45}
 
     async def test_snapshot_frozen_against_zone_changes(self, client, auth_headers, session):
         await self._set_power_zones(client, auth_headers)
@@ -557,7 +557,7 @@ class TestWeeklyZonesEndpoint:
             [100] * 60 + [250] * 60,  # Z1:60, Z3:60 under the original zones
         )
         first = (await client.get("/api/metrics/zones/weekly", headers=auth_headers)).json()
-        assert first[0]["power"] == {"Z1": 60, "Z3": 60}
+        assert first[0]["power"] == {"Z1 Recovery": 60, "Z3 Tempo": 60}
 
         # Shift every boundary so the same samples would now land in different
         # zones (100 → Z2, 250 → Z5); the past activity must not move.
@@ -573,7 +573,7 @@ class TestWeeklyZonesEndpoint:
             ],
         )
         second = (await client.get("/api/metrics/zones/weekly", headers=auth_headers)).json()
-        assert second[0]["power"] == {"Z1": 60, "Z3": 60}
+        assert second[0]["power"] == {"Z1 Recovery": 60, "Z3 Tempo": 60}
 
     async def test_date_range_filter(self, client, auth_headers, session):
         await self._set_power_zones(client, auth_headers)
@@ -589,7 +589,7 @@ class TestWeeklyZonesEndpoint:
         )
         data = resp.json()
         assert len(data) == 1
-        assert data[0]["power"] == {"Z3": 10}
+        assert data[0]["power"] == {"Z3 Tempo": 10}
 
     async def test_unauthenticated_returns_401(self, client):
         resp = await client.get("/api/metrics/zones/weekly")
@@ -871,20 +871,28 @@ class TestIntensityDistribution:
         assert body["zone_definitions_changed"] is False
 
     async def test_mixed_zone_flag_on_renamed_zones(self, client, auth_headers, session):
+        # Names are normalised on write now, so a rename can't come in through
+        # the API. The case that remains is the real one: a snapshot frozen
+        # before normalisation existed, sitting in the same window as a new one.
         await self._set_zones(client, auth_headers)
-        await self._make_activity(client, auth_headers, session, 20, power_data=[100] * 300)
-        # Read once so the first snapshot is frozen under the original names —
-        # otherwise the lazy backfill would compute both with the new zones.
-        await client.get(self._URL, headers=auth_headers)
-
-        renamed = [dict(z, name=f"Zone {i + 1}") for i, z in enumerate(_CANONICAL_POWER_ZONES)]
-        await client.patch(
-            "/api/athlete", json={"power_zones": renamed}, headers=auth_headers,
+        new_id = await self._make_activity(
+            client, auth_headers, session, 10, power_data=[100] * 300,
         )
-        await self._make_activity(client, auth_headers, session, 10, power_data=[100] * 300)
+        legacy_id = await self._make_activity(
+            client, auth_headers, session, 20, power_data=[100] * 300,
+        )
+        await client.get(self._URL, headers=auth_headers)  # freeze both
+
+        legacy = await session.get(Activity, legacy_id)
+        legacy.zone_times = {"power": {"Z1": 300}}  # bare provider-style name
+        await session.commit()
 
         body = (await client.get(self._URL, headers=auth_headers)).json()
         assert body["zone_definitions_changed"] is True
+        # Both snapshots still map — "Z1" and "Z1 Recovery" are both placeable,
+        # they just disagree about what zone 1 is called.
+        assert body["coverage"]["activities_used"] == 2
+        assert new_id != legacy_id
 
     async def test_ftp_change_outside_window_does_not_flag(self, client, auth_headers, session):
         await self._set_zones(client, auth_headers)
@@ -954,6 +962,168 @@ class TestIntensityDistribution:
         assert len(weekly) == 1
         # Still zone names and seconds, untouched by the band mapping.
         assert weekly[0]["power"] == {"Z1 Recovery": 60, "Z3 Tempo": 30}
+
+    async def test_the_read_path_never_commits(self, client, auth_headers, session):
+        """The service must not commit a transaction it doesn't own.
+
+        ``regenerate_plan`` flushes the deletion of every non-completed workout
+        and deliberately leaves it uncommitted, so an LLM failure rolls it back.
+        The plan generator then calls this service on that same session. A
+        commit in here made the deletions permanent before the LLM was even
+        called — silently, unrecoverably, and only for athletes with rides
+        missing a snapshot.
+        """
+        from backend.app.services.intensity_distribution import (
+            compute_intensity_distribution,
+        )
+
+        await self._set_zones(client, auth_headers)
+        activity_id = await self._make_activity(
+            client, auth_headers, session, 10, power_data=[100] * 300,
+        )
+        athlete = (await session.execute(select(Athlete))).scalars().first()
+
+        # The snapshot is deliberately left unfrozen — this is the state that
+        # used to trigger the backfill and its commit.
+        activity = await session.get(Activity, activity_id)
+        assert activity.zone_times is None
+
+        # Stand in for the plan deletion: flushed, not committed.
+        plan = TrainingPlan(athlete_id=athlete.id, name="Doomed", weeks=4)
+        session.add(plan)
+        await session.flush()
+        plan_id = plan.id
+
+        await compute_intensity_distribution(
+            athlete, session, start=date.today() - timedelta(days=84), end=date.today(),
+        )
+
+        await session.rollback()
+        assert await session.get(TrainingPlan, plan_id) is None, (
+            "the distribution read path committed a transaction it does not own"
+        )
+
+    async def test_endpoint_still_backfills_snapshots(self, client, auth_headers, session):
+        # Moving the write out of the service must not cost legacy rides their
+        # snapshot — the endpoint owns that now.
+        await self._set_zones(client, auth_headers)
+        activity_id = await self._make_activity(
+            client, auth_headers, session, 10, power_data=[100] * 300,
+        )
+        assert (await session.get(Activity, activity_id)).zone_times is None
+
+        body = (await client.get(self._URL, headers=auth_headers)).json()
+        assert body["coverage"]["activities_used"] == 1
+
+        await session.refresh(await session.get(Activity, activity_id))
+        assert (await session.get(Activity, activity_id)).zone_times is not None
+
+    async def test_session_method_never_flags_zone_changes(
+        self, client, auth_headers, session
+    ):
+        # Session counting reads workout_category and never touches a zone
+        # boundary, so a zone change cannot have moved that number. Warning
+        # about it told the athlete — and the LLM — to distrust a figure the
+        # change couldn't have influenced.
+        await self._set_zones(client, auth_headers)
+        activity_id = await self._make_activity(
+            client, auth_headers, session, 10, power_data=[100] * 3600,
+        )
+        await client.patch(
+            f"/api/activities/{activity_id}",
+            json={"workout_category": "endurance"},
+            headers=auth_headers,
+        )
+        athlete = (await session.execute(select(Athlete))).scalars().first()
+        athlete.ftp_tests = [
+            {"date": (date.today() - timedelta(days=200)).isoformat(), "ftp": 250, "method": "test"},
+            {"date": (date.today() - timedelta(days=20)).isoformat(), "ftp": 265, "method": "test"},
+        ]
+        await session.commit()
+
+        time_body = (await client.get(self._URL, headers=auth_headers)).json()
+        assert time_body["zone_definitions_changed"] is True
+
+        session_body = (await client.get(
+            f"{self._URL}?method=session", headers=auth_headers,
+        )).json()
+        assert session_body["zone_definitions_changed"] is False
+
+    async def test_malformed_ftp_entry_does_not_flag(self, client, auth_headers, session):
+        await self._set_zones(client, auth_headers)
+        await self._make_activity(client, auth_headers, session, 10, power_data=[100] * 300)
+
+        athlete = (await session.execute(select(Athlete))).scalars().first()
+        athlete.ftp_tests = [
+            {"date": (date.today() - timedelta(days=200)).isoformat(), "ftp": 250},
+            {"date": (date.today() - timedelta(days=20)).isoformat()},          # no ftp
+            {"date": (date.today() - timedelta(days=10)).isoformat(), "ftp": "250"},  # string
+        ]
+        await session.commit()
+
+        body = (await client.get(self._URL, headers=auth_headers)).json()
+        assert body["zone_definitions_changed"] is False
+
+    async def test_basis_falls_back_when_power_zones_exist_but_no_power_data(
+        self, client, auth_headers, session
+    ):
+        # Having power zones configured is not the same as having a power meter
+        # — provider sync writes them for anyone with an FTP set. This athlete
+        # rode the whole window on HR, and is exactly who the fallback is for.
+        await self._set_zones(client, auth_headers, power=True, hr=True)
+        await self._make_activity(
+            client, auth_headers, session, 10, hr_data=[110] * 300 + [180] * 100,
+        )
+
+        body = (await client.get(self._URL, headers=auth_headers)).json()
+        assert body["basis"] == "hr"
+        assert body["coverage"]["activities_used"] == 1
+        assert self._bands(body)[1]["seconds"] == 300
+
+    async def test_explicit_basis_is_not_second_guessed(
+        self, client, auth_headers, session
+    ):
+        # An explicitly requested basis must be answered as asked, even when
+        # the other one would have data.
+        await self._set_zones(client, auth_headers, power=True, hr=True)
+        await self._make_activity(client, auth_headers, session, 10, hr_data=[110] * 300)
+
+        body = (await client.get(f"{self._URL}?basis=power", headers=auth_headers)).json()
+        assert body["basis"] == "power"
+        assert body["coverage"]["activities_used"] == 0
+
+    async def test_inverted_window_returns_422(self, client, auth_headers):
+        start = date.today().isoformat()
+        end = (date.today() - timedelta(days=30)).isoformat()
+        resp = await client.get(
+            f"{self._URL}?start={start}&end={end}", headers=auth_headers,
+        )
+        assert resp.status_code == 422
+
+    async def test_far_past_start_is_clamped(self, client, auth_headers, session):
+        # An explicit start was unbounded, so one request could be made to load
+        # every activity ever recorded.
+        await self._set_zones(client, auth_headers)
+        body = (await client.get(
+            f"{self._URL}?start=1990-01-01", headers=auth_headers,
+        )).json()
+        assert body["start"] > "1990-01-01"
+
+    async def test_percentages_reproduce_the_classification(
+        self, client, auth_headers, session
+    ):
+        # The endpoint is meant to be the single source of the shape, so a
+        # client recomputing it from the percentages it was handed must agree.
+        from openkoutsi.intensity_distribution import classify
+
+        await self._set_zones(client, auth_headers)
+        await self._make_activity(
+            client, auth_headers, session, 10,
+            power_data=[100] * 600 + [200] * 350 + [250] * 50,
+        )
+        body = (await client.get(self._URL, headers=auth_headers)).json()
+        bands = self._bands(body)
+        assert classify(*(bands[b]["pct"] for b in (1, 2, 3))) == body["classification"]
 
     async def test_invalid_method_returns_422(self, client, auth_headers):
         resp = await client.get(f"{self._URL}?method=vibes", headers=auth_headers)

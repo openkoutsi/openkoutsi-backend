@@ -1,25 +1,49 @@
 from datetime import date, datetime
 from typing import Literal, Optional
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, Field, field_validator
 
-from openkoutsi.zones import HR_ZONE_COUNT, POWER_ZONE_COUNT
+from openkoutsi.zones import (
+    HR_ZONE_COUNT,
+    HR_ZONE_NAMES,
+    POWER_ZONE_COUNT,
+    POWER_ZONE_NAMES,
+)
+
+# Well above any plausible HR or FTP-relative wattage, but high enough to admit
+# the 9999 sentinel the top power zone uses as its open upper bound.
+_MAX_ZONE_BOUND = 10000
 
 
 class ZoneSchema(BaseModel):
-    low: int
-    high: int
-    name: str
+    low: int = Field(ge=0, le=_MAX_ZONE_BOUND)
+    high: int = Field(ge=0, le=_MAX_ZONE_BOUND)
+    name: str = ""
 
 
-def _validate_zone_list(zones: Optional[list[ZoneSchema]], expected: int, label: str):
+def _validate_zone_list(
+    zones: Optional[list[ZoneSchema]],
+    expected: int,
+    names: tuple[str, ...],
+    label: str,
+):
     """Enforce the fixed zone model on write (issue #38).
 
     Zone lists used to be free-form: any length, any names. Anything built on
     top of them then had to guess what a given zone meant, which is what made
     the three-band intensity mapping hard. They are now fixed at
-    ``POWER_ZONE_COUNT`` / ``HR_ZONE_COUNT`` entries, ascending and
+    ``POWER_ZONE_COUNT`` / ``HR_ZONE_COUNT`` entries, ascending, contiguous and
     non-overlapping.
+
+    **Names are normalised, not validated.** The invariant this feature rests on
+    is positional: zone *i* is a specific physiological band, and the thing that
+    carries that position to every reader is the name, because ``time_in_zones``
+    keys the frozen snapshot by it. Leaving names free-form while validating
+    count and ordering enforced everything except the one field that mattered —
+    a natural list like ``Recovery, Endurance, Tempo, …`` passed validation and
+    then mis-mapped, and ``Sweet Spot 88-94%`` parsed as zone 88. Overwriting
+    the name makes the invariant true by construction instead of by hope, and
+    repairs existing athletes the next time they save.
 
     The ordering checks used to live only in ``Zones.validate()``, which runs
     lazily from ``time_in_zones``. A malformed list saved through the API
@@ -39,13 +63,24 @@ def _validate_zone_list(zones: Optional[list[ZoneSchema]], expected: int, label:
             raise ValueError(
                 f"{label} Z{i + 1}: high ({zone.high}) must be above low ({zone.low})"
             )
-        if i and zone.low < zones[i - 1].high:
-            raise ValueError(
-                f"{label} Z{i + 1}: low ({zone.low}) must not be below "
-                f"Z{i} high ({zones[i - 1].high})"
-            )
+        if i:
+            previous = zones[i - 1].high
+            if zone.low < previous:
+                raise ValueError(
+                    f"{label} Z{i + 1}: low ({zone.low}) must not be below "
+                    f"Z{i} high ({previous})"
+                )
+            # A gap is worse than an overlap: a value falling into one belongs
+            # to no zone at all, and used to be attributed to the *top* zone.
+            # ``low == previous`` and ``low == previous + 1`` are both in use as
+            # "contiguous" depending on whether the bound is read as inclusive.
+            if zone.low > previous + 1:
+                raise ValueError(
+                    f"{label} Z{i + 1}: low ({zone.low}) leaves a gap above "
+                    f"Z{i} high ({previous}); zones must be contiguous"
+                )
 
-    return zones
+    return [zone.model_copy(update={"name": names[i]}) for i, zone in enumerate(zones)]
 
 
 class FtpTestSchema(BaseModel):
@@ -100,12 +135,12 @@ class AthleteUpdate(BaseModel):
     @field_validator("hr_zones")
     @classmethod
     def _check_hr_zones(cls, v):
-        return _validate_zone_list(v, HR_ZONE_COUNT, "hr_zones")
+        return _validate_zone_list(v, HR_ZONE_COUNT, HR_ZONE_NAMES, "hr_zones")
 
     @field_validator("power_zones")
     @classmethod
     def _check_power_zones(cls, v):
-        return _validate_zone_list(v, POWER_ZONE_COUNT, "power_zones")
+        return _validate_zone_list(v, POWER_ZONE_COUNT, POWER_ZONE_NAMES, "power_zones")
 
 
 class TrainingStatusBody(BaseModel):
