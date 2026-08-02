@@ -1,5 +1,5 @@
 import pytest
-from openkoutsi.sport_matching import sports_match
+from openkoutsi.sport_matching import is_rest_workout, sports_match
 
 
 # Generic workout types (threshold, easy, etc.) match endurance sports
@@ -45,3 +45,25 @@ from openkoutsi.sport_matching import sports_match
 ])
 def test_sports_match(sport, workout, expected):
     assert sports_match(sport, workout) == expected
+
+
+# ``rest`` stays a generic type for grading purposes, so sports_match still
+# accepts it — which is exactly why the matcher needs is_rest_workout as a
+# separate, explicit gate (issue #40).
+def test_rest_is_still_a_generic_type_for_sports_match():
+    assert sports_match("Ride", "rest") is True
+
+
+@pytest.mark.parametrize("workout_type,expected", [
+    ("rest", True),
+    ("Rest", True),
+    ("  REST  ", True),
+    ("", True),        # untyped placeholder row
+    (None, True),
+    ("recovery", False),
+    ("easy", False),
+    ("endurance", False),
+    ("strength", False),
+])
+def test_is_rest_workout(workout_type, expected):
+    assert is_rest_workout(workout_type) is expected

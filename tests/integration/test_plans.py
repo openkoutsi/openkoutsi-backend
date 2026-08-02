@@ -11,6 +11,13 @@ import pytest
 _START = date(2025, 6, 2)  # A Monday
 
 
+def _workout_date(plan: dict, workout: dict) -> str:
+    """The calendar date a planned workout falls on, as the API renders it."""
+    start = date.fromisoformat(plan["start_date"])
+    offset = (workout["week_number"] - 1) * 7 + (workout["day_of_week"] - 1)
+    return str(start + timedelta(days=offset))
+
+
 class TestCreatePlan:
     async def test_creates_rule_based_plan_with_correct_structure(self, client, auth_headers):
         resp = await client.post(
@@ -982,6 +989,13 @@ class TestLinkWorkout:
             json={"activity_id": a1}, headers=auth_headers,
         )
         assert r2.status_code == 409
+        # The message must identify the workout holding the link — it is often a
+        # day the athlete never opens (issue #40), and "linked to another planned
+        # workout" on its own gives them nothing to act on.
+        detail = r2.json()["detail"]
+        assert workouts[0]["workout_type"] in detail
+        assert "Link Plan" in detail
+        assert _workout_date(plan, workouts[0]) in detail
 
     async def test_unlink_single_activity(self, client, auth_headers):
         plan_id, workout_id = await self._plan_and_workout(client, auth_headers)

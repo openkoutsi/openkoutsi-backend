@@ -29,7 +29,7 @@ from openkoutsi.plan_adherence import (
     supplemental_match_score,
     supplemental_weight,
 )
-from openkoutsi.sport_matching import workout_is_cycling
+from openkoutsi.sport_matching import is_rest_workout, workout_is_cycling
 
 
 def workout_date(start_date: date, week_number: int, day_of_week: int) -> date:
@@ -38,8 +38,7 @@ def workout_date(start_date: date, week_number: int, day_of_week: int) -> date:
 
 
 def _is_rest(workout: PlannedWorkout) -> bool:
-    wtype = (workout.workout_type or "").strip().lower()
-    return wtype in ("", "rest")
+    return is_rest_workout(workout.workout_type)
 
 
 def _cycling_weight(workout: PlannedWorkout, supp_weight: float) -> float:

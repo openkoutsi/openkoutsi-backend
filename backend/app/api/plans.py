@@ -400,6 +400,20 @@ async def unarchive_plan(
     return _plan_response_with_adherence(plan)
 
 
+def _already_linked_message(workout: PlannedWorkout, plan: TrainingPlan) -> str:
+    """Name the planned workout already holding the activity's link."""
+    what = workout.workout_type or "untyped"
+    if plan.start_date is not None:
+        when = workout_date(plan.start_date, workout.week_number, workout.day_of_week)
+        where = f"the {what} workout on {when.isoformat()}"
+    else:
+        where = f"the {what} workout in week {workout.week_number}"
+    return (
+        f"Activity is already linked to {where} in plan '{plan.name}'. "
+        "Unlink it there first."
+    )
+
+
 @router.put("/{plan_id}/workouts/{workout_id}/link", response_model=PlannedWorkoutResponse)
 async def link_workout_to_activity(
     plan_id: str,
@@ -431,14 +445,25 @@ async def link_workout_to_activity(
 
     # Reject if this activity is already linked to a different planned workout.
     # A workout may hold many activities, but an activity belongs to only one.
+    # Fetch the conflicting workout and its plan so the error can name it: the
+    # holder is often a day the athlete never opens (issue #40), and a bare
+    # "linked to another planned workout" leaves them nothing to act on.
     existing_link_result = await session.execute(
-        select(PlannedWorkoutActivity).where(
+        select(PlannedWorkout, TrainingPlan)
+        .join(
+            PlannedWorkoutActivity,
+            PlannedWorkoutActivity.planned_workout_id == PlannedWorkout.id,
+        )
+        .join(TrainingPlan, TrainingPlan.id == PlannedWorkout.plan_id)
+        .where(
             PlannedWorkoutActivity.activity_id == body.activity_id,
             PlannedWorkoutActivity.planned_workout_id != workout_id,
         )
+        .limit(1)
     )
-    if existing_link_result.scalar_one_or_none():
-        raise HTTPException(409, "Activity is already linked to another planned workout")
+    existing_link = existing_link_result.first()
+    if existing_link is not None:
+        raise HTTPException(409, _already_linked_message(*existing_link))
 
     # Idempotent: linking the same activity to this workout again is a no-op.
     already = await session.execute(
