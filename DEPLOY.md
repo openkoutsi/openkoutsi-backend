@@ -200,13 +200,40 @@ uv run python backend/scripts/migrate_user_dbs.py        # add --dry-run to prev
 
 This step is only needed when upgrading an existing deployment — new installs handle schema creation automatically on first startup.
 
-> **Note:** the latest per-user migration `017_message_title_body` adds nullable
-> `title`, `body` and `locale` columns to `messages`, which now carry their own
-> rendered text instead of being rebuilt from a template in the web app. It is
-> applied automatically by the entrypoint's per-user migration loop (or the
-> helper script above); no new environment variables are required. Messages sent
-> before the upgrade keep working — their `title` and `body` stay `null` and the
-> web app shows them as earlier notifications until they are deleted.
+> **Note:** the latest per-user migration `019_drop_rest_day_activity_links`
+> **deletes rows** — the only per-user migration so far that does. It removes
+> `planned_workout_activities` rows whose planned workout is a rest day, which
+> earlier versions created by auto-matching activities onto rest days. Those
+> links were invisible in the UI but blocked the activity from being linked to
+> the session it actually completed. Deleting them changes no adherence score or
+> achievement (rest days are excluded from scoring either way), and nothing else
+> references the rows, so no recompute is needed afterwards. It is applied
+> automatically by the entrypoint's per-user migration loop (or the helper script
+> above); no new environment variables are required.
+>
+> Every deleted row is copied to `planned_workout_activities_dropped_019` in the
+> same user DB first, and the number removed is logged. `downgrade()`
+> deliberately restores nothing — putting the links back would put the bug back —
+> but the snapshot means a restore stays possible:
+>
+> ```bash
+> sqlite3 data/users/<user-uuid>/user.db \
+>   "INSERT INTO planned_workout_activities SELECT * FROM planned_workout_activities_dropped_019"
+> ```
+
+### Backing up before a migration
+
+Per-user databases run in **WAL mode**, so `cp user.db` on its own can miss
+committed transactions still sitting in the `-wal` file. Use SQLite's own backup
+command, which checkpoints for you:
+
+```bash
+for db in data/users/*/user.db; do sqlite3 "$db" ".backup '$db.bak'"; done
+```
+
+If you copy files instead, copy `user.db`, `user.db-wal` and `user.db-shm`
+together. Take the backup **before** starting the new container — the entrypoint
+applies pending migrations on start, so there is no checkpoint after that.
 
 #### Registry and usage databases
 

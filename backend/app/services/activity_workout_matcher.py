@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.models.user_orm import (
@@ -14,7 +15,7 @@ from backend.app.models.user_orm import (
     TrainingPlan,
 )
 from openkoutsi.plan_adherence import MATCH_THRESHOLD, meets_threshold
-from openkoutsi.sport_matching import sports_match
+from openkoutsi.sport_matching import is_rest_workout, sports_match
 
 
 async def find_and_link_workout(
@@ -27,10 +28,12 @@ async def find_and_link_workout(
     Matching rules (all must pass):
     - Activity date falls within the plan's [start_date, end_date]
     - Same week_number and day_of_week relative to the plan's start_date
+    - The planned workout is not a rest day
     - Sport type compatible with workout type
     - activity.load >= 60% of planned target_load (when both present)
     - activity.duration_s >= 60% of planned duration_min in seconds (when both present)
     - planned workout does not already have any linked activity
+    - the activity is not already linked to some planned workout
 
     Auto-matching only ever attaches a single activity to an otherwise-empty
     planned workout; additional activities that together complete a workout (for
@@ -40,6 +43,18 @@ async def find_and_link_workout(
     Returns the linked PlannedWorkout, or None if no match found.
     """
     if activity.start_time is None:
+        return None
+
+    # An activity belongs to at most one planned workout (unique constraint on
+    # the join table), so re-running the matcher over an already-linked activity
+    # — a re-sync, a reprocess, a re-uploaded FIT file — must be a no-op rather
+    # than an INSERT that trips the constraint.
+    already_linked = await session.execute(
+        select(PlannedWorkoutActivity.planned_workout_id)
+        .where(PlannedWorkoutActivity.activity_id == activity.id)
+        .limit(1)
+    )
+    if already_linked.scalar_one_or_none() is not None:
         return None
 
     act_date = (
@@ -97,7 +112,19 @@ async def find_and_link_workout(
                     planned_workout_id=workout.id, activity_id=activity.id
                 )
             )
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError:
+                # Lost a race — a concurrent ingest (a provider webhook landing
+                # while a manual sync or reprocess runs) linked this activity
+                # between our pre-check and this commit. The unique constraint,
+                # not the pre-check, is what actually decides; losing means
+                # someone else already did the work, so behave exactly as if the
+                # pre-check had caught it. Letting it escape would 500 the
+                # request *and* skip the adherence/achievement recompute the
+                # callers queue after this, leaving adherence stale.
+                await session.rollback()
+                return None
             return workout
 
     return None
@@ -133,6 +160,16 @@ async def resolve_planned_workout_for_activity(
 
 
 def _matches(activity: Activity, workout: PlannedWorkout) -> bool:
+    # A rest day is a planned *absence* of a session, so nothing may auto-link to
+    # it (issue #40). It would otherwise be the loosest target in the plan and win
+    # every time: `sports_match` treats "rest" as a generic type that accepts any
+    # endurance sport, and its NULL target_load/duration_min make both threshold
+    # gates pass unconditionally — so any ride on a rest day was silently
+    # swallowed, leaving the athlete unable to link it to the session they
+    # actually did and no visible link anywhere to undo.
+    if is_rest_workout(workout.workout_type):
+        return False
+
     if not sports_match(activity.sport_type, workout.workout_type):
         return False
 

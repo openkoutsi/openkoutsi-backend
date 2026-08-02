@@ -53,6 +53,12 @@ _GENERIC_WORKOUT_TYPES = {
     "rest",
 }
 
+# Workout types standing for "no session planned". A plan carries a row for
+# every day of the week (see ``plan_builder._rest_day``), so a rest day is a
+# real ``PlannedWorkout``, not a gap — and an untyped row is a placeholder of
+# the same kind.
+_REST_WORKOUT_TYPES = {"", "rest"}
+
 # Workout types that imply a specific sport category
 _WORKOUT_TYPE_TO_CATEGORY: dict[str, str] = {
     "swim": "swimming",
@@ -99,6 +105,17 @@ def counting_category(sport_type: Optional[str]) -> Optional[str]:
     if not sport_type:
         return None
     return _ACTIVITY_SPORT_TO_CATEGORY.get(sport_type) or sport_type
+
+
+def is_rest_workout(workout_type: Optional[str]) -> bool:
+    """Whether a planned workout type stands for a rest day.
+
+    Note that ``rest`` is *also* in :data:`_GENERIC_WORKOUT_TYPES`, so
+    :func:`sports_match` accepts it for any endurance sport. That is deliberate
+    for grading — but it makes a rest day the loosest possible auto-match
+    target, so the matcher has to exclude rest days explicitly (issue #40).
+    """
+    return (workout_type or "").strip().lower() in _REST_WORKOUT_TYPES
 
 
 def _workout_category(workout_type: Optional[str]) -> Optional[str]:
