@@ -1,9 +1,10 @@
 """Unit tests for the activity→planned workout matching service."""
 import pytest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 from datetime import date, datetime, timedelta, timezone
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from backend.app.services.activity_workout_matcher import (
     _matches,
@@ -223,6 +224,38 @@ class TestFindAndLinkWorkout:
 
         linked = await find_and_link_workout(session, seeded_athlete.id, act)
         assert linked is not None and linked.id == real.id
+
+    async def test_losing_the_link_race_returns_none_instead_of_raising(
+        self, session, seeded_athlete
+    ):
+        # Two concurrent ingests can both clear the pre-check; the unique
+        # constraint decides, and the loser must behave as if the pre-check had
+        # caught it. Raising here would 500 the request *and* skip the
+        # adherence/achievement recompute the callers queue afterwards.
+        w = PlannedWorkout(
+            week_number=1, day_of_week=1, workout_type="threshold",
+            target_load=100, duration_min=60,
+        )
+        other = PlannedWorkout(week_number=1, day_of_week=2, workout_type="endurance")
+        await _seed_plan(session, seeded_athlete.id, [w, other])
+        act = await _persist_activity(session, seeded_athlete.id)
+        act.load, act.duration_s = 90.0, 3600
+        await session.commit()
+
+        # Stand in for the rival ingest winning the race: in production the
+        # unique constraint on activity_id is what raises this out of the commit.
+        async def commit_conflict():
+            raise IntegrityError(
+                "INSERT INTO planned_workout_activities",
+                {},
+                Exception("UNIQUE constraint failed: planned_workout_activities.activity_id"),
+            )
+
+        with patch.object(session, "commit", side_effect=commit_conflict):
+            assert await find_and_link_workout(session, seeded_athlete.id, act) is None
+
+        # Rolled back, not left half-applied.
+        assert await _links(session) == []
 
     async def test_already_linked_activity_is_left_alone(self, session, seeded_athlete):
         # A re-sync/reprocess must not try to link the activity a second time —

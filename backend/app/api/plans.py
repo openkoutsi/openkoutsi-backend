@@ -400,8 +400,26 @@ async def unarchive_plan(
     return _plan_response_with_adherence(plan)
 
 
-def _already_linked_message(workout: PlannedWorkout, plan: TrainingPlan) -> str:
-    """Name the planned workout already holding the activity's link."""
+_ALREADY_LINKED_GENERIC = "Activity is already linked to another planned workout"
+
+
+async def _already_linked_message(workout_id: str, session: AsyncSession) -> str:
+    """Name the planned workout already holding the activity's link.
+
+    Best-effort by design: the caller has already decided to refuse, so a
+    workout or plan that has gone missing (see the note at the call site)
+    degrades to the generic message rather than derailing the refusal.
+    """
+    result = await session.execute(
+        select(PlannedWorkout, TrainingPlan)
+        .join(TrainingPlan, TrainingPlan.id == PlannedWorkout.plan_id)
+        .where(PlannedWorkout.id == workout_id)
+    )
+    row = result.first()
+    if row is None:
+        return _ALREADY_LINKED_GENERIC
+
+    workout, plan = row
     what = workout.workout_type or "untyped"
     if plan.start_date is not None:
         when = workout_date(plan.start_date, workout.week_number, workout.day_of_week)
@@ -445,25 +463,22 @@ async def link_workout_to_activity(
 
     # Reject if this activity is already linked to a different planned workout.
     # A workout may hold many activities, but an activity belongs to only one.
-    # Fetch the conflicting workout and its plan so the error can name it: the
-    # holder is often a day the athlete never opens (issue #40), and a bare
-    # "linked to another planned workout" leaves them nothing to act on.
+    #
+    # The join table alone decides *whether* to refuse. Naming the conflicting
+    # workout needs its plan too, but that lookup must not be able to veto the
+    # refusal: a join row can outlive its workout (the ON DELETE CASCADE is inert
+    # while PRAGMA foreign_keys stays off), and gating on the join would let such
+    # a row fall through to an INSERT that trips the unique constraint — turning
+    # a clean 409 into a 500.
     existing_link_result = await session.execute(
-        select(PlannedWorkout, TrainingPlan)
-        .join(
-            PlannedWorkoutActivity,
-            PlannedWorkoutActivity.planned_workout_id == PlannedWorkout.id,
-        )
-        .join(TrainingPlan, TrainingPlan.id == PlannedWorkout.plan_id)
-        .where(
+        select(PlannedWorkoutActivity.planned_workout_id).where(
             PlannedWorkoutActivity.activity_id == body.activity_id,
             PlannedWorkoutActivity.planned_workout_id != workout_id,
         )
-        .limit(1)
     )
-    existing_link = existing_link_result.first()
-    if existing_link is not None:
-        raise HTTPException(409, _already_linked_message(*existing_link))
+    other_workout_id = existing_link_result.scalars().first()
+    if other_workout_id is not None:
+        raise HTTPException(409, await _already_linked_message(other_workout_id, session))
 
     # Idempotent: linking the same activity to this workout again is a no-op.
     already = await session.execute(

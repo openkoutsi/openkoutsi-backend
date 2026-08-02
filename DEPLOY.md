@@ -209,8 +209,31 @@ This step is only needed when upgrading an existing deployment — new installs 
 > achievement (rest days are excluded from scoring either way), and nothing else
 > references the rows, so no recompute is needed afterwards. It is applied
 > automatically by the entrypoint's per-user migration loop (or the helper script
-> above); no new environment variables are required. The downgrade deliberately
-> restores nothing.
+> above); no new environment variables are required.
+>
+> Every deleted row is copied to `planned_workout_activities_dropped_019` in the
+> same user DB first, and the number removed is logged. `downgrade()`
+> deliberately restores nothing — putting the links back would put the bug back —
+> but the snapshot means a restore stays possible:
+>
+> ```bash
+> sqlite3 data/users/<user-uuid>/user.db \
+>   "INSERT INTO planned_workout_activities SELECT * FROM planned_workout_activities_dropped_019"
+> ```
+
+### Backing up before a migration
+
+Per-user databases run in **WAL mode**, so `cp user.db` on its own can miss
+committed transactions still sitting in the `-wal` file. Use SQLite's own backup
+command, which checkpoints for you:
+
+```bash
+for db in data/users/*/user.db; do sqlite3 "$db" ".backup '$db.bak'"; done
+```
+
+If you copy files instead, copy `user.db`, `user.db-wal` and `user.db-shm`
+together. Take the backup **before** starting the new container — the entrypoint
+applies pending migrations on start, so there is no checkpoint after that.
 
 #### Registry and usage databases
 

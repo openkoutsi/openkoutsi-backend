@@ -997,6 +997,44 @@ class TestLinkWorkout:
         assert "Link Plan" in detail
         assert _workout_date(plan, workouts[0]) in detail
 
+    async def test_link_refused_cleanly_when_holder_workout_is_missing(
+        self, client, auth_headers, session
+    ):
+        """A join row can outlive its planned workout, and must still 409.
+
+        ``ondelete="CASCADE"`` on the join table is inert while SQLite's
+        foreign_keys pragma stays off, so a dangling row is reachable in
+        production. Identifying the holder is a nicety; refusing is not, and
+        falling through would trip the unique constraint as a 500.
+        """
+        from sqlalchemy import text
+
+        plan = await _create_plan(client, auth_headers, name="Dangling", weeks=1)
+        workouts = [w for w in plan["workouts"] if w["workout_type"] != "rest"]
+        w1, w2 = workouts[0]["id"], workouts[1]["id"]
+        a1 = await _create_activity(
+            client, auth_headers,
+            start_time="2020-06-02T08:00:00Z", duration_s=1800, load=40,
+        )
+        r1 = await client.put(
+            f"/api/plans/{plan['id']}/workouts/{w1}/link",
+            json={"activity_id": a1}, headers=auth_headers,
+        )
+        assert r1.status_code == 200
+
+        # Orphan the link, exactly as an inert CASCADE leaves it.
+        await session.execute(
+            text("DELETE FROM planned_workouts WHERE id = :id"), {"id": w1}
+        )
+        await session.commit()
+
+        r2 = await client.put(
+            f"/api/plans/{plan['id']}/workouts/{w2}/link",
+            json={"activity_id": a1}, headers=auth_headers,
+        )
+        assert r2.status_code == 409
+        assert "already linked" in r2.json()["detail"]
+
     async def test_unlink_single_activity(self, client, auth_headers):
         plan_id, workout_id = await self._plan_and_workout(client, auth_headers)
         a1 = await _create_activity(

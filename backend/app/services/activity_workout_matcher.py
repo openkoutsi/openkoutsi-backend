@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.models.user_orm import (
@@ -111,7 +112,19 @@ async def find_and_link_workout(
                     planned_workout_id=workout.id, activity_id=activity.id
                 )
             )
-            await session.commit()
+            try:
+                await session.commit()
+            except IntegrityError:
+                # Lost a race — a concurrent ingest (a provider webhook landing
+                # while a manual sync or reprocess runs) linked this activity
+                # between our pre-check and this commit. The unique constraint,
+                # not the pre-check, is what actually decides; losing means
+                # someone else already did the work, so behave exactly as if the
+                # pre-check had caught it. Letting it escape would 500 the
+                # request *and* skip the adherence/achievement recompute the
+                # callers queue after this, leaving adherence stale.
+                await session.rollback()
+                return None
             return workout
 
     return None
