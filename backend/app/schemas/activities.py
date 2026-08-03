@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any, ClassVar, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -122,39 +122,37 @@ class ActivityResponse(BaseModel):
 
     model_config = {"from_attributes": True}
 
+    # Field names this schema shares with an ORM relationship of the same name.
+    # `_orm_values` skips them so the caller's own value wins instead of a lazy
+    # relationship load — see `ActivityDetailResponse`.
+    _ORM_OVERRIDES: ClassVar[frozenset[str]] = frozenset()
+
+    @classmethod
+    def _orm_values(cls, activity) -> dict:
+        """This schema's fields read off an ORM ``Activity``.
+
+        Every field except the three derived ones is a straight column read, so
+        they are pulled by name from the schema's own field list rather than
+        restated here: declaring a field is enough to have it populated.
+        """
+        values = {
+            name: getattr(activity, name)
+            for name in cls.model_fields
+            if name not in cls._ORM_OVERRIDES and hasattr(activity, name)
+        }
+        return {
+            **values,
+            "sources": [s.provider for s in (activity.sources or [])],
+            "labels": activity.labels or [],
+            **_aerobic_ratios(activity),
+        }
+
     @model_validator(mode="before")
     @classmethod
     def _extract_sources(cls, data: Any) -> Any:
-        """Populate `sources` from the ORM relationship when validating from an ORM object."""
+        """Derive `sources` and the aerobic ratios when validating from an ORM object."""
         if hasattr(data, "sources"):
-            return {
-                "id": data.id,
-                "athlete_id": data.athlete_id,
-                "sources": [s.provider for s in (data.sources or [])],
-                "name": data.name,
-                "sport_type": data.sport_type,
-                "start_time": data.start_time,
-                "duration_s": data.duration_s,
-                "distance_m": data.distance_m,
-                "elevation_m": data.elevation_m,
-                "avg_power": data.avg_power,
-                "weighted_power": data.weighted_power,
-                "avg_hr": data.avg_hr,
-                "max_hr": data.max_hr,
-                "avg_cadence": data.avg_cadence,
-                "load": data.load,
-                "intensity": data.intensity,
-                **_aerobic_ratios(data),
-                "decoupling_pct": data.decoupling_pct,
-                "decoupling_reason": data.decoupling_reason,
-                "workout_category": data.workout_category,
-                "labels": data.labels or [],
-                "notes": data.notes,
-                "rpe": data.rpe,
-                "has_fit_file": data.has_fit_file,
-                "status": data.status,
-                "created_at": data.created_at,
-            }
+            return cls._orm_values(data)
         return data
 
 
@@ -201,6 +199,12 @@ class ActivityDetailResponse(ActivityResponse):
     analysis_status: Optional[str] = None
     analysis: Optional[str] = None
 
+    # `Activity` carries relationships under these names too; the caller passes
+    # the already-shaped values, so never read them off the ORM object.
+    _ORM_OVERRIDES: ClassVar[frozenset[str]] = frozenset(
+        {"streams", "power_bests", "distance_bests", "intervals"}
+    )
+
     @classmethod
     def from_orm_and_streams(
         cls,
@@ -212,42 +216,12 @@ class ActivityDetailResponse(ActivityResponse):
         power_pr_badges: dict[int, dict[str, str]] | None = None,
         distance_pr_badges: dict[int, dict[str, str]] | None = None,
     ) -> "ActivityDetailResponse":
-        return cls(
-            id=activity.id,
-            athlete_id=activity.athlete_id,
-            sources=[s.provider for s in (activity.sources or [])],
-            name=activity.name,
-            sport_type=activity.sport_type,
-            start_time=activity.start_time,
-            duration_s=activity.duration_s,
-            distance_m=activity.distance_m,
-            elevation_m=activity.elevation_m,
-            avg_power=activity.avg_power,
-            weighted_power=activity.weighted_power,
-            avg_hr=activity.avg_hr,
-            max_hr=activity.max_hr,
-            avg_cadence=activity.avg_cadence,
-            load=activity.load,
-            intensity=activity.intensity,
-            **_aerobic_ratios(activity),
-            decoupling_pct=activity.decoupling_pct,
-            decoupling_reason=activity.decoupling_reason,
-            cp_w=activity.cp_w,
-            w_prime_j=activity.w_prime_j,
-            cp_fit_points=activity.cp_fit_points,
-            workout_category=activity.workout_category,
-            labels=activity.labels or [],
-            notes=activity.notes,
-            rpe=activity.rpe,
-            has_fit_file=activity.has_fit_file,
-            status=activity.status,
-            created_at=activity.created_at,
-            streams=streams,
-            power_bests=power_bests or {},
-            distance_bests=distance_bests or {},
-            power_pr_badges=power_pr_badges or {},
-            distance_pr_badges=distance_pr_badges or {},
-            intervals=intervals or [],
-            analysis_status=activity.analysis_status,
-            analysis=activity.analysis,
-        )
+        return cls.model_validate({
+            **cls._orm_values(activity),
+            "streams": streams,
+            "power_bests": power_bests or {},
+            "distance_bests": distance_bests or {},
+            "power_pr_badges": power_pr_badges or {},
+            "distance_pr_badges": distance_pr_badges or {},
+            "intervals": intervals or [],
+        })

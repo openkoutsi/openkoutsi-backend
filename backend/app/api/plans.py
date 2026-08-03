@@ -1,5 +1,5 @@
 from datetime import date, datetime, timedelta, timezone
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -7,7 +7,8 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.core.deps import get_ctx_and_session
+from backend.app.core.auth import UserContext
+from backend.app.core.deps import get_ctx_session_athlete
 from backend.app.db.registry import get_registry_session
 from backend.app.models.registry_orm import InstanceSettings
 from backend.app.models.user_orm import (
@@ -122,22 +123,84 @@ async def _archive_overlapping_active_plans(session, athlete_id, start_date, end
     await session.flush()
 
 
-async def _get_athlete(global_user_id: str, session: AsyncSession) -> Athlete:
-    result = await session.execute(select(Athlete).where(Athlete.global_user_id == global_user_id))
-    athlete = result.scalar_one_or_none()
-    if not athlete:
-        raise HTTPException(404, "Athlete profile not found")
-    return athlete
+# ── Path-scoped dependencies ─────────────────────────────────────────────────
+#
+# Every ``/{plan_id}`` route needs the same preamble — resolve the athlete, look
+# the plan up *scoped to them*, 404 otherwise — and every
+# ``/{plan_id}/workouts/{workout_id}`` route needs that plus the workout scoped
+# to the plan. Expressing it as dependencies keeps the ownership check in one
+# place: a new route cannot forget the ``athlete_id`` predicate and leak another
+# athlete's plan.
+
+
+class PlanCtx(NamedTuple):
+    ctx: UserContext
+    session: AsyncSession
+    athlete: Athlete
+    plan: TrainingPlan
+
+
+class WorkoutCtx(NamedTuple):
+    ctx: UserContext
+    session: AsyncSession
+    athlete: Athlete
+    plan: TrainingPlan
+    workout: PlannedWorkout
+
+
+async def _load_plan(plan_id: str, ctx_athlete, *, with_workouts: bool) -> PlanCtx:
+    ctx, session, athlete = ctx_athlete
+    query = select(TrainingPlan).where(
+        TrainingPlan.id == plan_id, TrainingPlan.athlete_id == athlete.id
+    )
+    if with_workouts:
+        query = query.options(selectinload(TrainingPlan.workouts))
+    plan = (await session.execute(query)).scalar_one_or_none()
+    if not plan:
+        raise HTTPException(404, "Plan not found")
+    return PlanCtx(ctx, session, athlete, plan)
+
+
+async def get_owned_plan(
+    plan_id: str,
+    ctx_athlete=Depends(get_ctx_session_athlete),
+) -> PlanCtx:
+    """The caller's plan named by the ``{plan_id}`` path parameter, or a 404."""
+    return await _load_plan(plan_id, ctx_athlete, with_workouts=False)
+
+
+async def get_owned_plan_with_workouts(
+    plan_id: str,
+    ctx_athlete=Depends(get_ctx_session_athlete),
+) -> PlanCtx:
+    """:func:`get_owned_plan` with ``plan.workouts`` eagerly loaded."""
+    return await _load_plan(plan_id, ctx_athlete, with_workouts=True)
+
+
+async def get_owned_workout(
+    workout_id: str,
+    plan_ctx: PlanCtx = Depends(get_owned_plan),
+) -> WorkoutCtx:
+    """The ``{workout_id}`` planned workout inside ``{plan_id}``, or a 404."""
+    result = await plan_ctx.session.execute(
+        select(PlannedWorkout).where(
+            PlannedWorkout.id == workout_id,
+            PlannedWorkout.plan_id == plan_ctx.plan.id,
+        )
+    )
+    workout = result.scalar_one_or_none()
+    if not workout:
+        raise HTTPException(404, "Planned workout not found")
+    return WorkoutCtx(*plan_ctx, workout)
 
 
 @router.get("", response_model=Page[TrainingPlanResponse],
             operation_id="listPlans", summary="List training plans")
 async def list_plans(
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
     params: PageParams = Depends(paginate_params),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
     total = (await session.execute(
         select(func.count()).select_from(TrainingPlan).where(TrainingPlan.athlete_id == athlete.id)
     )).scalar_one()
@@ -156,12 +219,11 @@ async def list_plans(
 @router.post("", response_model=TrainingPlanResponse, status_code=201)
 async def create_plan(
     body: TrainingPlanCreate,
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
     registry_session: AsyncSession = Depends(get_registry_session),
 ):
-    ctx, session = ctx_session
+    ctx, session, athlete = ctx_athlete
 
-    athlete = await _get_athlete(ctx.user_id, session)
 
     # Clamp structure parameters (progression %, cadence, hours band, …) to sane
     # bounds before generation and persistence.
@@ -261,51 +323,28 @@ async def create_plan(
 
 
 @router.get("/{plan_id}", response_model=TrainingPlanResponse)
-async def get_plan(
-    plan_id: str,
-    ctx_session=Depends(get_ctx_and_session),
-):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
-    result = await session.execute(
-        select(TrainingPlan)
-        .where(TrainingPlan.id == plan_id, TrainingPlan.athlete_id == athlete.id)
-        .options(selectinload(TrainingPlan.workouts))
-    )
-    plan = result.scalar_one_or_none()
-    if not plan:
-        raise HTTPException(404, "Plan not found")
-    return _plan_response_with_adherence(plan)
+async def get_plan(plan_ctx: PlanCtx = Depends(get_owned_plan_with_workouts)):
+    return _plan_response_with_adherence(plan_ctx.plan)
 
 
 @router.get("/{plan_id}/adherence", response_model=list[PlanAdherencePoint],
             operation_id="getPlanAdherence", summary="Plan adherence snapshot series")
 async def get_plan_adherence(
-    plan_id: str,
     start: Optional[date] = None,
     end: Optional[date] = None,
-    ctx_session=Depends(get_ctx_and_session),
+    plan_ctx: PlanCtx = Depends(get_owned_plan),
 ):
     """Persisted daily adherence snapshots for a plan (mirrors /metrics/fitness).
 
     Runs a cheap, deterministic catch-up first so the series is fresh even for a
     user who hasn't loaded the dashboard yet, then returns the stored trend.
     """
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
-    plan_result = await session.execute(
-        select(TrainingPlan).where(
-            TrainingPlan.id == plan_id, TrainingPlan.athlete_id == athlete.id
-        )
-    )
-    if not plan_result.scalar_one_or_none():
-        raise HTTPException(404, "Plan not found")
-
+    _, session, athlete, plan = plan_ctx
     await catch_up_adherence(athlete.id, session)
 
     query = select(PlanAdherenceDaily).where(
         PlanAdherenceDaily.athlete_id == athlete.id,
-        PlanAdherenceDaily.plan_id == plan_id,
+        PlanAdherenceDaily.plan_id == plan.id,
     )
     if start:
         query = query.where(PlanAdherenceDaily.date >= start)
@@ -317,20 +356,10 @@ async def get_plan_adherence(
 
 @router.put("/{plan_id}", response_model=TrainingPlanResponse)
 async def update_plan(
-    plan_id: str,
     body: TrainingPlanUpdate,
-    ctx_session=Depends(get_ctx_and_session),
+    plan_ctx: PlanCtx = Depends(get_owned_plan_with_workouts),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
-    result = await session.execute(
-        select(TrainingPlan)
-        .where(TrainingPlan.id == plan_id, TrainingPlan.athlete_id == athlete.id)
-        .options(selectinload(TrainingPlan.workouts))
-    )
-    plan = result.scalar_one_or_none()
-    if not plan:
-        raise HTTPException(404, "Plan not found")
+    _, session, athlete, plan = plan_ctx
 
     if body.status is not None:
         plan.status = body.status
@@ -357,26 +386,14 @@ async def update_plan(
 
 @router.post("/{plan_id}/unarchive", response_model=TrainingPlanResponse,
              operation_id="unarchivePlan", summary="Unarchive a training plan")
-async def unarchive_plan(
-    plan_id: str,
-    ctx_session=Depends(get_ctx_and_session),
-):
+async def unarchive_plan(plan_ctx: PlanCtx = Depends(get_owned_plan_with_workouts)):
     """Reactivate an archived plan.
 
     Any currently-active plan whose date range overlaps the reactivated plan is
     archived, so overlapping plans are never both active at once. Active plans
     covering a different period are left untouched.
     """
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
-    result = await session.execute(
-        select(TrainingPlan)
-        .where(TrainingPlan.id == plan_id, TrainingPlan.athlete_id == athlete.id)
-        .options(selectinload(TrainingPlan.workouts))
-    )
-    plan = result.scalar_one_or_none()
-    if not plan:
-        raise HTTPException(404, "Plan not found")
+    _, session, athlete, plan = plan_ctx
 
     if plan.status != "active":
         await _archive_overlapping_active_plans(
@@ -434,26 +451,10 @@ async def _already_linked_message(workout_id: str, session: AsyncSession) -> str
 
 @router.put("/{plan_id}/workouts/{workout_id}/link", response_model=PlannedWorkoutResponse)
 async def link_workout_to_activity(
-    plan_id: str,
-    workout_id: str,
     body: LinkActivityRequest,
-    ctx_session=Depends(get_ctx_and_session),
+    workout_ctx: WorkoutCtx = Depends(get_owned_workout),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
-
-    plan_result = await session.execute(
-        select(TrainingPlan).where(TrainingPlan.id == plan_id, TrainingPlan.athlete_id == athlete.id)
-    )
-    if not plan_result.scalar_one_or_none():
-        raise HTTPException(404, "Plan not found")
-
-    workout_result = await session.execute(
-        select(PlannedWorkout).where(PlannedWorkout.id == workout_id, PlannedWorkout.plan_id == plan_id)
-    )
-    workout = workout_result.scalar_one_or_none()
-    if not workout:
-        raise HTTPException(404, "Planned workout not found")
+    _, session, athlete, _plan, workout = workout_ctx
 
     activity_result = await session.execute(
         select(Activity).where(Activity.id == body.activity_id, Activity.athlete_id == athlete.id)
@@ -473,7 +474,7 @@ async def link_workout_to_activity(
     existing_link_result = await session.execute(
         select(PlannedWorkoutActivity.planned_workout_id).where(
             PlannedWorkoutActivity.activity_id == body.activity_id,
-            PlannedWorkoutActivity.planned_workout_id != workout_id,
+            PlannedWorkoutActivity.planned_workout_id != workout.id,
         )
     )
     other_workout_id = existing_link_result.scalars().first()
@@ -483,14 +484,14 @@ async def link_workout_to_activity(
     # Idempotent: linking the same activity to this workout again is a no-op.
     already = await session.execute(
         select(PlannedWorkoutActivity).where(
-            PlannedWorkoutActivity.planned_workout_id == workout_id,
+            PlannedWorkoutActivity.planned_workout_id == workout.id,
             PlannedWorkoutActivity.activity_id == body.activity_id,
         )
     )
     if not already.scalar_one_or_none():
         session.add(
             PlannedWorkoutActivity(
-                planned_workout_id=workout_id, activity_id=body.activity_id
+                planned_workout_id=workout.id, activity_id=body.activity_id
             )
         )
         await session.commit()
@@ -506,33 +507,17 @@ async def link_workout_to_activity(
 
 @router.delete("/{plan_id}/workouts/{workout_id}/link", status_code=204)
 async def unlink_workout_from_activity(
-    plan_id: str,
-    workout_id: str,
     activity_id: Optional[str] = None,
-    ctx_session=Depends(get_ctx_and_session),
+    workout_ctx: WorkoutCtx = Depends(get_owned_workout),
 ):
     """Unlink activities from a planned workout.
 
     With ``activity_id`` given, only that activity is unlinked; without it, every
     activity linked to the workout is unlinked.
     """
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    _, session, _athlete, _plan, workout = workout_ctx
 
-    plan_result = await session.execute(
-        select(TrainingPlan).where(TrainingPlan.id == plan_id, TrainingPlan.athlete_id == athlete.id)
-    )
-    if not plan_result.scalar_one_or_none():
-        raise HTTPException(404, "Plan not found")
-
-    workout_result = await session.execute(
-        select(PlannedWorkout).where(PlannedWorkout.id == workout_id, PlannedWorkout.plan_id == plan_id)
-    )
-    workout = workout_result.scalar_one_or_none()
-    if not workout:
-        raise HTTPException(404, "Planned workout not found")
-
-    conditions = [PlannedWorkoutActivity.planned_workout_id == workout_id]
+    conditions = [PlannedWorkoutActivity.planned_workout_id == workout.id]
     if activity_id is not None:
         conditions.append(PlannedWorkoutActivity.activity_id == activity_id)
     links_result = await session.execute(
@@ -545,26 +530,10 @@ async def unlink_workout_from_activity(
 
 @router.put("/{plan_id}/workouts/{workout_id}/skip", response_model=PlannedWorkoutResponse)
 async def skip_workout(
-    plan_id: str,
-    workout_id: str,
     body: SkipWorkoutRequest,
-    ctx_session=Depends(get_ctx_and_session),
+    workout_ctx: WorkoutCtx = Depends(get_owned_workout),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
-
-    plan_result = await session.execute(
-        select(TrainingPlan).where(TrainingPlan.id == plan_id, TrainingPlan.athlete_id == athlete.id)
-    )
-    if not plan_result.scalar_one_or_none():
-        raise HTTPException(404, "Plan not found")
-
-    workout_result = await session.execute(
-        select(PlannedWorkout).where(PlannedWorkout.id == workout_id, PlannedWorkout.plan_id == plan_id)
-    )
-    workout = workout_result.scalar_one_or_none()
-    if not workout:
-        raise HTTPException(404, "Planned workout not found")
+    _, session, _athlete, _plan, workout = workout_ctx
 
     if workout.is_completed:
         raise HTTPException(409, "Cannot skip a workout that has already been completed")
@@ -576,48 +545,21 @@ async def skip_workout(
 
 
 @router.delete("/{plan_id}/workouts/{workout_id}/skip", status_code=204)
-async def clear_workout_skip(
-    plan_id: str,
-    workout_id: str,
-    ctx_session=Depends(get_ctx_and_session),
-):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
-
-    plan_result = await session.execute(
-        select(TrainingPlan).where(TrainingPlan.id == plan_id, TrainingPlan.athlete_id == athlete.id)
-    )
-    if not plan_result.scalar_one_or_none():
-        raise HTTPException(404, "Plan not found")
-
-    workout_result = await session.execute(
-        select(PlannedWorkout).where(PlannedWorkout.id == workout_id, PlannedWorkout.plan_id == plan_id)
-    )
-    workout = workout_result.scalar_one_or_none()
-    if not workout:
-        raise HTTPException(404, "Planned workout not found")
-
+async def clear_workout_skip(workout_ctx: WorkoutCtx = Depends(get_owned_workout)):
+    _, session, _athlete, _plan, workout = workout_ctx
     workout.skip_reason = None
     await session.commit()
 
 
 @router.post("/{plan_id}/workouts", response_model=PlannedWorkoutResponse, status_code=201)
 async def add_workout(
-    plan_id: str,
     body: PlannedWorkoutCreate,
-    ctx_session=Depends(get_ctx_and_session),
+    plan_ctx: PlanCtx = Depends(get_owned_plan),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
-
-    plan_result = await session.execute(
-        select(TrainingPlan).where(TrainingPlan.id == plan_id, TrainingPlan.athlete_id == athlete.id)
-    )
-    if not plan_result.scalar_one_or_none():
-        raise HTTPException(404, "Plan not found")
+    _, session, _athlete, plan = plan_ctx
 
     workout = PlannedWorkout(
-        plan_id=plan_id,
+        plan_id=plan.id,
         week_number=body.week_number,
         day_of_week=body.day_of_week,
         workout_type=body.workout_type,
@@ -633,26 +575,10 @@ async def add_workout(
 
 @router.put("/{plan_id}/workouts/{workout_id}", response_model=PlannedWorkoutResponse)
 async def update_workout(
-    plan_id: str,
-    workout_id: str,
     body: PlannedWorkoutUpdate,
-    ctx_session=Depends(get_ctx_and_session),
+    workout_ctx: WorkoutCtx = Depends(get_owned_workout),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
-
-    plan_result = await session.execute(
-        select(TrainingPlan).where(TrainingPlan.id == plan_id, TrainingPlan.athlete_id == athlete.id)
-    )
-    if not plan_result.scalar_one_or_none():
-        raise HTTPException(404, "Plan not found")
-
-    workout_result = await session.execute(
-        select(PlannedWorkout).where(PlannedWorkout.id == workout_id, PlannedWorkout.plan_id == plan_id)
-    )
-    workout = workout_result.scalar_one_or_none()
-    if not workout:
-        raise HTTPException(404, "Planned workout not found")
+    _, session, _athlete, _plan, workout = workout_ctx
 
     if workout.is_completed:
         raise HTTPException(409, "Cannot edit a workout that has already been completed")
@@ -668,26 +594,8 @@ async def update_workout(
 
 
 @router.delete("/{plan_id}/workouts/{workout_id}", status_code=204)
-async def delete_workout(
-    plan_id: str,
-    workout_id: str,
-    ctx_session=Depends(get_ctx_and_session),
-):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
-
-    plan_result = await session.execute(
-        select(TrainingPlan).where(TrainingPlan.id == plan_id, TrainingPlan.athlete_id == athlete.id)
-    )
-    if not plan_result.scalar_one_or_none():
-        raise HTTPException(404, "Plan not found")
-
-    workout_result = await session.execute(
-        select(PlannedWorkout).where(PlannedWorkout.id == workout_id, PlannedWorkout.plan_id == plan_id)
-    )
-    workout = workout_result.scalar_one_or_none()
-    if not workout:
-        raise HTTPException(404, "Planned workout not found")
+async def delete_workout(workout_ctx: WorkoutCtx = Depends(get_owned_workout)):
+    _, session, _athlete, _plan, workout = workout_ctx
 
     if workout.is_completed:
         raise HTTPException(409, "Cannot delete a workout that has already been completed")
@@ -698,23 +606,12 @@ async def delete_workout(
 
 @router.post("/{plan_id}/regenerate", response_model=TrainingPlanResponse)
 async def regenerate_plan(
-    plan_id: str,
     body: RegeneratePlanRequest,
-    ctx_session=Depends(get_ctx_and_session),
+    plan_ctx: PlanCtx = Depends(get_owned_plan_with_workouts),
     registry_session: AsyncSession = Depends(get_registry_session),
 ):
     """Replace a plan's workouts, preserving any already linked to a completed activity."""
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
-
-    result = await session.execute(
-        select(TrainingPlan)
-        .where(TrainingPlan.id == plan_id, TrainingPlan.athlete_id == athlete.id)
-        .options(selectinload(TrainingPlan.workouts))
-    )
-    plan = result.scalar_one_or_none()
-    if not plan:
-        raise HTTPException(404, "Plan not found")
+    ctx, session, athlete, plan = plan_ctx
 
     config = clamp_plan_params(body.config) if body.config else None
     num_weeks = body.weeks if body.weeks is not None else (plan.weeks or 8)
@@ -814,9 +711,8 @@ async def regenerate_plan(
 
 @router.post("/{plan_id}/generate-upcoming/workouts", response_model=GenerateUpcomingWorkoutsResponse)
 async def generate_upcoming_workouts(
-    plan_id: str,
     body: GenerateUpcomingWorkoutsRequest,
-    ctx_session=Depends(get_ctx_and_session),
+    plan_ctx: PlanCtx = Depends(get_owned_plan_with_workouts),
     registry_session: AsyncSession = Depends(get_registry_session),
 ):
     """Synthesize structured workouts for the plan's upcoming days (no upload).
@@ -828,17 +724,8 @@ async def generate_upcoming_workouts(
     show up in the Workouts tab, where they can be reviewed, edited, and uploaded
     individually. Returns a per-workout summary.
     """
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete, plan = plan_ctx
 
-    result = await session.execute(
-        select(TrainingPlan)
-        .where(TrainingPlan.id == plan_id, TrainingPlan.athlete_id == athlete.id)
-        .options(selectinload(TrainingPlan.workouts))
-    )
-    plan = result.scalar_one_or_none()
-    if not plan:
-        raise HTTPException(404, "Plan not found")
     if not plan.start_date:
         raise HTTPException(400, "Plan has no start date")
 
@@ -933,18 +820,7 @@ async def generate_upcoming_workouts(
 
 
 @router.delete("/{plan_id}", status_code=204)
-async def delete_plan(
-    plan_id: str,
-    ctx_session=Depends(get_ctx_and_session),
-):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
-    result = await session.execute(
-        select(TrainingPlan)
-        .where(TrainingPlan.id == plan_id, TrainingPlan.athlete_id == athlete.id)
-    )
-    plan = result.scalar_one_or_none()
-    if not plan:
-        raise HTTPException(404, "Plan not found")
+async def delete_plan(plan_ctx: PlanCtx = Depends(get_owned_plan)):
+    _, session, _athlete, plan = plan_ctx
     await session.delete(plan)
     await session.commit()

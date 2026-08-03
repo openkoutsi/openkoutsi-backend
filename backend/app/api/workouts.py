@@ -7,7 +7,7 @@ from fastapi.responses import Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.core.deps import get_ctx_and_session
+from backend.app.core.deps import get_ctx_session_athlete
 from backend.app.db.registry import get_registry_session
 from backend.app.models.registry_orm import ProviderConnection
 from backend.app.models.user_orm import Athlete, WahooWorkoutUpload, WorkoutDefinition
@@ -31,16 +31,6 @@ router = APIRouter(prefix="/workouts", tags=["workouts"])
 
 # Wahoo only displays plans attached to a workout scheduled today → +6 days.
 _WAHOO_VISIBILITY_DAYS = 6
-
-
-async def _get_athlete(global_user_id: str, session: AsyncSession) -> Athlete:
-    result = await session.execute(
-        select(Athlete).where(Athlete.global_user_id == global_user_id)
-    )
-    athlete = result.scalar_one_or_none()
-    if athlete is None:
-        raise HTTPException(status_code=404, detail="Athlete profile not found")
-    return athlete
 
 
 async def _get_workout(
@@ -87,11 +77,10 @@ async def list_export_formats():
 @router.get("", response_model=Page[WorkoutDefinitionResponse],
             operation_id="listWorkouts", summary="List workout definitions")
 async def list_workouts(
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
     params: PageParams = Depends(paginate_params),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
     total = (await session.execute(
         select(func.count()).select_from(WorkoutDefinition)
         .where(WorkoutDefinition.athlete_id == athlete.id)
@@ -110,10 +99,9 @@ async def list_workouts(
 @router.post("", response_model=WorkoutDefinitionResponse, status_code=201)
 async def create_workout(
     body: WorkoutDefinitionCreate,
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
     steps = _validate_steps(body.steps)
     workout = WorkoutDefinition(
         id=str(uuid.uuid4()),
@@ -134,10 +122,9 @@ async def create_workout(
 @router.get("/{workout_id}", response_model=WorkoutDefinitionResponse)
 async def get_workout(
     workout_id: str,
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
     return await _get_workout(workout_id, athlete.id, session)
 
 
@@ -145,10 +132,9 @@ async def get_workout(
 async def update_workout(
     workout_id: str,
     body: WorkoutDefinitionUpdate,
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
     workout = await _get_workout(workout_id, athlete.id, session)
 
     update = body.model_dump(exclude_unset=True)
@@ -168,10 +154,9 @@ async def update_workout(
 @router.delete("/{workout_id}", status_code=204)
 async def delete_workout(
     workout_id: str,
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
     workout = await _get_workout(workout_id, athlete.id, session)
     await session.delete(workout)
     await session.commit()
@@ -181,10 +166,9 @@ async def delete_workout(
 async def export_workout(
     workout_id: str,
     format_key: str,
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
     workout = await _get_workout(workout_id, athlete.id, session)
 
     exporter_cls = EXPORTERS.get(format_key)
@@ -216,7 +200,7 @@ async def export_workout(
 async def push_workout_to_wahoo(
     workout_id: str,
     body: WahooPushRequest,
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
     registry_session: AsyncSession = Depends(get_registry_session),
 ):
     """Push a structured workout to Wahoo as a plan + scheduled workout pair.
@@ -225,8 +209,7 @@ async def push_workout_to_wahoo(
     library and a workout scheduled within the today→+6 day visibility window so
     it appears under "Planned Workouts" on ELEMNT / RIVAL devices.
     """
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
     workout = await _get_workout(workout_id, athlete.id, session)
 
     # Resolve the Wahoo connection and a fresh access token.

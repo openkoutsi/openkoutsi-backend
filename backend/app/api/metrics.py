@@ -5,7 +5,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.core.deps import get_ctx_and_session
+from backend.app.core.deps import get_ctx_session_athlete
 from backend.app.db.user_session import get_user_session_factory
 from backend.app.models.user_orm import Activity, ActivityStream, Athlete, DailyMetric
 from backend.app.schemas.metrics import (
@@ -42,23 +42,14 @@ from openkoutsi.training_math import (
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 
 
-async def _get_athlete(global_user_id: str, session: AsyncSession) -> Athlete:
-    result = await session.execute(select(Athlete).where(Athlete.global_user_id == global_user_id))
-    athlete = result.scalar_one_or_none()
-    if athlete is None:
-        raise HTTPException(status_code=404, detail="Athlete profile not found")
-    return athlete
-
-
 @router.get("/fitness", response_model=list[FitnessMetricResponse])
 async def get_fitness(
     start: Optional[date] = Query(None),
     end: Optional[date] = Query(None),
     days: Optional[int] = Query(None, ge=1, le=3650),
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
 
     query = select(DailyMetric).where(DailyMetric.athlete_id == athlete.id)
 
@@ -79,11 +70,10 @@ async def get_activity_summary(
     start: Optional[date] = Query(None),
     end: Optional[date] = Query(None),
     days: Optional[int] = Query(None, ge=1, le=3650),
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
     """Totals (count, active time, distance) for cycling activities in a period."""
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
 
     if days is not None and start is None:
         start = date.today() - timedelta(days=days)
@@ -111,9 +101,8 @@ async def get_activity_summary(
 
 
 @router.get("/fitness/current", response_model=FitnessCurrentResponse)
-async def get_fitness_current(ctx_session=Depends(get_ctx_and_session)):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+async def get_fitness_current(ctx_athlete=Depends(get_ctx_session_athlete)):
+    ctx, session, athlete = ctx_athlete
     today = date.today()
 
     result = await session.execute(
@@ -141,7 +130,7 @@ async def get_fitness_current(ctx_session=Depends(get_ctx_and_session)):
 @router.get("/fitness/forecast", response_model=list[FitnessForecastResponse])
 async def get_fitness_forecast(
     days: int = Query(DEFAULT_FORECAST_DAYS, ge=1, le=MAX_FORECAST_DAYS),
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
     """Project Fitness/Fatigue/Form forward from the athlete's planned workouts.
 
@@ -155,8 +144,7 @@ async def get_fitness_forecast(
     rather than from whatever the last stored day happened to be. Without it the
     answer would depend on whether the client had hit catch-up beforehand.
     """
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
 
     await catch_up_metrics(athlete.id, session)
     rows = await forecast_fitness(athlete.id, session, days=days)
@@ -178,7 +166,7 @@ EFFICIENCY_MAX_POINTS = 1000
             operation_id="getEfficiencyTrend", summary="Aerobic efficiency trend")
 async def get_efficiency_trend(
     days: Optional[int] = Query(None, ge=1, le=3650, description="Restrict to rides from the past N days. Omit for all-time."),
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
     """
     Aerobic efficiency (weighted power per heartbeat) for each steady endurance
@@ -196,8 +184,7 @@ async def get_efficiency_trend(
     trend covers the athlete's whole history immediately. Capped at the most
     recent 1000 qualifying rides.
     """
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
 
     # Select the columns rather than the entity: this reads seven fields, and
     # hydrating full ORM rows would deserialise each activity's `zone_times`
@@ -258,7 +245,7 @@ async def get_zones_weekly(
     start: Optional[date] = Query(None),
     end: Optional[date] = Query(None),
     days: Optional[int] = Query(None, ge=1, le=3650),
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
     """Accumulated time-in-zone (power + HR) per ISO week over a period.
 
@@ -268,8 +255,7 @@ async def get_zones_weekly(
 
     Declared before ``/zones/{activity_id}`` so "weekly" isn't matched as an id.
     """
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
 
     if days is not None and start is None:
         start = date.today() - timedelta(days=days)
@@ -327,7 +313,7 @@ async def get_intensity_distribution(
     days: Optional[int] = Query(None, ge=1, le=3650),
     basis: Optional[IntensityBasis] = Query(None),
     method: IntensityMethod = Query("time"),
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
     """Three-band intensity distribution and its shape over a period.
 
@@ -343,8 +329,7 @@ async def get_intensity_distribution(
     ``basis`` selects power or HR zones, preferring power when both exist; it
     does not apply to ``method=session`` and is echoed as ``null`` there.
     """
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
 
     try:
         start, end = resolve_window(start, end, days)
@@ -366,10 +351,9 @@ async def get_intensity_distribution(
 @router.get("/zones/{activity_id}")
 async def get_zones(
     activity_id: str,
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
 
     activity_result = await session.execute(
         select(Activity).where(
@@ -403,17 +387,15 @@ async def get_zones(
 
 
 @router.get("/ftp/history", operation_id="getFtpHistory", summary="FTP history")
-async def get_ftp_history(ctx_session=Depends(get_ctx_and_session)):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+async def get_ftp_history(ctx_athlete=Depends(get_ctx_session_athlete)):
+    ctx, session, athlete = ctx_athlete
     return athlete.ftp_tests or []
 
 
 @router.post("/catch-up", status_code=200)
-async def catch_up(ctx_session=Depends(get_ctx_and_session)):
+async def catch_up(ctx_athlete=Depends(get_ctx_session_athlete)):
     """Fill missing DailyMetric rows using stored Load. Called on dashboard load."""
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
     updated = await catch_up_metrics(athlete.id, session)
     return {"updated": updated}
 
@@ -421,7 +403,7 @@ async def catch_up(ctx_session=Depends(get_ctx_and_session)):
 @router.post("/recalculate", status_code=202)
 async def recalculate_all(
     background_tasks: BackgroundTasks,
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
     """
     Recompute Load for every processed activity using the athlete's current FTP/max_hr,
@@ -429,8 +411,7 @@ async def recalculate_all(
 
     Returns immediately (202); work happens in the background.
     """
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
     background_tasks.add_task(_bg_full_recalculate, ctx.user_id, athlete.id)
     return {"status": "recalculation started"}
 

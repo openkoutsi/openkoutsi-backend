@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.consent import require_consent
 from backend.app.core.config import settings
-from backend.app.core.deps import get_ctx_and_session
+from backend.app.core.deps import get_ctx_and_session, get_ctx_session_athlete
 from backend.app.db.registry import get_registry_session
 from backend.app.models.registry_orm import ProviderConnection
 from backend.app.models.user_orm import Activity, ActivitySource, Athlete
@@ -47,14 +47,6 @@ def _require_provider(provider: str) -> type:
     if client_cls is None:
         raise HTTPException(status_code=404, detail=f"Unknown provider: {provider}")
     return client_cls
-
-
-async def _get_athlete(global_user_id: str, session: AsyncSession) -> Athlete:
-    result = await session.execute(select(Athlete).where(Athlete.global_user_id == global_user_id))
-    athlete = result.scalar_one_or_none()
-    if athlete is None:
-        raise HTTPException(status_code=404, detail="Athlete not found")
-    return athlete
 
 
 async def _get_connection(
@@ -295,13 +287,12 @@ def _normalize_zone_names(zones: list[dict], names: tuple[str, ...]) -> list[dic
 @router.post("/{provider}/sync-zones")
 async def sync_zones(
     provider: str,
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
     registry_session: AsyncSession = Depends(get_registry_session),
 ):
     """Fetch training zones (HR, power) and FTP from the provider and save to the athlete profile."""
-    ctx, session = ctx_session
+    ctx, session, athlete = ctx_athlete
     client_cls = _require_provider(provider)
-    athlete = await _get_athlete(ctx.user_id, session)
     conn = await _get_connection(ctx.user_id, provider, registry_session)
 
     access_token = await ensure_fresh_token(conn, registry_session)

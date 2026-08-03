@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.core.deps import get_ctx_and_session
+from backend.app.core.deps import get_ctx_session_athlete
 from backend.app.models.user_orm import Activity, ActivityDistanceBest, Athlete
 from backend.app.schemas.distance import AllTimeDistanceBestsResponse, DistanceBestEntry
 from openkoutsi.training_math import DISTANCE_BEST_DISTANCES
@@ -12,14 +12,6 @@ from openkoutsi.training_math import DISTANCE_BEST_DISTANCES
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 
 TOP_N = 3
-
-
-async def _get_athlete(global_user_id: str, session: AsyncSession) -> Athlete:
-    result = await session.execute(select(Athlete).where(Athlete.global_user_id == global_user_id))
-    athlete = result.scalar_one_or_none()
-    if athlete is None:
-        raise HTTPException(status_code=404, detail="Athlete profile not found")
-    return athlete
 
 
 async def all_time_distance_bests(
@@ -71,7 +63,7 @@ async def all_time_distance_bests(
             operation_id="getDistanceBests", summary="All-time distance bests")
 async def get_distance_bests(
     include_virtual: bool = False,
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
     """
     Return the top-3 all-time best times for each standard distance,
@@ -80,7 +72,6 @@ async def get_distance_bests(
     By default only real (non-virtual) rides are included. Pass
     include_virtual=true to include all ride types.
     """
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
     entries = await all_time_distance_bests(athlete, session, include_virtual=include_virtual)
     return AllTimeDistanceBestsResponse(bests=entries)

@@ -2,17 +2,18 @@ import asyncio
 import io
 import json
 import zipfile
-from datetime import datetime, timezone
+from collections.abc import Collection
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy import select
+from sqlalchemy import inspect as sa_inspect, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from backend.app.core.config import settings
-from backend.app.core.deps import get_ctx_and_session
+from backend.app.core.deps import get_ctx_and_session, get_ctx_session_athlete
 from backend.app.core.file_encryption import decrypt_file
 from backend.app.core.ssrf import check_url_safe
 from backend.app.db.registry import get_registry_session
@@ -57,17 +58,8 @@ def _detect_image_type(data: bytes) -> str | None:
         return "image/webp"
     return None
 
+
 router = APIRouter(prefix="/athlete", tags=["athlete"])
-
-
-async def _get_athlete(global_user_id: str, session: AsyncSession) -> Athlete:
-    result = await session.execute(
-        select(Athlete).where(Athlete.global_user_id == global_user_id)
-    )
-    athlete = result.scalar_one_or_none()
-    if athlete is None:
-        raise HTTPException(status_code=404, detail="Athlete profile not found")
-    return athlete
 
 
 _MAX_LLM_URL_LEN = 2048
@@ -161,11 +153,10 @@ async def _get_consent_accepted(user_id: str, registry_session: AsyncSession) ->
 @router.get("", response_model=AthleteResponse,
             operation_id="getAthlete", summary="Get current athlete")
 async def get_athlete(
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
     registry_session: AsyncSession = Depends(get_registry_session),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
     providers = await _get_connected_providers(ctx.user_id, registry_session)
     consent_ok = await _get_consent_accepted(ctx.user_id, registry_session)
     return _athlete_response(athlete, providers, consent_accepted=consent_ok)
@@ -175,11 +166,10 @@ async def get_athlete(
               operation_id="updateAthlete", summary="Update current athlete")
 async def update_athlete(
     body: AthleteUpdate,
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
     registry_session: AsyncSession = Depends(get_registry_session),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
 
     if body.name is not None:
         athlete.name = body.name
@@ -329,10 +319,10 @@ async def update_athlete(
 @router.post("/avatar", response_model=AthleteResponse, include_in_schema=False)
 async def upload_avatar(
     file: UploadFile = File(...),
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
     registry_session: AsyncSession = Depends(get_registry_session),
 ):
-    ctx, session = ctx_session
+    ctx, session, athlete = ctx_athlete
 
     data = await file.read(_MAX_AVATAR_BYTES + 1)
     if len(data) > _MAX_AVATAR_BYTES:
@@ -345,7 +335,6 @@ async def upload_avatar(
             detail="Unsupported image type. Use JPEG, PNG, WebP, or GIF.",
         )
     ext = _CONTENT_TYPE_TO_EXT[detected_type]
-    athlete = await _get_athlete(ctx.user_id, session)
 
     avatar_dir = settings.user_avatar_dir(ctx.user_id)
     avatar_dir.mkdir(parents=True, exist_ok=True)
@@ -369,11 +358,10 @@ async def upload_avatar(
 @router.delete("/avatar", response_model=AthleteResponse,
                operation_id="deleteAvatar", summary="Delete own avatar")
 async def delete_avatar(
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
     registry_session: AsyncSession = Depends(get_registry_session),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
     if athlete.avatar_path:
         Path(athlete.avatar_path).unlink(missing_ok=True)
         athlete.avatar_path = None
@@ -408,11 +396,10 @@ _PENDING_TIMEOUT_MINUTES = 30
 @router.get("/training-status", response_model=TrainingStatusResponse,
             operation_id="getTrainingStatus", summary="Get training-status feedback")
 async def get_training_status(
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
     registry_session: AsyncSession = Depends(get_registry_session),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
     app_cfg = athlete.app_settings or {}
     from backend.app.services.llm_training_status_analyzer import _local_now
     now_utc = datetime.now(timezone.utc)
@@ -481,11 +468,10 @@ async def get_training_status(
              operation_id="triggerTrainingStatus", summary="Trigger training-status analysis")
 async def trigger_training_status(
     body: TrainingStatusBody = TrainingStatusBody(),
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
     registry_session: AsyncSession = Depends(get_registry_session),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
 
     # Issue #9 gate (the training-status analysis is always instance-paid).
     from backend.app.services.llm_access import check_llm_access, subscription_required_error
@@ -512,9 +498,8 @@ async def trigger_training_status(
 
 @router.get("/weight-log",
             operation_id="getWeightLog", summary="Get the athlete's weight log")
-async def get_weight_log(ctx_session=Depends(get_ctx_and_session)):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+async def get_weight_log(ctx_athlete=Depends(get_ctx_session_athlete)):
+    ctx, session, athlete = ctx_athlete
     result = await session.execute(
         select(WeightLog)
         .where(WeightLog.athlete_id == athlete.id)
@@ -524,215 +509,151 @@ async def get_weight_log(ctx_session=Depends(get_ctx_and_session)):
     return [{"date": e.effective_date.isoformat(), "weight_kg": e.weight_kg} for e in entries]
 
 
-def _iso(value) -> str | None:
-    """ISO-format a date/datetime, or None."""
-    return value.isoformat() if value is not None else None
+# ── Data export ──────────────────────────────────────────────────────────────
+#
+# Every file in the export zip is "one row per record, all of its columns".
+# Driving that off the mapper rather than a hand-written field list per model is
+# what keeps the export honest: a column added to a model shows up in the user's
+# download without anyone having to remember to add it here, which is exactly
+# the failure mode a data export must not have. `exclude` drops internal
+# plumbing (foreign keys the export's own structure already implies), and the
+# keyword arguments supply values the columns can't: relationships, derived
+# fields, and the redacted `app_settings`.
+
+
+def _dump(obj, *, exclude: Collection[str] = (), **extra) -> dict:
+    """Every mapped column of ``obj``, JSON-safe, plus any ``extra`` keys."""
+    values = {
+        attr.key: _json_safe(getattr(obj, attr.key))
+        for attr in sa_inspect(type(obj)).mapper.column_attrs
+        if attr.key not in exclude
+    }
+    return {**values, **extra}
+
+
+def _json_safe(value):
+    """Column values `json.dumps` can't take on its own — dates and datetimes."""
+    return value.isoformat() if isinstance(value, (date, datetime)) else value
+
+
+async def _export_rows(
+    session: AsyncSession, query, *, exclude: Collection[str] = (), extra=None
+) -> list[dict]:
+    """Dump every row ``query`` returns; ``extra(row)`` adds per-row derived keys."""
+    result = await session.execute(query)
+    return [
+        _dump(row, exclude=exclude, **(extra(row) if extra else {}))
+        for row in result.scalars().all()
+    ]
 
 
 def _export_profile(athlete: Athlete, username: str) -> dict:
     """Full athlete profile, including LLM/analysis settings (BYOK key redacted)."""
-    return {
-        "id": athlete.id,
-        "username": username,
-        "name": athlete.name,
-        "date_of_birth": _iso(athlete.date_of_birth),
-        "weight_kg": athlete.weight_kg,
-        "ftp": athlete.ftp,
-        "max_hr": athlete.max_hr,
-        "resting_hr": athlete.resting_hr,
-        "hr_zones": athlete.hr_zones or [],
-        "power_zones": athlete.power_zones or [],
-        "availability": athlete.availability or {},
-        "ftp_tests": athlete.ftp_tests or [],
-        "app_settings": _safe_app_settings(athlete),
-        "training_status": athlete.training_status,
-        "training_status_status": athlete.training_status_status,
-        "training_status_date": _iso(athlete.training_status_date),
-        "training_status_updated_at": _iso(athlete.training_status_updated_at),
-        "created_at": _iso(athlete.created_at),
-        "updated_at": _iso(athlete.updated_at),
-        "exported_at": datetime.now(timezone.utc).isoformat(),
-    }
+    return _dump(
+        athlete,
+        # `global_user_id` and `avatar_path` are server-side plumbing: a registry
+        # key and a filesystem path, neither meaningful outside this instance.
+        exclude=("global_user_id", "avatar_path"),
+        username=username,
+        hr_zones=athlete.hr_zones or [],
+        power_zones=athlete.power_zones or [],
+        availability=athlete.availability or {},
+        ftp_tests=athlete.ftp_tests or [],
+        app_settings=_safe_app_settings(athlete),
+        exported_at=datetime.now(timezone.utc).isoformat(),
+    )
 
 
 def _export_activity(a: Activity) -> dict:
     """One activity, including notes, labels and LLM analysis."""
-    return {
-        "id": a.id,
-        "name": a.name,
-        "sport_type": a.sport_type,
-        "start_time": _iso(a.start_time),
-        "duration_s": a.duration_s,
-        "distance_m": a.distance_m,
-        "elevation_m": a.elevation_m,
-        "avg_power": a.avg_power,
-        "weighted_power": a.weighted_power,
-        "avg_hr": a.avg_hr,
-        "max_hr": a.max_hr,
-        "avg_speed_ms": a.avg_speed_ms,
-        "avg_cadence": a.avg_cadence,
-        "load": a.load,
-        "intensity": a.intensity,
-        "workout_category": a.workout_category,
-        "labels": a.labels or [],
-        "notes": a.notes,
-        "rpe": a.rpe,
-        "status": a.status,
-        "analysis_status": a.analysis_status,
-        "analysis": a.analysis,
-        "sources": [s.provider for s in (a.sources or [])],
-        "created_at": _iso(a.created_at),
-        "has_fit_file": a.has_fit_file,
-    }
+    return _dump(
+        a,
+        exclude=("athlete_id",),
+        labels=a.labels or [],
+        sources=[s.provider for s in (a.sources or [])],
+        has_fit_file=a.has_fit_file,
+    )
 
 
 async def _export_goals(athlete: Athlete, session: AsyncSession) -> list[dict]:
-    result = await session.execute(
-        select(Goal).where(Goal.athlete_id == athlete.id).order_by(Goal.created_at)
+    return await _export_rows(
+        session,
+        select(Goal).where(Goal.athlete_id == athlete.id).order_by(Goal.created_at),
+        exclude=("athlete_id",),
     )
-    return [
-        {
-            "id": g.id,
-            "title": g.title,
-            "description": g.description,
-            "target_date": _iso(g.target_date),
-            "metric": g.metric,
-            "target_value": g.target_value,
-            "current_value": g.current_value,
-            "status": g.status,
-            "outcome_note": g.outcome_note,
-            "guidance": g.guidance,
-            "guidance_verdict": g.guidance_verdict,
-            "guidance_status": g.guidance_status,
-            "guidance_updated_at": _iso(g.guidance_updated_at),
-            "created_at": _iso(g.created_at),
-        }
-        for g in result.scalars().all()
-    ]
+
+
+def _export_planned_workout(w) -> dict:
+    return _dump(
+        w,
+        exclude=("plan_id",),
+        linked_activity_ids=[a.id for a in w.linked_activities],
+        completed_activity_id=(
+            w.linked_activities[0].id if w.linked_activities else None
+        ),
+    )
 
 
 async def _export_plans(athlete: Athlete, session: AsyncSession) -> list[dict]:
-    result = await session.execute(
+    return await _export_rows(
+        session,
         select(TrainingPlan)
         .where(TrainingPlan.athlete_id == athlete.id)
         .options(selectinload(TrainingPlan.workouts))
-        .order_by(TrainingPlan.created_at)
-    )
-    return [
-        {
-            "id": p.id,
-            "name": p.name,
-            "start_date": _iso(p.start_date),
-            "end_date": _iso(p.end_date),
-            "goal": p.goal,
-            "weeks": p.weeks,
-            "status": p.status,
+        .order_by(TrainingPlan.created_at),
+        exclude=("athlete_id",),
+        extra=lambda p: {
             "config": p.config or {},
-            "generation_method": p.generation_method,
             "week_meta": p.week_meta or [],
-            "created_at": _iso(p.created_at),
             "planned_workouts": [
-                {
-                    "id": w.id,
-                    "week_number": w.week_number,
-                    "day_of_week": w.day_of_week,
-                    "workout_type": w.workout_type,
-                    "description": w.description,
-                    "duration_min": w.duration_min,
-                    "target_load": w.target_load,
-                    "linked_activity_ids": [a.id for a in w.linked_activities],
-                    "completed_activity_id": (
-                        w.linked_activities[0].id if w.linked_activities else None
-                    ),
-                    "workout_definition_id": w.workout_definition_id,
-                    "skip_reason": w.skip_reason,
-                }
-                for w in sorted(
-                    p.workouts, key=lambda w: (w.week_number, w.day_of_week)
-                )
+                _export_planned_workout(w)
+                for w in sorted(p.workouts, key=lambda w: (w.week_number, w.day_of_week))
             ],
-        }
-        for p in result.scalars().all()
-    ]
+        },
+    )
 
 
 async def _export_workout_definitions(
     athlete: Athlete, session: AsyncSession
 ) -> list[dict]:
-    result = await session.execute(
+    return await _export_rows(
+        session,
         select(WorkoutDefinition)
         .where(WorkoutDefinition.athlete_id == athlete.id)
-        .order_by(WorkoutDefinition.created_at)
+        .order_by(WorkoutDefinition.created_at),
+        exclude=("athlete_id",),
+        extra=lambda w: {"steps": w.steps or []},
     )
-    return [
-        {
-            "id": w.id,
-            "name": w.name,
-            "description": w.description,
-            "sport_type": w.sport_type,
-            "steps": w.steps or [],
-            "estimated_duration_s": w.estimated_duration_s,
-            "estimated_load": w.estimated_load,
-            "created_at": _iso(w.created_at),
-            "updated_at": _iso(w.updated_at),
-        }
-        for w in result.scalars().all()
-    ]
 
 
 async def _export_daily_metrics(athlete: Athlete, session: AsyncSession) -> list[dict]:
     """CTL/ATL/TSB per day (`load_day` also drives weekly TSS)."""
-    result = await session.execute(
+    return await _export_rows(
+        session,
         select(DailyMetric)
         .where(DailyMetric.athlete_id == athlete.id)
-        .order_by(DailyMetric.date)
+        .order_by(DailyMetric.date),
+        exclude=("athlete_id",),
     )
-    return [
-        {
-            "date": _iso(m.date),
-            "fitness": m.fitness,
-            "fatigue": m.fatigue,
-            "form": m.form,
-            "load_day": m.load_day,
-        }
-        for m in result.scalars().all()
-    ]
 
 
 async def _export_inbox(session: AsyncSession) -> list[dict]:
     """In-app messages. The per-user DB identifies the recipient, so no filter."""
-    result = await session.execute(
-        select(Message).order_by(Message.created_at)
+    return await _export_rows(
+        session,
+        select(Message).order_by(Message.created_at),
+        extra=lambda m: {"data": m.data or {}},
     )
-    return [
-        {
-            "id": m.id,
-            "type": m.type,
-            "data": m.data or {},
-            "title": m.title,
-            "body": m.body,
-            "locale": m.locale,
-            "read_at": _iso(m.read_at),
-            "created_at": _iso(m.created_at),
-        }
-        for m in result.scalars().all()
-    ]
 
 
 async def _export_weight_log(athlete: Athlete, session: AsyncSession) -> list[dict]:
-    result = await session.execute(
+    return await _export_rows(
+        session,
         select(WeightLog)
         .where(WeightLog.athlete_id == athlete.id)
-        .order_by(WeightLog.effective_date)
+        .order_by(WeightLog.effective_date),
+        exclude=("athlete_id",),
     )
-    return [
-        {
-            "effective_date": _iso(w.effective_date),
-            "weight_kg": w.weight_kg,
-            "created_at": _iso(w.created_at),
-        }
-        for w in result.scalars().all()
-    ]
 
 
 async def _export_achievements(athlete: Athlete, session: AsyncSession) -> list[dict]:
@@ -741,31 +662,22 @@ async def _export_achievements(athlete: Athlete, session: AsyncSession) -> list[
     The catalogue itself is code, not data, so only the unlocks are exported —
     the ids are the stable machine keys the API uses.
     """
-    result = await session.execute(
+    return await _export_rows(
+        session,
         select(AchievementUnlock)
         .where(AchievementUnlock.athlete_id == athlete.id)
-        .order_by(AchievementUnlock.achieved_on)
+        .order_by(AchievementUnlock.achieved_on),
+        exclude=("athlete_id",),
     )
-    return [
-        {
-            "achievement_id": u.achievement_id,
-            "tier": u.tier,
-            "achieved_on": _iso(u.achieved_on),
-            "created_at": _iso(u.created_at),
-            "context": u.context,
-        }
-        for u in result.scalars().all()
-    ]
 
 
 @router.get("/export",
             operation_id="exportAthlete", summary="Export all athlete data as a zip")
 async def export_athlete(
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
     registry_session: AsyncSession = Depends(get_registry_session),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
 
     user_result = await registry_session.execute(
         select(User).where(User.id == ctx.user_id)

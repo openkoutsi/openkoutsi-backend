@@ -4043,21 +4043,21 @@
         ],
         "parameters": [
           {
-            "name": "plan_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Plan Id"
-            }
-          },
-          {
             "name": "workout_id",
             "in": "path",
             "required": true,
             "schema": {
               "type": "string",
               "title": "Workout Id"
+            }
+          },
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Plan Id"
             }
           }
         ],
@@ -4108,21 +4108,21 @@
         ],
         "parameters": [
           {
-            "name": "plan_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Plan Id"
-            }
-          },
-          {
             "name": "workout_id",
             "in": "path",
             "required": true,
             "schema": {
               "type": "string",
               "title": "Workout Id"
+            }
+          },
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Plan Id"
             }
           },
           {
@@ -4173,21 +4173,21 @@
         ],
         "parameters": [
           {
-            "name": "plan_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Plan Id"
-            }
-          },
-          {
             "name": "workout_id",
             "in": "path",
             "required": true,
             "schema": {
               "type": "string",
               "title": "Workout Id"
+            }
+          },
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Plan Id"
             }
           }
         ],
@@ -4237,21 +4237,21 @@
         ],
         "parameters": [
           {
-            "name": "plan_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Plan Id"
-            }
-          },
-          {
             "name": "workout_id",
             "in": "path",
             "required": true,
             "schema": {
               "type": "string",
               "title": "Workout Id"
+            }
+          },
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Plan Id"
             }
           }
         ],
@@ -4343,21 +4343,21 @@
         ],
         "parameters": [
           {
-            "name": "plan_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Plan Id"
-            }
-          },
-          {
             "name": "workout_id",
             "in": "path",
             "required": true,
             "schema": {
               "type": "string",
               "title": "Workout Id"
+            }
+          },
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Plan Id"
             }
           }
         ],
@@ -4407,21 +4407,21 @@
         ],
         "parameters": [
           {
-            "name": "plan_id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Plan Id"
-            }
-          },
-          {
             "name": "workout_id",
             "in": "path",
             "required": true,
             "schema": {
               "type": "string",
               "title": "Workout Id"
+            }
+          },
+          {
+            "name": "plan_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Plan Id"
             }
           }
         ],

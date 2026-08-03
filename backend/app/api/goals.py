@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.core.deps import get_ctx_and_session
+from backend.app.core.deps import get_ctx_session_athlete
 from backend.app.db.registry import get_registry_session
 from backend.app.models.registry_orm import InstanceSettings
 from backend.app.models.user_orm import Athlete, Goal
@@ -27,22 +27,13 @@ router = APIRouter(prefix="/goals", tags=["goals"])
 _PENDING_TIMEOUT_MINUTES = 30
 
 
-async def _get_athlete(global_user_id: str, session: AsyncSession) -> Athlete:
-    result = await session.execute(select(Athlete).where(Athlete.global_user_id == global_user_id))
-    athlete = result.scalar_one_or_none()
-    if athlete is None:
-        raise HTTPException(status_code=404, detail="Athlete profile not found")
-    return athlete
-
-
 @router.get("", response_model=Page[GoalResponse],
             operation_id="listGoals", summary="List goals")
 async def list_goals(
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
     params: PageParams = Depends(paginate_params),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
     total = (await session.execute(
         select(func.count()).select_from(Goal).where(Goal.athlete_id == athlete.id)
     )).scalar_one()
@@ -60,10 +51,9 @@ async def list_goals(
 @router.post("", response_model=GoalResponse, status_code=201)
 async def create_goal(
     body: GoalCreate,
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
     goal = Goal(id=str(uuid.uuid4()), athlete_id=athlete.id, **body.model_dump())
     session.add(goal)
     await session.commit()
@@ -75,10 +65,9 @@ async def create_goal(
 async def update_goal(
     goal_id: str,
     body: GoalUpdate,
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
     result = await session.execute(
         select(Goal).where(Goal.id == goal_id, Goal.athlete_id == athlete.id)
     )
@@ -100,10 +89,9 @@ async def update_goal(
 @router.delete("/{goal_id}", status_code=204)
 async def delete_goal(
     goal_id: str,
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
     result = await session.execute(
         select(Goal).where(Goal.id == goal_id, Goal.athlete_id == athlete.id)
     )
@@ -129,10 +117,9 @@ async def _get_owned_goal(goal_id: str, athlete: Athlete, session: AsyncSession)
             operation_id="getGoalGuidance", summary="Get AI guidance for a goal")
 async def get_goal_guidance(
     goal_id: str,
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
     goal = await _get_owned_goal(goal_id, athlete, session)
 
     # Recover from a stuck "pending" state: if the task hasn't completed within
@@ -164,11 +151,10 @@ async def get_goal_guidance(
 async def trigger_goal_guidance(
     goal_id: str,
     body: GoalGuidanceBody = GoalGuidanceBody(),
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
     registry_session: AsyncSession = Depends(get_registry_session),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
     goal = await _get_owned_goal(goal_id, athlete, session)
 
     # Issue #9 gate (goal guidance is always instance-paid).

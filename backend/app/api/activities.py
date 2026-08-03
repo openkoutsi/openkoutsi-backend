@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.api.consent import require_consent
 from backend.app.core.auth import get_current_user
 from backend.app.core.config import settings
-from backend.app.core.deps import get_ctx_and_session
+from backend.app.core.deps import get_ctx_session_athlete
 from backend.app.core.file_encryption import decrypt_file, encrypt_file
 from backend.app.db.registry import get_registry_session
 from backend.app.db.user_session import get_user_session_factory
@@ -43,7 +43,13 @@ from backend.app.core.limiter import limiter
 from backend.app.services.fit_processor import process_fit_file, read_fit_start_time
 from backend.app.services.metrics_engine import recalculate_from
 from backend.app.services.pr_detection import detect_pr_badges
-from backend.app.services.provider_sync import _source_priority
+from backend.app.services.provider_sync import (
+    _add_distance_bests,
+    _add_power_bests,
+    _source_priority,
+    rebuild_intervals,
+)
+from backend.app.services.weight import load_weight_log
 from backend.app.services.aerobic_metrics import apply_aerobic_metrics, replace_w_bal_stream
 from openkoutsi.training_math import calculate_load, variability_index
 from openkoutsi.categorization import WorkoutCategory, classify_workout
@@ -77,16 +83,6 @@ def _has_label_clause(label: str):
         .correlate(Activity)
         .exists()
     )
-
-
-async def _get_athlete(global_user_id: str, session: AsyncSession) -> Athlete:
-    result = await session.execute(
-        select(Athlete).where(Athlete.global_user_id == global_user_id)
-    )
-    athlete = result.scalar_one_or_none()
-    if athlete is None:
-        raise HTTPException(status_code=404, detail="Athlete profile not found")
-    return athlete
 
 
 def _maybe_auto_analyze(activity_id: str, athlete: Athlete, user_id: str) -> bool:
@@ -266,14 +262,7 @@ async def _bg_attach_fit_and_reprocess(
 ) -> None:
     """After attaching a user-uploaded FIT to an existing synced activity,
     replace its intervals with lap data from the device file."""
-    import io as _io
-    from sqlalchemy import delete as sa_delete
-    from openkoutsi.fit import extractIntervals
-    from openkoutsi.fit_processing import (
-        auto_interval_s, build_auto_intervals, compute_interval_stats,
-    )
     from backend.app.core.file_encryption import encrypt_file
-    from backend.app.models.user_orm import ActivityStream
 
     async with get_user_session_factory(user_id)() as session:
         act_result = await session.execute(select(Activity).where(Activity.id == activity_id))
@@ -281,34 +270,11 @@ async def _bg_attach_fit_and_reprocess(
         if activity is None:
             return
 
-        raw = extractIntervals(file_path)
-        is_auto = len(raw) <= 1
-        if is_auto:
-            duration_s = activity.duration_s or 0
-            stream_length = 0
-            streams_result = await session.execute(
-                select(ActivityStream).where(ActivityStream.activity_id == activity_id)
-            )
-            for s in streams_result.scalars():
-                if s.data:
-                    stream_length = max(stream_length, len(s.data))
-            actual_duration = max(duration_s, stream_length)
-            if actual_duration:
-                interval_s = auto_interval_s(actual_duration)
-                raw = build_auto_intervals(activity.start_time, actual_duration, interval_s)
-
-        if raw and activity.start_time:
-            streams_result = await session.execute(
-                select(ActivityStream).where(ActivityStream.activity_id == activity_id)
-            )
-            stream_map = {s.stream_type: s.data for s in streams_result.scalars()}
-            intervals_data = compute_interval_stats(raw, activity.start_time, stream_map, is_auto)
-
-            await session.execute(
-                sa_delete(ActivityInterval).where(ActivityInterval.activity_id == activity_id)
-            )
-            for iv in intervals_data:
-                session.add(ActivityInterval(id=str(uuid.uuid4()), activity_id=activity_id, **iv))
+        streams_result = await session.execute(
+            select(ActivityStream).where(ActivityStream.activity_id == activity_id)
+        )
+        stream_map = {s.stream_type: s.data for s in streams_result.scalars()}
+        await rebuild_intervals(activity, session, file_path, stream_map, replace=True)
 
         try:
             src_result = await session.execute(
@@ -333,10 +299,9 @@ async def upload_activity(
     request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
 
     storage_dir = settings.user_fit_dir(ctx.user_id)
     storage_dir.mkdir(parents=True, exist_ok=True)
@@ -425,10 +390,9 @@ async def upload_activity(
 async def create_manual_activity(
     payload: ManualActivityCreate,
     background_tasks: BackgroundTasks,
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
 
     load: Optional[float] = None
     if payload.load is not None:
@@ -512,10 +476,9 @@ async def list_activities(
     wahoo_device_only: bool = Query(False, alias="wahoo_device_only"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
 
     base_query = select(Activity).where(Activity.athlete_id == athlete.id)
     if q:
@@ -585,7 +548,7 @@ async def list_activities(
 
 @router.get("/rpe-queue", response_model=RpeQueueResponse,
             operation_id="getRpeQueue", summary="Pending RPE-rating queue")
-async def get_rpe_queue(ctx_session=Depends(get_ctx_and_session)):
+async def get_rpe_queue(ctx_athlete=Depends(get_ctx_session_athlete)):
     """Qualifying cycling activities still awaiting an RPE rating (issue #28).
 
     Returns activities that are cycling sports, ingested after the athlete's
@@ -600,8 +563,7 @@ async def get_rpe_queue(ctx_session=Depends(get_ctx_and_session)):
     ``PATCH /api/athlete`` (set ``app_settings.rpe_head`` to the handled
     activity's ``created_at``).
     """
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
 
     app_settings = dict(athlete.app_settings or {})
     rpe_head_raw = app_settings.get("rpe_head")
@@ -647,10 +609,9 @@ async def get_rpe_queue(ctx_session=Depends(get_ctx_and_session)):
 @router.get("/{activity_id}", response_model=ActivityDetailResponse)
 async def get_activity(
     activity_id: str,
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
 
     result = await session.execute(
         select(Activity).where(Activity.id == activity_id, Activity.athlete_id == athlete.id)
@@ -698,10 +659,9 @@ async def get_activity(
 @router.get("/{activity_id}/streams", response_model=ActivityStreamsResponse)
 async def get_activity_streams(
     activity_id: str,
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
 
     result = await session.execute(
         select(Activity).where(Activity.id == activity_id, Activity.athlete_id == athlete.id)
@@ -719,10 +679,9 @@ async def get_activity_streams(
 @router.get("/{activity_id}/fit")
 async def download_fit_file(
     activity_id: str,
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
 
     result = await session.execute(
         select(Activity).where(Activity.id == activity_id, Activity.athlete_id == athlete.id)
@@ -766,26 +725,14 @@ async def download_fit_file(
 @router.post("/{activity_id}/reprocess", response_model=ActivityDetailResponse)
 async def reprocess_activity(
     activity_id: str,
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
     """Recompute Weighted Power/Load/Intensity/bests/intervals from stored streams using current athlete settings."""
     import io
     from sqlalchemy import delete as sa_delete
-    from openkoutsi.training_math import (
-        weighted_power,
-        compute_power_bests,
-        compute_distance_bests,
-        compute_torque_stream,
-    )
-    from openkoutsi.fit_processing import (
-        auto_interval_s,
-        build_auto_intervals,
-        compute_interval_stats,
-    )
-    from openkoutsi.fit import extractIntervals
+    from openkoutsi.training_math import weighted_power, compute_torque_stream
 
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
     result = await session.execute(
         select(Activity).where(Activity.id == activity_id, Activity.athlete_id == athlete.id)
     )
@@ -843,18 +790,11 @@ async def reprocess_activity(
     if wp is not None:
         activity.weighted_power = wp
 
-    # Rebuild power bests
+    # Rebuild power bests. Carry the weight already snapshotted on this activity
+    # across the rebuild, so reprocessing never re-attributes an old effort to a
+    # weight the athlete only logged later. Only when the rows never had one (or
+    # this is the first processing) do we look it up from the log.
     if power_data:
-        from backend.app.services.weight import (
-            effective_weight_for,
-            load_weight_log,
-            w_per_kg,
-        )
-
-        # Carry the weight already snapshotted on this activity across the
-        # rebuild, so reprocessing never re-attributes an old effort to a weight
-        # the athlete only logged later. Only when the rows never had one (or
-        # this is the first processing) do we look it up from the log.
         prev = await session.execute(
             select(ActivityPowerBest.weight_kg)
             .where(
@@ -864,43 +804,23 @@ async def reprocess_activity(
             .limit(1)
         )
         weight = prev.scalar_one_or_none()
-        if weight is None:
-            weight_log = await load_weight_log(athlete.id, session)
-            act_date = activity.start_time.date() if activity.start_time else None
-            weight = effective_weight_for(weight_log, act_date)
         await session.execute(
             sa_delete(ActivityPowerBest).where(ActivityPowerBest.activity_id == activity_id)
         )
-        for duration_s, power_w_val in compute_power_bests(power_data).items():
-            session.add(
-                ActivityPowerBest(
-                    activity_id=activity_id,
-                    athlete_id=athlete.id,
-                    duration_s=duration_s,
-                    power_w=power_w_val,
-                    activity_start_time=activity.start_time,
-                    weight_kg=weight,
-                    w_per_kg=w_per_kg(power_w_val, weight),
-                )
-            )
+        _add_power_bests(
+            activity, athlete, session, power_data,
+            await load_weight_log(athlete.id, session) if weight is None else None,
+            weight=weight,
+        )
 
     # Rebuild distance bests
     if speed_data:
         await session.execute(
             sa_delete(ActivityDistanceBest).where(ActivityDistanceBest.activity_id == activity_id)
         )
-        for distance_m, time_s in compute_distance_bests(speed_data).items():
-            session.add(
-                ActivityDistanceBest(
-                    activity_id=activity_id,
-                    athlete_id=athlete.id,
-                    distance_m=distance_m,
-                    time_s=time_s,
-                    activity_start_time=activity.start_time,
-                )
-            )
+        _add_distance_bests(activity, athlete, session, speed_data)
 
-    # Re-extract intervals from FIT file or auto-split
+    # Re-extract intervals from the FIT file, or auto-split when there is none.
     fileish = None
     fit_sources = [s for s in (activity.sources or []) if s.fit_file_path]
     if fit_sources:
@@ -913,26 +833,7 @@ async def reprocess_activity(
             else:
                 fileish = str(fit_path)
 
-    raw = extractIntervals(fileish) if fileish is not None else []
-    is_auto = len(raw) <= 1
-
-    if is_auto:
-        duration_s = activity.duration_s or 0
-        stream_length = max((len(v) for v in stream_map.values() if v), default=duration_s)
-        actual_duration = max(duration_s, stream_length)
-        interval_s = auto_interval_s(actual_duration)
-        if activity.start_time and actual_duration:
-            raw = build_auto_intervals(activity.start_time, actual_duration, interval_s)
-
-    intervals_data: list[dict] = []
-    if raw and activity.start_time:
-        intervals_data = compute_interval_stats(raw, activity.start_time, stream_map, is_auto)
-
-    await session.execute(
-        sa_delete(ActivityInterval).where(ActivityInterval.activity_id == activity_id)
-    )
-    for iv in intervals_data:
-        session.add(ActivityInterval(id=str(uuid.uuid4()), activity_id=activity_id, **iv))
+    await rebuild_intervals(activity, session, fileish, stream_map, replace=True)
 
     # Recalculate workout category
     vi = variability_index(activity.weighted_power, activity.avg_power)
@@ -997,10 +898,9 @@ async def reprocess_activity(
 async def update_activity(
     activity_id: str,
     payload: ActivityUpdate,
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
 
     result = await session.execute(
         select(Activity).where(Activity.id == activity_id, Activity.athlete_id == athlete.id)
@@ -1045,10 +945,9 @@ async def update_activity(
 async def delete_activity(
     activity_id: str,
     background_tasks: BackgroundTasks,
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
 
     result = await session.execute(
         select(Activity).where(Activity.id == activity_id, Activity.athlete_id == athlete.id)
@@ -1085,15 +984,14 @@ async def trigger_analysis(
     activity_id: str,
     background_tasks: BackgroundTasks,
     body: AnalyzeBody = AnalyzeBody(),
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
     registry_session: AsyncSession = Depends(get_registry_session),
 ):
     from backend.app.services.llm_access import check_llm_access, subscription_required_error
     from backend.app.services.llm_activity_analyzer import analyze_activity_bg
     from backend.app.models.registry_orm import InstanceSettings
 
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
     result = await session.execute(
         select(Activity).where(Activity.id == activity_id, Activity.athlete_id == athlete.id)
     )
@@ -1126,10 +1024,9 @@ async def trigger_analysis(
 async def save_frontend_analysis(
     activity_id: str,
     body: FrontendAnalysisBody,
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
     result = await session.execute(
         select(Activity).where(Activity.id == activity_id, Activity.athlete_id == athlete.id)
     )

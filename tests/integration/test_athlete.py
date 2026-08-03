@@ -559,6 +559,59 @@ class TestExportAthlete:
             "weight_log.json",
         } <= names
 
+    async def test_export_profile_carries_every_documented_field(
+        self, client, auth_headers
+    ):
+        """The profile dump is column-driven — pin the fields users rely on.
+
+        The export builds each record from the model's mapped columns, so a new
+        column joins the download by itself. That convenience cuts both ways: an
+        over-broad `exclude` would silently drop a field instead of failing to
+        compile. This is the guard against that.
+        """
+        resp = await client.get("/api/athlete/export", headers=auth_headers)
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            profile = json.loads(zf.read("profile.json"))
+
+        assert {
+            "id", "username", "name", "date_of_birth", "weight_kg", "ftp",
+            "max_hr", "resting_hr", "hr_zones", "power_zones", "availability",
+            "ftp_tests", "app_settings", "training_status",
+            "training_status_status", "training_status_date",
+            "training_status_updated_at", "created_at", "updated_at",
+            "exported_at",
+        } <= set(profile)
+        # Server-side plumbing stays out of a user-facing download.
+        assert "global_user_id" not in profile
+        assert "avatar_path" not in profile
+
+    async def test_export_activity_carries_every_documented_field(
+        self, client, auth_headers
+    ):
+        """Same guard for activities, whose dump also has to survive column churn."""
+        await client.post(
+            "/api/activities",
+            json={
+                "sport_type": "Ride",
+                "start_time": "2025-06-01T10:00:00Z",
+                "duration_s": 3600,
+            },
+            headers=auth_headers,
+        )
+        resp = await client.get("/api/athlete/export", headers=auth_headers)
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            activity = json.loads(zf.read("activities.json"))[0]
+
+        assert {
+            "id", "name", "sport_type", "start_time", "duration_s", "distance_m",
+            "elevation_m", "avg_power", "weighted_power", "avg_hr", "max_hr",
+            "avg_speed_ms", "avg_cadence", "load", "intensity",
+            "workout_category", "labels", "notes", "rpe", "status",
+            "analysis_status", "analysis", "sources", "created_at",
+            "has_fit_file",
+        } <= set(activity)
+        assert "athlete_id" not in activity
+
     async def test_export_profile_redacts_llm_key_and_includes_settings(
         self, client, auth_headers, session, seeded_athlete
     ):
