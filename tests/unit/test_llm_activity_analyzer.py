@@ -350,7 +350,7 @@ class TestStreamAnalysis:
             yield mock_client
 
         with (
-            patch("backend.app.services.llm_activity_analyzer._RegistrySessionLocal",
+            patch("backend.app.services.llm_streaming._RegistrySessionLocal",
                   return_value=_mock_registry_session(team)),
             patch("httpx.AsyncClient", return_value=_mock_httpx()),
         ):
@@ -365,7 +365,7 @@ class TestStreamAnalysis:
         team = MagicMock()
         team.llm_models = None
 
-        with patch("backend.app.services.llm_activity_analyzer._RegistrySessionLocal",
+        with patch("backend.app.services.llm_streaming._RegistrySessionLocal",
                    return_value=_mock_registry_session(team)):
             with pytest.raises(ValueError, match="base URL"):
                 async for _ in _stream_analysis(_make_activity(), _make_athlete(), "team-1"):
@@ -396,7 +396,7 @@ class TestStreamAnalysis:
             yield mock_client
 
         with (
-            patch("backend.app.services.llm_activity_analyzer._RegistrySessionLocal",
+            patch("backend.app.services.llm_streaming._RegistrySessionLocal",
                   return_value=_mock_registry_session(team)),
             patch("httpx.AsyncClient", return_value=_mock_httpx()),
         ):
@@ -427,7 +427,7 @@ class TestStreamAnalysis:
             yield mock_client
 
         with (
-            patch("backend.app.services.llm_activity_analyzer._RegistrySessionLocal",
+            patch("backend.app.services.llm_streaming._RegistrySessionLocal",
                   return_value=_mock_registry_session(team)),
             patch("httpx.AsyncClient", return_value=_mock_httpx()),
         ):
@@ -489,7 +489,7 @@ class TestStreamAnalysis:
             yield mock_client
 
         with (
-            patch("backend.app.services.llm_activity_analyzer._RegistrySessionLocal",
+            patch("backend.app.services.llm_streaming._RegistrySessionLocal",
                   return_value=_mock_registry_session(team)),
             patch("httpx.AsyncClient", return_value=_mock_httpx()),
         ):

@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.core.deps import get_ctx_and_session
+from backend.app.core.deps import get_ctx_session_athlete
 from backend.app.models.user_orm import Activity, ActivityPowerBest, Athlete
 from backend.app.schemas.power import (
     AllTimePowerBestsResponse,
@@ -41,14 +41,6 @@ router = APIRouter(prefix="/metrics", tags=["metrics"])
 TOP_N = 3
 
 Metric = Literal["watts", "wkg"]
-
-
-async def _get_athlete(global_user_id: str, session: AsyncSession) -> Athlete:
-    result = await session.execute(select(Athlete).where(Athlete.global_user_id == global_user_id))
-    athlete = result.scalar_one_or_none()
-    if athlete is None:
-        raise HTTPException(status_code=404, detail="Athlete profile not found")
-    return athlete
 
 
 async def all_time_power_bests(
@@ -132,7 +124,7 @@ async def all_time_power_bests(
 async def get_power_bests(
     days: Optional[int] = Query(None, ge=1, description="Restrict to bests from the past N days. Omit for all-time."),
     metric: Metric = Query("watts", description="Rank by absolute 'watts' or by 'wkg' (watts per kg at the time of each effort)."),
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
     """
     Return the top-3 best efforts for each standard duration,
@@ -145,8 +137,7 @@ async def get_power_bests(
     default ?metric=watts ranks by absolute power.  Pass ?days=90/180/365 to
     restrict to a rolling window; omit for all-time.
     """
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
     entries = await all_time_power_bests(athlete, session, days=days, metric=metric)
     return AllTimePowerBestsResponse(bests=entries)
 
@@ -155,7 +146,7 @@ async def get_power_bests(
             operation_id="getFtpEstimate", summary="Current FTP estimate")
 async def get_ftp_estimate(
     days: Optional[int] = Query(None, ge=1, description="Estimate from bests in the past N days. Omit for all-time."),
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
     """
     Estimate FTP from the athlete's power curve using two methods:
@@ -166,8 +157,7 @@ async def get_ftp_estimate(
     Both estimates use the rank-1 (single best) power per duration.  Pass
     ?days=90/180/365 to estimate from a rolling window; omit for all-time.
     """
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
 
     cutoff = (
         datetime.now(timezone.utc) - timedelta(days=days)
@@ -291,7 +281,7 @@ def build_power_models(rank1: dict[int, float]) -> list[PowerModelFit]:
             operation_id="getPowerModels", summary="Fitted power–duration models")
 async def get_power_models(
     days: Optional[int] = Query(None, ge=1, description="Fit from bests in the past N days. Omit for all-time."),
-    ctx_session=Depends(get_ctx_and_session),
+    ctx_athlete=Depends(get_ctx_session_athlete),
 ):
     """
     Fit several power–duration models to the athlete's power curve and return,
@@ -304,8 +294,7 @@ async def get_power_models(
     All use the rank-1 (single best) power per duration.  Pass ?days=90/180/365
     to fit from a rolling window; omit for all-time.
     """
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
 
     cutoff = (
         datetime.now(timezone.utc) - timedelta(days=days)

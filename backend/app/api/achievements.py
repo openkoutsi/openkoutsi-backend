@@ -11,7 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 
-from backend.app.core.deps import get_ctx_and_session
+from backend.app.core.deps import get_ctx_session_athlete
 from backend.app.models.user_orm import AchievementUnlock, Athlete
 from backend.app.schemas.achievements import (
     AchievementDefinition,
@@ -29,27 +29,16 @@ from openkoutsi.achievements import CATALOGUE
 router = APIRouter(prefix="/achievements", tags=["achievements"])
 
 
-async def _get_athlete(global_user_id: str, session: AsyncSession) -> Athlete:
-    result = await session.execute(
-        select(Athlete).where(Athlete.global_user_id == global_user_id)
-    )
-    athlete = result.scalar_one_or_none()
-    if athlete is None:
-        raise HTTPException(status_code=404, detail="Athlete profile not found")
-    return athlete
-
-
 @router.get("", response_model=AchievementsResponse,
             operation_id="getAchievements", summary="Achievements, progress and streaks")
-async def get_achievements(ctx_session=Depends(get_ctx_and_session)):
+async def get_achievements(ctx_athlete=Depends(get_ctx_session_athlete)):
     """Catalogue, earned tiers, progress toward the locked ones, and streaks.
 
     Achievements whose data requirement the athlete cannot meet (elevation
     without a barometric FIT, Load without power or HR) are left out of the
     catalogue entirely rather than shown permanently locked.
     """
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
 
     if not gamification_enabled(athlete):
         return AchievementsResponse(
@@ -110,10 +99,9 @@ async def get_achievements(ctx_session=Depends(get_ctx_and_session)):
 
 @router.get("/streaks", response_model=list[StreakResponse],
             operation_id="getStreaks", summary="Current and longest streaks")
-async def get_streaks(ctx_session=Depends(get_ctx_and_session)):
+async def get_streaks(ctx_athlete=Depends(get_ctx_session_athlete)):
     """Just the streaks, for the dashboard card."""
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
 
     if not gamification_enabled(athlete):
         return []
@@ -139,14 +127,13 @@ async def get_streaks(ctx_session=Depends(get_ctx_and_session)):
 
 @router.post("/seen", status_code=204,
              operation_id="markAchievementsSeen", summary="Clear the new-achievement marker")
-async def mark_seen(ctx_session=Depends(get_ctx_and_session)):
+async def mark_seen(ctx_athlete=Depends(get_ctx_session_athlete)):
     """Mark every unlock as seen, so the UI stops flagging them as new.
 
     Purely a UI marker — it has no bearing on the inbox message, which is emitted
     once by the reconcile that first inserted the row.
     """
-    ctx, session = ctx_session
-    athlete = await _get_athlete(ctx.user_id, session)
+    ctx, session, athlete = ctx_athlete
 
     rows = (
         await session.execute(

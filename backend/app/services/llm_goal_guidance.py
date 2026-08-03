@@ -15,30 +15,21 @@ machine-readable tag line (``REALISM:`` here, mirroring the ``MOOD:`` convention
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
-import time
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator
 
-import httpx
 from sqlalchemy import select
 
-from ..core.ssrf import check_url_safe
-from ..db.registry import _RegistrySessionLocal
 from ..db.user_session import get_user_session_factory
-from ..models.registry_orm import InstanceSettings
 from ..models.user_orm import Activity, Athlete, DailyMetric, Goal, TrainingPlan
 from ..schemas.metrics import _form_to_label
 from .athlete_experience import EXPERIENCE_GUIDANCE, experience_level
-from .llm_access import record_llm_usage, usage_from_sse_data
-from .llm_client import (
-    apply_body_extras,
-    merge_llm_headers,
-    raise_for_llm_status,
-    resolve_llm_config,
-    temperature_param,
+from .llm_streaming import (
+    failure_recovery,
+    stream_chat_completion,
+    stream_into_db,
 )
 from .llm_training_status_analyzer import (
     _COACHING_STYLE_PROMPTS,
@@ -203,7 +194,7 @@ def _stream_display_prose(text: str) -> str:
     return prose
 
 
-async def _stream_goal_guidance(
+def _stream_goal_guidance(
     athlete: Athlete,
     user_id: str,
     goal: Goal,
@@ -215,84 +206,16 @@ async def _stream_goal_guidance(
     coaching_style: str | None = None,
     usage_out: dict | None = None,
 ) -> AsyncIterator[str]:
-    """Yield text chunks from the LLM via streaming SSE.
-
-    When ``usage_out`` is provided it is populated with ``{"cfg", "usage"}`` so
-    the caller can record the instance-paid token usage (issue #9).
-    """
-    instance: InstanceSettings | None = None
-    async with _RegistrySessionLocal() as reg:
-        result = await reg.execute(select(InstanceSettings).limit(1))
-        instance = result.scalar_one_or_none()
-
-    # Resolve the athlete's effective LLM config, exactly like the other
-    # analyzers: their own BYOK server if configured, else their selected
-    # instance preset, else the instance default (first preset).
-    cfg = resolve_llm_config(athlete, instance, user_id)
-    if usage_out is not None:
-        usage_out["cfg"] = cfg
-
-    url = f"{cfg.base_url.rstrip('/')}/chat/completions"
-    check_url_safe(url)
-    headers: dict[str, str] = {"Content-Type": "application/json"}
-    if cfg.api_key:
-        headers["Authorization"] = f"Bearer {cfg.api_key}"
-    headers = merge_llm_headers(headers, cfg.extra_headers)
-
-    prompt = _build_goal_prompt(
-        athlete, goal, recent_activities, current_metric, active_plan, now
+    """Yield text chunks from the LLM via streaming SSE."""
+    return stream_chat_completion(
+        athlete,
+        user_id,
+        system_prompt=_build_system_prompt(locale, coaching_style),
+        user_prompt=_build_goal_prompt(
+            athlete, goal, recent_activities, current_metric, active_plan, now
+        ),
+        usage_out=usage_out,
     )
-    messages: list[dict] = [
-        {"role": "system", "content": _build_system_prompt(locale, coaching_style)},
-        {"role": "user", "content": prompt},
-    ]
-    analysis_context = getattr(instance, "llm_analysis_context", None)
-    if analysis_context and analysis_context.strip():
-        messages.insert(1, {"role": "system", "content": analysis_context.strip()})
-
-    def _payload(include_usage: bool) -> dict:
-        base: dict = {
-            "model": cfg.model,
-            "messages": messages,
-            **temperature_param(),
-            "stream": True,
-        }
-        if include_usage:
-            base["stream_options"] = {"include_usage": True}
-        return apply_body_extras(base, cfg.extra_body)
-
-    async with httpx.AsyncClient(
-        timeout=httpx.Timeout(300.0, connect=10.0)
-    ) as client:
-        # Ask for a trailing usage chunk; retry once without it if the upstream
-        # rejects stream_options (Ollama-family tolerance).
-        cm = client.stream("POST", url, json=_payload(True), headers=headers)
-        resp = await cm.__aenter__()
-        if getattr(resp, "is_error", False):
-            await cm.__aexit__(None, None, None)
-            cm = client.stream("POST", url, json=_payload(False), headers=headers)
-            resp = await cm.__aenter__()
-        try:
-            await raise_for_llm_status(resp, url)
-            async for line in resp.aiter_lines():
-                if not line.startswith("data: "):
-                    continue
-                data = line[6:]
-                if data.strip() == "[DONE]":
-                    break
-                if usage_out is not None:
-                    usage = usage_from_sse_data(data)
-                    if usage is not None:
-                        usage_out["usage"] = usage
-                try:
-                    chunk = json.loads(data)
-                    content = chunk["choices"][0]["delta"].get("content", "")
-                    if content:
-                        yield content
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    continue
-        finally:
-            await cm.__aexit__(None, None, None)
 
 
 async def generate_goal_guidance_bg(
@@ -305,7 +228,17 @@ async def generate_goal_guidance_bg(
     Background task: stream per-goal LLM guidance → write prose to DB every 500 ms
     → parse the leading REALISM verdict → set final guidance_status 'done'/'error'.
     """
-    try:
+
+    async def _clear_pending(recovery_session) -> None:
+        result = await recovery_session.execute(select(Goal).where(Goal.id == goal_id))
+        stuck = result.scalar_one_or_none()
+        if stuck:
+            stuck.guidance_status = "error"
+            stuck.guidance_updated_at = datetime.now(timezone.utc)
+
+    async with failure_recovery(
+        user_id, f"Goal guidance for goal {goal_id}", _clear_pending
+    ):
         async with get_user_session_factory(user_id)() as session:
             athlete_result = await session.execute(
                 select(Athlete).where(Athlete.id == athlete_id)
@@ -361,74 +294,34 @@ async def generate_goal_guidance_bg(
             )
             active_plan = plan_result.scalar_one_or_none()
 
-            buffer: list[str] = []
-            last_flush = time.monotonic()
-            accumulated = ""
-            usage_out: dict = {}
-            started = time.monotonic()
+            def _set_prose(text: str) -> None:
+                # Persist tag-free prose so a mid-stream poll never returns the
+                # raw REALISM: line (see _stream_display_prose).
+                goal.guidance = _stream_display_prose(text)
 
-            try:
-                async for chunk in _stream_goal_guidance(
-                    athlete, user_id, goal,
-                    recent_activities, current_metric, active_plan,
-                    now, locale=resolved_locale, coaching_style=coaching_style,
-                    usage_out=usage_out,
-                ):
-                    buffer.append(chunk)
-                    if time.monotonic() - last_flush >= 0.5:
-                        accumulated += "".join(buffer)
-                        buffer.clear()
-                        last_flush = time.monotonic()
-                        # Persist tag-free prose so a mid-stream poll never
-                        # returns the raw REALISM: line (see _stream_display_prose).
-                        goal.guidance = _stream_display_prose(accumulated)
-                        await session.commit()
-
-                accumulated += "".join(buffer)
-                verdict, prose = _parse_verdict(accumulated)
+            def _finish(text: str) -> None:
+                verdict, prose = _parse_verdict(text)
                 goal.guidance = prose
                 goal.guidance_verdict = verdict
                 goal.guidance_status = "done"
                 goal.guidance_updated_at = datetime.now(timezone.utc)
-                await session.commit()
-                log.info("Goal guidance complete for goal %s", goal_id)
 
-            except Exception:
-                log.exception("Goal guidance failed for goal %s", goal_id)
+            def _fail() -> None:
                 goal.guidance_status = "error"
                 goal.guidance_updated_at = datetime.now(timezone.utc)
-                await session.commit()
-            finally:
-                # Record instance-paid token usage (issue #9). Fire-and-forget.
-                cfg = usage_out.get("cfg")
-                if cfg is not None:
-                    await record_llm_usage(
-                        user_id=user_id,
-                        feature="goal_guidance",
-                        cfg=cfg,
-                        usage=usage_out.get("usage"),
-                        duration_ms=int((time.monotonic() - started) * 1000),
-                    )
 
-    except Exception:
-        # Session acquisition or early DB query failed — open a fresh session to
-        # clear the pending state so the user can retry.
-        log.exception(
-            "Goal guidance background task failed outside inner try for goal %s",
-            goal_id,
-        )
-        try:
-            async with get_user_session_factory(user_id)() as recovery_session:
-                result = await recovery_session.execute(
-                    select(Goal).where(Goal.id == goal_id)
-                )
-                goal = result.scalar_one_or_none()
-                if goal:
-                    goal.guidance_status = "error"
-                    goal.guidance_updated_at = datetime.now(timezone.utc)
-                    await recovery_session.commit()
-        except Exception:
-            log.exception(
-                "Recovery session also failed for goal %s — status may remain stuck",
-                goal_id,
+            await stream_into_db(
+                session,
+                lambda usage_out: _stream_goal_guidance(
+                    athlete, user_id, goal,
+                    recent_activities, current_metric, active_plan,
+                    now, locale=resolved_locale, coaching_style=coaching_style,
+                    usage_out=usage_out,
+                ),
+                on_progress=_set_prose,
+                on_done=_finish,
+                on_error=_fail,
+                user_id=user_id,
+                feature="goal_guidance",
+                label=f"Goal guidance for goal {goal_id}",
             )

@@ -16,6 +16,7 @@ Priority (lower = higher priority):
 """
 
 import asyncio
+import dataclasses
 import io
 import logging
 import uuid
@@ -44,6 +45,7 @@ from openkoutsi.fit_processing import (
     build_auto_intervals,
     compute_interval_stats,
 )
+from backend.app.services.providers.base import NormalizedActivity
 from backend.app.services.providers.registry import PROVIDERS
 from backend.app.services.weight import effective_weight_for, load_weight_log, w_per_kg
 from backend.app.services.aerobic_metrics import apply_aerobic_metrics
@@ -466,6 +468,67 @@ async def _repopulate_activity(
     )
 
 
+# The two NormalizedActivity fields that aren't Activity columns. The rest of
+# the provider-agnostic shape exists precisely so the summary copy is verbatim.
+_NORM_ONLY_FIELDS = frozenset({"external_id", "source"})
+
+
+def _summary_fields(activity: Activity, norm: NormalizedActivity) -> dict:
+    """Activity fields taken straight off the provider's summary payload."""
+    fields = {
+        f.name: getattr(norm, f.name)
+        for f in dataclasses.fields(norm)
+        if f.name not in _NORM_ONLY_FIELDS
+    }
+    # A name or sport already on the row came from a higher-priority source.
+    fields["name"] = activity.name or norm.name
+    fields["sport_type"] = activity.sport_type or norm.sport_type
+    return fields
+
+
+async def _apply_import(
+    activity: Activity,
+    athlete: Athlete,
+    session: AsyncSession,
+    *,
+    fields: dict,
+    streams: dict[str, list],
+    weight_log,
+    load_duration_s: int,
+) -> None:
+    """Write imported metrics onto the Activity and persist the derived rows.
+
+    Shared by the FIT and stream-API import paths, so a ride's stored metrics
+    never depend on which provider won the priority contest.
+
+    ``load_duration_s`` is separate from ``fields["duration_s"]`` because the FIT
+    path falls back to the provider's duration for the load maths when the file
+    has none, while the row still records what the file itself said.
+    """
+    power_data = streams.get("power") or []
+    np_val = weighted_power(power_data) if power_data else None
+    load, intensity = calculate_load(
+        load_duration_s, np_val, fields.get("avg_hr"), athlete.ftp, athlete.max_hr
+    )
+
+    for key, value in fields.items():
+        setattr(activity, key, value)
+    activity.weighted_power = np_val
+    activity.load = load
+    activity.intensity = intensity
+    activity.status = "processed"
+
+    category = classify_workout(
+        intensity, variability_index(np_val, activity.avg_power)
+    )
+    activity.workout_category = category.value if category else None
+
+    _add_streams(activity, session, streams)
+    _add_power_bests(activity, athlete, session, power_data, weight_log)
+    _add_distance_bests(activity, athlete, session, streams.get("speed") or [])
+    await _apply_aerobic(activity, athlete, session, streams)
+
+
 async def _fill_from_source(
     activity: Activity,
     src: ActivitySource,
@@ -520,81 +583,60 @@ async def _fill_from_source(
         src.fit_file_encrypted = encrypted
 
         if profile is not None:
-            power_data = [float(v) for v in profile.power]
-            hr_data = [float(v) for v in profile.heartRate]
-            cadence_data = [float(v) for v in profile.cadence]
-            speed_ms = [v / 3.6 for v in profile.speed]
-            alt_data = [float(v) for v in profile.altitude]
-
-            np_val = weighted_power(power_data) if power_data else None
-            avg_hr_v = profile.avgHeartRate if hr_data else norm.avg_hr
-            dur_v = profile.duration or norm.duration_s or 0
-            load, intensity = calculate_load(
-                dur_v, np_val, avg_hr_v, athlete.ftp, athlete.max_hr
-            )
-
-            activity.name = activity.name or norm.name or "Uploaded Activity"
-            activity.sport_type = (
-                activity.sport_type
-                or norm.sport_type
-                or resolve_sport_type(profile.sport_type)
-            )
-            activity.start_time = profile.start_time or norm.start_time
-            activity.duration_s = profile.duration
-            activity.distance_m = (
-                float(profile.distance) if profile.distance else norm.distance_m
-            )
-            activity.elevation_m = (
-                float(profile.elevationGain)
-                if profile.elevationGain
-                else norm.elevation_m
-            )
-            activity.avg_power = profile.avgPower if power_data else norm.avg_power
-            activity.weighted_power = np_val
-            activity.avg_hr = avg_hr_v
-            activity.max_hr = profile.peakHR if hr_data else norm.max_hr
-            activity.avg_speed_ms = (
-                (profile.avgSpeed / 3.6) if profile.speed else norm.avg_speed_ms
-            )
-            activity.avg_cadence = (
-                float(profile.avgCadence) if profile.cadence else norm.avg_cadence
-            )
-            activity.load = load
-            activity.intensity = intensity
-            activity.status = "processed"
-
-            vi = variability_index(np_val, activity.avg_power)
-            category = classify_workout(intensity, vi)
-            activity.workout_category = category.value if category else None
-
-            _add_streams(
-                activity, session, power_data, hr_data, cadence_data, speed_ms, alt_data
-            )
-            _add_power_bests(activity, athlete, session, power_data, weight_log)
-            _add_distance_bests(activity, athlete, session, speed_ms)
-
-            stream_map = {
-                "power": power_data,
-                "heartrate": hr_data,
-                "cadence": cadence_data,
-                "speed": speed_ms,
-                "altitude": alt_data,
+            streams = {
+                "power": [float(v) for v in profile.power],
+                "heartrate": [float(v) for v in profile.heartRate],
+                "cadence": [float(v) for v in profile.cadence],
+                "speed": [v / 3.6 for v in profile.speed],
+                "altitude": [float(v) for v in profile.altitude],
             }
-            await _apply_aerobic(activity, athlete, session, stream_map)
-            _add_intervals(activity, session, fit_bytes, profile.start_time, stream_map)
+            has_power = bool(streams["power"])
+            has_hr = bool(streams["heartrate"])
+
+            # The device file wins on every field it can speak to; each falls
+            # through to the provider summary when the file has nothing.
+            fields = {
+                "name": activity.name or norm.name or "Uploaded Activity",
+                "sport_type": (
+                    activity.sport_type
+                    or norm.sport_type
+                    or resolve_sport_type(profile.sport_type)
+                ),
+                "start_time": profile.start_time or norm.start_time,
+                "duration_s": profile.duration,
+                "distance_m": (
+                    float(profile.distance) if profile.distance else norm.distance_m
+                ),
+                "elevation_m": (
+                    float(profile.elevationGain)
+                    if profile.elevationGain
+                    else norm.elevation_m
+                ),
+                "avg_power": profile.avgPower if has_power else norm.avg_power,
+                "avg_hr": profile.avgHeartRate if has_hr else norm.avg_hr,
+                "max_hr": profile.peakHR if has_hr else norm.max_hr,
+                "avg_speed_ms": (
+                    (profile.avgSpeed / 3.6) if profile.speed else norm.avg_speed_ms
+                ),
+                "avg_cadence": (
+                    float(profile.avgCadence) if profile.cadence else norm.avg_cadence
+                ),
+            }
+
+            await _apply_import(
+                activity, athlete, session, fields=fields, streams=streams,
+                weight_log=weight_log,
+                load_duration_s=profile.duration or norm.duration_s or 0,
+            )
+            # After _apply_import, so the laps see the w_bal stream it derived.
+            await rebuild_intervals(
+                activity, session, io.BytesIO(fit_bytes), streams
+            )
         else:
-            # FIT parse failed — use summary metadata only
-            activity.name = activity.name or norm.name
-            activity.sport_type = activity.sport_type or norm.sport_type
-            activity.start_time = norm.start_time
-            activity.duration_s = norm.duration_s
-            activity.distance_m = norm.distance_m
-            activity.elevation_m = norm.elevation_m
-            activity.avg_power = norm.avg_power
-            activity.avg_hr = norm.avg_hr
-            activity.max_hr = norm.max_hr
-            activity.avg_speed_ms = norm.avg_speed_ms
-            activity.avg_cadence = norm.avg_cadence
+            # FIT parse failed — summary metadata only. No streams means no load,
+            # intensity or category; a reprocess can still fill them in later.
+            for key, value in _summary_fields(activity, norm).items():
+                setattr(activity, key, value)
             activity.status = "processed"
 
         await session.commit()
@@ -607,54 +649,26 @@ async def _fill_from_source(
     except Exception:
         streams_raw = {}
 
-    power_data = streams_raw.get("power", [])
-    hr_data = streams_raw.get("heartrate", [])
-    cadence_data = streams_raw.get("cadence", [])
-    speed_data = streams_raw.get("speed", [])
-    altitude_data = streams_raw.get("altitude", [])
+    streams = {
+        key: streams_raw.get(key, [])
+        for key in ("power", "heartrate", "cadence", "speed", "altitude")
+    }
+    power_data, hr_data = streams["power"], streams["heartrate"]
 
-    np_val = weighted_power(power_data) if power_data else None
-    avg_hr = (sum(hr_data) / len(hr_data)) if hr_data else norm.avg_hr
-    dur_s = norm.duration_s or 0
-    load, intensity = calculate_load(
-        dur_s, np_val, avg_hr, athlete.ftp, athlete.max_hr
+    await _apply_import(
+        activity, athlete, session,
+        # Only the two averages the streams can improve on differ from the
+        # summary; everything else the provider told us stands.
+        fields=_summary_fields(activity, norm) | {
+            "avg_power": norm.avg_power or (
+                sum(power_data) / len(power_data) if power_data else None
+            ),
+            "avg_hr": (sum(hr_data) / len(hr_data)) if hr_data else norm.avg_hr,
+        },
+        streams=streams,
+        weight_log=weight_log,
+        load_duration_s=norm.duration_s or 0,
     )
-
-    activity.name = activity.name or norm.name
-    activity.sport_type = activity.sport_type or norm.sport_type
-    activity.start_time = norm.start_time
-    activity.duration_s = norm.duration_s
-    activity.distance_m = norm.distance_m
-    activity.elevation_m = norm.elevation_m
-    activity.avg_power = norm.avg_power or (
-        sum(power_data) / len(power_data) if power_data else None
-    )
-    activity.weighted_power = np_val
-    activity.avg_hr = avg_hr
-    activity.max_hr = norm.max_hr
-    activity.avg_speed_ms = norm.avg_speed_ms
-    activity.avg_cadence = norm.avg_cadence
-    activity.load = load
-    activity.intensity = intensity
-    activity.status = "processed"
-
-    vi = variability_index(np_val, activity.avg_power)
-    category = classify_workout(intensity, vi)
-    activity.workout_category = category.value if category else None
-
-    _add_streams(
-        activity, session, power_data, hr_data, cadence_data, speed_data, altitude_data
-    )
-    _add_power_bests(activity, athlete, session, power_data, weight_log)
-    _add_distance_bests(activity, athlete, session, speed_data)
-
-    await _apply_aerobic(activity, athlete, session, {
-        "power": power_data,
-        "heartrate": hr_data,
-        "cadence": cadence_data,
-        "speed": speed_data,
-        "altitude": altitude_data,
-    })
 
     await session.commit()
     await session.refresh(activity)
@@ -691,22 +705,15 @@ async def _apply_aerobic(
 
 
 def _add_streams(
-    activity: Activity,
-    session: AsyncSession,
-    power_data: list,
-    hr_data: list,
-    cadence_data: list,
-    speed_data: list,
-    altitude_data: list,
+    activity: Activity, session: AsyncSession, streams: dict[str, list]
 ) -> None:
-    for stream_type, data in [
-        ("power", power_data),
-        ("heartrate", hr_data),
-        ("cadence", cadence_data),
-        ("speed", speed_data),
-        ("altitude", altitude_data),
-        ("torque", compute_torque_stream(power_data, cadence_data)),
-    ]:
+    """Persist the recorded streams, plus the torque derived from power+cadence."""
+    derived = {
+        "torque": compute_torque_stream(
+            streams.get("power") or [], streams.get("cadence") or []
+        )
+    }
+    for stream_type, data in {**streams, **derived}.items():
         if data:
             session.add(
                 ActivityStream(
@@ -724,11 +731,21 @@ def _add_power_bests(
     session: AsyncSession,
     power_data: list,
     weight_log: list[tuple[date, float]] | None = None,
+    *,
+    weight: float | None = None,
 ) -> None:
+    """Insert this activity's peak-power rows, each stamped with a bodyweight.
+
+    ``weight`` pins the bodyweight instead of reading it from ``weight_log``.
+    The reprocess path passes the weight already stored on the existing rows, so
+    rebuilding never re-attributes an old effort to a weight the athlete only
+    logged later.
+    """
     if not power_data:
         return
-    act_date = activity.start_time.date() if activity.start_time else None
-    weight = effective_weight_for(weight_log or [], act_date)
+    if weight is None:
+        act_date = activity.start_time.date() if activity.start_time else None
+        weight = effective_weight_for(weight_log or [], act_date)
     for dur_s, pwr_w in compute_power_bests(power_data).items():
         session.add(
             ActivityPowerBest(
@@ -763,21 +780,47 @@ def _add_distance_bests(
         )
 
 
-def _add_intervals(
+async def rebuild_intervals(
     activity: Activity,
     session: AsyncSession,
-    fit_bytes: bytes,
-    activity_start: datetime,
-    stream_map: dict,
+    fileish,
+    stream_map: dict[str, list],
+    *,
+    replace: bool = False,
 ) -> None:
-    import io as _io
-    raw = extractIntervals(_io.BytesIO(fit_bytes))
+    """Give this activity its interval breakdown, from FIT laps or an auto-split.
+
+    ``fileish`` is anything ``extractIntervals`` accepts — a path, a file object,
+    or ``None`` when there is no FIT to read. A file with no usable lap records
+    (or no file at all) falls back to fixed-length auto-splits sized by the ride
+    duration, so every processed activity ends up with a breakdown.
+
+    ``replace=True`` clears the existing rows first, for the reprocess and
+    attach-a-FIT paths that run against an activity which already has intervals;
+    the import path is populating a fresh one and leaves it off.
+    """
+    if replace:
+        await session.execute(
+            delete(ActivityInterval).where(ActivityInterval.activity_id == activity.id)
+        )
+        await session.flush()
+
+    raw = extractIntervals(fileish) if fileish is not None else []
     is_auto = len(raw) <= 1
     if is_auto:
-        duration_s = activity.duration_s or 0
-        if duration_s:
-            interval_s = auto_interval_s(duration_s)
-            raw = build_auto_intervals(activity_start, duration_s, interval_s)
-    if raw:
-        for iv in compute_interval_stats(raw, activity_start, stream_map, is_auto):
-            session.add(ActivityInterval(id=str(uuid.uuid4()), activity_id=activity.id, **iv))
+        # A stream can outrun the recorded duration; split across the longer of
+        # the two so the tail of the ride isn't dropped from the breakdown.
+        stream_length = max((len(v) for v in stream_map.values() if v), default=0)
+        duration_s = max(activity.duration_s or 0, stream_length)
+        if duration_s and activity.start_time:
+            raw = build_auto_intervals(
+                activity.start_time, duration_s, auto_interval_s(duration_s)
+            )
+
+    if raw and activity.start_time:
+        for iv in compute_interval_stats(
+            raw, activity.start_time, stream_map, is_auto
+        ):
+            session.add(
+                ActivityInterval(id=str(uuid.uuid4()), activity_id=activity.id, **iv)
+            )

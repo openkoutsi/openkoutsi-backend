@@ -12,28 +12,15 @@ configured presets (``instance_settings.llm_models``, first entry = default).
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import time
 from typing import TYPE_CHECKING, AsyncIterator
 
-import httpx
 from sqlalchemy import select
 
-from ..core.ssrf import check_url_safe
-from ..db.registry import _RegistrySessionLocal
 from ..db.user_session import get_user_session_factory
-from ..models.registry_orm import InstanceSettings
 from ..models.user_orm import Activity, Athlete, DailyMetric, PlannedWorkout
 from .athlete_experience import EXPERIENCE_GUIDANCE, experience_level
-from .llm_access import record_llm_usage, usage_from_sse_data
-from .llm_client import (
-    apply_body_extras,
-    merge_llm_headers,
-    raise_for_llm_status,
-    resolve_llm_config,
-    temperature_param,
-)
+from .llm_streaming import stream_chat_completion, stream_into_db
 from .pr_detection import detect_pr_badges
 
 from openkoutsi.sport_matching import CYCLING_SPORT_TYPES
@@ -299,7 +286,7 @@ def _build_prompt(
     return "\n".join(lines)
 
 
-async def _stream_analysis(
+def _stream_analysis(
     activity: Activity,
     athlete: Athlete,
     user_id: str,
@@ -310,94 +297,16 @@ async def _stream_analysis(
     planned: PlannedWorkout | None = None,
     usage_out: dict | None = None,
 ) -> AsyncIterator[str]:
-    """Yield text chunks from the LLM via streaming SSE.
-
-    When ``usage_out`` is provided it is populated with ``{"cfg", "usage"}`` so
-    the caller can record the instance-paid token usage (issue #9). ``usage`` is
-    the trailing ``stream_options.include_usage`` chunk, or ``None`` when the
-    upstream omits it.
-    """
-    # Fetch instance settings for LLM config
-    instance: InstanceSettings | None = None
-    async with _RegistrySessionLocal() as reg:
-        result = await reg.execute(select(InstanceSettings).limit(1))
-        instance = result.scalar_one_or_none()
-
-    # Resolve the athlete's effective LLM config, exactly like the chat proxy:
-    # their own BYOK server if configured, else their selected instance preset
-    # (``app_settings["llm_model"]``), else the instance default (first preset).
-    # BYOK calls resolve to ``source == "user"`` and are skipped by usage
-    # recording (the hoster pays nothing for them).
-    cfg = resolve_llm_config(athlete, instance, user_id)
-    if usage_out is not None:
-        usage_out["cfg"] = cfg
-
-    url = f"{cfg.base_url.rstrip('/')}/chat/completions"
-    check_url_safe(url)
-    headers: dict[str, str] = {"Content-Type": "application/json"}
-    if cfg.api_key:
-        headers["Authorization"] = f"Bearer {cfg.api_key}"
-    headers = merge_llm_headers(headers, cfg.extra_headers)
-
-    messages: list[dict] = [
-        {"role": "system", "content": _build_system_prompt(locale, activity.sport_type)},
-    ]
-    analysis_context = getattr(instance, "llm_analysis_context", None)
-    if analysis_context and analysis_context.strip():
-        messages.append({"role": "system", "content": analysis_context.strip()})
-    messages.append(
-        {
-            "role": "user",
-            "content": _build_prompt(
-                activity, athlete, fatigue, power_pr_badges, distance_pr_badges, planned
-            ),
-        }
+    """Yield text chunks from the LLM via streaming SSE."""
+    return stream_chat_completion(
+        athlete,
+        user_id,
+        system_prompt=_build_system_prompt(locale, activity.sport_type),
+        user_prompt=_build_prompt(
+            activity, athlete, fatigue, power_pr_badges, distance_pr_badges, planned
+        ),
+        usage_out=usage_out,
     )
-
-    def _payload(include_usage: bool) -> dict:
-        base: dict = {
-            "model": cfg.model,
-            "messages": messages,
-            **temperature_param(),
-            "stream": True,
-        }
-        if include_usage:
-            base["stream_options"] = {"include_usage": True}
-        return apply_body_extras(base, cfg.extra_body)
-
-    # Local models can take several minutes; use a generous but finite timeout.
-    async with httpx.AsyncClient(
-        timeout=httpx.Timeout(300.0, connect=10.0)  # 5-minute read timeout
-    ) as client:
-        # Ask for a trailing usage chunk; retry once without it if the upstream
-        # rejects stream_options (Ollama-family tolerance).
-        cm = client.stream("POST", url, json=_payload(True), headers=headers)
-        resp = await cm.__aenter__()
-        if getattr(resp, "is_error", False):
-            await cm.__aexit__(None, None, None)
-            cm = client.stream("POST", url, json=_payload(False), headers=headers)
-            resp = await cm.__aenter__()
-        try:
-            await raise_for_llm_status(resp, url)
-            async for line in resp.aiter_lines():
-                if not line.startswith("data: "):
-                    continue
-                data = line[6:]
-                if data.strip() == "[DONE]":
-                    break
-                if usage_out is not None:
-                    usage = usage_from_sse_data(data)
-                    if usage is not None:
-                        usage_out["usage"] = usage
-                try:
-                    chunk = json.loads(data)
-                    content = chunk["choices"][0]["delta"].get("content", "")
-                    if content:
-                        yield content
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    continue
-        finally:
-            await cm.__aexit__(None, None, None)
 
 
 async def analyze_activity_bg(
@@ -450,46 +359,27 @@ async def analyze_activity_bg(
         from .activity_workout_matcher import resolve_planned_workout_for_activity
         planned = await resolve_planned_workout_for_activity(session, activity)
 
-        buffer: list[str] = []
-        last_flush = time.monotonic()
-        accumulated = ""
-        usage_out: dict = {}
-        started = time.monotonic()
+        def _set_analysis(text: str) -> None:
+            activity.analysis = text
 
-        try:
-            async for chunk in _stream_analysis(
+        def _finish(text: str) -> None:
+            activity.analysis = text
+            activity.analysis_status = "done"
+
+        def _fail() -> None:
+            activity.analysis_status = "error"
+
+        await stream_into_db(
+            session,
+            lambda usage_out: _stream_analysis(
                 activity, athlete, user_id, fatigue=fatigue, locale=resolved_locale,
                 power_pr_badges=power_pr_badges, distance_pr_badges=distance_pr_badges,
                 planned=planned, usage_out=usage_out,
-            ):
-                buffer.append(chunk)
-                if time.monotonic() - last_flush >= 0.5:
-                    accumulated += "".join(buffer)
-                    buffer.clear()
-                    last_flush = time.monotonic()
-                    activity.analysis = accumulated
-                    await session.commit()
-
-            # Final flush
-            accumulated += "".join(buffer)
-            activity.analysis = accumulated
-            activity.analysis_status = "done"
-            await session.commit()
-            log.info("Analysis complete for activity %s", activity_id)
-
-        except Exception:
-            log.exception("Analysis failed for activity %s", activity_id)
-            activity.analysis_status = "error"
-            await session.commit()
-        finally:
-            # Record instance-paid token usage (issue #9). Fire-and-forget; a
-            # failure never affects the analysis result.
-            cfg = usage_out.get("cfg")
-            if cfg is not None:
-                await record_llm_usage(
-                    user_id=user_id,
-                    feature="activity_analysis",
-                    cfg=cfg,
-                    usage=usage_out.get("usage"),
-                    duration_ms=int((time.monotonic() - started) * 1000),
-                )
+            ),
+            on_progress=_set_analysis,
+            on_done=_finish,
+            on_error=_fail,
+            user_id=user_id,
+            feature="activity_analysis",
+            label=f"Analysis for activity {activity_id}",
+        )

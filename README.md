@@ -75,6 +75,17 @@ Most cycling coaching tools are cloud-only SaaS. openkoutsi is different: you ru
 
 The bridge services are small external webhook receivers. The main app polls them, so the main app can stay private (for example behind NAT) while only bridges are exposed publicly.
 
+Cross-cutting plumbing lives in one place per concern, so route handlers and
+services stay focused on what is actually different between them:
+
+| Concern | Home |
+|---|---|
+| Auth + per-user session + athlete lookup for a route | `core/deps.py` (`get_ctx_session_athlete`) |
+| Plan / planned-workout ownership checks | `api/plans.py` (`get_owned_plan`, `get_owned_workout`) |
+| Streaming LLM analyses (transport, DB drain loop, usage recording) | `services/llm_streaming.py` |
+| Non-streaming LLM calls (config resolution, structured outputs) | `services/llm_client.py` |
+| Turning imported activity data into stored metrics, bests and intervals | `services/provider_sync.py` |
+
 ## Stack
 
 | Layer | Technology |

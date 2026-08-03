@@ -155,7 +155,8 @@ class TestGoalGuidance:
 
         with (
             patch.object(svc, "get_user_session_factory", return_value=lambda: _factory()),
-            patch.object(svc, "_RegistrySessionLocal", return_value=_mock_registry_session(None)),
+            patch("backend.app.services.llm_streaming._RegistrySessionLocal",
+                  return_value=_mock_registry_session(None)),
             patch("httpx.AsyncClient", return_value=_mock_httpx_stream(_GUIDANCE_SSE)),
         ):
             await svc.generate_goal_guidance_bg(goal.athlete_id, goal.id, _TEST_USER_ID)

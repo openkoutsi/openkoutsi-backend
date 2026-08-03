@@ -12,19 +12,14 @@ configured presets (``instance_settings.llm_models``, first entry = default).
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import time
 from datetime import date, datetime, timedelta, timezone
 from typing import AsyncIterator
-import httpx
+
 from sqlalchemy import select
 
-from ..core.ssrf import check_url_safe
 from ..core.timezones import local_now
-from ..db.registry import _RegistrySessionLocal
 from ..db.user_session import get_user_session_factory
-from ..models.registry_orm import InstanceSettings
 from ..models.user_orm import Activity, Athlete, DailyMetric, Goal, PlannedWorkout, TrainingPlan
 from ..schemas.metrics import IntensityDistributionResponse, _form_to_label
 from .athlete_experience import EXPERIENCE_GUIDANCE, experience_level
@@ -32,13 +27,10 @@ from .intensity_distribution import (
     DEFAULT_WINDOW_DAYS,
     compute_intensity_distribution,
 )
-from .llm_access import record_llm_usage, usage_from_sse_data
-from .llm_client import (
-    apply_body_extras,
-    merge_llm_headers,
-    raise_for_llm_status,
-    resolve_llm_config,
-    temperature_param,
+from .llm_streaming import (
+    failure_recovery,
+    stream_chat_completion,
+    stream_into_db,
 )
 
 log = logging.getLogger(__name__)
@@ -309,7 +301,7 @@ def _build_status_prompt(
     return "\n".join(lines)
 
 
-async def _stream_status_analysis(
+def _stream_status_analysis(
     athlete: Athlete,
     user_id: str,
     recent_activities: list[Activity],
@@ -322,87 +314,17 @@ async def _stream_status_analysis(
     usage_out: dict | None = None,
     distribution: IntensityDistributionResponse | None = None,
 ) -> AsyncIterator[str]:
-    """Yield text chunks from the LLM via streaming SSE.
-
-    When ``usage_out`` is provided it is populated with ``{"cfg", "usage"}`` so
-    the caller can record the instance-paid token usage (issue #9).
-    """
-    instance: InstanceSettings | None = None
-    async with _RegistrySessionLocal() as reg:
-        result = await reg.execute(select(InstanceSettings).limit(1))
-        instance = result.scalar_one_or_none()
-
-    # Resolve the athlete's effective LLM config, exactly like the chat proxy:
-    # their own BYOK server if configured, else their selected instance preset
-    # (``app_settings["llm_model"]``), else the instance default (first preset).
-    # BYOK calls resolve to ``source == "user"`` and are skipped by usage
-    # recording (the hoster pays nothing for them).
-    cfg = resolve_llm_config(athlete, instance, user_id)
-    if usage_out is not None:
-        usage_out["cfg"] = cfg
-
-    url = f"{cfg.base_url.rstrip('/')}/chat/completions"
-    check_url_safe(url)
-    headers: dict[str, str] = {"Content-Type": "application/json"}
-    if cfg.api_key:
-        headers["Authorization"] = f"Bearer {cfg.api_key}"
-    headers = merge_llm_headers(headers, cfg.extra_headers)
-
-    prompt = _build_status_prompt(
-        athlete, recent_activities, current_metric, active_plans,
-        active_goals, now, distribution,
+    """Yield text chunks from the LLM via streaming SSE."""
+    return stream_chat_completion(
+        athlete,
+        user_id,
+        system_prompt=_build_system_prompt(locale, coaching_style),
+        user_prompt=_build_status_prompt(
+            athlete, recent_activities, current_metric, active_plans,
+            active_goals, now, distribution,
+        ),
+        usage_out=usage_out,
     )
-    messages: list[dict] = [
-        {"role": "system", "content": _build_system_prompt(locale, coaching_style)},
-        {"role": "user", "content": prompt},
-    ]
-    analysis_context = getattr(instance, "llm_analysis_context", None)
-    if analysis_context and analysis_context.strip():
-        messages.insert(1, {"role": "system", "content": analysis_context.strip()})
-
-    def _payload(include_usage: bool) -> dict:
-        base: dict = {
-            "model": cfg.model,
-            "messages": messages,
-            **temperature_param(),
-            "stream": True,
-        }
-        if include_usage:
-            base["stream_options"] = {"include_usage": True}
-        return apply_body_extras(base, cfg.extra_body)
-
-    async with httpx.AsyncClient(
-        timeout=httpx.Timeout(300.0, connect=10.0)
-    ) as client:
-        # Ask for a trailing usage chunk; retry once without it if the upstream
-        # rejects stream_options (Ollama-family tolerance).
-        cm = client.stream("POST", url, json=_payload(True), headers=headers)
-        resp = await cm.__aenter__()
-        if getattr(resp, "is_error", False):
-            await cm.__aexit__(None, None, None)
-            cm = client.stream("POST", url, json=_payload(False), headers=headers)
-            resp = await cm.__aenter__()
-        try:
-            await raise_for_llm_status(resp, url)
-            async for line in resp.aiter_lines():
-                if not line.startswith("data: "):
-                    continue
-                data = line[6:]
-                if data.strip() == "[DONE]":
-                    break
-                if usage_out is not None:
-                    usage = usage_from_sse_data(data)
-                    if usage is not None:
-                        usage_out["usage"] = usage
-                try:
-                    chunk = json.loads(data)
-                    content = chunk["choices"][0]["delta"].get("content", "")
-                    if content:
-                        yield content
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    continue
-        finally:
-            await cm.__aexit__(None, None, None)
 
 
 async def analyze_training_status_bg(
@@ -414,7 +336,20 @@ async def analyze_training_status_bg(
     Background task: stream LLM training status → write chunks to DB every 500 ms
     → set final training_status_status to 'done' or 'error'.
     """
-    try:
+
+    async def _clear_pending(recovery_session) -> None:
+        result = await recovery_session.execute(
+            select(Athlete).where(Athlete.id == athlete_id)
+        )
+        stuck = result.scalar_one_or_none()
+        if stuck:
+            stuck.training_status_status = "error"
+            stuck.training_status_updated_at = datetime.now(timezone.utc)
+            stuck.training_status_date = datetime.now(timezone.utc).date()
+
+    async with failure_recovery(
+        user_id, f"Training status analysis for athlete {athlete_id}", _clear_pending
+    ):
         async with get_user_session_factory(user_id)() as session:
             athlete_result = await session.execute(
                 select(Athlete).where(Athlete.id == athlete_id)
@@ -509,74 +444,33 @@ async def analyze_training_status_bg(
                 end=today,
             )
 
-            buffer: list[str] = []
-            last_flush = time.monotonic()
-            accumulated = ""
-            usage_out: dict = {}
-            started = time.monotonic()
+            def _set_status(text: str) -> None:
+                athlete.training_status = text
 
-            try:
-                async for chunk in _stream_status_analysis(
+            def _finish(text: str) -> None:
+                athlete.training_status = text
+                athlete.training_status_status = "done"
+                athlete.training_status_date = today
+                athlete.training_status_updated_at = datetime.now(timezone.utc)
+
+            def _fail() -> None:
+                athlete.training_status_status = "error"
+                athlete.training_status_date = today
+                athlete.training_status_updated_at = datetime.now(timezone.utc)
+
+            await stream_into_db(
+                session,
+                lambda usage_out: _stream_status_analysis(
                     athlete, user_id,
                     recent_activities, current_metric,
                     active_plans, active_goals,
                     now, locale=resolved_locale, coaching_style=coaching_style,
                     usage_out=usage_out, distribution=distribution,
-                ):
-                    buffer.append(chunk)
-                    if time.monotonic() - last_flush >= 0.5:
-                        accumulated += "".join(buffer)
-                        buffer.clear()
-                        last_flush = time.monotonic()
-                        athlete.training_status = accumulated
-                        await session.commit()
-
-                accumulated += "".join(buffer)
-                athlete.training_status = accumulated
-                athlete.training_status_status = "done"
-                athlete.training_status_date = today
-                athlete.training_status_updated_at = datetime.now(timezone.utc)
-                await session.commit()
-                log.info("Training status analysis complete for athlete %s", athlete_id)
-
-            except Exception:
-                log.exception("Training status analysis failed for athlete %s", athlete_id)
-                athlete.training_status_status = "error"
-                athlete.training_status_date = today
-                athlete.training_status_updated_at = datetime.now(timezone.utc)
-                await session.commit()
-            finally:
-                # Record instance-paid token usage (issue #9). Fire-and-forget.
-                cfg = usage_out.get("cfg")
-                if cfg is not None:
-                    await record_llm_usage(
-                        user_id=user_id,
-                        feature="training_status",
-                        cfg=cfg,
-                        usage=usage_out.get("usage"),
-                        duration_ms=int((time.monotonic() - started) * 1000),
-                    )
-
-    except Exception:
-        # Session acquisition or early DB query failed — open a fresh session to
-        # clear the pending state so the user can retry.
-        log.exception(
-            "Training status background task failed outside inner try for athlete %s",
-            athlete_id,
-        )
-        try:
-            async with get_user_session_factory(user_id)() as recovery_session:
-                result = await recovery_session.execute(
-                    select(Athlete).where(Athlete.id == athlete_id)
-                )
-                athlete = result.scalar_one_or_none()
-                if athlete:
-                    athlete.training_status_status = "error"
-                    athlete.training_status_updated_at = datetime.now(timezone.utc)
-                    athlete.training_status_date = datetime.now(timezone.utc).date()
-                    await recovery_session.commit()
-        except Exception:
-            log.exception(
-                "Recovery session also failed for athlete %s — status may remain stuck",
-                athlete_id,
+                ),
+                on_progress=_set_status,
+                on_done=_finish,
+                on_error=_fail,
+                user_id=user_id,
+                feature="training_status",
+                label=f"Training status analysis for athlete {athlete_id}",
             )
