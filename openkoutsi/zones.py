@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from typing import Iterable, List, Sequence
 
+import numpy as np
+
 # The canonical zone models. Zone lists used to be arbitrary-length, which made
 # anything built on top of them (see ``intensity_distribution``) guess at what a
 # given zone meant. They are now fixed: seven power zones (Coggan) and five HR
@@ -43,11 +45,16 @@ def time_in_zones(samples: Iterable[float], zone_defs: Sequence[dict]) -> dict[s
     the last zone are clamped into the nearest zone by ``Zones.getZone``.
     """
     zones = Zones(*[(z["low"], z["high"]) for z in zone_defs])
+    # ``.astype`` truncates toward zero, matching the ``int(v)`` this used to do
+    # per sample before handing the value to ``getZone``.
+    values = np.fromiter(samples, dtype=float).astype(np.int64)
+    counts = np.bincount(zones.zoneIndices(values), minlength=len(zone_defs))
+
     out: dict[str, int] = {}
-    for v in samples:
-        i = zones.getZone(int(v))
-        name = zone_defs[i].get("name", f"Z{i + 1}")
-        out[name] = out.get(name, 0) + 1
+    for i, seconds in enumerate(counts):
+        if seconds:
+            name = zone_defs[i].get("name", f"Z{i + 1}")
+            out[name] = out.get(name, 0) + int(seconds)
     return out
 
 
@@ -64,23 +71,32 @@ class Zones:
 
     def zoneName(self, i) -> str:
         return f"Z{i+1}"
-    
+
+    def zoneIndices(self, values: np.ndarray) -> np.ndarray:
+        """Zone index for each of ``values`` — the whole classification rule.
+
+        ``validate`` guarantees the bounds are ordered and non-overlapping, so
+        the first zone whose upper bound reaches a value is the zone that owns
+        it. Values that fall short of that zone's lower bound are in a gap
+        (or below Z1) and belong to the nearest zone *below*, not the top one:
+        falling through to the last zone booked easy samples as maximal effort,
+        a 3 W gap between Z1 and Z2 filing recovery-pace riding as Z7. New gaps
+        are rejected on write, but snapshots are backfilled from zone lists
+        saved before that rule existed.
+
+        This is the only place the rule is expressed; ``getZone`` is the scalar
+        entry point onto it.
+        """
+        last = len(self.zones) - 1
+        lowers = np.array([lower for lower, _ in self.zones])
+        uppers = np.array([upper for _, upper in self.zones])
+
+        i = np.minimum(np.searchsorted(uppers, values, side="left"), last)
+        i = np.where(values < lowers[i], i - 1, i)
+        return np.clip(i, 0, last)
+
     def getZone(self, v: int) -> int:
-        for i, (lower, upper) in enumerate(self.zones):
-            if v >= lower and v <= upper:
-                return i
-        # Below Z1 → clamp to Z1.
-        if v < self.zones[0][0]:
-            return 0
-        # Landing in a gap between two zones means the nearest zone *below* it,
-        # not the top one. Falling through to the last zone booked easy samples
-        # as maximal effort: a 3 W gap between Z1 and Z2 filed recovery-pace
-        # riding as Z7. New gaps are rejected on write, but snapshots are
-        # backfilled from zone lists saved before that rule existed.
-        for i in range(len(self.zones) - 1, -1, -1):
-            if v > self.zones[i][1]:
-                return i
-        return len(self.zones) - 1
+        return int(self.zoneIndices(np.array([v]))[0])
 
 
     def validate(self) -> None:

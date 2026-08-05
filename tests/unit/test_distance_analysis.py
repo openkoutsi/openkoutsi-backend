@@ -66,6 +66,19 @@ class TestBestTimeForDistance:
         result = best_time_for_distance(stream, 1000)
         assert result == 200
 
+    def test_window_landing_on_the_threshold_is_not_lost_to_rounding(self):
+        # 900 slow samples put ~1e-13 of accumulated rounding into the prefix
+        # sum before the fast section starts, so the 200-sample window that
+        # covers exactly 1000 m sums to a hair under it in floating point.
+        # Without the match tolerance the answer silently becomes 201.
+        for lead in (300, 900, 3600, 7200):
+            stream = [0.1] * lead + [5.0] * 200
+            assert best_time_for_distance(stream, 1000) == 200, f"lead={lead}"
+
+    def test_accepts_a_numpy_array(self):
+        np = pytest.importorskip("numpy")
+        assert best_time_for_distance(np.full(300, 5.0), 1000) == 200
+
 
 class TestComputeDistanceBests:
     def test_empty_stream_returns_empty(self):
@@ -106,3 +119,9 @@ class TestComputeDistanceBests:
         stream = [6.0] * 10000
         for d, t in compute_distance_bests(stream).items():
             assert t > 0, f"distance {d} has non-positive time {t}"
+
+    def test_times_are_plain_ints(self):
+        # These are persisted straight into ActivityDistanceBest.time_s; a numpy
+        # scalar would only fail later, at the database boundary.
+        for t in compute_distance_bests([6.0] * 10000).values():
+            assert type(t) is int

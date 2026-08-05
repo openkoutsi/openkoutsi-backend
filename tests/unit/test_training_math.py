@@ -3,12 +3,17 @@ Unit tests for backend/app/services/training_math.py.
 
 These are pure-function tests — no DB or fixtures needed.
 """
+import json
 import math
+import warnings
 
+import numpy as np
 import pytest
 
 from openkoutsi.training_math import (
+    aerobic_decoupling,
     calculate_load,
+    compute_power_bests,
     compute_torque_stream,
     weighted_power,
 )
@@ -134,3 +139,39 @@ class TestComputeTorqueStream:
         load, if_ = calculate_load(3600, 320.0, None, 300, None)
         assert if_ > 1.0
         assert load > 100.0
+
+
+# ── the array boundary ──────────────────────────────────────────────────────
+#
+# The stream math is vectorised internally, but ``ActivityStream.data`` is a
+# JSON column and callers hand it around as ``list[float]``. A numpy value that
+# escapes one of these functions does not fail at the call site — it fails much
+# later, at the JSON encoder or the ORM. These tests pin the boundary.
+
+class TestArrayBoundary:
+    def test_torque_stream_is_json_serialisable(self):
+        stream = compute_torque_stream([200.0, 0.0, 150.0], [90.0, 0.0, 80.0])
+        assert type(stream) is list
+        assert all(type(v) is float for v in stream)
+        assert json.loads(json.dumps(stream)) == stream
+
+    def test_scalars_are_plain_floats(self):
+        assert type(weighted_power([250.0] * 60)) is float
+        power = [200.0 + (i % 60) for i in range(7200)]
+        hr = [140.0 + i / 3600 for i in range(7200)]
+        assert type(aerobic_decoupling(power, hr)) is float
+
+    def test_zero_cadence_does_not_warn(self):
+        # The divisor is masked, not the result: dividing by a raw zero cadence
+        # would emit a RuntimeWarning on every coasting sample.
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            assert compute_torque_stream([300.0, 250.0], [0.0, 90.0])[0] == 0.0
+
+    def test_functions_accept_numpy_arrays(self):
+        # Callers that already hold an array shouldn't have to convert back.
+        assert weighted_power(np.full(60, 250.0)) == pytest.approx(250.0)
+        assert compute_power_bests(np.full(60, 200.0))[60] == pytest.approx(200.0)
+        assert compute_torque_stream(np.array([200.0]), np.array([90.0])) == pytest.approx(
+            [200.0 * 60.0 / (2 * math.pi * 90.0)]
+        )
