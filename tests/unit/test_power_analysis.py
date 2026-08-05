@@ -106,6 +106,12 @@ class TestComputePowerBests:
         for d, v in bests.items():
             assert v > 0, f"duration {d}s has non-positive value {v}"
 
+    def test_values_are_plain_floats(self):
+        # Persisted straight into ActivityPowerBest.power_w — a numpy scalar
+        # would only blow up later, at the database or JSON boundary.
+        for v in compute_power_bests([200.0] * 120).values():
+            assert type(v) is float
+
     def test_longer_durations_not_higher_than_shorter(self):
         # For a constant stream, all durations yield the same value
         stream = [250.0] * 3600
@@ -205,6 +211,21 @@ class TestEstimateCp3:
         assert estimate_cp3({120: 300.0, 300: 260.0}) is None
         assert estimate_cp3({}) is None
 
+    def test_grid_is_fine_enough_to_pin_k(self):
+        # The k grid spans [-60, -0.5]. This tolerance is roughly two grid
+        # steps at the resolution that ships (7201 points); a coarser grid —
+        # the 121 points a naive port would use — lands 0.16 away and fails.
+        cp_true, wp_true, k_true = 250.0, 15000.0, -20.0
+        bests = {d: cp_true + wp_true / (d - k_true) for d in CP3_FIT_DURATIONS}
+        _cp, _wp, k, _pmax = estimate_cp3(bests)
+        assert k == pytest.approx(k_true, abs=0.02)
+
+    def test_rejects_bests_that_rise_with_duration(self):
+        # A data error, not an athlete: no grid point yields a positive CP and
+        # W' together, so the fit refuses rather than reporting a number. A
+        # bounded continuous optimiser would return an answer here instead.
+        assert estimate_cp3({d: 100.0 + d / 10.0 for d in CP3_FIT_DURATIONS}) is None
+
 
 class TestEstimateExponential:
     def test_recovers_known_params(self):
@@ -222,6 +243,19 @@ class TestEstimateExponential:
 
     def test_insufficient_points_returns_none(self):
         assert estimate_exponential({5: 900.0, 60: 400.0}) is None
+
+    def test_grid_is_fine_enough_to_pin_tau(self):
+        # As for CP3: tight enough that the shipped ln τ resolution is required.
+        cp_true, pmax_true, tau_true = 240.0, 1100.0, 90.0
+        bests = {
+            d: cp_true + (pmax_true - cp_true) * math.exp(-d / tau_true)
+            for d in EXP_FIT_DURATIONS
+        }
+        _cp, _pmax, tau = estimate_exponential(bests)
+        assert tau == pytest.approx(tau_true, abs=0.05)
+
+    def test_rejects_bests_that_rise_with_duration(self):
+        assert estimate_exponential({d: 100.0 + d / 10.0 for d in EXP_FIT_DURATIONS}) is None
 
 
 class TestEstimatePowerLaw:

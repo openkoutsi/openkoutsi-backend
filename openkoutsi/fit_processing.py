@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Sequence
+
+import numpy as np
 
 
 _FIT_SPORT_MAP = {
@@ -52,9 +54,11 @@ def build_auto_intervals(activity_start: datetime, duration_s: int, interval_s: 
     return intervals
 
 
-def mean_nonzero(values: list[float]) -> Optional[float]:
-    nonzero = [v for v in values if v > 0]
-    return sum(nonzero) / len(nonzero) if nonzero else None
+def mean_nonzero(values: Sequence[float]) -> Optional[float]:
+    """Mean of the positive samples, ignoring the zeros a paused sensor records."""
+    arr = np.asarray(values, dtype=float)
+    nonzero = arr[arr > 0]
+    return float(nonzero.mean()) if nonzero.size else None
 
 
 def compute_interval_stats(
@@ -74,6 +78,13 @@ def compute_interval_stats(
     if activity_start.tzinfo is not None:
         activity_start = activity_start.replace(tzinfo=None)
 
+    # Converted once for the whole activity rather than per interval per stream.
+    streams = {
+        key: np.asarray(data, dtype=float)
+        for key, data in stream_map.items()
+        if data is not None and len(data)
+    }
+
     result = []
     for i, iv in enumerate(raw):
         iv_start = iv["start_time"]
@@ -85,8 +96,8 @@ def compute_interval_stats(
         end = start_offset_s + duration_s
 
         def _slice_mean(key: str) -> Optional[float]:
-            data = stream_map.get(key, [])
-            if not data:
+            data = streams.get(key)
+            if data is None:
                 return None
             return mean_nonzero(data[start_offset_s:end])
 

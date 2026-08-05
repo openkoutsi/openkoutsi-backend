@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from datetime import datetime
 import json
 
-from .zones import Zones
+import numpy as np
 
 
 @dataclass
@@ -50,13 +50,18 @@ class Profile:
         self.altitude = altitude or []
         self.sport_type = sport_type
 
-        self.avgHeartRate = (sum(heartRate) / len(heartRate)) if heartRate else 0.0
-        self.avgSpeed = (sum(speed) / len(speed)) if speed else 0.0
-        self.avgPower = (sum(power) / len(power)) if power else 0.0
-        self.peakPower = max(power) if power else 0
-        self.peakHR = max(heartRate) if heartRate else 0
-        self.peakCadence = max(cadence) if cadence else 0
-        self.avgCadence = int(round(sum(cadence) / len(cadence))) if cadence else 0
+        hr = np.asarray(heartRate, dtype=float)
+        spd = np.asarray(speed, dtype=float)
+        pwr = np.asarray(power, dtype=float)
+        cad = np.asarray(cadence, dtype=float)
+
+        self.avgHeartRate = float(hr.mean()) if hr.size else 0.0
+        self.avgSpeed = float(spd.mean()) if spd.size else 0.0
+        self.avgPower = float(pwr.mean()) if pwr.size else 0.0
+        self.peakPower = float(pwr.max()) if pwr.size else 0
+        self.peakHR = float(hr.max()) if hr.size else 0
+        self.peakCadence = float(cad.max()) if cad.size else 0
+        self.avgCadence = int(round(float(cad.mean()))) if cad.size else 0
 
     @classmethod
     def from_json(cls, value: str | dict) -> "Profile":
@@ -92,37 +97,3 @@ class Profile:
                 "cadence": self.cadence,
             }
         )
-
-
-def zoneBreakdown(
-    workout: Profile, hrZones: Zones, powerZones: Zones
-) -> tuple[dict, dict]:
-    """Analyze a workout profile and summarize time spent in heart-rate and power zones.
-    This function iterates through the given workout profile and accumulates the
-    amount of time spent in each HR zone and each power zone.
-    Args:
-        workout: The workout profile to analyze.
-        hrZones: The configured heart-rate zones used for classification.
-        powerZones: The configured power zones used for classification.
-        Returns:
-            A tuple of two dictionaries:
-                - The first dictionary maps each heart-rate zone to the time spent in it.
-                - The second dictionary maps each power zone to the time spent in it.
-    """
-
-    sample_count = min(
-        workout.duration, len(workout.heartRate), len(workout.speed), len(workout.power)
-    )
-    timeInHrZones = {hrZones.zoneName(i): 0 for i in range(len(hrZones.zones))}
-    timeInPowerZones = {powerZones.zoneName(i): 0 for i in range(len(powerZones.zones))}
-
-    for i in range(sample_count):
-        hr_zone = hrZones.getZone(int(workout.heartRate[i]))
-        power_zone = powerZones.getZone(int(workout.power[i]))
-        hr_zone_name = hrZones.zoneName(hr_zone)
-        power_zone_name = powerZones.zoneName(power_zone)
-
-        timeInHrZones[hr_zone_name] = timeInHrZones.get(hr_zone_name, 0) + 1
-        timeInPowerZones[power_zone_name] = timeInPowerZones.get(power_zone_name, 0) + 1
-
-    return (timeInHrZones, timeInPowerZones)

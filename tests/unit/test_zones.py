@@ -97,3 +97,38 @@ class TestGapFallback:
     def test_contiguous_zones_are_unaffected(self):
         zones = Zones((0, 100), (100, 200), (200, 300))
         assert [zones.getZone(v) for v in (50, 150, 250)] == [0, 1, 2]
+
+
+class TestSingleClassificationRule:
+    """``time_in_zones`` and ``getZone`` must not drift apart.
+
+    The gap-clamping rule above has had a real bug in it before. It is now
+    expressed once, in ``Zones.zoneIndices``; ``getZone`` is the scalar entry
+    point onto it and ``time_in_zones`` the vectorised one. These tests fail if
+    either grows its own copy.
+    """
+
+    _LAYOUTS = {
+        "contiguous": [(0, 120), (121, 150), (151, 170), (171, 200), (201, 9999)],
+        "gapped": [(0, 150), (160, 210), (211, 300), (301, 330), (331, 9999)],
+        "shared_edges": [(0, 100), (100, 200), (200, 300), (300, 400), (400, 500)],
+        "single": [(0, 300)],
+    }
+
+    @pytest.mark.parametrize("layout", _LAYOUTS.values(), ids=list(_LAYOUTS))
+    def test_stream_counting_agrees_with_scalar_lookup(self, layout):
+        zones = Zones(*layout)
+        defs = [{"low": lo, "high": hi, "name": f"Z{i + 1}"} for i, (lo, hi) in enumerate(layout)]
+        samples = [float(v) for v in range(-20, 520)] + [9999.0, 20000.0]
+
+        expected: dict[str, int] = {}
+        for v in samples:
+            name = defs[zones.getZone(int(v))]["name"]
+            expected[name] = expected.get(name, 0) + 1
+
+        assert time_in_zones(samples, defs) == expected
+
+    def test_fractional_samples_truncate_like_the_scalar_path(self):
+        defs = [{"low": 0, "high": 120, "name": "Z1"}, {"low": 121, "high": 150, "name": "Z2"}]
+        # 120.9 truncates to 120 → still Z1, exactly as int(v) did per sample.
+        assert time_in_zones([120.9, 121.4], defs) == {"Z1": 1, "Z2": 1}

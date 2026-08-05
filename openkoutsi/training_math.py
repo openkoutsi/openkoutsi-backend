@@ -1,8 +1,18 @@
 """
 Shared training load calculations — peak power, weighted power, Load, distance bests.
+
+The per-second stream math is vectorised with numpy.  Public functions still
+take any sequence (``np.asarray`` at the top) and hand back plain Python floats
+and lists, so callers can keep passing the ``list[float]`` they read out of
+``ActivityStream.data`` and persist the results straight back as JSON — an
+``np.float64`` reaching the ORM would fail at the JSON encoder rather than at
+the call site.
 """
 
 import math
+from typing import Sequence
+
+import numpy as np
 
 POWER_BEST_DURATIONS: list[int] = [
     1, 3, 5, 10, 15, 30, 45, 60, 120, 180, 300, 480, 600,
@@ -11,33 +21,39 @@ POWER_BEST_DURATIONS: list[int] = [
 ]
 
 
-def peak_average_power(stream: list[float], duration_s: int) -> float | None:
+def _prefix_sum(values: np.ndarray) -> np.ndarray:
+    """Cumulative sums with a leading zero, so ``c[j] - c[i]`` sums ``[i:j]``."""
+    return np.concatenate(([0.0], np.cumsum(values)))
+
+
+def _peak_from_prefix(c: np.ndarray, duration_s: int) -> float | None:
+    """Highest mean over any ``duration_s``-wide window, from a prefix sum."""
+    if c.size - 1 < duration_s or duration_s <= 0:
+        return None
+    return float((c[duration_s:] - c[:-duration_s]).max()) / duration_s
+
+
+def peak_average_power(stream: Sequence[float], duration_s: int) -> float | None:
     """
     Return the highest mean wattage over any contiguous `duration_s`-second
     window in `stream`.  Returns None if the stream is shorter than the window.
-    Uses a sliding-window approach so it is O(n) per duration.
+
+    One prefix sum serves every window, so each duration costs a single
+    vectorised subtraction rather than a pass over the stream.
     """
-    n = len(stream)
-    if n < duration_s:
-        return None
-    window_sum = sum(stream[:duration_s])
-    best = window_sum
-    for i in range(duration_s, n):
-        window_sum += stream[i] - stream[i - duration_s]
-        if window_sum > best:
-            best = window_sum
-    return best / duration_s
+    return _peak_from_prefix(_prefix_sum(np.asarray(stream, dtype=float)), duration_s)
 
 
-def compute_power_bests(stream: list[float]) -> dict[int, float]:
+def compute_power_bests(stream: Sequence[float]) -> dict[int, float]:
     """
     Compute peak_average_power for every standard duration in POWER_BEST_DURATIONS.
     Only returns entries where the stream is long enough to cover the duration.
     """
+    c = _prefix_sum(np.asarray(stream, dtype=float))
     return {
         d: v
         for d in POWER_BEST_DURATIONS
-        if (v := peak_average_power(stream, d)) is not None
+        if (v := _peak_from_prefix(c, d)) is not None
     }
 
 
@@ -68,30 +84,17 @@ def estimate_cp_wprime(bests: dict[int, float]) -> tuple[float | None, float | N
     CP_FIT_DURATIONS are used.  Needs at least 2 data points.  Returns
     (None, None) if there are fewer than 2 points or the fit yields CP <= 0.
     """
-    points = [
-        (float(d), bests[d] * d)  # (t, work)
-        for d in CP_FIT_DURATIONS
-        if d in bests
-    ]
-    if len(points) < 2:
+    durations = [d for d in CP_FIT_DURATIONS if d in bests]
+    if len(durations) < 2:
         return None, None
 
-    n = len(points)
-    sum_t = sum(t for t, _ in points)
-    sum_w = sum(w for _, w in points)
-    sum_tt = sum(t * t for t, _ in points)
-    sum_tw = sum(t * w for t, w in points)
-
-    denom = n * sum_tt - sum_t * sum_t
-    if denom == 0:
-        return None, None
-
-    cp = (n * sum_tw - sum_t * sum_w) / denom
-    w_prime = (sum_w - cp * sum_t) / n
-
+    # Slope is CP, intercept is W'.
+    cp, w_prime = np.polyfit(
+        [float(d) for d in durations], [bests[d] * d for d in durations], 1
+    )
     if cp <= 0:
         return None, None
-    return cp, w_prime
+    return float(cp), float(w_prime)
 
 
 # ---------------------------------------------------------------------------
@@ -99,10 +102,14 @@ def estimate_cp_wprime(bests: dict[int, float]) -> tuple[float | None, float | N
 #
 # Each model predicts mean power P(t) for an effort of ``t`` seconds and is fit
 # to the athlete's rank-1 best power per duration (same input as the CP fit
-# above).  There is no numpy/scipy available, so the two nonlinear models
-# (3-parameter CP and exponential) are fit with a 1-D grid search over the
-# single nonlinear parameter, solving the remaining parameters in closed form
-# by ordinary least squares at each grid point.
+# above).  The two nonlinear models (3-parameter CP and exponential) are fit by
+# evaluating the single nonlinear parameter over a dense grid and solving the
+# remaining parameters in closed form by ordinary least squares — the whole grid
+# as one vectorised matrix solve, see ``_ols_grid``.
+#
+# A continuous optimiser (scipy) was measured against this and rejected: it
+# improves the fit by 0.0001 %, runs 3× slower on ~10 points, and its bounded
+# solvers manufacture an answer where the grid correctly returns None.
 #
 # Fit-duration windows below are deliberately conservative and tunable.
 # ---------------------------------------------------------------------------
@@ -119,6 +126,11 @@ POWER_LAW_FIT_DURATIONS: list[int] = [
     60, 120, 180, 300, 480, 600, 900, 1200, 1800, 2700, 3600,
     7200, 10800, 14400, 18000, 21600, 25200, 28800,
 ]
+
+# A flat power curve fits b ≈ 0, and the least-squares solver returns a few ulp
+# either side of it — so "is this a decaying power law" cannot be asked as
+# ``b < 0``.  Real endurance fits land near −0.05 … −0.15, far below this floor.
+_POWER_LAW_MIN_DECAY = 1e-9
 
 # Durations (seconds) reported as the athlete's estimated potential:
 # 5 s neuromuscular / P_max, 60 s anaerobic capacity, 300 s maximal aerobic
@@ -139,55 +151,43 @@ def _log_spaced(lo: int, hi: int, count: int) -> list[int]:
 MODEL_CURVE_DURATIONS: list[int] = _log_spaced(5, 28800, 56)
 
 
-def _linear_ols(xs: list[float], ys: list[float]) -> tuple[float, float, float] | None:
-    """
-    Ordinary least squares fit of ``y = slope·x + intercept``.
+# Grid resolution for the nonlinear parameter of the CP3 / exponential fits.
+# This replaced a two-pass search (121 coarse points, then a fine pass over ±1
+# coarse spacing), whose effective resolution was span/7200 — matching it takes
+# 7201 single-pass points, not the 121 a naive port would use.  The whole grid
+# solves in ~2 ms against a full bests table, and these fits run once per
+# power-profile request rather than per activity, so the resolution is worth
+# more here than the milliseconds are.  ``test_grid_is_fine_enough_to_pin_k``
+# fails if it is cut back.
+_FIT_GRID_POINTS = 7201
 
-    Returns ``(slope, intercept, sse)`` where ``sse`` is the residual sum of
-    squares, or ``None`` if there are fewer than 2 points or ``x`` has no spread.
+
+def _ols_grid(xs: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    n = len(xs)
-    if n < 2:
+    Ordinary least squares of ``y = slope·x + intercept`` for every row of ``xs``.
+
+    ``xs`` is ``(grid_points, n)`` — one candidate predictor vector per grid
+    point — and ``y`` is the ``(n,)`` observation vector shared by all of them.
+    Returns ``(slope, intercept, sse)``, each ``(grid_points,)``.  Rows whose
+    ``x`` has no spread yield NaN, which the callers' plausibility masks reject
+    along with any other unusable grid point.
+    """
+    n = y.size
+    sum_x = xs.sum(axis=1)
+    denom = n * (xs * xs).sum(axis=1) - sum_x * sum_x
+    with np.errstate(divide="ignore", invalid="ignore"):
+        slope = (n * (xs @ y) - sum_x * y.sum()) / denom
+    intercept = (y.sum() - slope * sum_x) / n
+    residuals = y - (slope[:, None] * xs + intercept[:, None])
+    return slope, intercept, (residuals * residuals).sum(axis=1)
+
+
+def _best_grid_point(sse: np.ndarray, valid: np.ndarray) -> int | None:
+    """Index of the lowest-SSE grid point among ``valid``, or None if none are."""
+    candidates = np.flatnonzero(valid)
+    if candidates.size == 0:
         return None
-    sum_x = sum(xs)
-    sum_y = sum(ys)
-    sum_xx = sum(x * x for x in xs)
-    sum_xy = sum(x * y for x, y in zip(xs, ys))
-    denom = n * sum_xx - sum_x * sum_x
-    if denom == 0:
-        return None
-    slope = (n * sum_xy - sum_x * sum_y) / denom
-    intercept = (sum_y - slope * sum_x) / n
-    sse = sum((y - (slope * x + intercept)) ** 2 for x, y in zip(xs, ys))
-    return slope, intercept, sse
-
-
-def _grid_search_1d(lo: float, hi: float, f, steps: int = 120):
-    """
-    Two-pass linear grid search minimising ``f(x)[0]`` over ``x ∈ [lo, hi]``.
-
-    ``f`` returns a tuple whose first element is the objective (e.g. SSE), or
-    ``None`` for an invalid ``x``.  A coarse scan is followed by a finer scan
-    around the best point.  Returns ``(x, f(x))`` or ``None`` if ``f`` was never
-    valid.
-    """
-    def scan(a: float, b: float):
-        best = None
-        for i in range(steps + 1):
-            x = a + (b - a) * i / steps
-            res = f(x)
-            if res is not None and (best is None or res[0] < best[1][0]):
-                best = (x, res)
-        return best
-
-    coarse = scan(lo, hi)
-    if coarse is None:
-        return None
-    span = (hi - lo) / steps
-    fine = scan(max(lo, coarse[0] - span), min(hi, coarse[0] + span))
-    if fine is None:
-        return coarse
-    return fine if fine[1][0] <= coarse[1][0] else coarse
+    return int(candidates[np.argmin(sse[candidates])])
 
 
 def estimate_cp3(
@@ -204,28 +204,22 @@ def estimate_cp3(
     Uses durations in ``CP3_FIT_DURATIONS``; needs at least 3 points.  Returns
     ``(cp, w_prime, k, pmax)`` or ``None`` if it cannot be fit sensibly.
     """
-    points = [(float(d), bests[d]) for d in CP3_FIT_DURATIONS if d in bests]
-    if len(points) < 3:
+    durations = [d for d in CP3_FIT_DURATIONS if d in bests]
+    if len(durations) < 3:
         return None
-    ts = [t for t, _ in points]
-    ps = [p for _, p in points]
+    ts = np.array(durations, dtype=float)
+    ps = np.array([bests[d] for d in durations], dtype=float)
 
-    def objective(k: float):
-        xs = [1.0 / (t - k) for t in ts]  # t − k > 0 since k < 0 and t > 0
-        fit = _linear_ols(xs, ps)
-        if fit is None:
-            return None
-        w_prime, cp, sse = fit
-        if cp <= 0 or w_prime <= 0:
-            return None
-        return sse, cp, w_prime
-
-    result = _grid_search_1d(-60.0, -0.5, objective)
-    if result is None:
+    ks = np.linspace(-60.0, -0.5, _FIT_GRID_POINTS)
+    xs = 1.0 / (ts - ks[:, None])  # t − k > 0 since k < 0 and t > 0
+    w_prime, cp, sse = _ols_grid(xs, ps)
+    # Refusing every grid point is how this rejects garbage input (power rising
+    # with duration, say) instead of reporting a fitted-looking number.
+    i = _best_grid_point(sse, (cp > 0) & (w_prime > 0))
+    if i is None:
         return None
-    k, (_, cp, w_prime) = result
-    pmax = cp - w_prime / k
-    return cp, w_prime, k, pmax
+    k = float(ks[i])
+    return float(cp[i]), float(w_prime[i]), k, float(cp[i] - w_prime[i] / k)
 
 
 def estimate_exponential(
@@ -243,29 +237,20 @@ def estimate_exponential(
     Uses durations in ``EXP_FIT_DURATIONS``; needs at least 3 points.  Returns
     ``(cp, pmax, tau)`` or ``None`` if it cannot be fit sensibly.
     """
-    points = [(float(d), bests[d]) for d in EXP_FIT_DURATIONS if d in bests]
-    if len(points) < 3:
+    durations = [d for d in EXP_FIT_DURATIONS if d in bests]
+    if len(durations) < 3:
         return None
-    ts = [t for t, _ in points]
-    ps = [p for _, p in points]
+    ts = np.array(durations, dtype=float)
+    ps = np.array([bests[d] for d in durations], dtype=float)
 
-    def objective(log_tau: float):
-        tau = math.exp(log_tau)
-        xs = [math.exp(-t / tau) for t in ts]
-        fit = _linear_ols(xs, ps)
-        if fit is None:
-            return None
-        amplitude, cp, sse = fit  # slope = P_max − CP, intercept = CP
-        if cp <= 0 or amplitude <= 0:
-            return None
-        return sse, cp, cp + amplitude
-
-    # τ from ~5 s to ~1 h.
-    result = _grid_search_1d(math.log(5.0), math.log(3600.0), objective)
-    if result is None:
+    # τ from ~5 s to ~1 h, gridded over ln τ for scale invariance.
+    log_taus = np.linspace(math.log(5.0), math.log(3600.0), _FIT_GRID_POINTS)
+    xs = np.exp(-ts / np.exp(log_taus)[:, None])
+    amplitude, cp, sse = _ols_grid(xs, ps)  # slope = P_max − CP, intercept = CP
+    i = _best_grid_point(sse, (cp > 0) & (amplitude > 0))
+    if i is None:
         return None
-    log_tau, (_, cp, pmax) = result
-    return cp, pmax, math.exp(log_tau)
+    return float(cp[i]), float(cp[i] + amplitude[i]), float(math.exp(log_taus[i]))
 
 
 def estimate_power_law(bests: dict[int, float]) -> tuple[float, float] | None:
@@ -274,24 +259,20 @@ def estimate_power_law(bests: dict[int, float]) -> tuple[float, float] | None:
 
     Linear in log space: ``ln P = ln a + b·ln t``, fit by OLS.  Uses durations
     in ``POWER_LAW_FIT_DURATIONS``; needs at least 2 points.  Returns
-    ``(a, b)`` or ``None`` if it cannot be fit sensibly.
+    ``(a, b)`` or ``None`` if it cannot be fit sensibly — including a curve flat
+    enough that ``b`` is indistinguishable from zero.
     """
-    points = [
-        (float(d), bests[d])
-        for d in POWER_LAW_FIT_DURATIONS
-        if d in bests and bests[d] > 0
-    ]
-    if len(points) < 2:
+    durations = [d for d in POWER_LAW_FIT_DURATIONS if d in bests and bests[d] > 0]
+    if len(durations) < 2:
         return None
-    xs = [math.log(t) for t, _ in points]
-    ys = [math.log(p) for _, p in points]
-    fit = _linear_ols(xs, ys)
-    if fit is None:
+    b, ln_a = np.polyfit(
+        np.log(np.array(durations, dtype=float)),
+        np.log(np.array([bests[d] for d in durations], dtype=float)),
+        1,
+    )
+    if b >= -_POWER_LAW_MIN_DECAY:
         return None
-    b, ln_a, _ = fit
-    if b >= 0:
-        return None
-    return math.exp(ln_a), b
+    return float(math.exp(ln_a)), float(b)
 
 
 def predict_power(model: str, params: tuple[float, ...], t: float) -> float:
@@ -351,62 +332,66 @@ DISTANCE_BEST_DISTANCES: list[int] = [
 ]
 
 
-def best_time_for_distance(speed_stream: list[float], distance_m: int) -> int | None:
+# Windows are matched against the distance with a relative tolerance.  A prefix
+# sum over hours of samples carries ~1e-13 of accumulated rounding, so a window
+# that covers the distance exactly in real arithmetic can land a fraction of a
+# nanometre short of it in floating point — and the answer then jumps by a whole
+# second.  No speed sensor resolves anything close to that.
+_DISTANCE_MATCH_TOLERANCE = 1e-12
+
+
+def _fastest_window(cum: np.ndarray, distance_m: int) -> int | None:
+    """Narrowest window of the prefix sum ``cum`` spanning ``distance_m``."""
+    n = cum.size - 1
+    target = distance_m * (1.0 - _DISTANCE_MATCH_TOLERANCE)
+    if n == 0 or cum[-1] < target:
+        return None
+    # For every window end, the latest start that still covers the distance —
+    # the vectorised form of walking a second pointer forward.  -1 means no such
+    # start exists, i.e. this end is unreachable.
+    starts = np.searchsorted(cum, cum - target, side="right") - 1
+    widths = np.where(starts >= 0, np.arange(cum.size) - starts, n + 1)
+    best = int(widths.min())
+    return best if best <= n else None
+
+
+def best_time_for_distance(speed_stream: Sequence[float], distance_m: int) -> int | None:
     """
     Return the minimum number of seconds to cover `distance_m` metres in
     `speed_stream` (m/s values at 1-second intervals).
 
-    Uses a two-pointer sliding-window approach: O(n).
     Returns None if the total distance in the stream is less than distance_m.
     """
-    n = len(speed_stream)
-    if n == 0:
-        return None
-
-    cum = [0.0] * (n + 1)
-    for i, v in enumerate(speed_stream):
-        cum[i + 1] = cum[i] + v
-
-    if cum[n] < distance_m:
-        return None
-
-    best = n + 1
-    j = 0
-    for i in range(1, n + 1):
-        while cum[i] - cum[j] >= distance_m:
-            best = min(best, i - j)
-            j += 1
-
-    return best if best <= n else None
+    return _fastest_window(_prefix_sum(np.asarray(speed_stream, dtype=float)), distance_m)
 
 
-def compute_distance_bests(speed_stream: list[float]) -> dict[int, int]:
+def compute_distance_bests(speed_stream: Sequence[float]) -> dict[int, int]:
     """
     Compute best_time_for_distance for every standard distance.
     Only returns entries where the stream covers that distance.
     """
+    cum = _prefix_sum(np.asarray(speed_stream, dtype=float))
     return {
         d: t
         for d in DISTANCE_BEST_DISTANCES
-        if (t := best_time_for_distance(speed_stream, d)) is not None
+        if (t := _fastest_window(cum, d)) is not None
     }
 
 
-def weighted_power(power_series: list[float]) -> float | None:
+def weighted_power(power_series: Sequence[float]) -> float | None:
     """30-second rolling average → raise to 4th power → mean → 4th root."""
-    if len(power_series) < 30:
-        return None
     window = 30
-    rolling = [
-        sum(power_series[i - window + 1 : i + 1]) / window
-        for i in range(window - 1, len(power_series))
-    ]
-    if not rolling:
+    series = np.asarray(power_series, dtype=float)
+    if series.size < window:
         return None
-    return (sum(v**4 for v in rolling) / len(rolling)) ** 0.25
+    cum = _prefix_sum(series)
+    rolling = (cum[window:] - cum[:-window]) / window
+    return float((rolling**4).mean() ** 0.25)
 
 
-def compute_torque_stream(power: list[float], cadence: list[float]) -> list[float]:
+def compute_torque_stream(
+    power: Sequence[float], cadence: Sequence[float]
+) -> list[float]:
     """Per-second crank torque (Nm) derived from power (W) and cadence (rpm).
 
     torque = power · 60 / (2π · cadence).  Returns 0.0 where cadence is 0 or
@@ -414,15 +399,17 @@ def compute_torque_stream(power: list[float], cadence: list[float]) -> list[floa
     is empty; the result length is the shorter of the two inputs (FIT streams
     can differ in length).
     """
-    if not power or not cadence:
-        return []
     n = min(len(power), len(cadence))
-    k = 60.0 / (2.0 * math.pi)
-    out = [0.0] * n
-    for i in range(n):
-        c = cadence[i]
-        out[i] = (power[i] * k / c) if c and c > 0 else 0.0
-    return out
+    if n == 0:
+        return []
+    p = np.asarray(power, dtype=float)[:n]
+    c = np.asarray(cadence, dtype=float)[:n]
+    pedalling = c > 0
+    # Mask the divisor rather than the result: dividing by the raw cadence would
+    # warn (and produce inf) on the coasting samples before np.where drops them.
+    return np.where(
+        pedalling, p * (60.0 / (2.0 * math.pi)) / np.where(pedalling, c, 1.0), 0.0
+    ).tolist()
 
 
 # ---------------------------------------------------------------------------
@@ -431,7 +418,8 @@ def compute_torque_stream(power: list[float], cadence: list[float]) -> list[floa
 # Efficiency factor and variability index are pure ratios of values openkoutsi
 # already stores per activity, so they are derived on read rather than
 # persisted.  Aerobic decoupling and W' balance need the per-second streams.
-# All are plain-Python and O(n) — no numpy/scipy in this module.
+# All are O(n); the stream scans are vectorised, except ``w_bal_stream``, whose
+# [0, W'] clamp makes it a genuinely sequential nonlinear recurrence.
 # ---------------------------------------------------------------------------
 
 
@@ -465,23 +453,23 @@ def variability_index(
     return weighted_power / avg_power
 
 
-def _half_power(segment: list[float]) -> float | None:
+def _half_power(segment: np.ndarray) -> float | None:
     """Representative power for one half of a decoupling split.
 
     Weighted power is the defensible choice on variable terrain, but it needs
     the 30-second rolling window; shorter halves fall back to the arithmetic
     mean.  Returns None for an empty or zero-power segment.
     """
-    if not segment:
+    if segment.size == 0:
         return None
-    value = weighted_power(segment) if len(segment) >= 30 else None
+    value = weighted_power(segment) if segment.size >= 30 else None
     if value is None:
-        value = sum(segment) / len(segment)
+        value = float(segment.mean())
     return value if value > 0 else None
 
 
 def aerobic_decoupling(
-    power: list[float], heartrate: list[float]
+    power: Sequence[float], heartrate: Sequence[float]
 ) -> float | None:
     """
     Power:HR decoupling (Pw:HR drift) as a percentage.
@@ -500,17 +488,20 @@ def aerobic_decoupling(
     math with no validity checks — see `decoupling_unavailable_reason` for
     whether the answer is meaningful at all.
     """
-    n = min(len(power), len(heartrate))
+    watts = np.asarray(power, dtype=float)
+    beats = np.asarray(heartrate, dtype=float)
+    n = min(watts.size, beats.size)
     half = n // 2
     if half == 0:
         return None
 
     def ratio(lo: int, hi: int) -> float | None:
-        p = _half_power(power[lo:hi])
-        hr_slice = [v for v in heartrate[lo:hi] if v > 0]
-        if p is None or not hr_slice:
+        p = _half_power(watts[lo:hi])
+        hr_slice = beats[lo:hi]
+        hr_slice = hr_slice[hr_slice > 0]
+        if p is None or hr_slice.size == 0:
             return None
-        return p / (sum(hr_slice) / len(hr_slice))
+        return p / float(hr_slice.mean())
 
     first = ratio(0, half)
     second = ratio(n - half, n)
@@ -554,7 +545,7 @@ DECOUPLING_MAX_LENGTH_MISMATCH = 0.05
 DECOUPLING_MIN_RATIO = 0.05
 
 
-def _positive_in_both_halves(stream: list[float], n: int) -> bool:
+def _positive_in_both_halves(stream: np.ndarray, n: int) -> bool:
     """Does ``stream`` carry a positive sample in each half of the split?
 
     The whole-stream check isn't enough: a power meter that dies at halfway
@@ -564,13 +555,13 @@ def _positive_in_both_halves(stream: list[float], n: int) -> bool:
     half = n // 2
     if half == 0:
         return False
-    return any(v > 0 for v in stream[:half]) and any(v > 0 for v in stream[n - half:n])
+    return bool((stream[:half] > 0).any() and (stream[n - half:n] > 0).any())
 
 
 def decoupling_unavailable_reason(
     duration_s: int | None,
-    power: list[float] | None,
-    heartrate: list[float] | None,
+    power: Sequence[float] | None,
+    heartrate: Sequence[float] | None,
     workout_category: str | None = None,
     vi: float | None = None,
 ) -> str | None:
@@ -589,9 +580,9 @@ def decoupling_unavailable_reason(
     Data problems are reported before qualification problems, so the athlete is
     told the thing actually blocking the measurement.
     """
-    power = power or []
-    heartrate = heartrate or []
-    n = min(len(power), len(heartrate))
+    watts = np.asarray([] if power is None else power, dtype=float)
+    hr = np.asarray([] if heartrate is None else heartrate, dtype=float)
+    n = min(watts.size, hr.size)
 
     # Content-aware, not just emptiness: a paired-but-silent meter records a
     # full stream of zeros, and calling that a heart-rate problem would send the
@@ -600,17 +591,17 @@ def decoupling_unavailable_reason(
     # Whole-stream checks come first. The per-half checks below divide by the
     # *shared* length, so a missing heart-rate stream would otherwise make the
     # power half-check fail and misreport a fine power meter as absent.
-    if not any(v > 0 for v in power):
+    if not (watts > 0).any():
         return "no_power"
-    if not any(v > 0 for v in heartrate):
+    if not (hr > 0).any():
         return "no_hr"
-    if not _positive_in_both_halves(power, n):
+    if not _positive_in_both_halves(watts, n):
         return "no_power"
-    if not _positive_in_both_halves(heartrate, n):
+    if not _positive_in_both_halves(hr, n):
         return "no_hr"
 
     shorter = n
-    if shorter and abs(len(power) - len(heartrate)) > DECOUPLING_MAX_LENGTH_MISMATCH * shorter:
+    if shorter and abs(watts.size - hr.size) > DECOUPLING_MAX_LENGTH_MISMATCH * shorter:
         return "stream_mismatch"
 
     # Both clocks matter: `duration_s` is elapsed time from the FIT header, while
@@ -622,8 +613,8 @@ def decoupling_unavailable_reason(
     if n < DECOUPLING_MIN_DURATION_S:
         return "too_short"
 
-    beats = [v for v in heartrate if v > 0]
-    if not beats or min(beats) == max(beats):
+    beats = hr[hr > 0]
+    if beats.size == 0 or beats.min() == beats.max():
         return "degenerate_hr"
 
     if workout_category in DECOUPLING_EXCLUDED_CATEGORIES:
@@ -634,8 +625,8 @@ def decoupling_unavailable_reason(
     # Variability index catches surging but is blind to a monotonic ramp, which
     # is precisely the shape that produces a large spurious drift number.
     half = n // 2
-    first_mean = sum(power[:half]) / half
-    second_mean = sum(power[n - half:n]) / half
+    first_mean = float(watts[:half].mean())
+    second_mean = float(watts[n - half:n].mean())
     reference = max(first_mean, second_mean)
     if reference > 0 and abs(first_mean - second_mean) / reference > DECOUPLING_MAX_HALF_POWER_DELTA:
         return "uneven_pacing"

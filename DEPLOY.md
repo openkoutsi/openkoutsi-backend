@@ -30,6 +30,11 @@ The deployment model is **build-in-CI, pull-on-VM**:
 | Wahoo bridge  | `ghcr.io/openkoutsi/openkoutsi-wahoo-bridge`   | this repo (`wahoo_bridge/`)         |
 | Web frontend  | `ghcr.io/openkoutsi/openkoutsi-web`            | [openkoutsi-web](https://github.com/openkoutsi/openkoutsi-web) |
 
+The backend image carries **numpy**, which the per-second stream math and the
+power–duration model fits are built on. It adds roughly 60 MB uncompressed to
+the runtime layer — no system packages or build tooling are needed for it, since
+`uv sync` installs a manylinux wheel.
+
 Each build pushes two tags: `latest` (the channel the VM tracks) and
 `sha-<shortsha>` (immutable, for rollback — pin a service to a prior `sha-` tag
 and `docker compose up -d` to restore it).
