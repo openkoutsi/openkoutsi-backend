@@ -39,6 +39,11 @@ log = logging.getLogger(__name__)
 # branches on a stable key, never on message text.
 LLM_SUBSCRIPTION_REQUIRED = "llm_subscription_required"
 
+# Denial reason when the caller presented a personal access token (issue #46).
+# LLM features are outside what a PAT may reach at all, so this is not an upsell
+# and the frontend must not treat it as one.
+PAT_LLM_FORBIDDEN = "llm_not_available_to_tokens"
+
 # The gated feature areas — also the ``llm_usage.feature`` column values.
 #
 # ``chat`` is no longer written: the general-purpose `POST /api/llm/chat` proxy
@@ -131,7 +136,17 @@ async def check_llm_access(
 
     See :class:`LlmAccess` for the modes. Admins are **not** implicitly exempt —
     they can grant themselves an entitlement like anyone else.
+
+    Personal access tokens (issue #46) are denied here whatever the gate says.
+    The endpoints that unconditionally trigger an LLM call are already closed to
+    tokens at the route level; this covers the handful that trigger one only
+    *sometimes* — ``POST /api/plans`` with ``use_llm``, and the auto-refresh
+    inside ``GET /api/athlete/training-status`` — without those routes losing
+    their ordinary, non-spending behaviour for a token.
     """
+    if getattr(ctx, "is_pat", False):
+        return LlmAccess(False, "none", PAT_LLM_FORBIDDEN)
+
     gated = bool(getattr(instance, "llm_requires_subscription", False))
     if not gated:
         return LlmAccess(True, "ungated")
@@ -164,8 +179,24 @@ async def auto_analysis_allowed(user_id: str, athlete: Any) -> bool:
         return access.allowed
 
 
-def subscription_required_error() -> HTTPException:
-    """The canonical 403 for a denied LLM request, with a structured ``detail``."""
+def subscription_required_error(access: LlmAccess | None = None) -> HTTPException:
+    """The canonical 403 for a denied LLM request, with a structured ``detail``.
+
+    Pass the :class:`LlmAccess` that denied the call so a personal access token
+    gets told what actually happened rather than being offered a subscription it
+    could not use anyway.
+    """
+    if access is not None and access.reason == PAT_LLM_FORBIDDEN:
+        return HTTPException(
+            status_code=403,
+            detail={
+                "code": PAT_LLM_FORBIDDEN,
+                "message": (
+                    "AI features are not available to personal access tokens. "
+                    "Sign in to use them."
+                ),
+            },
+        )
     return HTTPException(
         status_code=403,
         detail={

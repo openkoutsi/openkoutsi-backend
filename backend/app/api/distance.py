@@ -5,11 +5,17 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.deps import get_ctx_session_athlete
+from backend.app.core.scopes import pat_scopes
 from backend.app.models.user_orm import Activity, ActivityDistanceBest, Athlete
 from backend.app.schemas.distance import AllTimeDistanceBestsResponse, DistanceBestEntry
 from openkoutsi.training_math import DISTANCE_BEST_DISTANCES
 
-router = APIRouter(prefix="/metrics", tags=["metrics"])
+
+router = APIRouter(
+    prefix="/metrics",
+    tags=["metrics"],
+    dependencies=[pat_scopes(read="metrics:read")],
+)
 
 TOP_N = 3
 

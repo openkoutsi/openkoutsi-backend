@@ -12,12 +12,14 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.auth import UserContext, get_current_user
+from backend.app.core.scopes import pat_forbidden
 from backend.app.db.user_session import get_user_session_factory, init_user_db
 from backend.app.models.message_orm import Message
 from backend.app.schemas.messages import MessageResponse, UnreadCountResponse
 from backend.app.schemas.pagination import Page, PageParams, paginate_params
 
-router = APIRouter(prefix="/messages", tags=["messages"])
+
+router = APIRouter(prefix="/messages", tags=["messages"], dependencies=[pat_forbidden()])
 
 
 async def get_user_message_session(

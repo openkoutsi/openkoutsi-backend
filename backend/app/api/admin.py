@@ -7,6 +7,7 @@ and instance LLM settings.
 """
 import hashlib
 import json
+import logging
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -15,10 +16,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.core import audit
 from backend.app.core.auth import UserContext, get_current_user
 from backend.app.core.config import settings
 from backend.app.core.file_encryption import encrypt_instance_secret
 from backend.app.core.limiter import limiter
+from backend.app.core.scopes import pat_forbidden
 from backend.app.db.registry import get_registry_session
 from backend.app.db.usage import get_usage_session
 from backend.app.db.user_session import delete_user_db
@@ -28,6 +31,7 @@ from backend.app.models.registry_orm import (
     Invitation,
     LlmEntitlement,
     PasswordResetToken,
+    PersonalAccessToken,
     ProviderConnection,
     User,
 )
@@ -46,10 +50,17 @@ from backend.app.schemas.admin import (
     UserResponse,
     UserRolesUpdate,
 )
+from backend.app.schemas.tokens import AdminPersonalAccessTokenResponse
+from backend.app.services import notifications
+from backend.app.services import personal_access_tokens as pat
 from backend.app.services.llm_access import is_entitled
 from backend.app.schemas.pagination import Page, PageParams, paginate_params
 
-router = APIRouter(prefix="/admin", tags=["admin"])
+
+log = logging.getLogger(__name__)
+
+
+router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[pat_forbidden()])
 
 VALID_ROLES = {"administrator", "user"}
 
@@ -57,6 +68,15 @@ VALID_ROLES = {"administrator", "user"}
 async def require_admin(
     ctx: UserContext = Depends(get_current_user),
 ) -> UserContext:
+    # The router is already closed to personal access tokens, so this branch is
+    # belt-and-braces — but the rule it states is the important one: admin status
+    # must never widen the athlete-data surface a token can reach, whoever owns
+    # it. `UserContext.is_admin` is False for a token for the same reason.
+    if ctx.is_pat:
+        raise HTTPException(
+            status_code=403,
+            detail="The admin API is not available to personal access tokens.",
+        )
     if not ctx.is_admin:
         raise HTTPException(status_code=403, detail="Administrator role required")
     return ctx
@@ -421,6 +441,7 @@ def _settings_response(instance: InstanceSettings) -> InstanceSettingsResponse:
         llm_models=[_preset_out(e) for e in (instance.llm_models or []) if isinstance(e, dict)],
         llm_requires_subscription=bool(instance.llm_requires_subscription),
         allow_self_signup=bool(instance.allow_self_signup),
+        allow_personal_access_tokens=bool(instance.allow_personal_access_tokens),
     )
 
 
@@ -453,6 +474,8 @@ async def update_instance_settings(
         instance.llm_requires_subscription = bool(body.llm_requires_subscription)
     if body.allow_self_signup is not None:
         instance.allow_self_signup = bool(body.allow_self_signup)
+    if body.allow_personal_access_tokens is not None:
+        instance.allow_personal_access_tokens = bool(body.allow_personal_access_tokens)
 
     await session.commit()
     await session.refresh(instance)
@@ -616,3 +639,94 @@ async def llm_usage_summary(
         for row in rows
     ]
     return LlmUsageSummaryResponse(group_by=group_by, from_=from_, to=to, buckets=buckets)
+
+
+# ── Personal access tokens (instance admin, issue #46) ──────────────────────
+#
+# Narrow on purpose, and it follows from the audit log rather than being a
+# separate ambition: once rate limits and audit records are keyed by token id,
+# an admin investigating a runaway integration is staring at a token id with no
+# proportionate way to act on it — the instance switch takes down every user and
+# deleting the account is absurd.
+#
+# This is not a new capability. On a self-hosted instance the admin holds
+# ENCRYPTION_KEY and root on the box; they can already open registry.db and
+# delete the row. The endpoint moves that action out of a shell and into the
+# audit log, and tells the user it happened.
+
+
+@router.get("/users/{user_id}/tokens",
+            response_model=list[AdminPersonalAccessTokenResponse],
+            operation_id="listUserPersonalAccessTokens",
+            summary="List a user's personal access tokens (metadata only)")
+async def list_user_tokens(
+    user_id: str,
+    _: UserContext = Depends(require_admin),
+    session: AsyncSession = Depends(get_registry_session),
+):
+    """Metadata only — never the token name.
+
+    Names are user-written free text and can be revealing on their own
+    ("garmin-sync-for-my-cardiologist"). Revocation needs the id, not the label.
+    """
+    result = await session.execute(
+        select(PersonalAccessToken)
+        .where(PersonalAccessToken.user_id == user_id)
+        .order_by(PersonalAccessToken.created_at.desc())
+    )
+    return [
+        AdminPersonalAccessTokenResponse(
+            id=token.id,
+            scopes=pat.scopes_of(token),
+            status=pat.status_of(token),
+            expires_at=token.expires_at,
+            last_used_at=token.last_used_at,
+            revoked_at=token.revoked_at,
+            created_at=token.created_at,
+        )
+        for token in result.scalars().all()
+    ]
+
+
+@router.delete("/users/{user_id}/tokens/{token_id}", status_code=204,
+               operation_id="revokeUserPersonalAccessToken",
+               summary="Revoke a user's personal access token")
+async def revoke_user_token(
+    user_id: str,
+    token_id: str,
+    ctx: UserContext = Depends(require_admin),
+    session: AsyncSession = Depends(get_registry_session),
+):
+    """Revoke one token on a user's behalf, audited and notified.
+
+    There is deliberately no issue-on-behalf counterpart: an admin-minted token
+    would be indistinguishable from one the user created, which is precisely the
+    failure this feature exists to avoid. A power used *on* someone should be
+    visible to them, so every revocation lands in their inbox.
+    """
+    result = await session.execute(
+        select(PersonalAccessToken).where(
+            PersonalAccessToken.id == token_id,
+            PersonalAccessToken.user_id == user_id,
+        )
+    )
+    token = result.scalar_one_or_none()
+    if token is None:
+        raise HTTPException(status_code=404, detail="Token not found")
+    if token.revoked_at is not None:
+        return
+
+    token.revoked_at = datetime.now(timezone.utc)
+    await session.commit()
+
+    audit.pat_admin_revoke(
+        token_id=token.id, user_id=user_id, admin_user_id=ctx.user_id
+    )
+    try:
+        await notifications.notify_user(
+            user_id,
+            notifications.PAT_REVOKED_BY_ADMIN,
+            {"token_id": token.id, "name": token.name},
+        )
+    except Exception:
+        log.exception("Failed to notify user %s of admin token revocation", user_id)

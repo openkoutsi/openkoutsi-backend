@@ -115,6 +115,46 @@ class TestInviteUsed:
         assert rendered.body == "Ana R (ana) joined via an invite link."
 
 
+class TestPersonalAccessTokens:
+    """Issue #46 — a token that dies silently takes an integration with it."""
+
+    def test_the_seven_day_warning_counts_the_days(self):
+        rendered = render(
+            "pat_expiring",
+            {"name": "nightly-backup", "stage": "expiring_7d", "days_left": 7},
+        )
+        assert rendered.title == "Access token expires in 7 days"
+        assert "nightly-backup" in rendered.body
+        assert "in 7 days" in rendered.body
+
+    def test_the_one_day_warning_says_tomorrow(self):
+        rendered = render(
+            "pat_expiring",
+            {"name": "nightly-backup", "stage": "expiring_1d", "days_left": 1},
+        )
+        assert rendered.title == "Access token expires tomorrow"
+        assert "tomorrow" in rendered.body
+
+    def test_expiry_says_it_has_already_happened(self):
+        rendered = render("pat_expired", {"name": "nightly-backup"})
+        assert rendered.title == "Access token expired"
+        assert "no longer works" in rendered.body
+
+    def test_admin_revocation_says_who_did_it(self):
+        rendered = render("pat_revoked_by_admin", {"name": "nightly-backup"})
+        assert rendered.title == "Access token revoked by an administrator"
+        assert "administrator" in rendered.body
+
+    def test_a_nameless_token_still_reads_as_a_sentence(self):
+        for type_ in ("pat_expired", "pat_revoked_by_admin"):
+            rendered = render(type_, {})
+            assert rendered.body.startswith("A personal access token ")
+
+    def test_a_nameless_expiring_token_still_reads_as_a_sentence(self):
+        rendered = render("pat_expiring", {"days_left": 3})
+        assert rendered.body.startswith("A personal access token expires in 3 days")
+
+
 class TestFallback:
     @pytest.mark.parametrize("payload", [{}, None, {"anything": 1}])
     def test_an_unknown_type_is_still_readable(self, payload):

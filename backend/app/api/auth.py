@@ -22,6 +22,7 @@ from backend.app.core.auth import (
 )
 from backend.app.core.config import settings
 from backend.app.core.limiter import limiter
+from backend.app.core.scopes import pat_forbidden
 from backend.app.db.registry import get_registry_session
 from backend.app.db.user_session import delete_user_db, get_user_session_factory, init_user_db
 from backend.app.models.registry_orm import (
@@ -52,11 +53,13 @@ from backend.app.services.email import (
     send_password_reset_email,
     send_verification_email,
 )
+from backend.app.services.personal_access_tokens import revoke_all_for_user
 from backend.app.services.providers.registry import PROVIDERS
 
 log = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/auth", tags=["auth"])
+
+router = APIRouter(prefix="/auth", tags=["auth"], dependencies=[pat_forbidden()])
 
 _COOKIE_NAME = "refresh_token"
 _COOKIE_MAX_AGE = settings.refresh_token_expire_days * 24 * 60 * 60
@@ -328,6 +331,10 @@ async def reset_password(
 
     user.password_hash = hash_password(body.new_password)
     token_row.used_at = now
+    # Whatever prompted the reset — a suspected compromise, most of the time —
+    # applies to the credentials this account handed out just as much as to the
+    # password itself, so every live personal access token goes with it (#46).
+    await revoke_all_for_user(session, user.id, now)
     await session.commit()
 
 

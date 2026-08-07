@@ -40,6 +40,7 @@ from backend.app.schemas.activities import (
     RpeQueueResponse,
 )
 from backend.app.core.limiter import limiter
+from backend.app.core.scopes import pat_forbidden, pat_scopes
 from backend.app.services.fit_processor import process_fit_file, read_fit_start_time
 from backend.app.services.metrics_engine import recalculate_from
 from backend.app.services.pr_detection import detect_pr_badges
@@ -65,7 +66,12 @@ _VALID_LABELS = {"race", "commute"}
 
 log = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/activities", tags=["activities"])
+
+router = APIRouter(
+    prefix="/activities",
+    tags=["activities"],
+    dependencies=[pat_scopes(read="activities:read", write="activities:write")],
+)
 
 
 def _has_label_clause(label: str):
@@ -979,7 +985,7 @@ async def delete_activity(
         background_tasks.add_task(_bg_recalculate, athlete.id, start_date, ctx.user_id)
 
 
-@router.post("/{activity_id}/analyze", status_code=202)
+@router.post("/{activity_id}/analyze", status_code=202, dependencies=[pat_forbidden()])
 async def trigger_analysis(
     activity_id: str,
     background_tasks: BackgroundTasks,
@@ -1005,7 +1011,7 @@ async def trigger_analysis(
     ).scalar_one_or_none()
     access = await check_llm_access(ctx, athlete, instance, registry_session)
     if not access.allowed:
-        raise subscription_required_error()
+        raise subscription_required_error(access)
 
     if activity.analysis_status == "pending":
         return {"status": "pending"}

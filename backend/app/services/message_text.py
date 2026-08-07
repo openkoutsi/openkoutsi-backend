@@ -167,6 +167,50 @@ def _render_invite_used(data: dict) -> RenderedMessage:
     )
 
 
+def _token_name(data: dict) -> str:
+    name = str(data.get("name") or "").strip()
+    return f'"{name}"' if name else "A personal access token"
+
+
+def _render_pat_expiring(data: dict) -> RenderedMessage:
+    days = int(data.get("days_left") or 0)
+    when = "tomorrow" if days <= 1 else f"in {days} days"
+    subject = _token_name(data)
+    lead = subject if subject.startswith("A ") else f"Your personal access token {subject}"
+    return RenderedMessage(
+        title=f"Access token expires {when}",
+        body=(
+            f"{lead} expires {when}. Anything using it will stop working once it "
+            "does. Create a replacement in Settings → Personal access tokens and "
+            "update whatever holds the old one."
+        ),
+    )
+
+
+def _render_pat_expired(data: dict) -> RenderedMessage:
+    subject = _token_name(data)
+    lead = subject if subject.startswith("A ") else f"Your personal access token {subject}"
+    return RenderedMessage(
+        title="Access token expired",
+        body=(
+            f"{lead} has expired and no longer works. Create a replacement in "
+            "Settings → Personal access tokens if you still need it."
+        ),
+    )
+
+
+def _render_pat_revoked_by_admin(data: dict) -> RenderedMessage:
+    subject = _token_name(data)
+    lead = subject if subject.startswith("A ") else f"Your personal access token {subject}"
+    return RenderedMessage(
+        title="Access token revoked by an administrator",
+        body=(
+            f"{lead} was revoked by an administrator of this server and no longer "
+            "works. If you did not expect this, contact the administrator."
+        ),
+    )
+
+
 def render(type: str, data: dict, locale: str = DEFAULT_LOCALE) -> RenderedMessage:
     """Render an inbox message's title and body.
 
@@ -179,6 +223,12 @@ def render(type: str, data: dict, locale: str = DEFAULT_LOCALE) -> RenderedMessa
         return _render_achievement_unlocked(data)
     if type == "invite_used":
         return _render_invite_used(data)
+    if type == "pat_expiring":
+        return _render_pat_expiring(data)
+    if type == "pat_expired":
+        return _render_pat_expired(data)
+    if type == "pat_revoked_by_admin":
+        return _render_pat_revoked_by_admin(data)
     return RenderedMessage(
         title="Notification",
         body="You have a new notification.",

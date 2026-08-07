@@ -7,6 +7,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.deps import get_ctx_session_athlete
+from backend.app.core.scopes import pat_forbidden, pat_scopes
 from backend.app.db.registry import get_registry_session
 from backend.app.models.registry_orm import InstanceSettings
 from backend.app.models.user_orm import Athlete, Goal
@@ -20,7 +21,12 @@ from backend.app.schemas.goals import (
 from backend.app.schemas.pagination import Page, PageParams, paginate_params
 from backend.app.services.achievements import recompute_achievements_safe
 
-router = APIRouter(prefix="/goals", tags=["goals"])
+
+router = APIRouter(
+    prefix="/goals",
+    tags=["goals"],
+    dependencies=[pat_scopes(read="goals:read", write="goals:write")],
+)
 
 # Recover from a stuck "pending" guidance state: if the background task hasn't
 # completed within this window, reset to "error" so the user can retry.
@@ -146,7 +152,7 @@ async def get_goal_guidance(
     )
 
 
-@router.post("/{goal_id}/guidance", status_code=202,
+@router.post("/{goal_id}/guidance", status_code=202, dependencies=[pat_forbidden()],
              operation_id="triggerGoalGuidance", summary="Trigger AI guidance for a goal")
 async def trigger_goal_guidance(
     goal_id: str,
@@ -164,7 +170,7 @@ async def trigger_goal_guidance(
     ).scalar_one_or_none()
     access = await check_llm_access(ctx, athlete, instance, registry_session)
     if not access.allowed:
-        raise subscription_required_error()
+        raise subscription_required_error(access)
 
     if goal.guidance_status == "pending":
         return {"status": "pending"}

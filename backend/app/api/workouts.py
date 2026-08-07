@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.deps import get_ctx_session_athlete
+from backend.app.core.scopes import pat_scopes
 from backend.app.db.registry import get_registry_session
 from backend.app.models.registry_orm import ProviderConnection
 from backend.app.models.user_orm import Athlete, WahooWorkoutUpload, WorkoutDefinition
@@ -27,7 +28,12 @@ from openkoutsi.workout_formats.registry import EXPORTERS
 from openkoutsi.workout_formats.wahoo_plan import build_wahoo_plan
 from openkoutsi.workout_schema import WorkoutStepOrRepeat
 
-router = APIRouter(prefix="/workouts", tags=["workouts"])
+
+router = APIRouter(
+    prefix="/workouts",
+    tags=["workouts"],
+    dependencies=[pat_scopes(read="workouts:read", write="workouts:write")],
+)
 
 # Wahoo only displays plans attached to a workout scheduled today → +6 days.
 _WAHOO_VISIBILITY_DAYS = 6

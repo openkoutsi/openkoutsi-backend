@@ -156,6 +156,7 @@
           "auth"
         ],
         "summary": "Delete the current account",
+        "description": "\n\n**Not available to personal access tokens.**",
         "operationId": "deleteAccount",
         "requestBody": {
           "content": {
@@ -186,7 +187,10 @@
           {
             "OAuth2PasswordBearer": []
           }
-        ]
+        ],
+        "x-personal-access-token": {
+          "allowed": false
+        }
       }
     },
     "/api/auth/reset-password": {
@@ -418,6 +422,7 @@
           "admin"
         ],
         "summary": "List users",
+        "description": "\n\n**Not available to personal access tokens.**",
         "operationId": "listUsers",
         "security": [
           {
@@ -470,6 +475,9 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": false
         }
       }
     },
@@ -479,6 +487,7 @@
           "admin"
         ],
         "summary": "Update a user's roles",
+        "description": "\n\n**Not available to personal access tokens.**",
         "operationId": "updateUserRoles",
         "security": [
           {
@@ -527,6 +536,9 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": false
         }
       }
     },
@@ -536,6 +548,7 @@
           "admin"
         ],
         "summary": "Delete a user",
+        "description": "\n\n**Not available to personal access tokens.**",
         "operationId": "deleteUser",
         "security": [
           {
@@ -567,6 +580,9 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": false
         }
       }
     },
@@ -576,6 +592,7 @@
           "admin"
         ],
         "summary": "Generate a password-reset link for a user",
+        "description": "\n\n**Not available to personal access tokens.**",
         "operationId": "createUserPasswordResetLink",
         "security": [
           {
@@ -614,6 +631,9 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": false
         }
       }
     },
@@ -623,6 +643,7 @@
           "admin"
         ],
         "summary": "Create an invitation",
+        "description": "\n\n**Not available to personal access tokens.**",
         "operationId": "createInvitation",
         "security": [
           {
@@ -660,6 +681,9 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": false
         }
       },
       "get": {
@@ -667,6 +691,7 @@
           "admin"
         ],
         "summary": "List invitations",
+        "description": "\n\n**Not available to personal access tokens.**",
         "operationId": "listInvitations",
         "security": [
           {
@@ -719,6 +744,9 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": false
         }
       }
     },
@@ -728,6 +756,7 @@
           "admin"
         ],
         "summary": "Revoke an invitation",
+        "description": "\n\n**Not available to personal access tokens.**",
         "operationId": "revokeInvitation",
         "security": [
           {
@@ -759,6 +788,9 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": false
         }
       }
     },
@@ -768,6 +800,7 @@
           "admin"
         ],
         "summary": "Get instance settings",
+        "description": "\n\n**Not available to personal access tokens.**",
         "operationId": "getInstanceSettings",
         "responses": {
           "200": {
@@ -785,13 +818,17 @@
           {
             "OAuth2PasswordBearer": []
           }
-        ]
+        ],
+        "x-personal-access-token": {
+          "allowed": false
+        }
       },
       "patch": {
         "tags": [
           "admin"
         ],
         "summary": "Update instance settings",
+        "description": "\n\n**Not available to personal access tokens.**",
         "operationId": "updateInstanceSettings",
         "requestBody": {
           "content": {
@@ -829,7 +866,10 @@
           {
             "OAuth2PasswordBearer": []
           }
-        ]
+        ],
+        "x-personal-access-token": {
+          "allowed": false
+        }
       }
     },
     "/api/admin/users/{user_id}/llm-entitlement": {
@@ -838,7 +878,7 @@
           "admin"
         ],
         "summary": "Grant or revoke a user's LLM-access entitlement",
-        "description": "Upsert a user's manual LLM-access entitlement (Phase 1).\n\nIdempotent: one row per user. Records ``source=\"manual\"`` and the granting\nadmin. Passing ``status=\"revoked\"`` revokes access without deleting the row\n(keeping its audit trail).",
+        "description": "Upsert a user's manual LLM-access entitlement (Phase 1).\n\nIdempotent: one row per user. Records ``source=\"manual\"`` and the granting\nadmin. Passing ``status=\"revoked\"`` revokes access without deleting the row\n(keeping its audit trail).\n\n**Not available to personal access tokens.**",
         "operationId": "setUserLlmEntitlement",
         "security": [
           {
@@ -887,6 +927,9 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": false
         }
       }
     },
@@ -896,7 +939,7 @@
           "admin"
         ],
         "summary": "Aggregate instance-paid LLM usage",
-        "description": "Aggregate the dedicated usage DB (instance-paid calls only; issue #9).\n\n``group_by`` is one of ``user | provider | feature | day | week | month``.\nInput and output tokens are summed **separately** (never merged), plus a\nconvenience total and an ``unknown_usage_calls`` count. Combine ``user_id``\nwith ``group_by=month`` for \"tokens per user per month\" \u2014 the original\n\"average LLM cost per user\" question. Every row is instance-paid; BYOK calls\nare never recorded, so no filter is needed.",
+        "description": "Aggregate the dedicated usage DB (instance-paid calls only; issue #9).\n\n``group_by`` is one of ``user | provider | feature | day | week | month``.\nInput and output tokens are summed **separately** (never merged), plus a\nconvenience total and an ``unknown_usage_calls`` count. Combine ``user_id``\nwith ``group_by=month`` for \"tokens per user per month\" \u2014 the original\n\"average LLM cost per user\" question. Every row is instance-paid; BYOK calls\nare never recorded, so no filter is needed.\n\n**Not available to personal access tokens.**",
         "operationId": "getLlmUsageSummary",
         "security": [
           {
@@ -984,6 +1027,117 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": false
+        }
+      }
+    },
+    "/api/admin/users/{user_id}/tokens": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "List a user's personal access tokens (metadata only)",
+        "description": "Metadata only \u2014 never the token name.\n\nNames are user-written free text and can be revealing on their own\n(\"garmin-sync-for-my-cardiologist\"). Revocation needs the id, not the label.\n\n**Not available to personal access tokens.**",
+        "operationId": "listUserPersonalAccessTokens",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "User Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AdminPersonalAccessTokenResponse"
+                  },
+                  "title": "Response Listuserpersonalaccesstokens"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-personal-access-token": {
+          "allowed": false
+        }
+      }
+    },
+    "/api/admin/users/{user_id}/tokens/{token_id}": {
+      "delete": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Revoke a user's personal access token",
+        "description": "Revoke one token on a user's behalf, audited and notified.\n\nThere is deliberately no issue-on-behalf counterpart: an admin-minted token\nwould be indistinguishable from one the user created, which is precisely the\nfailure this feature exists to avoid. A power used *on* someone should be\nvisible to them, so every revocation lands in their inbox.\n\n**Not available to personal access tokens.**",
+        "operationId": "revokeUserPersonalAccessToken",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "User Id"
+            }
+          },
+          {
+            "name": "token_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Token Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-personal-access-token": {
+          "allowed": false
         }
       }
     },
@@ -993,6 +1147,7 @@
           "athlete"
         ],
         "summary": "Get current athlete",
+        "description": "\n\n**Personal access token scope:** `athlete:read`",
         "operationId": "getAthlete",
         "responses": {
           "200": {
@@ -1010,13 +1165,18 @@
           {
             "OAuth2PasswordBearer": []
           }
-        ]
+        ],
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "athlete:read"
+        }
       },
       "patch": {
         "tags": [
           "athlete"
         ],
         "summary": "Update current athlete",
+        "description": "\n\n**Personal access token scope:** `athlete:write`",
         "operationId": "updateAthlete",
         "requestBody": {
           "content": {
@@ -1054,7 +1214,11 @@
           {
             "OAuth2PasswordBearer": []
           }
-        ]
+        ],
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "athlete:write"
+        }
       }
     },
     "/api/athlete/avatar": {
@@ -1063,6 +1227,7 @@
           "athlete"
         ],
         "summary": "Upload/replace own avatar",
+        "description": "\n\n**Personal access token scope:** `athlete:write`",
         "operationId": "setAvatar",
         "requestBody": {
           "content": {
@@ -1100,13 +1265,18 @@
           {
             "OAuth2PasswordBearer": []
           }
-        ]
+        ],
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "athlete:write"
+        }
       },
       "delete": {
         "tags": [
           "athlete"
         ],
         "summary": "Delete own avatar",
+        "description": "\n\n**Personal access token scope:** `athlete:write`",
         "operationId": "deleteAvatar",
         "responses": {
           "200": {
@@ -1124,7 +1294,11 @@
           {
             "OAuth2PasswordBearer": []
           }
-        ]
+        ],
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "athlete:write"
+        }
       }
     },
     "/api/athlete/{athlete_id}/avatar": {
@@ -1133,6 +1307,7 @@
           "athlete"
         ],
         "summary": "Get an athlete's avatar (auth)",
+        "description": "\n\n**Personal access token scope:** `athlete:read`",
         "operationId": "getAthleteAvatar",
         "security": [
           {
@@ -1169,6 +1344,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "athlete:read"
         }
       }
     },
@@ -1178,6 +1357,7 @@
           "athlete"
         ],
         "summary": "Get training-status feedback",
+        "description": "\n\n**Personal access token scope:** `athlete:read`",
         "operationId": "getTrainingStatus",
         "responses": {
           "200": {
@@ -1195,13 +1375,18 @@
           {
             "OAuth2PasswordBearer": []
           }
-        ]
+        ],
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "athlete:read"
+        }
       },
       "post": {
         "tags": [
           "athlete"
         ],
         "summary": "Trigger training-status analysis",
+        "description": "\n\n**Not available to personal access tokens.**",
         "operationId": "triggerTrainingStatus",
         "requestBody": {
           "content": {
@@ -1237,7 +1422,10 @@
           {
             "OAuth2PasswordBearer": []
           }
-        ]
+        ],
+        "x-personal-access-token": {
+          "allowed": false
+        }
       }
     },
     "/api/athlete/weight-log": {
@@ -1246,6 +1434,7 @@
           "athlete"
         ],
         "summary": "Get the athlete's weight log",
+        "description": "\n\n**Personal access token scope:** `athlete:read`",
         "operationId": "getWeightLog",
         "responses": {
           "200": {
@@ -1261,7 +1450,11 @@
           {
             "OAuth2PasswordBearer": []
           }
-        ]
+        ],
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "athlete:read"
+        }
       }
     },
     "/api/athlete/export": {
@@ -1270,6 +1463,7 @@
           "athlete"
         ],
         "summary": "Export all athlete data as a zip",
+        "description": "\n\n**Personal access token scope:** `athlete:export`",
         "operationId": "exportAthlete",
         "responses": {
           "200": {
@@ -1285,7 +1479,11 @@
           {
             "OAuth2PasswordBearer": []
           }
-        ]
+        ],
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "athlete:export"
+        }
       }
     },
     "/api/activities/upload": {
@@ -1294,6 +1492,7 @@
           "activities"
         ],
         "summary": "Upload Activity",
+        "description": "\n\n**Personal access token scope:** `activities:write`",
         "operationId": "upload_activity_api_activities_upload_post",
         "requestBody": {
           "content": {
@@ -1331,7 +1530,11 @@
           {
             "OAuth2PasswordBearer": []
           }
-        ]
+        ],
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "activities:write"
+        }
       }
     },
     "/api/activities": {
@@ -1340,6 +1543,7 @@
           "activities"
         ],
         "summary": "Create a manual activity",
+        "description": "\n\n**Personal access token scope:** `activities:write`",
         "operationId": "createActivity",
         "security": [
           {
@@ -1377,6 +1581,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "activities:write"
         }
       },
       "get": {
@@ -1384,6 +1592,7 @@
           "activities"
         ],
         "summary": "List activities",
+        "description": "\n\n**Personal access token scope:** `activities:read`",
         "operationId": "listActivities",
         "security": [
           {
@@ -1704,6 +1913,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "activities:read"
         }
       }
     },
@@ -1713,7 +1926,7 @@
           "activities"
         ],
         "summary": "Pending RPE-rating queue",
-        "description": "Qualifying cycling activities still awaiting an RPE rating (issue #28).\n\nReturns activities that are cycling sports, ingested after the athlete's\n``rpe_head`` cursor, and still lack an ``rpe`` \u2014 oldest-first (by ingestion\n``created_at``). ``commute``-labelled rides are excluded so easy spins don't\nnag.\n\nThe cursor is stored in ``app_settings.rpe_head``. On the very first call\n(cursor unset) it is pinned to the athlete's most recent activity so the\nbacklog of their entire history is *not* surfaced; only rides ingested from\nthen on are prompted. Advancing the cursor is done by the caller via\n``PATCH /api/athlete`` (set ``app_settings.rpe_head`` to the handled\nactivity's ``created_at``).",
+        "description": "Qualifying cycling activities still awaiting an RPE rating (issue #28).\n\nReturns activities that are cycling sports, ingested after the athlete's\n``rpe_head`` cursor, and still lack an ``rpe`` \u2014 oldest-first (by ingestion\n``created_at``). ``commute``-labelled rides are excluded so easy spins don't\nnag.\n\nThe cursor is stored in ``app_settings.rpe_head``. On the very first call\n(cursor unset) it is pinned to the athlete's most recent activity so the\nbacklog of their entire history is *not* surfaced; only rides ingested from\nthen on are prompted. Advancing the cursor is done by the caller via\n``PATCH /api/athlete`` (set ``app_settings.rpe_head`` to the handled\nactivity's ``created_at``).\n\n**Personal access token scope:** `activities:read`",
         "operationId": "getRpeQueue",
         "responses": {
           "200": {
@@ -1731,7 +1944,11 @@
           {
             "OAuth2PasswordBearer": []
           }
-        ]
+        ],
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "activities:read"
+        }
       }
     },
     "/api/activities/{activity_id}": {
@@ -1740,6 +1957,7 @@
           "activities"
         ],
         "summary": "Get Activity",
+        "description": "\n\n**Personal access token scope:** `activities:read`",
         "operationId": "get_activity_api_activities__activity_id__get",
         "security": [
           {
@@ -1778,6 +1996,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "activities:read"
         }
       },
       "patch": {
@@ -1785,6 +2007,7 @@
           "activities"
         ],
         "summary": "Update Activity",
+        "description": "\n\n**Personal access token scope:** `activities:write`",
         "operationId": "update_activity_api_activities__activity_id__patch",
         "security": [
           {
@@ -1833,6 +2056,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "activities:write"
         }
       },
       "delete": {
@@ -1840,6 +2067,7 @@
           "activities"
         ],
         "summary": "Delete Activity",
+        "description": "\n\n**Personal access token scope:** `activities:write`",
         "operationId": "delete_activity_api_activities__activity_id__delete",
         "security": [
           {
@@ -1871,6 +2099,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "activities:write"
         }
       }
     },
@@ -1880,6 +2112,7 @@
           "activities"
         ],
         "summary": "Get Activity Streams",
+        "description": "\n\n**Personal access token scope:** `activities:read`",
         "operationId": "get_activity_streams_api_activities__activity_id__streams_get",
         "security": [
           {
@@ -1918,6 +2151,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "activities:read"
         }
       }
     },
@@ -1927,6 +2164,7 @@
           "activities"
         ],
         "summary": "Download Fit File",
+        "description": "\n\n**Personal access token scope:** `activities:read`",
         "operationId": "download_fit_file_api_activities__activity_id__fit_get",
         "security": [
           {
@@ -1963,6 +2201,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "activities:read"
         }
       }
     },
@@ -1972,7 +2214,7 @@
           "activities"
         ],
         "summary": "Reprocess Activity",
-        "description": "Recompute Weighted Power/Load/Intensity/bests/intervals from stored streams using current athlete settings.",
+        "description": "Recompute Weighted Power/Load/Intensity/bests/intervals from stored streams using current athlete settings.\n\n**Personal access token scope:** `activities:write`",
         "operationId": "reprocess_activity_api_activities__activity_id__reprocess_post",
         "security": [
           {
@@ -2011,6 +2253,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "activities:write"
         }
       }
     },
@@ -2020,6 +2266,7 @@
           "activities"
         ],
         "summary": "Trigger Analysis",
+        "description": "\n\n**Not available to personal access tokens.**",
         "operationId": "trigger_analysis_api_activities__activity_id__analyze_post",
         "security": [
           {
@@ -2066,6 +2313,9 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": false
         }
       }
     },
@@ -2075,6 +2325,7 @@
           "activities"
         ],
         "summary": "Save Frontend Analysis",
+        "description": "\n\n**Personal access token scope:** `activities:write`",
         "operationId": "save_frontend_analysis_api_activities__activity_id__analysis_patch",
         "security": [
           {
@@ -2123,6 +2374,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "activities:write"
         }
       }
     },
@@ -2132,7 +2387,7 @@
           "integrations"
         ],
         "summary": "Available",
-        "description": "Return the list of provider names that have credentials configured on the server.",
+        "description": "Return the list of provider names that have credentials configured on the server.\n\n**Personal access token scope:** `integrations:read`",
         "operationId": "available_api_integrations_available_get",
         "responses": {
           "200": {
@@ -2148,7 +2403,11 @@
           {
             "OAuth2PasswordBearer": []
           }
-        ]
+        ],
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "integrations:read"
+        }
       }
     },
     "/api/integrations/status": {
@@ -2157,7 +2416,7 @@
           "integrations"
         ],
         "summary": "Status",
-        "description": "Return the list of provider names the current user has connected.",
+        "description": "Return the list of provider names the current user has connected.\n\n**Personal access token scope:** `integrations:read`",
         "operationId": "status_api_integrations_status_get",
         "responses": {
           "200": {
@@ -2173,7 +2432,11 @@
           {
             "OAuth2PasswordBearer": []
           }
-        ]
+        ],
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "integrations:read"
+        }
       }
     },
     "/api/integrations/{provider}/connect": {
@@ -2182,7 +2445,7 @@
           "integrations"
         ],
         "summary": "Connect",
-        "description": "Return the OAuth authorization URL for the given provider.",
+        "description": "Return the OAuth authorization URL for the given provider.\n\n**Personal access token scope:** `integrations:read`",
         "operationId": "connect_api_integrations__provider__connect_get",
         "security": [
           {
@@ -2219,6 +2482,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "integrations:read"
         }
       }
     },
@@ -2287,7 +2554,7 @@
           "integrations"
         ],
         "summary": "Sync",
-        "description": "Trigger a full history import from the given provider in the background.\n\nImports the full history into the user's own DB.",
+        "description": "Trigger a full history import from the given provider in the background.\n\nImports the full history into the user's own DB.\n\n**Personal access token scope:** `integrations:write`",
         "operationId": "sync_api_integrations__provider__sync_post",
         "security": [
           {
@@ -2324,6 +2591,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "integrations:write"
         }
       }
     },
@@ -2333,7 +2604,7 @@
           "integrations"
         ],
         "summary": "Sync Zones",
-        "description": "Fetch training zones (HR, power) and FTP from the provider and save to the athlete profile.",
+        "description": "Fetch training zones (HR, power) and FTP from the provider and save to the athlete profile.\n\n**Personal access token scope:** `integrations:write`",
         "operationId": "sync_zones_api_integrations__provider__sync_zones_post",
         "security": [
           {
@@ -2370,6 +2641,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "integrations:write"
         }
       }
     },
@@ -2379,7 +2654,7 @@
           "integrations"
         ],
         "summary": "Disconnect",
-        "description": "Revoke the provider token and remove the stored connection.\n\nPass ``delete_data=true`` (as a query parameter or in the request body) to\nalso permanently delete every activity imported from this provider from the\nuser's data. If that deletion fails, the connection is left in place and the\nrequest fails with ``500`` \u2014 the caller is never told the data is gone unless\nit actually was.",
+        "description": "Revoke the provider token and remove the stored connection.\n\nPass ``delete_data=true`` (as a query parameter or in the request body) to\nalso permanently delete every activity imported from this provider from the\nuser's data. If that deletion fails, the connection is left in place and the\nrequest fails with ``500`` \u2014 the caller is never told the data is gone unless\nit actually was.\n\n**Personal access token scope:** `integrations:write`",
         "operationId": "disconnect_api_integrations__provider__disconnect_delete",
         "security": [
           {
@@ -2440,6 +2715,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "integrations:write"
         }
       }
     },
@@ -2449,6 +2728,7 @@
           "metrics"
         ],
         "summary": "Get Fitness",
+        "description": "\n\n**Personal access token scope:** `metrics:read`",
         "operationId": "get_fitness_api_metrics_fitness_get",
         "security": [
           {
@@ -2534,6 +2814,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "metrics:read"
         }
       }
     },
@@ -2543,7 +2827,7 @@
           "metrics"
         ],
         "summary": "Get Activity Summary",
-        "description": "Totals (count, active time, distance) for cycling activities in a period.",
+        "description": "Totals (count, active time, distance) for cycling activities in a period.\n\n**Personal access token scope:** `metrics:read`",
         "operationId": "get_activity_summary_api_metrics_activity_summary_get",
         "security": [
           {
@@ -2625,6 +2909,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "metrics:read"
         }
       }
     },
@@ -2634,6 +2922,7 @@
           "metrics"
         ],
         "summary": "Get Fitness Current",
+        "description": "\n\n**Personal access token scope:** `metrics:read`",
         "operationId": "get_fitness_current_api_metrics_fitness_current_get",
         "responses": {
           "200": {
@@ -2651,7 +2940,11 @@
           {
             "OAuth2PasswordBearer": []
           }
-        ]
+        ],
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "metrics:read"
+        }
       }
     },
     "/api/metrics/fitness/forecast": {
@@ -2660,7 +2953,7 @@
           "metrics"
         ],
         "summary": "Get Fitness Forecast",
-        "description": "Project Fitness/Fatigue/Form forward from the athlete's planned workouts.\n\nCovers ``[today + 1, today + days]``. The projection itself is never stored,\nso it always reflects the plans as they stand right now. Kept separate from\n``GET /metrics/fitness`` so the historical contract is untouched and the\ncaller decides whether to concatenate the two series.\n\nMetrics are caught up first, exactly as the dashboard does via\n``POST /metrics/catch-up``, so the projection is always seeded from today\nrather than from whatever the last stored day happened to be. Without it the\nanswer would depend on whether the client had hit catch-up beforehand.",
+        "description": "Project Fitness/Fatigue/Form forward from the athlete's planned workouts.\n\nCovers ``[today + 1, today + days]``. The projection itself is never stored,\nso it always reflects the plans as they stand right now. Kept separate from\n``GET /metrics/fitness`` so the historical contract is untouched and the\ncaller decides whether to concatenate the two series.\n\nMetrics are caught up first, exactly as the dashboard does via\n``POST /metrics/catch-up``, so the projection is always seeded from today\nrather than from whatever the last stored day happened to be. Without it the\nanswer would depend on whether the client had hit catch-up beforehand.\n\n**Personal access token scope:** `metrics:read`",
         "operationId": "get_fitness_forecast_api_metrics_fitness_forecast_get",
         "security": [
           {
@@ -2706,6 +2999,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "metrics:read"
         }
       }
     },
@@ -2715,7 +3012,7 @@
           "metrics"
         ],
         "summary": "Aerobic efficiency trend",
-        "description": "Aerobic efficiency (weighted power per heartbeat) for each steady endurance\nride, oldest first \u2014 the trend that shows aerobic progress a rising Fitness\nnumber alone doesn't.\n\nRestricted to cycling rides of at least 20 minutes that have both weighted\npower and average heart rate, and that were steady enough for the number to\nmean something: the same \"not an interval session\" test the decoupling gate\nuses (variability index at or below 1.10, and not categorized as VO2max,\nanaerobic or sprint work). Each ride's decoupling figure rides along when it\nhas one.\n\nComputed on read from stored columns \u2014 nothing extra is persisted, so the\ntrend covers the athlete's whole history immediately. Capped at the most\nrecent 1000 qualifying rides.",
+        "description": "Aerobic efficiency (weighted power per heartbeat) for each steady endurance\nride, oldest first \u2014 the trend that shows aerobic progress a rising Fitness\nnumber alone doesn't.\n\nRestricted to cycling rides of at least 20 minutes that have both weighted\npower and average heart rate, and that were steady enough for the number to\nmean something: the same \"not an interval session\" test the decoupling gate\nuses (variability index at or below 1.10, and not categorized as VO2max,\nanaerobic or sprint work). Each ride's decoupling figure rides along when it\nhas one.\n\nComputed on read from stored columns \u2014 nothing extra is persisted, so the\ntrend covers the athlete's whole history immediately. Capped at the most\nrecent 1000 qualifying rides.\n\n**Personal access token scope:** `metrics:read`",
         "operationId": "getEfficiencyTrend",
         "security": [
           {
@@ -2769,6 +3066,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "metrics:read"
         }
       }
     },
@@ -2778,7 +3079,7 @@
           "metrics"
         ],
         "summary": "Get Zones Weekly",
-        "description": "Accumulated time-in-zone (power + HR) per ISO week over a period.\n\nSums each cycling activity's frozen ``zone_times`` snapshot into Monday-based\nweekly buckets. Legacy activities without a snapshot are backfilled on the\nfly (using current zones) and frozen, mirroring the fitness catch-up flow.\n\nDeclared before ``/zones/{activity_id}`` so \"weekly\" isn't matched as an id.",
+        "description": "Accumulated time-in-zone (power + HR) per ISO week over a period.\n\nSums each cycling activity's frozen ``zone_times`` snapshot into Monday-based\nweekly buckets. Legacy activities without a snapshot are backfilled on the\nfly (using current zones) and frozen, mirroring the fitness catch-up flow.\n\nDeclared before ``/zones/{activity_id}`` so \"weekly\" isn't matched as an id.\n\n**Personal access token scope:** `metrics:read`",
         "operationId": "get_zones_weekly_api_metrics_zones_weekly_get",
         "security": [
           {
@@ -2864,6 +3165,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "metrics:read"
         }
       }
     },
@@ -2873,7 +3178,7 @@
           "metrics"
         ],
         "summary": "Intensity distribution over a training block",
-        "description": "Three-band intensity distribution and its shape over a period.\n\nWeekly zones say what last week held; this says what a *block* came out as\n\u2014 polarized, pyramidal, threshold-heavy, or almost all easy. Defaults to\nthe last 12 weeks.\n\n``method=time`` sums the frozen ``zone_times`` snapshots and reports\npercentages of time. ``method=session`` counts each ride whole by its\nworkout category and reports percentages of sessions. They disagree by\ndesign: warm-ups and coast-downs pull the time method toward pyramidal.\n\n``basis`` selects power or HR zones, preferring power when both exist; it\ndoes not apply to ``method=session`` and is echoed as ``null`` there.",
+        "description": "Three-band intensity distribution and its shape over a period.\n\nWeekly zones say what last week held; this says what a *block* came out as\n\u2014 polarized, pyramidal, threshold-heavy, or almost all easy. Defaults to\nthe last 12 weeks.\n\n``method=time`` sums the frozen ``zone_times`` snapshots and reports\npercentages of time. ``method=session`` counts each ride whole by its\nworkout category and reports percentages of sessions. They disagree by\ndesign: warm-ups and coast-downs pull the time method toward pyramidal.\n\n``basis`` selects power or HR zones, preferring power when both exist; it\ndoes not apply to ``method=session`` and is echoed as ``null`` there.\n\n**Personal access token scope:** `metrics:read`",
         "operationId": "getIntensityDistribution",
         "security": [
           {
@@ -2989,6 +3294,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "metrics:read"
         }
       }
     },
@@ -2998,6 +3307,7 @@
           "metrics"
         ],
         "summary": "Get Zones",
+        "description": "\n\n**Personal access token scope:** `metrics:read`",
         "operationId": "get_zones_api_metrics_zones__activity_id__get",
         "security": [
           {
@@ -3034,6 +3344,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "metrics:read"
         }
       }
     },
@@ -3043,6 +3357,7 @@
           "metrics"
         ],
         "summary": "FTP history",
+        "description": "\n\n**Personal access token scope:** `metrics:read`",
         "operationId": "getFtpHistory",
         "responses": {
           "200": {
@@ -3058,7 +3373,11 @@
           {
             "OAuth2PasswordBearer": []
           }
-        ]
+        ],
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "metrics:read"
+        }
       }
     },
     "/api/metrics/catch-up": {
@@ -3067,7 +3386,7 @@
           "metrics"
         ],
         "summary": "Catch Up",
-        "description": "Fill missing DailyMetric rows using stored Load. Called on dashboard load.",
+        "description": "Fill missing DailyMetric rows using stored Load. Called on dashboard load.\n\n**Personal access token scope:** `metrics:write`",
         "operationId": "catch_up_api_metrics_catch_up_post",
         "responses": {
           "200": {
@@ -3083,7 +3402,11 @@
           {
             "OAuth2PasswordBearer": []
           }
-        ]
+        ],
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "metrics:write"
+        }
       }
     },
     "/api/metrics/recalculate": {
@@ -3092,7 +3415,7 @@
           "metrics"
         ],
         "summary": "Recalculate All",
-        "description": "Recompute Load for every processed activity using the athlete's current FTP/max_hr,\nthen rebuild Fitness/Fatigue/Form from the earliest activity forward.\n\nReturns immediately (202); work happens in the background.",
+        "description": "Recompute Load for every processed activity using the athlete's current FTP/max_hr,\nthen rebuild Fitness/Fatigue/Form from the earliest activity forward.\n\nReturns immediately (202); work happens in the background.\n\n**Personal access token scope:** `metrics:write`",
         "operationId": "recalculate_all_api_metrics_recalculate_post",
         "responses": {
           "202": {
@@ -3108,7 +3431,11 @@
           {
             "OAuth2PasswordBearer": []
           }
-        ]
+        ],
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "metrics:write"
+        }
       }
     },
     "/api/metrics/bests/distance": {
@@ -3117,7 +3444,7 @@
           "metrics"
         ],
         "summary": "All-time distance bests",
-        "description": "Return the top-3 all-time best times for each standard distance,\nordered by (distance_m asc, rank asc).  Distances with no data are omitted.\n\nBy default only real (non-virtual) rides are included. Pass\ninclude_virtual=true to include all ride types.",
+        "description": "Return the top-3 all-time best times for each standard distance,\nordered by (distance_m asc, rank asc).  Distances with no data are omitted.\n\nBy default only real (non-virtual) rides are included. Pass\ninclude_virtual=true to include all ride types.\n\n**Personal access token scope:** `metrics:read`",
         "operationId": "getDistanceBests",
         "security": [
           {
@@ -3157,6 +3484,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "metrics:read"
         }
       }
     },
@@ -3166,7 +3497,7 @@
           "metrics"
         ],
         "summary": "All-time power bests",
-        "description": "Return the top-3 best efforts for each standard duration,\nordered by (duration_s asc, rank asc).  Durations with no data are omitted.\n\nPass ?metric=wkg to rank by watts-per-kg using the bodyweight recorded for\neach effort when its activity was processed (efforts with no known weight\nare omitted).  That weight is a snapshot: a later weigh-in applies to\nactivities from its own date onward and never restates older ones.  The\ndefault ?metric=watts ranks by absolute power.  Pass ?days=90/180/365 to\nrestrict to a rolling window; omit for all-time.",
+        "description": "Return the top-3 best efforts for each standard duration,\nordered by (duration_s asc, rank asc).  Durations with no data are omitted.\n\nPass ?metric=wkg to rank by watts-per-kg using the bodyweight recorded for\neach effort when its activity was processed (efforts with no known weight\nare omitted).  That weight is a snapshot: a later weigh-in applies to\nactivities from its own date onward and never restates older ones.  The\ndefault ?metric=watts ranks by absolute power.  Pass ?days=90/180/365 to\nrestrict to a rolling window; omit for all-time.\n\n**Personal access token scope:** `metrics:read`",
         "operationId": "getPowerBests",
         "security": [
           {
@@ -3231,6 +3562,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "metrics:read"
         }
       }
     },
@@ -3240,7 +3575,7 @@
           "metrics"
         ],
         "summary": "Current FTP estimate",
-        "description": "Estimate FTP from the athlete's power curve using two methods:\n\n- Simple: 95% of the 20-minute (1200s) best power.\n- Critical Power: linear work\u2013time fit over the 2\u201320 minute bests (CP).\n\nBoth estimates use the rank-1 (single best) power per duration.  Pass\n?days=90/180/365 to estimate from a rolling window; omit for all-time.",
+        "description": "Estimate FTP from the athlete's power curve using two methods:\n\n- Simple: 95% of the 20-minute (1200s) best power.\n- Critical Power: linear work\u2013time fit over the 2\u201320 minute bests (CP).\n\nBoth estimates use the rank-1 (single best) power per duration.  Pass\n?days=90/180/365 to estimate from a rolling window; omit for all-time.\n\n**Personal access token scope:** `metrics:read`",
         "operationId": "getFtpEstimate",
         "security": [
           {
@@ -3289,6 +3624,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "metrics:read"
         }
       }
     },
@@ -3298,7 +3637,7 @@
           "metrics"
         ],
         "summary": "Fitted power\u2013duration models",
-        "description": "Fit several power\u2013duration models to the athlete's power curve and return,\nfor each model: its fitted parameters, a sampled curve for plotting, the\nmodeled potential at key durations (5 s / 60 s / 5 min / 20 min), and the\nfit error (RMSE) against the actual bests.\n\nModels: 2-parameter Critical Power (``cp2``), 3-parameter CP (``cp3``),\nCP-anchored exponential (``exp``) and power law / Riegel (``power_law``).\nAll use the rank-1 (single best) power per duration.  Pass ?days=90/180/365\nto fit from a rolling window; omit for all-time.",
+        "description": "Fit several power\u2013duration models to the athlete's power curve and return,\nfor each model: its fitted parameters, a sampled curve for plotting, the\nmodeled potential at key durations (5 s / 60 s / 5 min / 20 min), and the\nfit error (RMSE) against the actual bests.\n\nModels: 2-parameter Critical Power (``cp2``), 3-parameter CP (``cp3``),\nCP-anchored exponential (``exp``) and power law / Riegel (``power_law``).\nAll use the rank-1 (single best) power per duration.  Pass ?days=90/180/365\nto fit from a rolling window; omit for all-time.\n\n**Personal access token scope:** `metrics:read`",
         "operationId": "getPowerModels",
         "security": [
           {
@@ -3347,6 +3686,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "metrics:read"
         }
       }
     },
@@ -3356,6 +3699,7 @@
           "goals"
         ],
         "summary": "List goals",
+        "description": "\n\n**Personal access token scope:** `goals:read`",
         "operationId": "listGoals",
         "security": [
           {
@@ -3408,6 +3752,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "goals:read"
         }
       },
       "post": {
@@ -3415,6 +3763,7 @@
           "goals"
         ],
         "summary": "Create Goal",
+        "description": "\n\n**Personal access token scope:** `goals:write`",
         "operationId": "create_goal_api_goals_post",
         "security": [
           {
@@ -3452,6 +3801,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "goals:write"
         }
       }
     },
@@ -3461,6 +3814,7 @@
           "goals"
         ],
         "summary": "Update Goal",
+        "description": "\n\n**Personal access token scope:** `goals:write`",
         "operationId": "update_goal_api_goals__goal_id__put",
         "security": [
           {
@@ -3509,6 +3863,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "goals:write"
         }
       },
       "delete": {
@@ -3516,6 +3874,7 @@
           "goals"
         ],
         "summary": "Delete Goal",
+        "description": "\n\n**Personal access token scope:** `goals:write`",
         "operationId": "delete_goal_api_goals__goal_id__delete",
         "security": [
           {
@@ -3547,6 +3906,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "goals:write"
         }
       }
     },
@@ -3556,6 +3919,7 @@
           "goals"
         ],
         "summary": "Get AI guidance for a goal",
+        "description": "\n\n**Personal access token scope:** `goals:read`",
         "operationId": "getGoalGuidance",
         "security": [
           {
@@ -3594,6 +3958,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "goals:read"
         }
       },
       "post": {
@@ -3601,6 +3969,7 @@
           "goals"
         ],
         "summary": "Trigger AI guidance for a goal",
+        "description": "\n\n**Not available to personal access tokens.**",
         "operationId": "triggerGoalGuidance",
         "security": [
           {
@@ -3647,6 +4016,9 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": false
         }
       }
     },
@@ -3656,6 +4028,7 @@
           "plans"
         ],
         "summary": "List training plans",
+        "description": "\n\n**Personal access token scope:** `plans:read`",
         "operationId": "listPlans",
         "security": [
           {
@@ -3708,6 +4081,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "plans:read"
         }
       },
       "post": {
@@ -3715,6 +4092,7 @@
           "plans"
         ],
         "summary": "Create Plan",
+        "description": "\n\n**Personal access token scope:** `plans:write`",
         "operationId": "create_plan_api_plans_post",
         "security": [
           {
@@ -3752,6 +4130,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "plans:write"
         }
       }
     },
@@ -3761,6 +4143,7 @@
           "plans"
         ],
         "summary": "Get Plan",
+        "description": "\n\n**Personal access token scope:** `plans:read`",
         "operationId": "get_plan_api_plans__plan_id__get",
         "security": [
           {
@@ -3799,6 +4182,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "plans:read"
         }
       },
       "put": {
@@ -3806,6 +4193,7 @@
           "plans"
         ],
         "summary": "Update Plan",
+        "description": "\n\n**Personal access token scope:** `plans:write`",
         "operationId": "update_plan_api_plans__plan_id__put",
         "security": [
           {
@@ -3854,6 +4242,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "plans:write"
         }
       },
       "delete": {
@@ -3861,6 +4253,7 @@
           "plans"
         ],
         "summary": "Delete Plan",
+        "description": "\n\n**Personal access token scope:** `plans:write`",
         "operationId": "delete_plan_api_plans__plan_id__delete",
         "security": [
           {
@@ -3892,6 +4285,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "plans:write"
         }
       }
     },
@@ -3901,7 +4298,7 @@
           "plans"
         ],
         "summary": "Plan adherence snapshot series",
-        "description": "Persisted daily adherence snapshots for a plan (mirrors /metrics/fitness).\n\nRuns a cheap, deterministic catch-up first so the series is fresh even for a\nuser who hasn't loaded the dashboard yet, then returns the stored trend.",
+        "description": "Persisted daily adherence snapshots for a plan (mirrors /metrics/fitness).\n\nRuns a cheap, deterministic catch-up first so the series is fresh even for a\nuser who hasn't loaded the dashboard yet, then returns the stored trend.\n\n**Personal access token scope:** `plans:read`",
         "operationId": "getPlanAdherence",
         "security": [
           {
@@ -3978,6 +4375,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "plans:read"
         }
       }
     },
@@ -3987,7 +4388,7 @@
           "plans"
         ],
         "summary": "Unarchive a training plan",
-        "description": "Reactivate an archived plan.\n\nAny currently-active plan whose date range overlaps the reactivated plan is\narchived, so overlapping plans are never both active at once. Active plans\ncovering a different period are left untouched.",
+        "description": "Reactivate an archived plan.\n\nAny currently-active plan whose date range overlaps the reactivated plan is\narchived, so overlapping plans are never both active at once. Active plans\ncovering a different period are left untouched.\n\n**Personal access token scope:** `plans:write`",
         "operationId": "unarchivePlan",
         "security": [
           {
@@ -4026,6 +4427,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "plans:write"
         }
       }
     },
@@ -4035,6 +4440,7 @@
           "plans"
         ],
         "summary": "Link Workout To Activity",
+        "description": "\n\n**Personal access token scope:** `plans:write`",
         "operationId": "link_workout_to_activity_api_plans__plan_id__workouts__workout_id__link_put",
         "security": [
           {
@@ -4092,6 +4498,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "plans:write"
         }
       },
       "delete": {
@@ -4099,7 +4509,7 @@
           "plans"
         ],
         "summary": "Unlink Workout From Activity",
-        "description": "Unlink activities from a planned workout.\n\nWith ``activity_id`` given, only that activity is unlinked; without it, every\nactivity linked to the workout is unlinked.",
+        "description": "Unlink activities from a planned workout.\n\nWith ``activity_id`` given, only that activity is unlinked; without it, every\nactivity linked to the workout is unlinked.\n\n**Personal access token scope:** `plans:write`",
         "operationId": "unlink_workout_from_activity_api_plans__plan_id__workouts__workout_id__link_delete",
         "security": [
           {
@@ -4156,6 +4566,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "plans:write"
         }
       }
     },
@@ -4165,6 +4579,7 @@
           "plans"
         ],
         "summary": "Skip Workout",
+        "description": "\n\n**Personal access token scope:** `plans:write`",
         "operationId": "skip_workout_api_plans__plan_id__workouts__workout_id__skip_put",
         "security": [
           {
@@ -4222,6 +4637,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "plans:write"
         }
       },
       "delete": {
@@ -4229,6 +4648,7 @@
           "plans"
         ],
         "summary": "Clear Workout Skip",
+        "description": "\n\n**Personal access token scope:** `plans:write`",
         "operationId": "clear_workout_skip_api_plans__plan_id__workouts__workout_id__skip_delete",
         "security": [
           {
@@ -4269,6 +4689,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "plans:write"
         }
       }
     },
@@ -4278,6 +4702,7 @@
           "plans"
         ],
         "summary": "Add Workout",
+        "description": "\n\n**Personal access token scope:** `plans:write`",
         "operationId": "add_workout_api_plans__plan_id__workouts_post",
         "security": [
           {
@@ -4326,6 +4751,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "plans:write"
         }
       }
     },
@@ -4335,6 +4764,7 @@
           "plans"
         ],
         "summary": "Update Workout",
+        "description": "\n\n**Personal access token scope:** `plans:write`",
         "operationId": "update_workout_api_plans__plan_id__workouts__workout_id__put",
         "security": [
           {
@@ -4392,6 +4822,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "plans:write"
         }
       },
       "delete": {
@@ -4399,6 +4833,7 @@
           "plans"
         ],
         "summary": "Delete Workout",
+        "description": "\n\n**Personal access token scope:** `plans:write`",
         "operationId": "delete_workout_api_plans__plan_id__workouts__workout_id__delete",
         "security": [
           {
@@ -4439,6 +4874,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "plans:write"
         }
       }
     },
@@ -4448,7 +4887,7 @@
           "plans"
         ],
         "summary": "Regenerate Plan",
-        "description": "Replace a plan's workouts, preserving any already linked to a completed activity.",
+        "description": "Replace a plan's workouts, preserving any already linked to a completed activity.\n\n**Not available to personal access tokens.**",
         "operationId": "regenerate_plan_api_plans__plan_id__regenerate_post",
         "security": [
           {
@@ -4497,6 +4936,9 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": false
         }
       }
     },
@@ -4506,7 +4948,7 @@
           "plans"
         ],
         "summary": "Generate Upcoming Workouts",
-        "description": "Synthesize structured workouts for the plan's upcoming days (no upload).\n\nFor each planned workout falling within the upcoming-week window (today\u2192+6;\nrest days and unstructured rows excluded), ensure a structured\n``WorkoutDefinition`` exists \u2014 generating one via the LLM and caching it on\n``PlannedWorkout.workout_definition_id`` when missing. The generated workouts\nshow up in the Workouts tab, where they can be reviewed, edited, and uploaded\nindividually. Returns a per-workout summary.",
+        "description": "Synthesize structured workouts for the plan's upcoming days (no upload).\n\nFor each planned workout falling within the upcoming-week window (today\u2192+6;\nrest days and unstructured rows excluded), ensure a structured\n``WorkoutDefinition`` exists \u2014 generating one via the LLM and caching it on\n``PlannedWorkout.workout_definition_id`` when missing. The generated workouts\nshow up in the Workouts tab, where they can be reviewed, edited, and uploaded\nindividually. Returns a per-workout summary.\n\n**Not available to personal access tokens.**",
         "operationId": "generate_upcoming_workouts_api_plans__plan_id__generate_upcoming_workouts_post",
         "security": [
           {
@@ -4555,6 +4997,9 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": false
         }
       }
     },
@@ -4564,7 +5009,7 @@
           "llm"
         ],
         "summary": "Get Allowed Servers",
-        "description": "Return the list of LLM base URLs the admin has allow-listed.",
+        "description": "Return the list of LLM base URLs the admin has allow-listed.\n\n**Not available to personal access tokens.**",
         "operationId": "get_allowed_servers_api_llm_servers_get",
         "responses": {
           "200": {
@@ -4580,7 +5025,10 @@
           {
             "OAuth2PasswordBearer": []
           }
-        ]
+        ],
+        "x-personal-access-token": {
+          "allowed": false
+        }
       }
     },
     "/api/llm/models": {
@@ -4589,7 +5037,7 @@
           "llm"
         ],
         "summary": "List Llm Models",
-        "description": "Return the presets this user may select and their current selection.\n\nEach option carries the stable ``name`` (the selection value) and a\nhuman-friendly ``label`` for display. The list is the instance's presets\noverlaid by the user's personal presets; falls back to the single configured\nmodel name when no presets exist.",
+        "description": "Return the presets this user may select and their current selection.\n\nEach option carries the stable ``name`` (the selection value) and a\nhuman-friendly ``label`` for display. The list is the instance's presets\noverlaid by the user's personal presets; falls back to the single configured\nmodel name when no presets exist.\n\n**Not available to personal access tokens.**",
         "operationId": "list_llm_models_api_llm_models_get",
         "responses": {
           "200": {
@@ -4607,7 +5055,10 @@
           {
             "OAuth2PasswordBearer": []
           }
-        ]
+        ],
+        "x-personal-access-token": {
+          "allowed": false
+        }
       }
     },
     "/api/llm/access": {
@@ -4616,7 +5067,7 @@
           "llm"
         ],
         "summary": "Get Llm Access",
-        "description": "Report whether the caller may use LLM features, and by which route.",
+        "description": "Report whether the caller may use LLM features, and by which route.\n\n**Not available to personal access tokens.**",
         "operationId": "get_llm_access_api_llm_access_get",
         "responses": {
           "200": {
@@ -4634,7 +5085,10 @@
           {
             "OAuth2PasswordBearer": []
           }
-        ]
+        ],
+        "x-personal-access-token": {
+          "allowed": false
+        }
       }
     },
     "/api/llm/test-connection": {
@@ -4643,7 +5097,7 @@
           "llm"
         ],
         "summary": "Test Llm Connection",
-        "description": "Test the instance's configured LLM connection. Admin-only.\n\nSends a minimal \"hello world\" chat completion to the instance's saved LLM\nconfig and confirms the model replies with a usable response. Any configured\nextra headers and the selected model's body params are applied, so this also\nvalidates a zero-data-retention header or a thinking config. Pass ``model``\nto test a specific preset from the configured list instead of the default.",
+        "description": "Test the instance's configured LLM connection. Admin-only.\n\nSends a minimal \"hello world\" chat completion to the instance's saved LLM\nconfig and confirms the model replies with a usable response. Any configured\nextra headers and the selected model's body params are applied, so this also\nvalidates a zero-data-retention header or a thinking config. Pass ``model``\nto test a specific preset from the configured list instead of the default.\n\n**Not available to personal access tokens.**",
         "operationId": "test_llm_connection_api_llm_test_connection_post",
         "security": [
           {
@@ -4689,6 +5143,9 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": false
         }
       }
     },
@@ -4698,7 +5155,7 @@
           "llm"
         ],
         "summary": "Test My Llm Connection",
-        "description": "Test the caller's own (BYOK) LLM connection. Any authenticated user.\n\nBody values override the athlete's saved config so the Test button works\nbefore saving; when ``api_key`` is omitted but a saved encrypted key exists\nit is decrypted and used. The tested URL must pass the SSRF guard and, when\nan allow-list is configured, be on it. Rate-limited since it triggers an\noutbound request on demand.",
+        "description": "Test the caller's own (BYOK) LLM connection. Any authenticated user.\n\nBody values override the athlete's saved config so the Test button works\nbefore saving; when ``api_key`` is omitted but a saved encrypted key exists\nit is decrypted and used. The tested URL must pass the SSRF guard and, when\nan allow-list is configured, be on it. Rate-limited since it triggers an\noutbound request on demand.\n\n**Not available to personal access tokens.**",
         "operationId": "test_my_llm_connection_api_llm_test_my_connection_post",
         "requestBody": {
           "content": {
@@ -4736,7 +5193,10 @@
           {
             "OAuth2PasswordBearer": []
           }
-        ]
+        ],
+        "x-personal-access-token": {
+          "allowed": false
+        }
       }
     },
     "/api/public/instance-info": {
@@ -4833,6 +5293,7 @@
           "workouts"
         ],
         "summary": "List workout definitions",
+        "description": "\n\n**Personal access token scope:** `workouts:read`",
         "operationId": "listWorkouts",
         "security": [
           {
@@ -4885,6 +5346,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "workouts:read"
         }
       },
       "post": {
@@ -4892,6 +5357,7 @@
           "workouts"
         ],
         "summary": "Create Workout",
+        "description": "\n\n**Personal access token scope:** `workouts:write`",
         "operationId": "create_workout_api_workouts_post",
         "security": [
           {
@@ -4929,6 +5395,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "workouts:write"
         }
       }
     },
@@ -4938,6 +5408,7 @@
           "workouts"
         ],
         "summary": "Get Workout",
+        "description": "\n\n**Personal access token scope:** `workouts:read`",
         "operationId": "get_workout_api_workouts__workout_id__get",
         "security": [
           {
@@ -4976,6 +5447,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "workouts:read"
         }
       },
       "put": {
@@ -4983,6 +5458,7 @@
           "workouts"
         ],
         "summary": "Update Workout",
+        "description": "\n\n**Personal access token scope:** `workouts:write`",
         "operationId": "update_workout_api_workouts__workout_id__put",
         "security": [
           {
@@ -5031,6 +5507,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "workouts:write"
         }
       },
       "delete": {
@@ -5038,6 +5518,7 @@
           "workouts"
         ],
         "summary": "Delete Workout",
+        "description": "\n\n**Personal access token scope:** `workouts:write`",
         "operationId": "delete_workout_api_workouts__workout_id__delete",
         "security": [
           {
@@ -5069,6 +5550,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "workouts:write"
         }
       }
     },
@@ -5078,6 +5563,7 @@
           "workouts"
         ],
         "summary": "Export Workout",
+        "description": "\n\n**Personal access token scope:** `workouts:read`",
         "operationId": "export_workout_api_workouts__workout_id__export__format_key__get",
         "security": [
           {
@@ -5123,6 +5609,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "workouts:read"
         }
       }
     },
@@ -5132,7 +5622,7 @@
           "workouts"
         ],
         "summary": "Push Workout To Wahoo",
-        "description": "Push a structured workout to Wahoo as a plan + scheduled workout pair.\n\nCreates (or updates, by ``external_id``) a plan in the athlete's Wahoo\nlibrary and a workout scheduled within the today\u2192+6 day visibility window so\nit appears under \"Planned Workouts\" on ELEMNT / RIVAL devices.",
+        "description": "Push a structured workout to Wahoo as a plan + scheduled workout pair.\n\nCreates (or updates, by ``external_id``) a plan in the athlete's Wahoo\nlibrary and a workout scheduled within the today\u2192+6 day visibility window so\nit appears under \"Planned Workouts\" on ELEMNT / RIVAL devices.\n\n**Personal access token scope:** `workouts:write`",
         "operationId": "push_workout_to_wahoo_api_workouts__workout_id__push_wahoo_post",
         "security": [
           {
@@ -5181,6 +5671,10 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "workouts:write"
         }
       }
     },
@@ -5190,6 +5684,7 @@
           "consent"
         ],
         "summary": "Record data-processing consent",
+        "description": "\n\n**Not available to personal access tokens.**",
         "operationId": "recordConsent",
         "requestBody": {
           "content": {
@@ -5227,7 +5722,10 @@
           {
             "OAuth2PasswordBearer": []
           }
-        ]
+        ],
+        "x-personal-access-token": {
+          "allowed": false
+        }
       }
     },
     "/api/health": {
@@ -5252,6 +5750,7 @@
           "messages"
         ],
         "summary": "List messages",
+        "description": "\n\n**Not available to personal access tokens.**",
         "operationId": "listMessages",
         "security": [
           {
@@ -5304,6 +5803,9 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": false
         }
       }
     },
@@ -5313,6 +5815,7 @@
           "messages"
         ],
         "summary": "Unread Count",
+        "description": "\n\n**Not available to personal access tokens.**",
         "operationId": "unread_count_api_messages_unread_count_get",
         "responses": {
           "200": {
@@ -5330,7 +5833,10 @@
           {
             "OAuth2PasswordBearer": []
           }
-        ]
+        ],
+        "x-personal-access-token": {
+          "allowed": false
+        }
       }
     },
     "/api/messages/read-all": {
@@ -5339,6 +5845,7 @@
           "messages"
         ],
         "summary": "Mark All Read",
+        "description": "\n\n**Not available to personal access tokens.**",
         "operationId": "mark_all_read_api_messages_read_all_post",
         "responses": {
           "204": {
@@ -5349,7 +5856,10 @@
           {
             "OAuth2PasswordBearer": []
           }
-        ]
+        ],
+        "x-personal-access-token": {
+          "allowed": false
+        }
       }
     },
     "/api/messages/{message_id}/read": {
@@ -5358,6 +5868,7 @@
           "messages"
         ],
         "summary": "Mark Read",
+        "description": "\n\n**Not available to personal access tokens.**",
         "operationId": "mark_read_api_messages__message_id__read_post",
         "security": [
           {
@@ -5396,6 +5907,9 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": false
         }
       }
     },
@@ -5405,6 +5919,7 @@
           "messages"
         ],
         "summary": "Delete Message",
+        "description": "\n\n**Not available to personal access tokens.**",
         "operationId": "delete_message_api_messages__message_id__delete",
         "security": [
           {
@@ -5436,6 +5951,9 @@
               }
             }
           }
+        },
+        "x-personal-access-token": {
+          "allowed": false
         }
       }
     },
@@ -5445,7 +5963,7 @@
           "achievements"
         ],
         "summary": "Achievements, progress and streaks",
-        "description": "Catalogue, earned tiers, progress toward the locked ones, and streaks.\n\nAchievements whose data requirement the athlete cannot meet (elevation\nwithout a barometric FIT, Load without power or HR) are left out of the\ncatalogue entirely rather than shown permanently locked.",
+        "description": "Catalogue, earned tiers, progress toward the locked ones, and streaks.\n\nAchievements whose data requirement the athlete cannot meet (elevation\nwithout a barometric FIT, Load without power or HR) are left out of the\ncatalogue entirely rather than shown permanently locked.\n\n**Personal access token scope:** `achievements:read`",
         "operationId": "getAchievements",
         "responses": {
           "200": {
@@ -5463,7 +5981,11 @@
           {
             "OAuth2PasswordBearer": []
           }
-        ]
+        ],
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "achievements:read"
+        }
       }
     },
     "/api/achievements/streaks": {
@@ -5472,7 +5994,7 @@
           "achievements"
         ],
         "summary": "Current and longest streaks",
-        "description": "Just the streaks, for the dashboard card.",
+        "description": "Just the streaks, for the dashboard card.\n\n**Personal access token scope:** `achievements:read`",
         "operationId": "getStreaks",
         "responses": {
           "200": {
@@ -5494,7 +6016,11 @@
           {
             "OAuth2PasswordBearer": []
           }
-        ]
+        ],
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "achievements:read"
+        }
       }
     },
     "/api/achievements/seen": {
@@ -5503,7 +6029,7 @@
           "achievements"
         ],
         "summary": "Clear the new-achievement marker",
-        "description": "Mark every unlock as seen, so the UI stops flagging them as new.\n\nPurely a UI marker \u2014 it has no bearing on the inbox message, which is emitted\nonce by the reconcile that first inserted the row.",
+        "description": "Mark every unlock as seen, so the UI stops flagging them as new.\n\nPurely a UI marker \u2014 it has no bearing on the inbox message, which is emitted\nonce by the reconcile that first inserted the row.\n\n**Personal access token scope:** `achievements:write`",
         "operationId": "markAchievementsSeen",
         "responses": {
           "204": {
@@ -5514,7 +6040,167 @@
           {
             "OAuth2PasswordBearer": []
           }
-        ]
+        ],
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "achievements:write"
+        }
+      }
+    },
+    "/api/tokens/scopes": {
+      "get": {
+        "tags": [
+          "tokens"
+        ],
+        "summary": "List the scope vocabulary a token can be granted",
+        "description": "\n\n**Not available to personal access tokens.**",
+        "operationId": "listTokenScopes",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TokenScopesResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "x-personal-access-token": {
+          "allowed": false
+        }
+      }
+    },
+    "/api/tokens": {
+      "get": {
+        "tags": [
+          "tokens"
+        ],
+        "summary": "List your personal access tokens",
+        "description": "Every token the caller holds, live and dead.\n\nExpired and revoked rows are retained rather than pruned, so the list is the\nuser's own record of what they issued \u2014 the UI groups active apart from\nexpired/revoked the way the invitations tab splits pending from used.\n\n**Not available to personal access tokens.**",
+        "operationId": "listPersonalAccessTokens",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PersonalAccessTokenResponse"
+                  },
+                  "type": "array",
+                  "title": "Response Listpersonalaccesstokens"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "x-personal-access-token": {
+          "allowed": false
+        }
+      },
+      "post": {
+        "tags": [
+          "tokens"
+        ],
+        "summary": "Create a personal access token",
+        "description": "Mint a token and return its secret \u2014 the only time it is ever returned.\n\n**Not available to personal access tokens.**",
+        "operationId": "createPersonalAccessToken",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PersonalAccessTokenCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonalAccessTokenCreated"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "x-personal-access-token": {
+          "allowed": false
+        }
+      }
+    },
+    "/api/tokens/{token_id}": {
+      "delete": {
+        "tags": [
+          "tokens"
+        ],
+        "summary": "Revoke a personal access token",
+        "description": "Withdraw a token immediately \u2014 no cache, no grace window.\n\nThe row survives, hash included: a later attempt with it is then logged as a\nrevoked-token attempt rather than an unknown one, which is a different event\nand worth being able to tell apart.\n\n**Not available to personal access tokens.**",
+        "operationId": "revokePersonalAccessToken",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "token_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Token Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-personal-access-token": {
+          "allowed": false
+        }
       }
     },
     "/api/version": {
@@ -6508,6 +7194,69 @@
         },
         "type": "object",
         "title": "ActivityUpdate"
+      },
+      "AdminPersonalAccessTokenResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Scopes"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Expires At"
+          },
+          "last_used_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Used At"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "scopes",
+          "status",
+          "expires_at",
+          "created_at"
+        ],
+        "title": "AdminPersonalAccessTokenResponse",
+        "description": "An administrator's view of one user's token.\n\nMetadata only, and deliberately **no name**: token names are user-written\nfree text and revealing on their own (\"garmin-sync-for-my-cardiologist\").\nRevocation needs the id, not the label."
       },
       "AllTimeDistanceBestsResponse": {
         "properties": {
@@ -7821,6 +8570,11 @@
             "type": "boolean",
             "title": "Allow Self Signup",
             "default": false
+          },
+          "allow_personal_access_tokens": {
+            "type": "boolean",
+            "title": "Allow Personal Access Tokens",
+            "default": true
           }
         },
         "type": "object",
@@ -7889,6 +8643,17 @@
               }
             ],
             "title": "Allow Self Signup"
+          },
+          "allow_personal_access_tokens": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allow Personal Access Tokens"
           }
         },
         "type": "object",
@@ -7935,6 +8700,11 @@
             "type": "boolean",
             "title": "Allow Self Signup",
             "default": false
+          },
+          "allow_personal_access_tokens": {
+            "type": "boolean",
+            "title": "Allow Personal Access Tokens",
+            "default": true
           }
         },
         "type": "object",
@@ -9195,6 +9965,176 @@
         ],
         "title": "PctFtpSpec"
       },
+      "PersonalAccessTokenCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Scopes"
+          },
+          "expires_in_days": {
+            "type": "integer",
+            "maximum": 365.0,
+            "minimum": 1.0,
+            "title": "Expires In Days",
+            "default": 90
+          }
+        },
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "PersonalAccessTokenCreate"
+      },
+      "PersonalAccessTokenCreated": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Scopes"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Expires At"
+          },
+          "last_used_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Used At"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "token": {
+            "type": "string",
+            "title": "Token"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "scopes",
+          "status",
+          "expires_at",
+          "created_at",
+          "token"
+        ],
+        "title": "PersonalAccessTokenCreated",
+        "description": "The create response \u2014 the only time the secret is ever returned."
+      },
+      "PersonalAccessTokenResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Scopes"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Expires At"
+          },
+          "last_used_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Used At"
+          },
+          "revoked_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Revoked At"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "scopes",
+          "status",
+          "expires_at",
+          "created_at"
+        ],
+        "title": "PersonalAccessTokenResponse",
+        "description": "A token's metadata. Never carries the secret or its hash."
+      },
       "PlanAdherencePoint": {
         "properties": {
           "date": {
@@ -10119,6 +11059,30 @@
         "title": "RpeQueueResponse",
         "description": "Pending RPE-rating queue for the dashboard/post-upload prompt (issue #28).\n\n``items`` are qualifying cycling activities ingested after the athlete's\n``rpe_head`` cursor that still lack an RPE, oldest-first. ``rpe_head`` is the\nserver-side cursor (an activity ``created_at`` ISO timestamp) marking the\nboundary between already-handled and new activities."
       },
+      "ScopeInfo": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "description": {
+            "type": "string",
+            "title": "Description"
+          },
+          "sensitive": {
+            "type": "boolean",
+            "title": "Sensitive",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "description"
+        ],
+        "title": "ScopeInfo",
+        "description": "One entry of the scope vocabulary, for the creation UI."
+      },
       "SetupRequest": {
         "properties": {
           "admin_username": {
@@ -10261,6 +11225,40 @@
           "access_token"
         ],
         "title": "TokenResponse"
+      },
+      "TokenScopesResponse": {
+        "properties": {
+          "scopes": {
+            "items": {
+              "$ref": "#/components/schemas/ScopeInfo"
+            },
+            "type": "array",
+            "title": "Scopes"
+          },
+          "allowed_lifetime_days": {
+            "items": {
+              "type": "integer"
+            },
+            "type": "array",
+            "title": "Allowed Lifetime Days"
+          },
+          "default_lifetime_days": {
+            "type": "integer",
+            "title": "Default Lifetime Days",
+            "default": 90
+          },
+          "max_lifetime_days": {
+            "type": "integer",
+            "title": "Max Lifetime Days",
+            "default": 365
+          }
+        },
+        "type": "object",
+        "required": [
+          "scopes",
+          "allowed_lifetime_days"
+        ],
+        "title": "TokenScopesResponse"
       },
       "TrainingPlanCreate": {
         "properties": {

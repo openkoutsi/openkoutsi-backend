@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.deps import get_ctx_session_athlete
+from backend.app.core.scopes import pat_scopes
 from backend.app.db.user_session import get_user_session_factory
 from backend.app.models.user_orm import Activity, ActivityStream, Athlete, DailyMetric
 from backend.app.schemas.metrics import (
@@ -39,7 +40,12 @@ from openkoutsi.training_math import (
     variability_index,
 )
 
-router = APIRouter(prefix="/metrics", tags=["metrics"])
+
+router = APIRouter(
+    prefix="/metrics",
+    tags=["metrics"],
+    dependencies=[pat_scopes(read="metrics:read", write="metrics:write")],
+)
 
 
 @router.get("/fitness", response_model=list[FitnessMetricResponse])

@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.deps import get_ctx_session_athlete
+from backend.app.core.scopes import pat_scopes
 from backend.app.models.user_orm import Activity, ActivityPowerBest, Athlete
 from backend.app.schemas.power import (
     AllTimePowerBestsResponse,
@@ -36,7 +37,12 @@ from openkoutsi.training_math import (
     sample_power_curve,
 )
 
-router = APIRouter(prefix="/metrics", tags=["metrics"])
+
+router = APIRouter(
+    prefix="/metrics",
+    tags=["metrics"],
+    dependencies=[pat_scopes(read="metrics:read")],
+)
 
 TOP_N = 3
 

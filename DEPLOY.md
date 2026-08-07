@@ -187,6 +187,28 @@ Tables are created automatically on first startup — no manual step required:
 uv run uvicorn backend.main:app --host 0.0.0.0 --port 8000
 ```
 
+### Migrating the registry database
+
+The registry (`data/registry.db`) holds accounts, invitations, provider
+connections, instance settings and personal access tokens. Bare-metal upgrades
+apply its migrations with:
+
+```bash
+uv run alembic -c backend/alembic-registry.ini upgrade head
+```
+
+Container deployments do this automatically — see *Migrations on start* above.
+
+> **Note:** the latest registry migration `012_personal_access_tokens` adds the
+> `personal_access_tokens` table and the `instance_settings.allow_personal_access_tokens`
+> column. That column defaults to **1 (on)**, including for existing rows: a PAT
+> grants strictly less than the session its owner already holds, and defaulting it
+> off would mean the feature silently works nowhere until an admin performs an
+> action nobody told them about. If you would rather not have long-lived
+> credentials on your box, turn it off explicitly — see
+> [ADMIN.md](ADMIN.md), *Personal access tokens*. No new environment variables are
+> required.
+
 ### Migrating existing user databases
 
 New per-user databases are always created with the latest schema. Existing per-user databases require Alembic migrations when upgrading. Run once per user after updating the code:

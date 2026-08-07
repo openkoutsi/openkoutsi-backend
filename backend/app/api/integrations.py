@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.api.consent import require_consent
 from backend.app.core.config import settings
 from backend.app.core.deps import get_ctx_and_session, get_ctx_session_athlete
+from backend.app.core.scopes import pat_scopes
 from backend.app.db.registry import get_registry_session
 from backend.app.models.registry_orm import ProviderConnection
 from backend.app.models.user_orm import Activity, ActivitySource, Athlete
@@ -37,7 +38,12 @@ from openkoutsi.zones import (
 
 log = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/integrations", tags=["integrations"])
+
+router = APIRouter(
+    prefix="/integrations",
+    tags=["integrations"],
+    dependencies=[pat_scopes(read="integrations:read", write="integrations:write")],
+)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────

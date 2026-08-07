@@ -27,6 +27,13 @@ log = logging.getLogger(__name__)
 # ── Message types ────────────────────────────────────────────────────────────
 INVITE_USED = "invite_used"                     # someone registered via an invite link
 ACHIEVEMENT_UNLOCKED = "achievement_unlocked"   # one or more achievement tiers earned
+# Personal access tokens (issue #46). A one-year ceiling without warnings would
+# only relocate the outage: a token that dies silently takes a nightly backup or
+# a head-unit sync with it, and the first the user hears of it is a broken
+# integration weeks later.
+PAT_EXPIRING = "pat_expiring"                   # a token expires in 7 days / 1 day
+PAT_EXPIRED = "pat_expired"                     # a token has expired
+PAT_REVOKED_BY_ADMIN = "pat_revoked_by_admin"   # an admin withdrew a token
 
 
 async def notify_user(

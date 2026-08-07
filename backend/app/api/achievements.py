@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from fastapi import HTTPException
 
 from backend.app.core.deps import get_ctx_session_athlete
+from backend.app.core.scopes import pat_scopes
 from backend.app.models.user_orm import AchievementUnlock, Athlete
 from backend.app.schemas.achievements import (
     AchievementDefinition,
@@ -26,7 +27,12 @@ from backend.app.services.achievements import (
 )
 from openkoutsi.achievements import CATALOGUE
 
-router = APIRouter(prefix="/achievements", tags=["achievements"])
+
+router = APIRouter(
+    prefix="/achievements",
+    tags=["achievements"],
+    dependencies=[pat_scopes(read="achievements:read", write="achievements:write")],
+)
 
 
 @router.get("", response_model=AchievementsResponse,
