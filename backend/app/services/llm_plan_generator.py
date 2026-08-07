@@ -4,8 +4,8 @@ LLM-based training plan generator.
 Uses any OpenAI-compatible chat completions API (Ollama, OpenAI, Mistral, etc.)
 via httpx. No additional dependencies required.
 
-LLM settings are resolved with the same priority as the chat proxy: the
-athlete's own BYOK config (``app_settings``) then the instance's presets
+LLM settings are resolved in the usual priority order: the athlete's own BYOK
+config (``app_settings``) then the instance's presets
 (``instance_settings.llm_models``, first entry = default).
 """
 
