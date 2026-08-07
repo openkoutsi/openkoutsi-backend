@@ -4739,51 +4739,6 @@
         ]
       }
     },
-    "/api/llm/chat": {
-      "post": {
-        "tags": [
-          "llm"
-        ],
-        "summary": "Llm Chat",
-        "description": "Proxy an OpenAI-compatible chat completion to the user's LLM endpoint.",
-        "operationId": "llm_chat_api_llm_chat_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/LlmChatRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "Successful Response",
-            "content": {
-              "application/json": {
-                "schema": {}
-              }
-            }
-          },
-          "422": {
-            "description": "Validation Error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            }
-          }
-        },
-        "security": [
-          {
-            "OAuth2PasswordBearer": []
-          }
-        ]
-      }
-    },
     "/api/public/instance-info": {
       "get": {
         "tags": [
@@ -6911,24 +6866,6 @@
         ],
         "title": "Body_upload_activity_api_activities_upload_post"
       },
-      "ChatMessage": {
-        "properties": {
-          "role": {
-            "type": "string",
-            "title": "Role"
-          },
-          "content": {
-            "type": "string",
-            "title": "Content"
-          }
-        },
-        "type": "object",
-        "required": [
-          "role",
-          "content"
-        ],
-        "title": "ChatMessage"
-      },
       "ConsentRequest": {
         "properties": {
           "consent_version": {
@@ -8415,49 +8352,6 @@
         ],
         "title": "LlmAccessResponse",
         "description": "The frontend's single source of truth for LLM access state (issue #9).\n\n``gated`` reflects the instance switch; ``mode`` is how the caller is (or\nwould be) served: ``ungated`` (gate off), ``byok`` (own LLM), ``entitled``\n(active entitlement), or ``none`` (gated, no BYOK, no entitlement \u2192 the\nupsell). ``entitlement`` echoes the caller's own entitlement row if any."
-      },
-      "LlmChatRequest": {
-        "properties": {
-          "messages": {
-            "items": {
-              "$ref": "#/components/schemas/ChatMessage"
-            },
-            "type": "array",
-            "title": "Messages"
-          },
-          "temperature": {
-            "anyOf": [
-              {
-                "type": "number"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Temperature"
-          },
-          "stream": {
-            "type": "boolean",
-            "title": "Stream",
-            "default": false
-          },
-          "model": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Model"
-          }
-        },
-        "type": "object",
-        "required": [
-          "messages"
-        ],
-        "title": "LlmChatRequest"
       },
       "LlmEntitlementUpdate": {
         "properties": {

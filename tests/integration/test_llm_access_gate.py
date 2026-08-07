@@ -1,6 +1,7 @@
 """Integration tests for the LLM subscription gate + usage stats (issue #9)."""
 
 import json
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -60,30 +61,6 @@ class TestAccessEndpoint:
         assert resp.json()["mode"] == "byok"
 
 
-class TestChatGate:
-    async def test_denied_chat_returns_structured_403(self, client, auth_headers):
-        await _set_gate(client, auth_headers, True)
-        resp = await client.post(
-            "/api/llm/chat",
-            json={"messages": [{"role": "user", "content": "hi"}]},
-            headers=auth_headers,
-        )
-        assert resp.status_code == 403
-        detail = resp.json()["detail"]
-        assert detail["code"] == "llm_subscription_required"
-        assert "message" in detail
-
-    async def test_gating_off_regression(self, client, auth_headers):
-        # With the gate off, a non-entitled user is not blocked by the gate; the
-        # request proceeds to config resolution (400: no LLM configured here).
-        resp = await client.post(
-            "/api/llm/chat",
-            json={"messages": [{"role": "user", "content": "hi"}]},
-            headers=auth_headers,
-        )
-        assert resp.status_code != 403
-
-
 class TestPlansGate:
     async def test_denied_plan_generate_returns_403(self, client, auth_headers):
         await _set_gate(client, auth_headers, True)
@@ -110,11 +87,31 @@ class TestPlansGate:
 
 
 class TestAnalyzeGate:
+    """The training-status trigger also carries the structured-403 contract.
+
+    This is the canonical coverage for the shape of ``subscription_required_error``
+    — a ``detail`` object with a stable ``code`` plus a human ``message`` — which
+    every frontend branches on.
+    """
+
     async def test_denied_training_status_trigger_403(self, client, auth_headers):
         await _set_gate(client, auth_headers, True)
         resp = await client.post("/api/athlete/training-status", headers=auth_headers)
         assert resp.status_code == 403
-        assert resp.json()["detail"]["code"] == "llm_subscription_required"
+        detail = resp.json()["detail"]
+        assert detail["code"] == "llm_subscription_required"
+        assert "message" in detail
+
+    async def test_gating_off_regression(self, client, auth_headers):
+        # With the gate off, a non-entitled user is not blocked; the request
+        # proceeds and the analysis is queued (202 pending).
+        with patch(
+            "backend.app.services.llm_training_status_analyzer.analyze_training_status_bg",
+            new_callable=AsyncMock,
+        ):
+            resp = await client.post("/api/athlete/training-status", headers=auth_headers)
+        assert resp.status_code != 403
+        assert resp.status_code == 202
 
 
 class TestAdminEntitlementCrud:
@@ -197,6 +194,27 @@ class TestUsageRecording:
         assert b["prompt_tokens"] == 10
         assert b["completion_tokens"] == 4
         assert b["unknown_usage_calls"] == 0
+
+    async def test_historical_chat_feature_still_renders(self, client, auth_headers, usage_db):
+        # The `/api/llm/chat` proxy is gone (issue #45), but `feature="chat"` rows
+        # written before its removal are still in the usage DB. The literal stays
+        # in `Feature` and the admin summary must keep grouping them.
+        cfg = ResolvedLlm(
+            base_url="https://api.openai.com/v1", model="gpt-4o", api_key="k",
+            source="instance", key_source="instance",
+        )
+        await record_llm_usage(
+            user_id=_TEST_USER_ID, feature="chat", cfg=cfg,
+            usage={"prompt_tokens": 7, "completion_tokens": 3, "total_tokens": 10},
+        )
+        resp = await client.get(
+            "/api/admin/llm-usage/summary?group_by=feature", headers=auth_headers
+        )
+        assert resp.status_code == 200
+        b = next(x for x in resp.json()["buckets"] if x["key"] == "chat")
+        assert b["calls"] == 1
+        assert b["prompt_tokens"] == 7
+        assert b["completion_tokens"] == 3
 
     async def test_byok_call_not_recorded(self, client, auth_headers, usage_db):
         cfg = ResolvedLlm(

@@ -1,4 +1,20 @@
-"""LLM proxy endpoint.
+"""LLM configuration endpoints.
+
+This module exposes the endpoints that let a user *configure and inspect* their
+LLM setup — it does not run any AI feature itself:
+
+* ``GET  /api/llm/servers``            — the admin's BYOK base-URL allow-list.
+* ``GET  /api/llm/models``             — the presets the caller may select.
+* ``GET  /api/llm/access``             — whether the caller may use LLM features.
+* ``POST /api/llm/test-connection``    — probe the instance's config (admin).
+* ``POST /api/llm/test-my-connection`` — probe the caller's own BYOK config.
+
+Every actual AI feature (activity analysis, training status, goal guidance, plan
+and workout generation) builds its own prompt server-side in
+``backend/app/services/``.  There is deliberately **no** general-purpose chat
+passthrough: an endpoint taking a client-supplied ``messages`` array would let
+any token holder replace the system prompt and so remove the coach-scope and
+medical-boundary guardrails.
 
 Security model
 --------------
@@ -9,21 +25,15 @@ stored in ``athlete.app_settings['llm_api_key_enc']`` and is **never**
 returned to the browser after being saved.
 
 When an LLM call is needed the server decrypts the key in-memory, adds it to
-the outbound request headers, and proxies the OpenAI-compatible request to
-the user's configured endpoint.  From the browser's perspective the request
-goes to ``/api/llm/chat`` on the same origin, so:
-
-* No API key is ever transmitted to the frontend.
-* The browser's Content-Security-Policy (``connect-src 'self' ...``) already
-  permits calls to the API origin — no extra CSP rules required.
-* The LLM endpoint is called server-to-server, so mixed-content (HTTP ↔ HTTPS)
-  restrictions in the browser do not apply.
+the outbound request headers, and calls the user's configured endpoint
+server-to-server.  The key therefore never reaches the frontend, and
+mixed-content (HTTP ↔ HTTPS) restrictions in the browser do not apply.
 
 SSRF mitigations
 ----------------
 Because any authenticated user can set an arbitrary base URL, the server could
-be used as a proxy to reach internal services.  The following defences are
-applied:
+be used as a proxy to reach internal services.  The connection probes below —
+and every outbound call made by the feature services — apply these defences:
 
 1. Only ``http://`` and ``https://`` schemes are accepted.
 2. The hostname is resolved to an IP address before the request is made.  If
@@ -44,18 +54,14 @@ only) via an out-of-band policy.
 
 from __future__ import annotations
 
-import logging
-import time
 from typing import Any, Optional
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.core.auth import UserContext
 from backend.app.core.config import settings
 from backend.app.core.deps import get_ctx_and_session
 from backend.app.core.file_encryption import decrypt_secret
@@ -65,59 +71,24 @@ from backend.app.db.registry import get_registry_session
 from backend.app.models.registry_orm import InstanceSettings
 from backend.app.models.user_orm import Athlete
 from backend.app.services.llm_access import (
-    LlmAccess,
     check_llm_access,
     get_entitlement,
     is_entitled,
-    record_llm_usage,
-    subscription_required_error,
-    usage_from_sse_data,
 )
 from backend.app.services.llm_client import (
-    LLM_ERROR_STATUS,
-    LlmConfigError,
     apply_body_extras,
     merge_llm_headers,
     preset_map,
     resolve_llm,
-    resolve_llm_config,
-    temperature_param,
 )
-
-
-def _http_from_llm_config_error(exc: LlmConfigError) -> HTTPException:
-    return HTTPException(status_code=LLM_ERROR_STATUS.get(exc.code, 400), detail=str(exc))
 
 
 async def _load_instance_settings(registry_session: AsyncSession) -> InstanceSettings | None:
     result = await registry_session.execute(select(InstanceSettings).limit(1))
     return result.scalar_one_or_none()
 
-log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/llm", tags=["llm"])
-
-# Maximum bytes accepted from an upstream LLM response.
-_MAX_RESPONSE_BYTES = 32 * 1024 * 1024  # 32 MB
-
-# ── Request schema ─────────────────────────────────────────────────────────
-
-
-class ChatMessage(BaseModel):
-    role: str
-    content: str
-
-
-class LlmChatRequest(BaseModel):
-    messages: list[ChatMessage]
-    # Optional: when omitted, the temperature parameter is left out of the
-    # upstream request entirely so the model uses its own default. This keeps
-    # thinking-enabled models — which reject any temperature other than 1 —
-    # working through the proxy.
-    temperature: Optional[float] = None
-    stream: bool = False
-    model: Optional[str] = None
-
 
 # ── LLM config helper ──────────────────────────────────────────────────────
 
@@ -419,181 +390,3 @@ async def test_my_llm_connection(
         )
 
     return await _probe_llm_endpoint(base_url, model, api_key)
-
-
-# ── Endpoint ───────────────────────────────────────────────────────────────
-
-
-@router.post("/chat")
-async def llm_chat(
-    body: LlmChatRequest,
-    ctx_session=Depends(get_ctx_and_session),
-    registry_session: AsyncSession = Depends(get_registry_session),
-):
-    """Proxy an OpenAI-compatible chat completion to the user's LLM endpoint."""
-    ctx, session = ctx_session
-
-    result = await session.execute(select(Athlete).where(Athlete.global_user_id == ctx.user_id))
-    athlete = result.scalar_one_or_none()
-    if athlete is None:
-        raise HTTPException(status_code=404, detail="Athlete profile not found")
-
-    instance = await _load_instance_settings(registry_session)
-
-    # Issue #9 gate: on a gated instance, deny non-entitled users without BYOK.
-    access = await check_llm_access(ctx, athlete, instance, registry_session)
-    if not access.allowed:
-        raise subscription_required_error()
-
-    try:
-        cfg = resolve_llm_config(
-            athlete,
-            instance,
-            ctx.user_id,
-            requested_model=body.model,
-            # In BYOK mode the instance credentials must never be touched.
-            allow_instance_fallback=(access.mode != "byok"),
-        )
-    except LlmConfigError as exc:
-        raise _http_from_llm_config_error(exc)
-    upstream_url = f"{cfg.base_url.rstrip('/')}/chat/completions"
-
-    check_url_safe(upstream_url)
-
-    headers = merge_llm_headers({"Content-Type": "application/json"}, cfg.extra_headers)
-    if cfg.api_key:
-        headers["Authorization"] = f"Bearer {cfg.api_key}"
-
-    def _build_payload(include_usage: bool) -> dict[str, Any]:
-        base: dict[str, Any] = {
-            "model": cfg.model,
-            "messages": [{"role": m.role, "content": m.content} for m in body.messages],
-            **temperature_param(body.temperature),
-            "stream": body.stream,
-        }
-        # Ask the upstream to emit a trailing usage chunk so instance-paid token
-        # counts can be recorded (issue #9). Some servers reject the option — the
-        # caller retries once without it.
-        if body.stream and include_usage:
-            base["stream_options"] = {"include_usage": True}
-        return apply_body_extras(base, cfg.extra_body)
-
-    transport = httpx.AsyncHTTPTransport(retries=0)
-    started = time.monotonic()
-
-    if body.stream:
-        client = httpx.AsyncClient(
-            transport=transport,
-            follow_redirects=False,
-            timeout=httpx.Timeout(120.0),
-        )
-
-        async def _open_stream(include_usage: bool):
-            req = client.build_request(
-                "POST", upstream_url, headers=headers, json=_build_payload(include_usage)
-            )
-            return await client.send(req, stream=True)
-
-        include_usage = True
-        try:
-            resp = await _open_stream(include_usage)
-        except Exception as exc:
-            await client.aclose()
-            raise HTTPException(
-                status_code=502,
-                detail=f"Could not reach LLM endpoint: {exc}",
-            )
-
-        # Ollama-family tolerance: if stream_options was rejected, retry once
-        # without it (usage is then simply never emitted → recorded as nulls).
-        if resp.status_code != 200 and include_usage:
-            await resp.aclose()
-            include_usage = False
-            try:
-                resp = await _open_stream(include_usage)
-            except Exception as exc:
-                await client.aclose()
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"Could not reach LLM endpoint: {exc}",
-                )
-
-        if resp.status_code != 200:
-            error_bytes = await resp.aread()
-            await resp.aclose()
-            await client.aclose()
-            raise HTTPException(
-                status_code=502,
-                detail=f"LLM returned {resp.status_code}: {error_bytes[:512].decode(errors='replace')}",
-            )
-
-        async def _iter_upstream():
-            total = 0
-            captured_usage: dict | None = None
-            text_buffer = ""
-            try:
-                async for chunk in resp.aiter_bytes():
-                    total += len(chunk)
-                    # Tee-parse the SSE text to capture the final usage chunk,
-                    # passing the original bytes through untouched.
-                    text_buffer += chunk.decode("utf-8", errors="ignore")
-                    while "\n" in text_buffer:
-                        line, text_buffer = text_buffer.split("\n", 1)
-                        if line.startswith("data:"):
-                            usage = usage_from_sse_data(line[5:])
-                            if usage is not None:
-                                captured_usage = usage
-                    if total > _MAX_RESPONSE_BYTES:
-                        log.warning("LLM streaming response exceeded %d bytes — aborting", _MAX_RESPONSE_BYTES)
-                        yield b"data: [DONE]\n\n"
-                        return
-                    yield chunk
-            finally:
-                await resp.aclose()
-                await client.aclose()
-                # Fire-and-forget; skips BYOK, writes to the dedicated usage DB.
-                await record_llm_usage(
-                    user_id=ctx.user_id,
-                    feature="chat",
-                    cfg=cfg,
-                    usage=captured_usage,
-                    duration_ms=int((time.monotonic() - started) * 1000),
-                )
-
-        return StreamingResponse(_iter_upstream(), media_type="text/event-stream")
-
-    else:
-        async with httpx.AsyncClient(
-            transport=transport,
-            follow_redirects=False,
-            timeout=httpx.Timeout(120.0),
-        ) as client:
-            try:
-                resp = await client.post(upstream_url, headers=headers, json=_build_payload(False))
-            except Exception as exc:
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"Could not reach LLM endpoint: {exc}",
-                )
-
-            if resp.status_code != 200:
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"LLM returned {resp.status_code}: {resp.text[:512]}",
-                )
-
-            if len(resp.content) > _MAX_RESPONSE_BYTES:
-                raise HTTPException(
-                    status_code=502,
-                    detail=f"LLM response exceeded the {_MAX_RESPONSE_BYTES // (1024*1024)} MB limit.",
-                )
-
-            data = resp.json()
-            await record_llm_usage(
-                user_id=ctx.user_id,
-                feature="chat",
-                cfg=cfg,
-                usage=data.get("usage") if isinstance(data, dict) else None,
-                duration_ms=int((time.monotonic() - started) * 1000),
-            )
-            return data

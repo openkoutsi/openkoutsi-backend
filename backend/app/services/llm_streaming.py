@@ -63,7 +63,7 @@ async def stream_chat_completion(
 ) -> AsyncIterator[str]:
     """Yield assistant text chunks from an athlete-facing streaming completion.
 
-    Resolves the athlete's effective LLM config exactly like the chat proxy:
+    Resolves the athlete's effective LLM config in the usual priority order:
     their own BYOK server if configured, else their selected instance preset
     (``app_settings["llm_model"]``), else the instance default (first preset).
     The instance's ``llm_analysis_context`` — the hoster's house style — is

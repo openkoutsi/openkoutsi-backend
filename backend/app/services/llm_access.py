@@ -40,6 +40,10 @@ log = logging.getLogger(__name__)
 LLM_SUBSCRIPTION_REQUIRED = "llm_subscription_required"
 
 # The gated feature areas — also the ``llm_usage.feature`` column values.
+#
+# ``chat`` is no longer written: the general-purpose `POST /api/llm/chat` proxy
+# was removed in issue #45. The value is kept because historical usage rows still
+# carry it and `GET /api/admin/llm-usage/summary` groups by this column.
 Feature = Literal[
     "chat", "plan_generate", "workout_generate", "activity_analysis",
     "training_status", "goal_guidance",
