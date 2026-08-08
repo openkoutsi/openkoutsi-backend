@@ -1,8 +1,10 @@
 """The tool registry's own guarantees (issue #42).
 
-The route-policy walk in ``tests/integration/test_pat_scopes.py`` cannot see past
-the ``/mcp`` mount, so none of what it proves about HTTP routes applies to the
-tools behind it. This module is the equivalent control for the tool layer: every
+The route-policy walk in ``tests/integration/test_pat_scopes.py`` never covers
+``POST /mcp`` — that route resolves its own credential, so ``route_requires_auth``
+is false for it and the walk never asks it to declare anything. None of what that
+walk proves about HTTP routes therefore applies to the tools behind this one.
+This module is the equivalent control for the tool layer: every
 tool declares its scopes, those scopes are read-only and in the shared
 vocabulary, every field is described with its unit, and nothing stream-shaped can
 be returned.
@@ -57,9 +59,9 @@ def test_there_are_tools_to_check():
 def test_every_tool_declares_at_least_one_scope():
     """**The default-deny control.**
 
-    A mounted sub-application inherits no route policy, so a tool that declared
-    nothing would be reachable by any live credential. The decorator refuses to
-    register one; this asserts that nothing got in another way.
+    No route policy covers these tools, so one that declared nothing would be
+    reachable by any live credential. The decorator refuses to register such a
+    tool; this asserts that none got in another way.
     """
     undeclared = [t.name for t in all_tools() if not t.scopes]
     assert undeclared == [], f"tools with no declared scope: {undeclared}"
@@ -423,3 +425,51 @@ def test_no_tool_module_reaches_the_registry_database():
             if forbidden in text:
                 offenders.append(f"{module.name}: {forbidden}")
     assert offenders == []
+
+
+# ── Audit-line safety (review of #86) ────────────────────────────────────────
+
+
+def test_caller_controlled_text_cannot_forge_an_audit_line():
+    """`tool` is `params["name"]` from the request body and `token_id` is
+    whatever sat between the underscores of an `okp_…` bearer. Unsanitised,
+    either can carry a newline and forge a second, plausible record under the
+    default formatter — which `audit.py` deliberately still supports."""
+    from backend.app.core.audit import _safe
+
+    forged = "x\nmcp ok tool=get_activity_detail caller=session user=someone-else 3.2ms"
+    cleaned = _safe(forged)
+    assert "\n" not in cleaned
+    assert "\r" not in cleaned
+    # Replaced rather than stripped, so the attempt stays visible in the record
+    # instead of being tidied into something that reads as ordinary.
+    assert "?" in cleaned
+
+
+def test_an_overlong_field_is_truncated():
+    from backend.app.core.audit import _MAX_FIELD, _safe
+
+    assert len(_safe("a" * 5000)) == _MAX_FIELD + 1  # + the ellipsis
+
+
+def test_an_absent_field_reads_as_absent():
+    from backend.app.core.audit import _safe
+
+    assert _safe(None) == "-"
+    assert _safe("") == "-"
+
+
+def test_the_structured_fields_are_left_intact(caplog):
+    """A JSON formatter escapes them correctly, and truncating there would lose
+    data an operator may need."""
+    import logging
+
+    from backend.app.core import audit
+
+    long_name = "n" * 200
+    with caplog.at_level(logging.INFO, logger="openkoutsi.audit"):
+        audit.mcp_tool_call(tool=long_name, outcome="unknown_tool", user_id="u")
+
+    record = next(r for r in caplog.records if getattr(r, "event", None) == "mcp_tool_call")
+    assert record.mcp_tool == long_name
+    assert len(record.getMessage()) < 200

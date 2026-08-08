@@ -9,15 +9,16 @@ The order matters, and each step is here rather than in the tools for a reason:
 
 1. **Resolve the tool.** Unknown names get a result naming the real ones, so a
    model that hallucinated a tool can recover in one turn instead of retrying.
-2. **Check scopes.** Default-deny: the tool declares what it needs
+2. **Check the rate limit** — for external callers only; see
+   :mod:`backend.app.mcp.limits`. Before the refusals below rather than after,
+   so the calls that *cannot* succeed are the ones it counts.
+3. **Check scopes.** Default-deny: the tool declares what it needs
    (:mod:`backend.app.mcp.registry`) and a credential either holds all of it or
    is refused. A session credential carries ``scopes is None`` — full access,
    the same meaning it has everywhere else in this codebase.
-3. **Check consent.** ``require_consent`` guards the *ingestion* paths; reading
+4. **Check consent.** ``require_consent`` guards the *ingestion* paths; reading
    health data back out through a tool is the same processing, so the same gate
    applies per invocation.
-4. **Check the rate limit** — for external callers only; see
-   :mod:`backend.app.mcp.limits`.
 5. **Validate arguments** against the tool's pydantic model, turning a schema
    violation into a sentence rather than a stack trace.
 6. **Establish the per-user context** — ``open_user_session`` sets the encryption
@@ -53,6 +54,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core import audit
 from backend.app.core.deps import load_athlete, open_user_session
+from backend.app.core.encryption import set_user_encryption_context
 from backend.app.mcp.errors import ToolAccessError, ToolError, ToolNotFound
 from backend.app.mcp.limits import tool_limiter
 from backend.app.mcp.registry import Tool, get_tool, tool_names
@@ -168,14 +170,14 @@ async def _consent_ok(user_id: str, registry_session: Optional[AsyncSession]) ->
     if registry_session is not None:
         return await has_consent(user_id, registry_session)
 
-    from backend.app.db.registry import get_registry_session
+    # `registry_session()`, not the FastAPI dependency: driving a DI generator
+    # by hand works only while it stays single-yield with its cleanup in a
+    # `with`, and would silently stop meaning what it looks like if anyone added
+    # a second yield or a post-yield commit.
+    from backend.app.db.registry import registry_session as open_registry_session
 
-    agen = get_registry_session()
-    session = await agen.__anext__()
-    try:
+    async with open_registry_session() as session:
         return await has_consent(user_id, session)
-    finally:
-        await agen.aclose()
 
 
 async def call_tool(
@@ -232,21 +234,13 @@ async def call_tool(
         record(outcome, result.duration_ms)
         return result
 
-    # ── 2. Scopes ────────────────────────────────────────────────────────────
-    missing = tool.missing_scopes(caller.scopes)
-    if missing:
-        return fail(audit.DENIED_SCOPE, ToolAccessError(tool.name, missing).rendered())
-
-    # ── 3. Consent ───────────────────────────────────────────────────────────
-    if not await _consent_ok(caller.user_id, registry_session):
-        return fail(
-            audit.DENIED_CONSENT,
-            "This account has not accepted the current data-processing policy, "
-            "so its training data cannot be read. The account holder needs to "
-            "accept it in the web app before any tool here can answer.",
-        )
-
-    # ── 4. Rate limit ────────────────────────────────────────────────────────
+    # ── 2. Rate limit ────────────────────────────────────────────────────────
+    #
+    # Ahead of the refusal paths, not behind them. Counting only the calls that
+    # were going to succeed inverts the intent: the runaway loop most likely to
+    # actually happen is a client retrying against a credential that *cannot*
+    # succeed, and every one of those iterations writes an audit record and (for
+    # the consent check) costs a registry round-trip.
     if caller.kind != INTERNAL:
         allowed, retry_after = tool_limiter.check(caller.user_id)
         if not allowed:
@@ -255,6 +249,20 @@ async def call_tool(
                 f"Too many tool calls in the last minute. Retry in about "
                 f"{retry_after} s, or make fewer, broader calls.",
             )
+
+    # ── 3. Scopes ────────────────────────────────────────────────────────────
+    missing = tool.missing_scopes(caller.scopes)
+    if missing:
+        return fail(audit.DENIED_SCOPE, ToolAccessError(tool.name, missing).rendered())
+
+    # ── 4. Consent ───────────────────────────────────────────────────────────
+    if not await _consent_ok(caller.user_id, registry_session):
+        return fail(
+            audit.DENIED_CONSENT,
+            "This account has not accepted the current data-processing policy, "
+            "so its training data cannot be read. The account holder needs to "
+            "accept it in the web app before any tool here can answer.",
+        )
 
     # ── 5. Arguments ─────────────────────────────────────────────────────────
     try:
@@ -265,6 +273,15 @@ async def call_tool(
     # ── 6–7. Context, run, record ────────────────────────────────────────────
     try:
         if session is not None:
+            # A caller-supplied session is the caller's responsibility, but it
+            # must not be a *silent* one: `caller.user_id` is what the scope
+            # check, the consent check and every audit record key on, and
+            # nothing ties it to the session handed in. Deriving the key from
+            # `caller.user_id` here turns a mismatch into a decryption failure
+            # instead of one athlete's data returned under another's name. One
+            # HKDF derivation; the `else` branch gets the same thing from
+            # `open_user_session`.
+            set_user_encryption_context(caller.user_id)
             result = await _run(tool, caller, session, athlete, parsed)
         else:
             async with open_user_session(caller.user_id) as owned:

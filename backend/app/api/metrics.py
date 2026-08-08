@@ -266,7 +266,7 @@ async def get_zones_weekly(
     if days is not None and start is None:
         start = date.today() - timedelta(days=days)
 
-    buckets = await weekly_zone_buckets(athlete, session, start=start, end=end)
+    buckets, _ = await weekly_zone_buckets(athlete, session, start=start, end=end)
     return [WeeklyZoneBucket(**bucket) for bucket in buckets]
 
 

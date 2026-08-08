@@ -127,12 +127,14 @@ async def validate_personal_access_token(
     failure raises the same opaque 401 and is written to the audit log first.
 
     Split out from :func:`_resolve_personal_access_token` because there is one
-    other surface that authorizes differently: the MCP server (issue #42) lives
-    in a mounted sub-application, which the route-policy map cannot see, and
-    gates on the *tool* being called instead. Splitting the policy question off
-    lets it reuse this without becoming a second identity path — the part that
-    decides *who the caller is*, and therefore which database and encryption key
-    their request reaches, stays a single implementation.
+    other surface that authorizes differently: the MCP server (issue #42) gates
+    on the *tool* named in the request body rather than on the route, since no
+    single declaration on ``POST /mcp`` could be right for nine differently-scoped
+    tools. It therefore never reaches the route-policy map at all. Splitting the
+    policy question off lets it reuse this without becoming a second identity
+    path — the part that decides *who the caller is*, and therefore which
+    database and encryption key their request reaches, stays a single
+    implementation.
     """
     from backend.app.models.registry_orm import InstanceSettings, User
     from backend.app.services import personal_access_tokens as pat

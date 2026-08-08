@@ -82,19 +82,33 @@ async def weekly_zone_buckets(
     *,
     start: Optional[date] = None,
     end: Optional[date] = None,
-) -> list[dict]:
+    backfill: bool = True,
+) -> tuple[list[dict], int]:
     """Accumulated time-in-zone per Monday-based week over a period.
 
     Sums each processed cycling activity's frozen ``zone_times`` snapshot into
     weekly buckets, shaped as ``{"week_start": date, "hr": {...}, "power": {...}}``
-    and ordered oldest first. Legacy activities with no snapshot are backfilled
-    (using current zones) and frozen on the way through, mirroring the fitness
-    catch-up flow — so this commits when it wrote something.
+    and ordered oldest first. Returns those alongside the number of activities in
+    the window that had **no** snapshot to contribute.
 
-    Lives here rather than in the route because two callers need exactly this
-    answer: ``GET /api/metrics/zones/weekly`` and the ``get_zone_totals`` MCP
-    tool (issue #42). Two implementations of "which week does this ride belong
-    to" would eventually disagree about a Sunday night ride.
+    ``backfill`` decides what happens to those. True (the default, and what
+    ``GET /api/metrics/zones/weekly`` wants) computes them from stored streams
+    using the athlete's *current* zones, freezes them, and commits — mirroring
+    the fitness catch-up flow. False reads only what is already frozen and
+    leaves the count for the caller to report.
+
+    That switch exists because freezing is not a read. The snapshot is permanent
+    by design, so whichever caller triggers it decides, forever, which zone
+    definitions an old ride is bucketed against — and the MCP tool layer, which
+    a coaching agent may call at any moment on a ``metrics:read`` scope, is
+    exactly the wrong place to be making that decision (issue #42). It also
+    loads ``ActivityStream`` data for every unsnapshotted activity in the window,
+    which is a working set no output bound can constrain.
+
+    Lives here rather than in the route because two callers need this answer:
+    that endpoint and the ``get_zone_totals`` tool. Two implementations of
+    "which week does this ride belong to" would eventually disagree about a
+    Sunday-night ride.
     """
     query = select(Activity).where(
         Activity.athlete_id == athlete.id,
@@ -109,12 +123,14 @@ async def weekly_zone_buckets(
 
     activities = (await session.execute(query)).scalars().all()
 
-    if await ensure_zone_times(athlete, session, activities):
+    if backfill and await ensure_zone_times(athlete, session, activities):
         await session.commit()
 
+    unsnapshotted = 0
     buckets: dict[date, dict[str, dict[str, int]]] = {}
     for activity in activities:
         if not activity.zone_times or activity.start_time is None:
+            unsnapshotted += 1
             continue
         day = activity.start_time.date()
         week_start = day - timedelta(days=day.weekday())  # Monday
@@ -127,11 +143,14 @@ async def weekly_zone_buckets(
             for name, seconds in times.items():
                 dest[name] = dest.get(name, 0) + seconds
 
-    return [
-        {
-            "week_start": week_start,
-            "hr": data.get("hr", {}),
-            "power": data.get("power", {}),
-        }
-        for week_start, data in sorted(buckets.items())
-    ]
+    return (
+        [
+            {
+                "week_start": week_start,
+                "hr": data.get("hr", {}),
+                "power": data.get("power", {}),
+            }
+            for week_start, data in sorted(buckets.items())
+        ],
+        unsnapshotted,
+    )

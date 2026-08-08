@@ -67,6 +67,7 @@ from fastapi.responses import JSONResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.auth import authenticate_bearer
+from backend.app.core.limiter import limiter
 from backend.app.db.registry import get_registry_session
 from backend.app.mcp.dispatch import ToolCaller, call_tool
 from backend.app.mcp.registry import all_tools
@@ -110,12 +111,39 @@ def _result(request_id: Any, payload: dict) -> JSONResponse:
     )
 
 
+async def _mcp_enabled(registry_session: AsyncSession) -> bool:
+    """Whether this instance publishes the MCP server at all (issue #42).
+
+    Checked before anything else, handshake included: a disabled endpoint that
+    still completed `initialize` would let a client believe it had connected to
+    a server that will refuse every useful call. Answered as a 404, which is
+    what a not-published endpoint is, with a body saying so — the self-hoster
+    who turned it off and forgot is the person most likely to be reading it.
+    """
+    from sqlalchemy import select
+
+    from backend.app.models.registry_orm import InstanceSettings
+
+    instance = (
+        await registry_session.execute(select(InstanceSettings).limit(1))
+    ).scalar_one_or_none()
+    return instance is None or bool(instance.allow_mcp_server)
+
+
 def _bearer(request: Request) -> Optional[str]:
+    """The bearer value, or ``None``.
+
+    The scheme is matched case-insensitively because RFC 7235 says auth-scheme
+    is, and MCP clients differ on how they build the header. A client sending
+    ``bearer okp_…`` would otherwise be told its credential was *missing* — an
+    error message pointing at the token when the fault is one character of
+    casing, which is a miserable thing to debug from the far end.
+    """
     header = request.headers.get("Authorization", "")
-    if not header.startswith("Bearer "):
+    scheme, _, value = header.partition(" ")
+    if scheme.lower() != "bearer":
         return None
-    token = header[len("Bearer "):].strip()
-    return token or None
+    return value.strip() or None
 
 
 _RPC_REQUEST_SCHEMA = {
@@ -190,10 +218,30 @@ def create_mcp_router() -> APIRouter:
             }
         },
     )
+    # The one HTTP-level limit this endpoint needs, and it belongs here rather
+    # than only in the dispatcher: `initialize`, `ping` and *failed*
+    # authentication never reach a tool, and a failed authentication costs two
+    # registry queries and an audit line each time. Brute force is not the
+    # concern — `mint_token` is high-entropy and `verify_secret` is a sha256
+    # compare — but audit-log flooding and registry load from an unauthenticated
+    # caller are. Keyed by `principal_key`, so an authenticated caller is
+    # counted by user and everyone else by address. Every other
+    # credential-accepting router in this API declares a limit; this one no
+    # longer is the exception.
+    @limiter.limit("120/minute")
     async def rpc(
         request: Request,
         registry_session: AsyncSession = Depends(get_registry_session),
     ):
+        if not await _mcp_enabled(registry_session):
+            return _error(
+                None,
+                INVALID_REQUEST,
+                "The MCP server is disabled on this instance. An administrator "
+                "can enable it under Settings → allow_mcp_server.",
+                status=404,
+            )
+
         try:
             message = await request.json()
         except Exception:
@@ -210,7 +258,9 @@ def create_mcp_router() -> APIRouter:
 
         request_id = message.get("id")
         method = message.get("method")
-        params = message.get("params") or {}
+        params = message.get("params", {})
+        if params is None:
+            params = {}
         if not isinstance(params, dict):
             return _error(request_id, INVALID_PARAMS, "'params' must be an object.")
 
@@ -298,7 +348,9 @@ def create_mcp_router() -> APIRouter:
             name = params.get("name")
             if not isinstance(name, str) or not name:
                 return _error(request_id, INVALID_PARAMS, "'name' is required.")
-            arguments = params.get("arguments") or {}
+            arguments = params.get("arguments", {})
+            if arguments is None:
+                arguments = {}
             if not isinstance(arguments, dict):
                 return _error(request_id, INVALID_PARAMS, "'arguments' must be an object.")
 

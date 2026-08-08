@@ -288,6 +288,21 @@ def _summarize(activity: Activity) -> ActivitySummary:
     )
 
 
+def _like_literal(text: str) -> str:
+    """Escape LIKE's wildcards so a substring search is one.
+
+    ``%`` and ``_`` are wildcards, so an unescaped ``name_contains="_intervals"``
+    also matches ``4x8 intervals`` and ``"100%"`` matches anything starting
+    ``100``. The field's own description promises a plain case-insensitive
+    substring match, and that is what the model will believe it got — the same
+    failure ``ToolArgs(extra="forbid")`` exists to prevent, where more rows come
+    back than were asked for and get reported as a filtered answer.
+
+    The backslash goes first, or it would escape the escapes added after it.
+    """
+    return text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 def _has_label(label: str):
     """Correlated EXISTS over the JSON ``labels`` array — see ``api.activities``."""
     entries = func.json_each(Activity.labels).table_valued("value")
@@ -397,7 +412,9 @@ async def find_activity(run: ToolRun, args: FindActivityArgs) -> FoundActivities
     if args.label:
         query = query.where(_has_label(args.label))
     if args.name_contains:
-        query = query.where(Activity.name.ilike(f"%{args.name_contains}%"))
+        query = query.where(
+            Activity.name.ilike(f"%{_like_literal(args.name_contains)}%", escape="\\")
+        )
     if args.min_duration_s is not None:
         query = query.where(Activity.duration_s >= args.min_duration_s)
 

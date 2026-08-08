@@ -17,11 +17,19 @@ Why this needs its own default-deny check
 -----------------------------------------
 Personal access tokens (#46) are default-deny because
 :func:`backend.app.core.scopes.build_access_map` walks ``app.routes`` and a route
-that declared nothing is simply absent from the map. That walk cannot see the MCP
-server: it is a **mounted sub-application**, one opaque ``Mount`` as far as
-``app.routes`` is concerned, so every tool behind it would inherit exactly one
-policy — whatever the mount happens to say — and a tool added later would inherit
-it silently.
+that declared nothing is simply absent from the map, so ``get_current_user``
+refuses it. That walk has nothing to say about the tools here, for a precise
+reason: ``POST /mcp`` resolves its own credential rather than depending on
+``get_current_user``, so ``route_requires_auth`` is false for it and the walk
+never asks it to declare anything. (It *is* an ordinary route and the walk does
+enumerate it — ``test_pat_scopes.py::test_the_mcp_endpoint_is_outside_this_walk_by_design``
+pins exactly that shape.)
+
+It resolves its own credential because there is no honest declaration to make:
+the scope a call needs is a property of the tool named in the request body, not
+of the URL. One declaration on that path would have to be right for nine
+differently-scoped tools at once, and a tool added later would inherit whatever
+it said, silently.
 
 So the registry enforces the same property at its own layer, and does it at
 *registration* rather than at call time: :func:`tool` raises unless the
@@ -191,8 +199,10 @@ def tool(
             raise ValueError(
                 f"Tool {name!r} declares no scopes. Every tool must say what a "
                 "credential needs to hold to call it — there is no implicit "
-                "grant, because the route-policy walk that provides one for HTTP "
-                "routes cannot see a mounted sub-application."
+                "grant here, because the route-policy walk that provides one "
+                "for ordinary HTTP routes never covers the MCP endpoint: it "
+                "resolves its own credential, since the scope a call needs "
+                "depends on which tool was named in the request body."
             )
         unknown = sorted(set(scopes) - TOOL_SCOPES)
         if unknown:

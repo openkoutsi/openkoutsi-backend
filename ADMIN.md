@@ -148,8 +148,34 @@ Two things are worth knowing when a user asks for MCP access:
   record is the opposite of the task-shaped tools this surface exists to publish;
   it stays a deliberate grant for a backup script, over the REST route, audited.
 
-Whether the endpoint is reachable from outside your network is a reverse-proxy
-decision — see [DEPLOY.md](DEPLOY.md).
+### Turning the MCP server off
+
+`allow_mcp_server` is an instance setting, **on by default**, alongside
+`allow_personal_access_tokens` in the **Settings** tab. Turning it off refuses the
+endpoint outright — the handshake included, not just the tool calls — so a client
+is told the server is not there rather than connecting successfully and then
+failing every useful call.
+
+```bash
+curl -X PATCH https://api.your-domain/api/admin/settings \
+  -H "Authorization: Bearer <admin session token>" \
+  -H "Content-Type: application/json" \
+  -d '{"allow_mcp_server": false}'
+```
+
+It defaults on for the same reason personal access tokens do: the endpoint
+publishes read-only, scoped tools over data the caller's own credential already
+reaches, so there is no prior behaviour to preserve and nothing is widened by it
+being available. The switch exists because "an AI client may talk to my training
+data" is a decision worth making once for the instance rather than per token.
+
+Be clear with yourself about what turning it off achieves. It removes an
+*interface*, not an exposure: a token scoped to `activities:read` can read the
+same activities through the ordinary REST routes either way. What limits what a
+credential can see is its scopes.
+
+Denying `/mcp` at the reverse proxy does the same job from outside and is a
+reasonable second layer — see [DEPLOY.md](DEPLOY.md).
 
 ## Password reset
 

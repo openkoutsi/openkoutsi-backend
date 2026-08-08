@@ -304,7 +304,7 @@ async def test_calling_a_tool_returns_content_and_structured_content(
 async def test_the_default_deny_the_route_walk_cannot_provide(
     client, issue_token, mcp_athlete
 ):
-    """**The control this mount needs.**
+    """**The control this endpoint needs.**
 
     ``build_access_map`` never saw these tools, so nothing about the route policy
     protects them. A token holding one scope reaches exactly the tools that
@@ -405,3 +405,113 @@ async def test_using_the_endpoint_marks_the_token_as_used(
 
     await registry_session.refresh(before)
     assert before.last_used_at is not None
+
+
+# ── The instance toggle (review of #86) ──────────────────────────────────────
+
+
+async def _disable_mcp(registry_session):
+    from backend.app.models.registry_orm import InstanceSettings
+
+    registry_session.add(InstanceSettings(allow_mcp_server=False))
+    await registry_session.commit()
+
+
+async def test_the_instance_can_turn_the_whole_endpoint_off(
+    client, issue_token, registry_session, mcp_athlete
+):
+    token = await issue_token()
+    assert (await rpc(client, "tools/list", token=token)).status_code == 200
+
+    await _disable_mcp(registry_session)
+
+    resp = await rpc(client, "tools/list", token=token)
+    assert resp.status_code == 404
+    assert "disabled on this instance" in resp.json()["error"]["message"]
+
+
+async def test_disabling_it_closes_the_handshake_too(client, registry_session):
+    """A disabled endpoint that still completed `initialize` would let a client
+    believe it had connected to a server that will refuse every useful call."""
+    await _disable_mcp(registry_session)
+    for method in ("initialize", "ping"):
+        resp = await rpc(client, method)
+        assert resp.status_code == 404, method
+
+
+async def test_it_is_on_by_default(client):
+    """Nothing to preserve and nothing widened, as with personal access tokens."""
+    assert (await rpc(client, "initialize")).status_code == 200
+
+
+async def test_an_admin_can_read_and_flip_the_setting(client, auth_headers):
+    read = await client.get("/api/admin/settings", headers=auth_headers)
+    assert read.status_code == 200
+    assert read.json()["allow_mcp_server"] is True
+
+    patched = await client.patch(
+        "/api/admin/settings", json={"allow_mcp_server": False}, headers=auth_headers
+    )
+    assert patched.status_code == 200
+    assert patched.json()["allow_mcp_server"] is False
+
+    resp = await rpc(client, "initialize")
+    assert resp.status_code == 404
+
+
+# ── Header and argument handling (review of #86) ─────────────────────────────
+
+
+@pytest.mark.parametrize("scheme", ["Bearer", "bearer", "BEARER", "BeArEr"])
+async def test_the_auth_scheme_is_case_insensitive(client, issue_token, scheme):
+    """RFC 7235 makes auth-scheme case-insensitive and clients differ. Getting
+    'your credential is missing' for a casing difference is a miserable thing to
+    debug from the far end."""
+    token = await issue_token()
+    resp = await client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+        headers={"Authorization": f"{scheme} {token}"},
+    )
+    assert resp.status_code == 200, scheme
+    assert len(resp.json()["result"]["tools"]) == 9
+
+
+async def test_extra_whitespace_in_the_header_is_tolerated(client, issue_token):
+    token = await issue_token()
+    resp = await client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+        headers={"Authorization": f"Bearer   {token}  "},
+    )
+    assert resp.status_code == 200
+
+
+@pytest.mark.parametrize("bad", [[], "", 0, 3])
+async def test_falsy_non_object_arguments_are_refused_not_ignored(
+    client, issue_token, mcp_athlete, bad
+):
+    """`or {}` ran before the type check, so any *falsy* non-dict slipped through
+    as 'no arguments' — the one thing this layer relaxed that
+    ToolArgs(extra='forbid') exists to tighten."""
+    resp = await rpc(
+        client, "tools/call", {"name": "get_goal_progress", "arguments": bad},
+        token=await issue_token(),
+    )
+    assert resp.json()["error"]["code"] == -32602, bad
+
+
+async def test_omitted_arguments_still_mean_no_arguments(client, issue_token, mcp_athlete):
+    """Refusing a falsy non-dict must not refuse an absent one."""
+    resp = await rpc(
+        client, "tools/call", {"name": "get_goal_progress"}, token=await issue_token()
+    )
+    assert resp.json()["result"]["isError"] is False
+
+
+@pytest.mark.parametrize("bad", [[], "", 0])
+async def test_falsy_non_object_params_are_refused(client, bad):
+    resp = await client.post(
+        "/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "ping", "params": bad}
+    )
+    assert resp.json()["error"]["code"] == -32602, bad

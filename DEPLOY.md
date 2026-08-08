@@ -323,23 +323,35 @@ The frontend has its own `server {}` block — see the openkoutsi-web repository
 ### Exposing (or not exposing) the MCP endpoint
 
 `POST /mcp` is the Model Context Protocol tool server (see the README). It ships
-enabled and needs no configuration, but *reachability* is a deployment decision
-you make in the proxy, exactly as for the rest of the API.
+**enabled**, and whether it is available is an instance setting rather than a
+proxy rule, so the decision lives somewhere the admin console can show you:
 
-It answers only to a credential this instance issued — a personal access token or
-a session token — and every tool it publishes is read-only and scoped. If you
-want it available to an external MCP client (a desktop AI assistant, say), the
-block above already covers it. If you would rather keep the tool surface to the
-server's own agent, deny it at the proxy:
+```bash
+# Turn it off for the whole instance
+curl -X PATCH https://api.your-domain/api/admin/settings \
+  -H "Authorization: Bearer <admin session token>" \
+  -H "Content-Type: application/json" \
+  -d '{"allow_mcp_server": false}'
+```
+
+Off refuses the endpoint outright — handshake included — with a 404 saying so,
+rather than letting a client connect to a server that will decline every useful
+call. It is the same shape as `allow_personal_access_tokens`, and for the same
+reason: "an AI client may talk to my training data" is a decision a self-hoster
+makes once, for the box, not per token.
+
+Denying `/mcp` at the proxy still works and is a reasonable belt-and-braces
+measure if you also want it unreachable from outside:
 
 ```nginx
 location = /mcp { return 404; }
 ```
 
-Doing so leaves the rest of the API untouched. Note that a personal access token
-can reach the same underlying data through the ordinary REST routes, so closing
-`/mcp` narrows the interface rather than the exposure — the control that limits
-what a credential can see is its scopes, not this location block.
+Either way, note what this does and does not narrow. The MCP endpoint answers
+only to a credential this instance already issued, and the same underlying data
+is reachable through the ordinary REST routes with the same token. Turning it off
+removes an *interface*, not an exposure — what limits what a credential can see
+is its scopes.
 
 ---
 

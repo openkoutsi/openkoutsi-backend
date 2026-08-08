@@ -42,6 +42,35 @@ OVERSIZED = "oversized"
 FAILED = "failed"
 
 
+#: Longer than any real tool name or UUID, short enough that a forged record
+#: cannot be padded out to hide behind a scroll.
+_MAX_FIELD = 64
+
+
+def _safe(value: Optional[str]) -> str:
+    """Make a caller-controlled string safe to interpolate into a log *line*.
+
+    Both record types below take fields straight from a request: ``tool`` is
+    ``params["name"]`` from the MCP body, and ``token_id`` is whatever sat
+    between the underscores of an ``okp_…`` bearer, which ``parse_token`` only
+    checks is non-empty. Unsanitised, either can carry a newline and forge a
+    second, entirely plausible audit line under the default formatter — which
+    the module docstring above deliberately keeps supporting.
+
+    Control characters are replaced rather than stripped, so a forgery attempt
+    stays visible in the record instead of being silently tidied into something
+    that reads as ordinary. The structured ``extra`` fields are unaffected: a
+    JSON formatter escapes them correctly, and truncating there would lose data
+    an operator may need.
+    """
+    if not value:
+        return "-"
+    cleaned = "".join(ch if ch.isprintable() else "?" for ch in value)
+    if len(cleaned) > _MAX_FIELD:
+        cleaned = cleaned[:_MAX_FIELD] + "…"
+    return cleaned
+
+
 def pat_request(
     *,
     outcome: str,
@@ -54,11 +83,11 @@ def pat_request(
     """Record one personal-access-token request."""
     log.info(
         "pat %s token=%s user=%s %s %s",
-        outcome,
-        token_id or "-",
-        user_id or "-",
-        method or "-",
-        path or "-",
+        _safe(outcome),
+        _safe(token_id),
+        _safe(user_id),
+        _safe(method),
+        _safe(path),
         extra={
             "event": "pat_request",
             "pat_outcome": outcome,
@@ -93,11 +122,11 @@ def mcp_tool_call(
     """
     log.info(
         "mcp %s tool=%s caller=%s user=%s token=%s %.1fms",
-        outcome,
-        tool,
-        caller_kind,
-        user_id,
-        token_id or "-",
+        _safe(outcome),
+        _safe(tool),
+        _safe(caller_kind),
+        _safe(user_id),
+        _safe(token_id),
         duration_ms,
         extra={
             "event": "mcp_tool_call",

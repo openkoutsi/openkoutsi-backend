@@ -8711,6 +8711,17 @@
               }
             ],
             "title": "Allow Personal Access Tokens"
+          },
+          "allow_mcp_server": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allow Mcp Server"
           }
         },
         "type": "object",
@@ -8761,6 +8772,11 @@
           "allow_personal_access_tokens": {
             "type": "boolean",
             "title": "Allow Personal Access Tokens",
+            "default": true
+          },
+          "allow_mcp_server": {
+            "type": "boolean",
+            "title": "Allow Mcp Server",
             "default": true
           }
         },

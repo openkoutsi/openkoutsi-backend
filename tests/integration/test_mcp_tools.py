@@ -1108,3 +1108,222 @@ async def test_the_audit_log_never_carries_the_result(
 
     record = next(r for r in caplog.records if getattr(r, "event", None) == "mcp_tool_call")
     assert "Felt strong on the climbs." not in str(vars(record))
+
+
+# ── The tools do not write (review of #86) ───────────────────────────────────
+
+
+async def test_the_zone_tools_never_freeze_a_snapshot(
+    caller, session, training_data, registry_session
+):
+    """``readOnlyHint: True`` has to be true.
+
+    Both zone paths can backfill missing ``zone_times`` and commit. Freezing is
+    permanent by design, so letting a `metrics:read` tool trigger it would let
+    the moment a coaching agent asked a question decide, forever, which zone
+    definitions an old ride is judged against — and would make the hint an MCP
+    client uses to decide whether to ask the user first a lie.
+    """
+    from backend.app.models.user_orm import ActivityStream
+
+    bare = Activity(
+        id="act-no-snapshot",
+        athlete_id=training_data.id,
+        name="Before snapshots existed",
+        sport_type="Ride",
+        start_time=datetime.combine(date.today() - timedelta(days=3), time(9, 0), tzinfo=timezone.utc),
+        duration_s=3600,
+        status="processed",
+        zone_times=None,
+    )
+    session.add(bare)
+    await session.flush()
+    # A stream the backfill would have consumed, so the test fails for the right
+    # reason rather than because there was nothing to compute from.
+    session.add(ActivityStream(activity_id=bare.id, stream_type="power", data=[200] * 3600))
+    session.add(ActivityStream(activity_id=bare.id, stream_type="heartrate", data=[140] * 3600))
+    await session.commit()
+
+    for tool_name, args in (
+        ("get_zone_totals", {"weeks": 4}),
+        ("get_intensity_distribution", {"days": 30}),
+    ):
+        result = await run(
+            tool_name, args, caller=caller, session=session, athlete=training_data,
+            registry_session=registry_session,
+        )
+        assert result.ok, result.error
+
+    await session.refresh(bare)
+    assert bare.zone_times is None, "a read-only tool froze a zone snapshot"
+
+
+async def test_zone_totals_reports_rides_it_could_not_count(
+    caller, session, training_data, registry_session
+):
+    """Not counted is said out loud, so under-counted totals aren't read as an
+    easy week."""
+    session.add(
+        Activity(
+            id="act-unsnapshotted",
+            athlete_id=training_data.id,
+            name="No zone data",
+            sport_type="Ride",
+            start_time=datetime.combine(date.today() - timedelta(days=1), time(18, 0), tzinfo=timezone.utc),
+            duration_s=3600,
+            status="processed",
+            zone_times=None,
+        )
+    )
+    await session.commit()
+
+    result = await run(
+        "get_zone_totals", {"weeks": 2}, caller=caller, session=session,
+        athlete=training_data, registry_session=registry_session,
+    )
+    assert result.data["activities_without_zone_data"] == 1
+    assert "no stored time-in-zone" in result.data["note"]
+
+
+async def test_the_api_route_still_backfills(client, auth_headers, session, seeded_athlete):
+    """The tool layer stopped freezing snapshots; the endpoint that always did
+    must not have. It is a browser action by the data's owner, not a scoped
+    credential's side effect."""
+    from backend.app.models.user_orm import ActivityStream
+
+    seeded_athlete.power_zones = [
+        {"name": f"Z{i}", "low": low, "high": high}
+        for i, (low, high) in enumerate(
+            [(0, 137), (137, 187), (187, 217), (217, 237), (237, 265), (265, 300), (300, 9999)],
+            start=1,
+        )
+    ]
+    activity = Activity(
+        id="act-for-route",
+        athlete_id=seeded_athlete.id,
+        name="Needs a snapshot",
+        sport_type="Ride",
+        start_time=datetime.now(timezone.utc) - timedelta(days=1),
+        duration_s=3600,
+        status="processed",
+        zone_times=None,
+    )
+    session.add(activity)
+    await session.flush()
+    session.add(ActivityStream(activity_id=activity.id, stream_type="power", data=[200] * 3600))
+    await session.commit()
+
+    resp = await client.get("/api/metrics/zones/weekly", headers=auth_headers)
+    assert resp.status_code == 200
+
+    await session.refresh(activity)
+    assert activity.zone_times is not None
+
+
+# ── Ordering of the checks (review of #86) ───────────────────────────────────
+
+
+async def test_the_rate_limiter_counts_calls_that_cannot_succeed(
+    session, training_data, registry_session, monkeypatch
+):
+    """The loop most likely to actually happen is a client retrying against a
+    credential that can never succeed. Counting only the successes inverts the
+    limiter's whole intent."""
+    monkeypatch.setattr(tool_limiter, "limit", 2)
+
+    denied = ToolCaller(user_id=_TEST_USER_ID, scopes=[], kind="pat", token_id="t")
+    outcomes = []
+    for _ in range(3):
+        result = await run(
+            "get_plan_status", caller=denied, session=session, athlete=training_data,
+            registry_session=registry_session,
+        )
+        outcomes.append(result.error)
+
+    assert "missing" in outcomes[0]
+    assert "missing" in outcomes[1]
+    assert "Too many tool calls" in outcomes[2]
+
+
+async def test_a_consent_refusal_is_counted_too(
+    caller, session, training_data, registry_session, monkeypatch
+):
+    """Each of these costs a registry round-trip, so an uncounted loop is not
+    free."""
+    from backend.app.models.registry_orm import User
+
+    user = (
+        await registry_session.execute(select(User).where(User.id == _TEST_USER_ID))
+    ).scalar_one()
+    user.consented_at = None
+    await registry_session.commit()
+
+    monkeypatch.setattr(tool_limiter, "limit", 1)
+    first = await run(
+        "get_goal_progress", caller=caller, session=session, athlete=training_data,
+        registry_session=registry_session,
+    )
+    second = await run(
+        "get_goal_progress", caller=caller, session=session, athlete=training_data,
+        registry_session=registry_session,
+    )
+    assert "data-processing policy" in first.error
+    assert "Too many tool calls" in second.error
+
+
+async def test_the_encryption_context_is_set_for_a_caller_supplied_session(
+    caller, session, training_data, registry_session, monkeypatch
+):
+    """`caller.user_id` decides the scope check, the consent check and every
+    audit record; nothing ties it to a session handed in. Deriving the key from
+    it makes a mismatch a decryption failure rather than one athlete's data
+    returned under another's name."""
+    seen: list[str] = []
+    import backend.app.mcp.dispatch as dispatch
+
+    monkeypatch.setattr(dispatch, "set_user_encryption_context", lambda uid: seen.append(uid))
+
+    result = await run(
+        "get_goal_progress", caller=caller, session=session, athlete=training_data,
+        registry_session=registry_session,
+    )
+    assert result.ok, result.error
+    assert seen == [_TEST_USER_ID]
+
+
+# ── Filters mean what their descriptions say (review of #86) ─────────────────
+
+
+async def test_like_wildcards_in_a_name_search_are_literal(
+    caller, session, training_data, registry_session
+):
+    """The field promises a substring match, which is what the model believes
+    it got. Unescaped, `_` matches any character and `%` matches anything."""
+    session.add_all([
+        Activity(
+            id="act-underscore", athlete_id=training_data.id, name="_intervals",
+            sport_type="Ride", status="processed",
+            start_time=datetime.now(timezone.utc) - timedelta(days=4),
+            duration_s=3600,
+        ),
+        Activity(
+            id="act-plain", athlete_id=training_data.id, name="4x8 intervals",
+            sport_type="Ride", status="processed",
+            start_time=datetime.now(timezone.utc) - timedelta(days=5),
+            duration_s=3600,
+        ),
+    ])
+    await session.commit()
+
+    literal = await run(
+        "find_activity", {"name_contains": "_intervals"}, caller=caller,
+        session=session, athlete=training_data, registry_session=registry_session,
+    )
+    assert [i["activity_id"] for i in literal.data["items"]] == ["act-underscore"]
+
+    # And `%` is not "anything".
+    none_match = await run(
+        "find_activity", {"name_contains": "4x8%interv"}, caller=caller,
+        session=session, athlete=training_data, registry_session=registry_session,
+    )
+    assert none_match.data["total"] == 0

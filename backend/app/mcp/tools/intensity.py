@@ -6,6 +6,18 @@ zone names. ``get_intensity_distribution`` collapses a whole block into three
 bands and *names the shape* — polarized, pyramidal, threshold-heavy, or almost
 all easy — which is the level at which a coaching decision is usually made.
 
+**Neither writes.** Both underlying paths can freeze missing ``zone_times``
+snapshots on the way through, and both are asked *not* to here. Freezing is
+permanent by design — a snapshot is computed against the athlete's zones as they
+stand at that moment and never revisited — so whichever caller triggers it
+decides forever which zone definitions an old ride is judged by, and "whenever a
+coaching agent happened to ask a question" is the wrong answer to that. It would
+also make ``readOnlyHint`` a lie in the tool descriptor, which is not cosmetic:
+that hint is what an MCP client consults to decide whether a call needs the
+user's approval first. Rides with no snapshot are therefore *reported* rather
+than fixed, which is what this layer does with every other kind of missing
+figure.
+
 Both carry their caveats in the payload rather than leaving them implicit,
 because both are easy to over-read. A distribution drawn from six rides out of
 forty is not wrong, it is unfounded, so ``coverage`` travels with the numbers. A
@@ -26,7 +38,6 @@ from backend.app.mcp.dispatch import ToolRun
 from backend.app.mcp.registry import ToolArgs, tool
 from backend.app.mcp.shaping import pct, week_start
 from backend.app.services.intensity_distribution import (
-    backfill_window_snapshots,
     compute_intensity_distribution,
     resolve_window,
 )
@@ -162,11 +173,20 @@ class ZoneTotals(BaseModel):
     weeks: list[WeekZones] = Field(default_factory=list, description="One entry per week, oldest first.")
     returned: int = Field(0, description="How many weeks are in this response (count).")
     weeks_requested: int = Field(0, description="How many weeks were asked for (count).")
+    activities_without_zone_data: int = Field(
+        0,
+        description=(
+            "Rides in the window with no stored time-in-zone, so not counted "
+            "into any week (count). They predate zone snapshots rather than "
+            "being easy — read a non-zero figure here as under-counted totals."
+        ),
+    )
     note: Optional[str] = Field(
         None,
         description=(
-            "Set when weeks are absent because nothing was ridden in them, so a "
-            "gap is not mistaken for missing data."
+            "Set when weeks are absent because nothing was ridden in them, or "
+            "when rides were left out for want of zone data — so a gap is not "
+            "mistaken for an easy week."
         ),
     )
 
@@ -197,9 +217,9 @@ async def get_intensity_distribution(run: ToolRun, args: IntensityArgs) -> Inten
     end = run.today
     start, _ = resolve_window(None, end, args.days)
 
-    if args.method == "time":
-        await backfill_window_snapshots(run.athlete, run.session, start, end)
-
+    # No `backfill_window_snapshots` here, deliberately — see the module
+    # docstring. `compute_intensity_distribution` never writes, and rides with
+    # no frozen snapshot already show up honestly in `coverage`.
     result = await compute_intensity_distribution(
         run.athlete, run.session, start=start, end=end, basis=args.basis, method=args.method
     )
@@ -247,10 +267,16 @@ async def get_zone_totals(run: ToolRun, args: ZoneTotalsArgs) -> ZoneTotals:
     be the athlete's current one.
 
     A week with no entry is a week with nothing recorded, not missing data.
+    Rides that predate zone snapshots are counted in
+    'activities_without_zone_data' rather than silently omitted — a non-zero
+    figure there means the weekly totals are under-counted, not that the athlete
+    was taking it easy.
     """
     start = week_start(run.today) - timedelta(weeks=args.weeks - 1)
 
-    buckets = await weekly_zone_buckets(run.athlete, run.session, start=start, end=run.today)
+    buckets, unsnapshotted = await weekly_zone_buckets(
+        run.athlete, run.session, start=start, end=run.today, backfill=False
+    )
 
     weeks: list[WeekZones] = []
     for bucket in buckets:
@@ -265,16 +291,23 @@ async def get_zone_totals(run: ToolRun, args: ZoneTotalsArgs) -> ZoneTotals:
             )
         )
 
-    note = None
+    notes = []
     if len(weeks) < args.weeks:
-        note = (
+        notes.append(
             f"{args.weeks - len(weeks)} of the {args.weeks} weeks asked for hold "
             "no recorded riding and are omitted."
+        )
+    if unsnapshotted:
+        notes.append(
+            f"{unsnapshotted} ride(s) in this window have no stored time-in-zone "
+            "and are not counted — they predate zone snapshots. Opening the "
+            "weekly zones view in the web app fills them in."
         )
 
     return ZoneTotals(
         weeks=weeks,
         returned=len(weeks),
         weeks_requested=args.weeks,
-        note=note,
+        activities_without_zone_data=unsnapshotted,
+        note=" ".join(notes) or None,
     )
