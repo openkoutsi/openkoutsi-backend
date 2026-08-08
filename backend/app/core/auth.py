@@ -306,13 +306,19 @@ async def authenticate_bearer(
 ) -> UserContext:
     """Identity from a bearer value, with **no route policy applied**.
 
-    For surfaces that authorize per *operation* rather than per route: the MCP
-    server (issue #42) is mounted as a sub-application, so ``build_access_map``
-    never saw it, and the scope a call needs is a property of the tool being
-    invoked rather than of the URL it arrived at. Such a surface must therefore
-    do its own default-deny check — for the tool layer that is
-    ``backend.app.mcp.registry``, where every tool declares its scopes and an
-    undeclared one cannot be registered at all.
+    For surfaces that authorize per *operation* rather than per route: the scope
+    an MCP call needs (issue #42) is a property of the tool named in the request
+    body rather than of the URL it arrived at, so ``POST /mcp`` resolves its own
+    credential through this function instead of depending on
+    ``get_current_user``. ``route_requires_auth`` is therefore false for it and
+    ``build_access_map`` never asks it to declare a scope — the walk does
+    enumerate the route, it simply has nothing to say about it.
+
+    Such a surface must therefore do its own default-deny check — for the tool
+    layer that is ``backend.app.mcp.registry``, where every tool declares its
+    scopes and an undeclared one cannot be registered at all. Which is why this
+    function is allowed exactly one call site, asserted by
+    ``test_pat_scopes.py::test_only_one_place_steps_outside_the_route_policy``.
 
     A personal access token still has to be live, unrevoked and enabled here;
     only the *authorization* question is deferred.
