@@ -3,9 +3,9 @@
 What this is
 ------------
 A minimal, stateless implementation of the MCP *Streamable HTTP* transport: one
-``POST /mcp`` carrying one JSON-RPC 2.0 message. Five methods are served —
-``initialize``, ``notifications/initialized``, ``ping``, ``tools/list`` and
-``tools/call`` — which is everything a tools-only server owes a client. Resources
+``POST /mcp`` carrying one JSON-RPC 2.0 message. Four methods are served —
+``initialize``, ``ping``, ``tools/list`` and ``tools/call`` — plus a 202 for any
+notification, which is everything a tools-only server owes a client. Resources
 and prompts are deliberately absent from the advertised capabilities rather than
 stubbed, so a client never offers a user something that will fail.
 
@@ -63,7 +63,7 @@ import logging
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.auth import authenticate_bearer
@@ -155,7 +155,8 @@ _ENDPOINT_DESCRIPTION = """\
 Model Context Protocol endpoint (issue #42) — the tool interface an AI coach
 talks to, over JSON-RPC 2.0 rather than REST.
 
-`initialize`, `notifications/initialized` and `ping` need no credential.
+`initialize` and `ping` need no credential, and any JSON-RPC notification (a
+message with no `id`) is answered with 202 and no body.
 `tools/list` and `tools/call` are authenticated with the same
 `Authorization: Bearer …` header as the rest of this API, accepting either a
 session token or a personal access token.
@@ -213,6 +214,25 @@ def create_mcp_router() -> APIRouter:
         if not isinstance(params, dict):
             return _error(request_id, INVALID_PARAMS, "'params' must be an object.")
 
+        # ── Notifications ────────────────────────────────────────────────────
+        #
+        # A JSON-RPC message with no ``id`` is a notification: it expects no
+        # response at all, and the transport spec is explicit that the server
+        # answers 202 with **no body**. Handled here as a class rather than by
+        # name, because the set is open — a client sends
+        # ``notifications/cancelled`` when the user interrupts a tool call, and
+        # matching only ``notifications/initialized`` sent every other one down
+        # the authenticated path to be answered with a 401 error object. Replying
+        # to a notification at all is a protocol violation; replying to it with
+        # an error a stricter client may drop the connection over.
+        #
+        # Deliberately before the credential check. There is nothing to
+        # authorize: a notification we do not act on reads nothing, changes
+        # nothing and discloses nothing, and the spec requires the same 202
+        # either way.
+        if "id" not in message:
+            return Response(status_code=202)
+
         # ── Methods reachable without a credential ───────────────────────────
         #
         # Handshake and liveness only. They disclose the tool *names* by way of
@@ -228,9 +248,6 @@ def create_mcp_router() -> APIRouter:
                     "instructions": _INSTRUCTIONS,
                 },
             )
-        if method == "notifications/initialized":
-            # A notification carries no id and expects no body.
-            return JSONResponse(status_code=202, content=None)
         if method == "ping":
             return _result(request_id, {})
 

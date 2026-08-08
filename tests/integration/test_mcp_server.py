@@ -121,6 +121,50 @@ async def test_the_initialized_notification_is_accepted_with_no_body(client):
         "/mcp", json={"jsonrpc": "2.0", "method": "notifications/initialized"}
     )
     assert resp.status_code == 202
+    # "No body" means no body. An earlier version answered with the four bytes
+    # `null`, which is a body saying nothing.
+    assert resp.content == b""
+
+
+@pytest.mark.parametrize(
+    "method",
+    [
+        "notifications/initialized",
+        # Sent when the user interrupts a tool call. Matching notifications by
+        # name meant every one but `initialized` fell through to the credential
+        # check and was answered with a 401 error object — a reply to a message
+        # that expects no reply, which a strict client may drop the connection
+        # over. Notifications are now handled as a class: no `id`, no response.
+        "notifications/cancelled",
+        "notifications/progress",
+        "notifications/roots/list_changed",
+        "notifications/something/nobody/has/invented/yet",
+    ],
+)
+async def test_every_notification_is_accepted_and_answered_with_nothing(client, method):
+    resp = await client.post("/mcp", json={"jsonrpc": "2.0", "method": method})
+    assert resp.status_code == 202, method
+    assert resp.content == b""
+
+
+async def test_a_notification_needs_no_credential(client):
+    """There is nothing to authorize: it reads nothing and discloses nothing,
+    and the spec requires the same 202 either way."""
+    resp = await client.post(
+        "/mcp", json={"jsonrpc": "2.0", "method": "notifications/cancelled"}
+    )
+    assert resp.status_code == 202
+
+
+async def test_a_request_is_not_mistaken_for_a_notification(client):
+    """It is the absence of ``id`` that makes a notification, not the method
+    name — and an ``id`` of 0 or null is still an id that was sent."""
+    for request_id in (0, None, "x"):
+        resp = await client.post(
+            "/mcp", json={"jsonrpc": "2.0", "id": request_id, "method": "ping"}
+        )
+        assert resp.status_code == 200, request_id
+        assert resp.json()["result"] == {}
 
 
 async def test_an_unknown_method_is_a_json_rpc_error(client, issue_token):

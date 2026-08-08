@@ -6208,7 +6208,7 @@
           "mcp"
         ],
         "summary": "MCP JSON-RPC endpoint",
-        "description": "Model Context Protocol endpoint (issue #42) \u2014 the tool interface an AI coach\ntalks to, over JSON-RPC 2.0 rather than REST.\n\n`initialize`, `notifications/initialized` and `ping` need no credential.\n`tools/list` and `tools/call` are authenticated with the same\n`Authorization: Bearer \u2026` header as the rest of this API, accepting either a\nsession token or a personal access token.\n\n**Personal access token scope:** decided per tool, not per route. Each tool\ndeclares the read scopes it needs and `tools/list` reports them in its `_meta`;\na call whose credential lacks one comes back as a tool result explaining the\ngap, not as a 403. Every published tool is read-only.",
+        "description": "Model Context Protocol endpoint (issue #42) \u2014 the tool interface an AI coach\ntalks to, over JSON-RPC 2.0 rather than REST.\n\n`initialize` and `ping` need no credential, and any JSON-RPC notification (a\nmessage with no `id`) is answered with 202 and no body.\n`tools/list` and `tools/call` are authenticated with the same\n`Authorization: Bearer \u2026` header as the rest of this API, accepting either a\nsession token or a personal access token.\n\n**Personal access token scope:** decided per tool, not per route. Each tool\ndeclares the read scopes it needs and `tools/list` reports them in its `_meta`;\na call whose credential lacks one comes back as a tool result explaining the\ngap, not as a 403. Every published tool is read-only.",
         "operationId": "mcpJsonRpc",
         "requestBody": {
           "content": {
