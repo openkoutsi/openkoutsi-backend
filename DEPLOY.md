@@ -324,7 +324,9 @@ The frontend has its own `server {}` block — see the openkoutsi-web repository
 
 `POST /mcp` is the Model Context Protocol tool server (see the README). It ships
 **enabled**, and whether it is available is an instance setting rather than a
-proxy rule, so the decision lives somewhere the admin console can show you:
+proxy rule, so the decision lives somewhere the admin console can show you — the
+**Allow the MCP server** switch under Settings, next to the personal-access-token
+one. Over the API it is the same field:
 
 ```bash
 # Turn it off for the whole instance

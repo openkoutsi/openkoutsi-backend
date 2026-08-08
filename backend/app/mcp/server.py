@@ -238,7 +238,8 @@ def create_mcp_router() -> APIRouter:
                 None,
                 INVALID_REQUEST,
                 "The MCP server is disabled on this instance. An administrator "
-                "can enable it under Settings → allow_mcp_server.",
+                "can turn it back on in the admin console, under "
+                "Settings → 'Allow the MCP server'.",
                 status=404,
             )
 

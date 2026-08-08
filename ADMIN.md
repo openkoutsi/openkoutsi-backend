@@ -150,11 +150,17 @@ Two things are worth knowing when a user asks for MCP access:
 
 ### Turning the MCP server off
 
-`allow_mcp_server` is an instance setting, **on by default**, alongside
-`allow_personal_access_tokens` in the **Settings** tab. Turning it off refuses the
-endpoint outright — the handshake included, not just the tool calls — so a client
-is told the server is not there rather than connecting successfully and then
-failing every useful call.
+`allow_mcp_server` is an instance setting, **on by default**, shown as
+**Allow the MCP server** in the admin console's **Settings** tab, alongside
+`allow_personal_access_tokens`. Turning it off refuses the endpoint outright —
+the handshake included, not just the tool calls — so a client is told the server
+is not there rather than connecting successfully and then failing every useful
+call.
+
+Leaving it on while personal access tokens are off publishes the endpoint but
+leaves nothing able to reach it: `/mcp` accepts a session token as well, but
+those expire in an hour, so an external client has no credential it can hold. The
+admin console says so under the switch rather than leaving it to be discovered.
 
 ```bash
 curl -X PATCH https://api.your-domain/api/admin/settings \

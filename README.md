@@ -301,7 +301,8 @@ callable, since one call returning the whole record is the opposite of
 task-shaped.
 
 An admin can turn the endpoint off for the whole instance with `allow_mcp_server`
-(Settings, default **on**), which refuses it outright — handshake included —
+— the **Allow the MCP server** switch in the admin console's Settings tab,
+default **on** — which refuses it outright — handshake included —
 rather than letting a client connect to a server that will decline every useful
 call. Denying `/mcp` at the reverse proxy works too. Either way it narrows the
 *interface*, not the exposure: the same data is reachable through the ordinary
