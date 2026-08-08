@@ -6202,6 +6202,64 @@
         }
       }
     },
+    "/mcp": {
+      "post": {
+        "tags": [
+          "mcp"
+        ],
+        "summary": "MCP JSON-RPC endpoint",
+        "description": "Model Context Protocol endpoint (issue #42) \u2014 the tool interface an AI coach\ntalks to, over JSON-RPC 2.0 rather than REST.\n\n`initialize` and `ping` need no credential, and any JSON-RPC notification (a\nmessage with no `id`) is answered with 202 and no body.\n`tools/list` and `tools/call` are authenticated with the same\n`Authorization: Bearer \u2026` header as the rest of this API, accepting either a\nsession token or a personal access token.\n\n**Personal access token scope:** decided per tool, not per route. Each tool\ndeclares the read scopes it needs and `tools/list` reports them in its `_meta`;\na call whose credential lacks one comes back as a tool result explaining the\ngap, not as a 403. Every published tool is read-only.",
+        "operationId": "mcpJsonRpc",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "jsonrpc": {
+                    "const": "2.0",
+                    "description": "Always the string '2.0'."
+                  },
+                  "id": {
+                    "description": "Correlation id, echoed back on the response. Omit for a notification, which is answered with 202 and no body."
+                  },
+                  "method": {
+                    "type": "string",
+                    "enum": [
+                      "initialize",
+                      "notifications/initialized",
+                      "ping",
+                      "tools/list",
+                      "tools/call"
+                    ]
+                  },
+                  "params": {
+                    "type": "object",
+                    "description": "Method parameters. For tools/call: {'name': <tool name>, 'arguments': {\u2026}}, where the accepted arguments come from that tool's inputSchema in tools/list."
+                  }
+                },
+                "additionalProperties": false,
+                "type": "object",
+                "required": [
+                  "jsonrpc",
+                  "method"
+                ]
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/version": {
       "get": {
         "summary": "Get Version",
@@ -8653,6 +8711,17 @@
               }
             ],
             "title": "Allow Personal Access Tokens"
+          },
+          "allow_mcp_server": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allow Mcp Server"
           }
         },
         "type": "object",
@@ -8703,6 +8772,11 @@
           "allow_personal_access_tokens": {
             "type": "boolean",
             "title": "Allow Personal Access Tokens",
+            "default": true
+          },
+          "allow_mcp_server": {
+            "type": "boolean",
+            "title": "Allow Mcp Server",
             "default": true
           }
         },

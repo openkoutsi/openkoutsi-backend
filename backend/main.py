@@ -121,6 +121,7 @@ def create_app() -> FastAPI:
     from backend.app.api.messages import router as messages_router
     from backend.app.api.achievements import router as achievements_router
     from backend.app.api.tokens import router as tokens_router
+    from backend.app.mcp.server import create_mcp_router
 
     app = FastAPI(title="openkoutsi API", version="2.0.0", lifespan=lifespan)
 
@@ -162,6 +163,15 @@ def create_app() -> FastAPI:
     # than per request — see `core.scopes` for why this is static.
     app.state.pat_access_by_endpoint = build_access_map(app)
     _annotate_pat_scopes(app)
+
+    # The MCP tool server (issue #42). Added *after* the walk above, and
+    # deliberately outside it: the scope a call needs is a property of the tool
+    # being invoked, not of the URL, so no single declaration on this path could
+    # be honest about nine differently-scoped tools. It resolves its own
+    # credential and applies default-deny per tool instead — see
+    # `backend.app.mcp.server` for why, and `test_pat_scopes.py` for the test
+    # that stops a second endpoint doing the same thing unnoticed.
+    app.include_router(create_mcp_router())
 
     @app.get("/api/version")
     async def get_version():

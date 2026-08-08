@@ -320,6 +320,39 @@ server {
 
 The frontend has its own `server {}` block — see the openkoutsi-web repository.
 
+### Exposing (or not exposing) the MCP endpoint
+
+`POST /mcp` is the Model Context Protocol tool server (see the README). It ships
+**enabled**, and whether it is available is an instance setting rather than a
+proxy rule, so the decision lives somewhere the admin console can show you:
+
+```bash
+# Turn it off for the whole instance
+curl -X PATCH https://api.your-domain/api/admin/settings \
+  -H "Authorization: Bearer <admin session token>" \
+  -H "Content-Type: application/json" \
+  -d '{"allow_mcp_server": false}'
+```
+
+Off refuses the endpoint outright — handshake included — with a 404 saying so,
+rather than letting a client connect to a server that will decline every useful
+call. It is the same shape as `allow_personal_access_tokens`, and for the same
+reason: "an AI client may talk to my training data" is a decision a self-hoster
+makes once, for the box, not per token.
+
+Denying `/mcp` at the proxy still works and is a reasonable belt-and-braces
+measure if you also want it unreachable from outside:
+
+```nginx
+location = /mcp { return 404; }
+```
+
+Either way, note what this does and does not narrow. The MCP endpoint answers
+only to a credential this instance already issued, and the same underlying data
+is reachable through the ordinary REST routes with the same token. Turning it off
+removes an *interface*, not an exposure — what limits what a credential can see
+is its scopes.
+
 ---
 
 ## 4. Strava Bridge (optional)

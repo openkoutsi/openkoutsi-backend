@@ -442,6 +442,7 @@ def _settings_response(instance: InstanceSettings) -> InstanceSettingsResponse:
         llm_requires_subscription=bool(instance.llm_requires_subscription),
         allow_self_signup=bool(instance.allow_self_signup),
         allow_personal_access_tokens=bool(instance.allow_personal_access_tokens),
+        allow_mcp_server=bool(instance.allow_mcp_server),
     )
 
 
@@ -476,6 +477,8 @@ async def update_instance_settings(
         instance.allow_self_signup = bool(body.allow_self_signup)
     if body.allow_personal_access_tokens is not None:
         instance.allow_personal_access_tokens = bool(body.allow_personal_access_tokens)
+    if body.allow_mcp_server is not None:
+        instance.allow_mcp_server = bool(body.allow_mcp_server)
 
     await session.commit()
     await session.refresh(instance)

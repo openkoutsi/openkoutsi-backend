@@ -16,6 +16,23 @@ from backend.app.schemas.admin import ConsentRequest, ConsentResponse
 router = APIRouter(prefix="/consent", tags=["consent"], dependencies=[pat_forbidden()])
 
 
+async def has_consent(user_id: str, session: AsyncSession) -> bool:
+    """Whether ``user_id`` has accepted the *current* privacy policy version.
+
+    The plain-function half of :func:`require_consent`, for callers that are not
+    a route: the MCP tool layer (issue #42) applies the same gate per tool
+    invocation, and a second copy of "what counts as consent" is exactly the
+    kind of thing that drifts once the policy version moves.
+    """
+    result = await session.execute(select(User).where(User.id == user_id))
+    user = result.scalar_one_or_none()
+    return (
+        user is not None
+        and user.consented_at is not None
+        and user.consent_version == CURRENT_CONSENT_VERSION
+    )
+
+
 async def require_consent(
     ctx: UserContext = Depends(get_current_user),
     session: AsyncSession = Depends(get_registry_session),
@@ -27,13 +44,7 @@ async def require_consent(
     start processing health data before consent is on record. Returns 403 when
     consent is missing or predates the current policy version.
     """
-    result = await session.execute(select(User).where(User.id == ctx.user_id))
-    user = result.scalar_one_or_none()
-    if (
-        user is None
-        or user.consented_at is None
-        or user.consent_version != CURRENT_CONSENT_VERSION
-    ):
+    if not await has_consent(ctx.user_id, session):
         raise HTTPException(
             status_code=403,
             detail="Consent to data processing is required before this action.",

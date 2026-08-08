@@ -1,4 +1,5 @@
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from sqlalchemy import event, text
@@ -26,6 +27,20 @@ _RegistrySessionLocal = async_sessionmaker(_registry_engine, expire_on_commit=Fa
 
 
 async def get_registry_session() -> AsyncGenerator[AsyncSession, None]:
+    async with _RegistrySessionLocal() as session:
+        yield session
+
+
+@asynccontextmanager
+async def registry_session() -> AsyncIterator[AsyncSession]:
+    """A registry session for code that is not a FastAPI dependency.
+
+    ``get_registry_session`` is a dependency, and driving one by hand only works
+    while it stays single-yield with its cleanup inside a ``with`` — an
+    arrangement a later edit can break without the hand-driver noticing. Callers
+    outside dependency injection (the MCP tool layer, background work) take this
+    instead and get an ordinary ``async with``.
+    """
     async with _RegistrySessionLocal() as session:
         yield session
 

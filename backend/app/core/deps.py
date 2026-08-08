@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, AsyncIterator
+from contextlib import asynccontextmanager
 
 from fastapi import Depends, HTTPException
 from sqlalchemy import select
@@ -12,6 +13,24 @@ from backend.app.core.auth import UserContext, get_current_user
 from backend.app.core.encryption import set_user_encryption_context
 from backend.app.db.user_session import get_user_session_factory
 from backend.app.models.user_orm import Athlete
+
+
+@asynccontextmanager
+async def open_user_session(user_id: str) -> AsyncIterator[AsyncSession]:
+    """Set the per-user encryption context and open that user's DB session.
+
+    The two steps belong together and must not drift apart: isolation here is
+    *physical* — a database file and an encryption key per user — so reaching the
+    right rows means having established the right context first. Anything that
+    needs a per-user session outside a request (the MCP tool layer, background
+    work) goes through this rather than pairing the two calls itself.
+
+    ``get_ctx_and_session`` is this function with an identity resolved from a
+    credential in front of it.
+    """
+    set_user_encryption_context(user_id)
+    async with get_user_session_factory(user_id)() as session:
+        yield session
 
 
 class _UserSession:
@@ -27,8 +46,7 @@ class _UserSession:
         self,
         ctx: UserContext = Depends(get_current_user),
     ) -> AsyncGenerator[tuple[UserContext, AsyncSession], None]:
-        set_user_encryption_context(ctx.user_id)
-        async with get_user_session_factory(ctx.user_id)() as session:
+        async with open_user_session(ctx.user_id) as session:
             yield ctx, session
 
 

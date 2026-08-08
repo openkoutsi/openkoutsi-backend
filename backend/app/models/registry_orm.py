@@ -221,6 +221,17 @@ class InstanceSettings(RegistryBase):
     allow_personal_access_tokens: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default="1"
     )
+    # The MCP tool server (issue #42). Defaults **on**, for the same reason the
+    # switch above does: it publishes read-only, scoped tools over data the
+    # caller's own credential already reaches, so it adds an interface rather
+    # than authority. The switch exists because "an AI client can talk to my
+    # training data" is a decision a self-hoster may want to make once, for the
+    # whole instance, rather than per token — and because a reverse-proxy rule
+    # is not a decision the application can see, test, or report in the admin
+    # console. Off refuses the endpoint outright, handshake included.
+    allow_mcp_server: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="1"
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
     )

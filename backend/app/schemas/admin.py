@@ -168,6 +168,11 @@ class InstanceSettingsResponse(BaseModel):
     # strictly less than the session its owner already holds. Turning it off
     # refuses authentication, so tokens already issued stop working at once.
     allow_personal_access_tokens: bool = True
+    # Issue #42: expose the MCP tool server at POST /mcp. Defaults **on** for
+    # the same reason as the switch above — it publishes read-only, scoped tools
+    # over data the caller's credential already reaches. Off refuses the
+    # endpoint outright, handshake included.
+    allow_mcp_server: bool = True
 
 
 class InstanceSettingsPatch(BaseModel):
@@ -179,6 +184,7 @@ class InstanceSettingsPatch(BaseModel):
     llm_requires_subscription: Optional[bool] = None
     allow_self_signup: Optional[bool] = None
     allow_personal_access_tokens: Optional[bool] = None
+    allow_mcp_server: Optional[bool] = None
 
 
 # ── LLM usage stats (instance admin, issue #9) ──────────────────────────────

@@ -124,6 +124,59 @@ rather than to a database shared across users. Outcomes distinguish
 `revoked` from `unknown_token`, which is why revoked rows are retained: somebody
 using a credential you withdrew is a different event from somebody guessing.
 
+MCP tool invocations are recorded on the same logger, as `mcp_tool_call` events
+carrying the tool name, the caller (token id when there is one, and whether the
+call came from a credential or from the server's own agent), the arguments, the
+duration and the outcome. The arguments are recorded because without them the
+record cannot answer the question it exists for — *what did this credential
+read?* — and they are dates, ids and window lengths rather than content. Results
+are never logged: those are the health data itself.
+
+### Tokens and the MCP endpoint
+
+`POST /mcp` accepts the same tokens as the rest of the API, and the exclusions
+in the table above still hold — a token's scopes are what it can reach, whatever
+door it knocks on. The endpoint publishes only read-only tools, and every one of
+them declares which read scopes it needs, so a token scoped to `goals:read`
+reaches the goal tool and nothing else.
+
+Two things are worth knowing when a user asks for MCP access:
+
+- **There is no `mcp:*` scope**, deliberately. A scope named after the transport
+  would tell the person ticking the box nothing about what it hands over.
+- **`athlete:export` is not callable through MCP.** One call returning the entire
+  record is the opposite of the task-shaped tools this surface exists to publish;
+  it stays a deliberate grant for a backup script, over the REST route, audited.
+
+### Turning the MCP server off
+
+`allow_mcp_server` is an instance setting, **on by default**, alongside
+`allow_personal_access_tokens` in the **Settings** tab. Turning it off refuses the
+endpoint outright — the handshake included, not just the tool calls — so a client
+is told the server is not there rather than connecting successfully and then
+failing every useful call.
+
+```bash
+curl -X PATCH https://api.your-domain/api/admin/settings \
+  -H "Authorization: Bearer <admin session token>" \
+  -H "Content-Type: application/json" \
+  -d '{"allow_mcp_server": false}'
+```
+
+It defaults on for the same reason personal access tokens do: the endpoint
+publishes read-only, scoped tools over data the caller's own credential already
+reaches, so there is no prior behaviour to preserve and nothing is widened by it
+being available. The switch exists because "an AI client may talk to my training
+data" is a decision worth making once for the instance rather than per token.
+
+Be clear with yourself about what turning it off achieves. It removes an
+*interface*, not an exposure: a token scoped to `activities:read` can read the
+same activities through the ordinary REST routes either way. What limits what a
+credential can see is its scopes.
+
+Denying `/mcp` at the reverse proxy does the same job from outside and is a
+reasonable second layer — see [DEPLOY.md](DEPLOY.md).
+
 ## Password reset
 
 There are two ways to reset a password.

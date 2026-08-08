@@ -1,10 +1,10 @@
-"""Structured audit logging for personal-access-token requests (issue #46).
+"""Structured audit logging for scoped-credential activity (issues #46, #42).
 
-Every request a PAT authenticates is recorded here: token id, user, route,
-method and outcome. Deliberately **structured logs, not the shared usage DB** —
-invocation records against one person's health data do not belong in a database
-shared across users, and a self-hoster's log pipeline is already where the rest
-of this instance's operational record lives.
+Every request a PAT authenticates, and every MCP tool invocation, is recorded
+here: principal, what was reached, and the outcome. Deliberately **structured
+logs, not the shared usage DB** — invocation records against one person's health
+data do not belong in a database shared across users, and a self-hoster's log
+pipeline is already where the rest of this instance's operational record lives.
 
 Records go to the ``openkoutsi.audit`` logger with the fields attached as
 ``extra``, so a JSON formatter emits them as fields while the default formatter
@@ -14,7 +14,7 @@ still prints a readable line.
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 log = logging.getLogger("openkoutsi.audit")
 
@@ -31,6 +31,45 @@ REVOKED = "revoked"
 EXPIRED = "expired"
 DISABLED = "disabled"
 
+# Tool-layer outcomes (issue #42). `denied_scope` above is shared: a refusal is
+# a refusal whether it happened at a route or at a tool.
+DENIED_CONSENT = "denied_consent"
+RATE_LIMITED = "rate_limited"
+BAD_ARGUMENTS = "bad_arguments"
+UNKNOWN_TOOL = "unknown_tool"
+TOOL_ERROR = "tool_error"
+OVERSIZED = "oversized"
+FAILED = "failed"
+
+
+#: Longer than any real tool name or UUID, short enough that a forged record
+#: cannot be padded out to hide behind a scroll.
+_MAX_FIELD = 64
+
+
+def _safe(value: Optional[str]) -> str:
+    """Make a caller-controlled string safe to interpolate into a log *line*.
+
+    Both record types below take fields straight from a request: ``tool`` is
+    ``params["name"]`` from the MCP body, and ``token_id`` is whatever sat
+    between the underscores of an ``okp_…`` bearer, which ``parse_token`` only
+    checks is non-empty. Unsanitised, either can carry a newline and forge a
+    second, entirely plausible audit line under the default formatter — which
+    the module docstring above deliberately keeps supporting.
+
+    Control characters are replaced rather than stripped, so a forgery attempt
+    stays visible in the record instead of being silently tidied into something
+    that reads as ordinary. The structured ``extra`` fields are unaffected: a
+    JSON formatter escapes them correctly, and truncating there would lose data
+    an operator may need.
+    """
+    if not value:
+        return "-"
+    cleaned = "".join(ch if ch.isprintable() else "?" for ch in value)
+    if len(cleaned) > _MAX_FIELD:
+        cleaned = cleaned[:_MAX_FIELD] + "…"
+    return cleaned
+
 
 def pat_request(
     *,
@@ -44,11 +83,11 @@ def pat_request(
     """Record one personal-access-token request."""
     log.info(
         "pat %s token=%s user=%s %s %s",
-        outcome,
-        token_id or "-",
-        user_id or "-",
-        method or "-",
-        path or "-",
+        _safe(outcome),
+        _safe(token_id),
+        _safe(user_id),
+        _safe(method),
+        _safe(path),
         extra={
             "event": "pat_request",
             "pat_outcome": outcome,
@@ -57,6 +96,47 @@ def pat_request(
             "http_method": method,
             "http_path": path,
             "required_scope": scope,
+        },
+    )
+
+
+def mcp_tool_call(
+    *,
+    tool: str,
+    outcome: str,
+    user_id: str,
+    token_id: Optional[str] = None,
+    caller_kind: str = "session",
+    arguments: Optional[dict[str, Any]] = None,
+    duration_ms: float = 0.0,
+) -> None:
+    """Record one MCP tool invocation (issue #42).
+
+    Arguments are recorded because without them the record cannot answer the
+    question it exists for — "what did this credential read?" — and because a
+    tool's arguments are dates, ids and window lengths rather than content.
+    The *results* are never logged: those are the health data itself.
+
+    ``caller_kind`` separates the in-process agent from a credential presented
+    over the network, so the two can be counted apart.
+    """
+    log.info(
+        "mcp %s tool=%s caller=%s user=%s token=%s %.1fms",
+        _safe(outcome),
+        _safe(tool),
+        _safe(caller_kind),
+        _safe(user_id),
+        _safe(token_id),
+        duration_ms,
+        extra={
+            "event": "mcp_tool_call",
+            "mcp_outcome": outcome,
+            "mcp_tool": tool,
+            "mcp_caller_kind": caller_kind,
+            "mcp_arguments": arguments or {},
+            "mcp_duration_ms": duration_ms,
+            "pat_token_id": token_id,
+            "pat_user_id": user_id,
         },
     )
 

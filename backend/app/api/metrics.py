@@ -31,7 +31,7 @@ from backend.app.services.metrics_forecast import (
     MAX_FORECAST_DAYS,
     forecast_fitness,
 )
-from backend.app.services.zone_times import compute_zone_times, ensure_zone_times
+from backend.app.services.zone_times import compute_zone_times, weekly_zone_buckets
 from openkoutsi.sport_matching import CYCLING_SPORT_TYPES
 from openkoutsi.training_math import (
     DECOUPLING_EXCLUDED_CATEGORIES,
@@ -266,45 +266,8 @@ async def get_zones_weekly(
     if days is not None and start is None:
         start = date.today() - timedelta(days=days)
 
-    query = select(Activity).where(
-        Activity.athlete_id == athlete.id,
-        Activity.sport_type.in_(CYCLING_SPORT_TYPES),
-        Activity.status == "processed",
-        Activity.start_time.is_not(None),
-    )
-    if start:
-        query = query.where(Activity.start_time >= datetime.combine(start, time.min))
-    if end:
-        query = query.where(Activity.start_time <= datetime.combine(end, time.max))
-
-    activities = (await session.execute(query)).scalars().all()
-
-    if await ensure_zone_times(athlete, session, activities):
-        await session.commit()
-
-    buckets: dict[date, dict[str, dict[str, int]]] = {}
-    for activity in activities:
-        if not activity.zone_times or activity.start_time is None:
-            continue
-        day = activity.start_time.date()
-        week_start = day - timedelta(days=day.weekday())  # Monday
-        bucket = buckets.setdefault(week_start, {})
-        for kind in ("hr", "power"):
-            times = activity.zone_times.get(kind)
-            if not times:
-                continue
-            dest = bucket.setdefault(kind, {})
-            for name, seconds in times.items():
-                dest[name] = dest.get(name, 0) + seconds
-
-    return [
-        WeeklyZoneBucket(
-            week_start=week_start,
-            hr=data.get("hr", {}),
-            power=data.get("power", {}),
-        )
-        for week_start, data in sorted(buckets.items())
-    ]
+    buckets, _ = await weekly_zone_buckets(athlete, session, start=start, end=end)
+    return [WeeklyZoneBucket(**bucket) for bucket in buckets]
 
 
 @router.get(
