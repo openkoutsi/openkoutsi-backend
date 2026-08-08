@@ -2445,7 +2445,7 @@
           "integrations"
         ],
         "summary": "Connect",
-        "description": "Return the OAuth authorization URL for the given provider.\n\n**Personal access token scope:** `integrations:read`",
+        "description": "Return the OAuth authorization URL for the given provider.\n\nClosed to personal access tokens despite being a GET. It is not a read: it\nmints a signed ``state`` that ``callback`` \u2014 which is unauthenticated \u2014\ntrusts alone to decide whose row the provider tokens are written to. A\nread-scoped credential must not be able to produce an account-linking\ncapability, and starting an OAuth flow is a browser act that ends in a\nredirect, so there is nothing legitimate for a script to do with the URL.\n\n**Not available to personal access tokens.**",
         "operationId": "connect_api_integrations__provider__connect_get",
         "security": [
           {
@@ -2484,8 +2484,7 @@
           }
         },
         "x-personal-access-token": {
-          "allowed": true,
-          "scope": "integrations:read"
+          "allowed": false
         }
       }
     },

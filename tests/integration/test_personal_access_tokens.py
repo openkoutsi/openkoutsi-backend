@@ -567,6 +567,73 @@ class TestUnreachableSurfaces:
         )
         assert resp.status_code == 403
 
+    async def test_the_oauth_connect_flow_cannot_be_started(
+        self, pat_client, registry_session, own_athlete
+    ):
+        """`GET /{provider}/connect` is a GET but not a read.
+
+        It mints a signed `state` that the unauthenticated callback trusts alone
+        to decide whose row the provider tokens are written to — so a read scope
+        must not be able to produce an account-linking capability.
+        """
+        raw = await _issue(registry_session, scopes=_ALL_SCOPES)
+        resp = await pat_client.get(
+            "/api/integrations/strava/connect", headers=_pat_headers(raw)
+        )
+        assert resp.status_code == 403
+
+    async def test_llm_configuration_cannot_be_changed(
+        self, pat_client, registry_session, own_athlete
+    ):
+        """Closing the *spending* surfaces is not enough on its own.
+
+        Repointing `llm_base_url` would make the user's own browser session ship
+        their training data to a host of the token holder's choosing, with every
+        other control here still green — the token never calls an LLM route.
+        """
+        raw = await _issue(registry_session, scopes=_ALL_SCOPES)
+        resp = await pat_client.patch(
+            "/api/athlete",
+            json={"app_settings": {"llm_base_url": "https://evil.example.com/v1"}},
+            headers=_pat_headers(raw),
+        )
+        assert resp.status_code == 403
+        assert "personal access token" in resp.json()["detail"]
+
+    @pytest.mark.parametrize(
+        "key,value",
+        [
+            ("llm_base_url", "https://evil.example.com/v1"),
+            ("llm_api_key", "sk-attacker"),
+            ("llm_api_key_enc", "pre-encrypted"),
+            ("llm_model", "attacker-model"),
+            ("llm_models", [{"name": "x", "base_url": "https://evil.example.com/v1"}]),
+        ],
+    )
+    async def test_every_llm_setting_key_is_refused(
+        self, pat_client, registry_session, own_athlete, key, value
+    ):
+        raw = await _issue(registry_session, scopes=_ALL_SCOPES)
+        resp = await pat_client.patch(
+            "/api/athlete",
+            json={"app_settings": {key: value}},
+            headers=_pat_headers(raw),
+        )
+        assert resp.status_code == 403, key
+
+    async def test_ordinary_settings_are_still_writable(
+        self, pat_client, registry_session, own_athlete
+    ):
+        """The LLM guard must not have closed `athlete:write` generally."""
+        raw = await _issue(registry_session, scopes=["athlete:write", "athlete:read"])
+        resp = await pat_client.patch(
+            "/api/athlete",
+            json={"app_settings": {"ask_for_rpe": False}},
+            headers=_pat_headers(raw),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["app_settings"]["ask_for_rpe"] is False
+
 
 class TestExportScope:
     async def test_export_needs_its_own_grant(
@@ -901,18 +968,35 @@ class TestConsentStillApplies:
 
 
 class TestRateLimitKey:
-    def test_an_authenticated_token_keys_on_itself_not_the_address(self):
+    def test_an_authenticated_request_keys_on_the_user_not_the_address(self):
         from backend.app.core.limiter import principal_key
 
         class _Request:
-            def __init__(self, token_id=None):
+            def __init__(self, user_id=None):
                 self.state = type("S", (), {})()
-                if token_id:
-                    self.state.pat_token_id = token_id
+                if user_id:
+                    self.state.pat_user_id = user_id
                 self.client = type("C", (), {"host": "10.0.0.1"})()
                 self.headers = {}
 
-        assert principal_key(_Request("abc-123")) == "pat:abc-123"
+        assert principal_key(_Request("user-abc")) == "user:user-abc"
+
+    def test_two_tokens_of_one_user_share_a_bucket(self):
+        """Keying on the token would make the limit multiplicative in a number
+        nothing caps — a user may mint tokens freely."""
+        from backend.app.core.limiter import principal_key
+
+        class _Request:
+            def __init__(self, user_id, token_id):
+                self.state = type("S", (), {})()
+                self.state.pat_user_id = user_id
+                self.state.pat_token_id = token_id
+                self.client = type("C", (), {"host": "10.0.0.1"})()
+                self.headers = {}
+
+        assert principal_key(_Request("u1", "token-a")) == principal_key(
+            _Request("u1", "token-b")
+        )
 
     def test_unauthenticated_traffic_still_keys_on_the_address(self):
         """The limits protecting login and signup behave exactly as before."""

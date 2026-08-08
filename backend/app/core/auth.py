@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core import audit
 from backend.app.core.config import settings
-from backend.app.core.scopes import PatAccess
+from backend.app.core.scopes import PatAccess, access_for_request
 from backend.app.db.registry import get_registry_session
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
@@ -173,9 +173,11 @@ async def _resolve_personal_access_token(
     if user is None:
         raise deny(audit.UNKNOWN_TOKEN, token_id)
 
-    # Default-deny: a route that declared nothing is unreachable, so the hole
-    # cannot arrive silently with a router added later.
-    access: PatAccess | None = getattr(request.state, "pat_access", None)
+    # Default-deny: a route that declared nothing is absent from the map and so
+    # unreachable, and the hole cannot arrive silently with a router added later.
+    # Resolved from the route rather than from what has run so far — see
+    # `core.scopes` for why that distinction is load-bearing.
+    access: PatAccess | None = access_for_request(request)
     required = access.scope_for(method) if access is not None else None
     scopes = pat.scopes_of(token)
     if access is None or not access.allowed or required is None:
@@ -205,9 +207,12 @@ async def _resolve_personal_access_token(
         )
 
     await pat.touch_last_used(registry_session, token)
-    # The rate limiter reads this to key on the token rather than the address:
-    # one script hammering from one IP is not one anonymous visitor, and a token
-    # id is a stable principal in a way an address never was.
+    # The rate limiter keys on the *user* rather than the address: one script
+    # hammering from one IP is not one anonymous visitor. Not on the token —
+    # tokens can be minted freely, so per-token buckets would make the limit
+    # multiplicative in a number nothing caps. The token id is recorded too, for
+    # anything that wants per-token attribution rather than throttling.
+    request.state.pat_user_id = token.user_id
     request.state.pat_token_id = token_id
     audit.pat_request(
         outcome=audit.OK,

@@ -99,9 +99,11 @@ def test_the_closed_surfaces_stay_closed(app, prefix):
     """Excluded by allowlist, not denylist: each of these must declare
     ``pat_forbidden()`` rather than merely happen to lack a scope.
 
-    Applied to every route under the prefix, authenticated or not — ``/api/setup``
-    bootstraps the first admin and so resolves no identity at all, but a token
-    presented to it must still be refused rather than ignored.
+    Applied to every route under the prefix, authenticated or not. ``/api/setup``
+    is the one that resolves no identity today, so nothing reads its declaration
+    at request time — a token presented there is ignored rather than refused.
+    The declaration is still the right thing to carry: it is what makes setup
+    closed on the day it gains an authenticated route, instead of open.
     """
     routes = [r for r in _api_routes(app) if r.path.startswith(prefix)]
     assert routes, f"expected routes under {prefix}"
@@ -180,6 +182,56 @@ def test_read_methods_never_resolve_to_a_write_scope(app):
         assert scope is None or scope.endswith((":read", ":export")), (
             f"{route.path}: GET resolves to {scope}"
         )
+
+
+def test_the_policy_is_resolved_from_the_route_not_from_what_ran(app):
+    """Regression: a route-level declaration must bind regardless of ordering.
+
+    An earlier version had the declaration publish itself on `request.state` for
+    the resolver to read back, which works only while every declaration runs
+    before `get_current_user` does. It silently does not when a route-level
+    dependency resolves `get_current_user` as a sub-dependency of its own —
+    FastAPI caches that resolution, so the first dependency to ask for an
+    identity fixes the answer and a later `pat_forbidden()` never speaks.
+
+    `GET /api/integrations/{provider}/connect` is exactly that shape: its
+    `require_consent` dependency precedes its `pat_forbidden()`. Resolving the
+    policy statically from `route.dependant` is what makes the order irrelevant.
+    """
+    connect = next(
+        r for r in _authenticated_routes(app)
+        if r.path == "/api/integrations/{provider}/connect"
+    )
+    # The declaration is found, and it is the route's own, not its router's.
+    assert route_pat_access(connect).allowed is False
+    # And the map the resolver actually consults agrees.
+    assert app.state.pat_access_by_endpoint[connect.endpoint].allowed is False
+
+
+def test_every_declared_route_is_in_the_resolver_map(app):
+    """The static walk and the runtime lookup must not be able to disagree."""
+    for route in _api_routes(app):
+        access = route_pat_access(route)
+        if access is None:
+            continue
+        assert app.state.pat_access_by_endpoint.get(route.endpoint) == access, route.path
+
+
+def test_conflicting_declarations_on_one_handler_fail_loudly():
+    """Keying the map on the endpoint is only safe if disagreement is caught."""
+    from fastapi import FastAPI
+    from backend.app.core.scopes import build_access_map, pat_forbidden, pat_scopes
+
+    conflicted = FastAPI()
+
+    async def handler():
+        return None
+
+    conflicted.get("/a", dependencies=[pat_scopes(read="activities:read")])(handler)
+    conflicted.get("/b", dependencies=[pat_forbidden()])(handler)
+
+    with pytest.raises(RuntimeError, match="conflicting"):
+        build_access_map(conflicted)
 
 
 def test_declaring_a_scope_outside_the_vocabulary_is_impossible():

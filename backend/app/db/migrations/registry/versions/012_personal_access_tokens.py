@@ -55,9 +55,19 @@ def upgrade() -> None:
         "personal_access_tokens",
         ["user_id"],
     )
+    # The daily expiry sweep filters on expires_at; without this it is a full
+    # scan over a table that only grows, since dead rows are retained.
+    op.create_index(
+        "ix_personal_access_tokens_expires_at",
+        "personal_access_tokens",
+        ["expires_at"],
+    )
 
 
 def downgrade() -> None:
+    op.drop_index(
+        "ix_personal_access_tokens_expires_at", table_name="personal_access_tokens"
+    )
     op.drop_index(
         "ix_personal_access_tokens_user_id", table_name="personal_access_tokens"
     )

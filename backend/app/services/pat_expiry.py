@@ -119,21 +119,25 @@ async def _email_opted_in(user_id: str) -> bool:
 
 
 async def _send_email(user: User, token: PersonalAccessToken, days_left: Optional[int]) -> None:
-    """Best-effort expiry email. Silent when unconfigured or opted out."""
-    from backend.app.services.email import (
-        EmailError,
-        get_email_provider,
-        send_token_expiry_email,
-    )
+    """Best-effort expiry email. Silent when unconfigured or opted out.
 
+    Guarded against ``Exception``, not just ``EmailError``, and with provider
+    construction *inside* the guard: ``get_email_provider()`` raises a bare
+    ``ValueError`` for an unrecognised ``EMAIL_PROVIDER``, so a single typo in
+    the instance config would otherwise take the whole sweep down. This is the
+    optional channel on top of an inbox message that has already been written —
+    nothing it can do is worth failing the sweep for.
+    """
     if not user.email or user.email_verified_at is None:
         return
-    provider = get_email_provider()
-    if not provider.is_configured:
-        return
-    if not await _email_opted_in(user.id):
-        return
     try:
+        from backend.app.services.email import get_email_provider, send_token_expiry_email
+
+        provider = get_email_provider()
+        if not provider.is_configured:
+            return
+        if not await _email_opted_in(user.id):
+            return
         await send_token_expiry_email(
             provider,
             to=user.email,
@@ -141,7 +145,7 @@ async def _send_email(user: User, token: PersonalAccessToken, days_left: Optiona
             days_left=days_left,
             manage_url=f"{settings.frontend_url}/settings",
         )
-    except EmailError:
+    except Exception:
         log.exception("Failed to send token-expiry email for token %s", token.id)
 
 
@@ -152,10 +156,16 @@ async def run_expiry_sweep(
     now = now or datetime.now(timezone.utc)
 
     horizon = now + timedelta(days=7)
+    # `EXPIRED` is terminal, so a token already marked with it can never reach a
+    # new stage. Excluding those in SQL rather than in `_is_new_stage` keeps this
+    # query bounded by *live* tokens instead of by the instance's entire history
+    # of naturally-expired ones — dead rows are deliberately retained, so without
+    # this the daily sweep would load and discard a set that only ever grows.
     result = await registry_session.execute(
         select(PersonalAccessToken).where(
             PersonalAccessToken.revoked_at.is_(None),
             PersonalAccessToken.expires_at <= horizon,
+            PersonalAccessToken.last_expiry_notice.is_distinct_from(EXPIRED),
         )
     )
     tokens = list(result.scalars().all())
@@ -198,15 +208,19 @@ async def run_expiry_sweep(
             log.exception("Failed to notify user %s about token %s", user.id, token.id)
             continue
 
-        await _send_email(user, token, days_left)
-
-        # Marked only after the inbox write succeeded, so the stage is recorded
-        # as sent exactly when it was.
+        # Mark and commit *immediately* after the inbox write, and before the
+        # email. `notify_user` commits to the user's own DB, so the message is
+        # already durable; anything that threw between here and a commit at the
+        # end of the loop would roll back this mark while leaving that message
+        # in place, and the user would be re-notified every day thereafter —
+        # precisely the nag `last_expiry_notice` exists to prevent, arriving
+        # exactly when the mail path is broken and the warning matters most.
         token.last_expiry_notice = stage
+        await registry_session.commit()
         sent += 1
 
-    if sent:
-        await registry_session.commit()
+        await _send_email(user, token, days_left)
+
     return sent
 
 

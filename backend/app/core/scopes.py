@@ -16,18 +16,27 @@ or a single route::
 
     router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[pat_forbidden()])
 
-Nothing is enforced *by* the dependency: it only records itself on
-``request.state``. Enforcement happens once, centrally, in
-:func:`backend.app.core.auth.get_current_user`, which reads that declaration
-back. FastAPI resolves router- and route-level ``dependencies=[…]`` before the
-ones in an endpoint's signature — and router-level before route-level — so the
-declaration is always in place by the time the resolver runs, and a route-level
-one overwrites its router's.
+Nothing is enforced *by* the dependency, and nothing is read from it at request
+time either. :func:`build_access_map` resolves every route's declaration **once,
+at app construction**, into an endpoint → :class:`PatAccess` map, and
+:func:`backend.app.core.auth.get_current_user` looks the current endpoint up in
+it.
 
-Recording rather than enforcing is what makes this default-deny: a route with
-**no** declaration leaves nothing on ``request.state`` and is unreachable by a
-PAT rather than open, so a router added six months from now is closed without
-anybody having to remember this file exists.
+That indirection is not incidental. An earlier version had the dependency
+publish itself on ``request.state`` for the resolver to read back, which is
+correct only while every declaration happens to run before ``get_current_user``
+does — and it silently does not when a route-level dependency (``require_consent``,
+say) resolves ``get_current_user`` as a sub-dependency of its own. FastAPI caches
+that resolution, so the *first* dependency to ask for an identity fixes the
+answer, and a ``pat_forbidden()`` sitting later in the same list never got a
+chance to speak. Resolving statically removes the ordering question entirely:
+declarations are read off ``route.dependant``, where order is unambiguous and
+last-wins.
+
+Deriving the policy from the route rather than from what ran is what makes this
+default-deny: a route with **no** declaration is absent from the map and
+unreachable by a PAT rather than open, so a router added six months from now is
+closed without anybody having to remember this file exists.
 
 ``tests/integration/test_pat_scopes.py`` walks ``app.routes`` and fails when an
 authenticated route carries no declaration, which is what turns the convention
@@ -108,8 +117,8 @@ class PatAccess:
     even though the other half is — distinct from ``allowed=False``, which
     closes the route to tokens entirely.
 
-    As a FastAPI dependency it only publishes itself on ``request.state`` for the
-    resolver to read; see the module docstring.
+    As a FastAPI dependency it does nothing at all — it exists to be *found* on
+    ``route.dependant`` by :func:`build_access_map`; see the module docstring.
     """
 
     read: Optional[str] = None
@@ -127,8 +136,8 @@ class PatAccess:
             return None
         return self.read if method.upper() in _READ_METHODS else self.write
 
-    async def __call__(self, request: Request) -> None:
-        request.state.pat_access = self
+    async def __call__(self) -> None:  # pragma: no cover - a declaration, not logic
+        return None
 
 
 def pat_scopes(*, read: Optional[str] = None, write: Optional[str] = None):
@@ -176,6 +185,47 @@ def route_pat_access(route) -> Optional[PatAccess]:
         sub.call for sub in _flatten(dependant) if isinstance(sub.call, PatAccess)
     ]
     return declared[-1] if declared else None
+
+
+def build_access_map(app) -> dict:
+    """Resolve every route's declaration once, keyed by endpoint function.
+
+    Called from ``create_app()``; the result lives on ``app.state`` and is what
+    ``get_current_user`` consults. Routes with no declaration are simply absent,
+    which is the default-deny case.
+
+    Keying on the endpoint is safe because Starlette puts ``endpoint`` (not
+    ``route``) in the request scope. Registering one function on two routes is
+    fine as long as they agree — ``PUT``/``POST /athlete/avatar`` share a handler
+    and a declaration — and a **disagreement raises at startup** rather than
+    resolving to whichever route was registered last.
+    """
+    from fastapi.routing import APIRoute
+
+    resolved: dict = {}
+    for route in app.routes:
+        if not isinstance(route, APIRoute):
+            continue
+        access = route_pat_access(route)
+        if access is None:
+            continue
+        existing = resolved.get(route.endpoint)
+        if existing is not None and existing != access:
+            raise RuntimeError(
+                f"{route.endpoint.__qualname__} is registered on routes with "
+                f"conflicting personal-access-token declarations: "
+                f"{existing!r} vs {access!r}. Split the handler, or make them agree."
+            )
+        resolved[route.endpoint] = access
+    return resolved
+
+
+def access_for_request(request: Request) -> Optional[PatAccess]:
+    """The declaration covering the route this request matched, if any."""
+    resolved = getattr(request.app.state, "pat_access_by_endpoint", None)
+    if not resolved:
+        return None
+    return resolved.get(request.scope.get("endpoint"))
 
 
 def route_requires_auth(route) -> bool:

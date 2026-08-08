@@ -125,8 +125,10 @@ class PersonalAccessToken(RegistryBase):
     name: Mapped[str] = mapped_column(String, nullable=False)
     # JSON-encoded list of scopes, e.g. '["activities:read","metrics:read"]'.
     scopes: Mapped[str] = mapped_column(String, nullable=False, default="[]")
+    # Indexed: the daily expiry sweep filters on it, over a table that only
+    # grows because dead rows are retained.
     expires_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False
+        DateTime(timezone=True), nullable=False, index=True
     )
     # Written coarsely (only when more than an hour stale) — this is a WAL SQLite
     # registry with a pool of 3, and a write on every authenticated request would

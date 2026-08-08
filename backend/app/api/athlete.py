@@ -79,6 +79,14 @@ router = APIRouter(
 
 _MAX_LLM_URL_LEN = 2048
 
+# Every `app_settings` key that steers where an LLM call goes or what
+# authenticates it. Closed to personal access tokens (issue #46) — see the guard
+# in `update_athlete`. `llm_models` is a per-athlete preset list whose entries
+# each carry their own `base_url`, so it belongs here too.
+_LLM_SETTING_KEYS = frozenset({
+    "llm_base_url", "llm_api_key", "llm_api_key_enc", "llm_model", "llm_models",
+})
+
 # Self-reported athlete experience level, stored in app_settings (see #18) and
 # fed into the LLM coaching/generation prompts (see #32). The canonical tuple
 # lives in ``services.athlete_experience`` so validation here and prompt building
@@ -230,6 +238,19 @@ async def update_athlete(
     if body.app_settings is not None:
         new_settings: dict = dict(body.app_settings)
         new_settings.pop("llm_api_key_set", None)
+
+        # A personal access token may never touch the LLM *configuration*, not
+        # just the endpoints that spend money (issue #46). Repointing
+        # `llm_base_url` would make the user's own browser session ship their
+        # training data to a host of the token holder's choosing on the next
+        # analysis — every PAT control still green, because the token itself
+        # never calls an LLM route. `check_url_safe` only blocks link-local
+        # metadata ranges, so any publicly resolvable host would pass.
+        if ctx.is_pat and _LLM_SETTING_KEYS & new_settings.keys():
+            raise HTTPException(
+                status_code=403,
+                detail="LLM configuration cannot be changed with a personal access token.",
+            )
 
         if "llm_base_url" in new_settings:
             raw_url = new_settings.get("llm_base_url")

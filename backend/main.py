@@ -11,6 +11,7 @@ from starlette.requests import Request as StarletteRequest
 
 from backend.app.core.config import settings
 from backend.app.core.limiter import limiter
+from backend.app.core.scopes import build_access_map
 from backend.app.db.registry import init_registry_db
 from backend.app.db.usage import init_usage_db
 
@@ -157,6 +158,9 @@ def create_app() -> FastAPI:
     app.include_router(achievements_router, prefix="/api")
     app.include_router(tokens_router, prefix="/api")
 
+    # Resolve every route's personal-access-token policy once, here, rather
+    # than per request — see `core.scopes` for why this is static.
+    app.state.pat_access_by_endpoint = build_access_map(app)
     _annotate_pat_scopes(app)
 
     @app.get("/api/version")

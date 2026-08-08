@@ -50,6 +50,8 @@ What a token can never do, whatever scopes it was granted:
 | The token endpoints themselves | A token cannot create, list or revoke a token. Session-authenticated only, and there is no internal minting path. |
 | `/api/messages` | The inbox is where expiry warnings and admin-revocation notices land. A credential should not be able to read the message saying it is about to be cut off. |
 | `/api/llm/*` and the AI triggers | They spend money. |
+| Changing the **LLM configuration** (`llm_base_url`, `llm_api_key`) | Repointing it would make the user's *own* session send their data to a host of the token holder's choosing — closing only the endpoints that spend money would leave that open. |
+| Starting a provider **OAuth flow** (`GET /api/integrations/{provider}/connect`) | It mints a signed `state` that the unauthenticated callback trusts to decide whose account the provider tokens are written to. Connecting Strava or Wahoo stays a browser act. |
 
 `GET /api/athlete/export` **is** reachable, but only under its own
 `athlete:export` scope — one call that returns the entire record is never folded
@@ -176,7 +178,9 @@ uppercase letter and one digit), and is redirected to the login page.
 - Email verification: 20 requests/hour per IP
 - Personal access token creation: 20 requests/hour per user
 
-Rate limits are keyed by **principal**: a request authenticated by a personal
-access token is keyed on the token id, everything else on the client address. One
-script hammering from one address is not one anonymous visitor, and a token id is
-a stable principal in a way an address never was.
+Rate limits are keyed by **principal**: an authenticated request is keyed on the
+*user*, everything else on the client address. One script hammering from one
+address is not one anonymous visitor. The key is the user rather than the token
+because a user may mint tokens freely — per-token buckets would make every limit
+multiplicative in a number nothing caps. Token ids still appear in the audit log,
+which is where per-token attribution belongs.
