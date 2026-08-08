@@ -163,6 +163,11 @@ class InstanceSettingsResponse(BaseModel):
     llm_requires_subscription: bool = False
     # Issue #15: allow self-serve email signup (also needs a configured provider).
     allow_self_signup: bool = False
+    # Issue #46: allow users to issue personal access tokens. Defaults **on** —
+    # unlike the gates above it preserves no prior behaviour, and a token grants
+    # strictly less than the session its owner already holds. Turning it off
+    # refuses authentication, so tokens already issued stop working at once.
+    allow_personal_access_tokens: bool = True
 
 
 class InstanceSettingsPatch(BaseModel):
@@ -173,6 +178,7 @@ class InstanceSettingsPatch(BaseModel):
     llm_models: Optional[list[LlmModelConfigIn]] = None
     llm_requires_subscription: Optional[bool] = None
     allow_self_signup: Optional[bool] = None
+    allow_personal_access_tokens: Optional[bool] = None
 
 
 # ── LLM usage stats (instance admin, issue #9) ──────────────────────────────

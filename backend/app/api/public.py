@@ -30,6 +30,10 @@ class InstanceInfoResponse(BaseModel):
     # "email me a reset link" form) and whether self-serve signup is offered.
     email_enabled: bool = False
     allow_self_signup: bool = False
+    # Issue #46: whether users may issue personal access tokens on this
+    # instance. Exposed here (rather than only on the admin settings endpoint)
+    # so the settings card can hide itself without an admin round trip.
+    allow_personal_access_tokens: bool = True
 
 
 @router.get("/instance-info", response_model=InstanceInfoResponse,
@@ -52,6 +56,9 @@ async def get_instance_info(
         privacy_policy_url=settings.privacy_policy_url,
         email_enabled=email_enabled,
         allow_self_signup=bool(instance and instance.allow_self_signup) and email_enabled,
+        allow_personal_access_tokens=(
+            bool(instance.allow_personal_access_tokens) if instance else True
+        ),
     )
 
 

@@ -7,6 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.auth import create_access_token, hash_password
 from backend.app.core.limiter import limiter
+from backend.app.core.scopes import pat_forbidden
 from backend.app.db.registry import get_registry_session
 from backend.app.db.user_session import get_user_session_factory, init_user_db
 from backend.app.models.registry_orm import User
@@ -14,7 +15,8 @@ from backend.app.models.user_orm import Athlete
 from backend.app.schemas.admin import SetupRequest, SetupStatusResponse
 from backend.app.schemas.auth import TokenResponse
 
-router = APIRouter(prefix="/setup", tags=["setup"])
+
+router = APIRouter(prefix="/setup", tags=["setup"], dependencies=[pat_forbidden()])
 
 
 @router.get("/status", response_model=SetupStatusResponse,

@@ -51,6 +51,9 @@ class User(RegistryBase):
     provider_connections: Mapped[list["ProviderConnection"]] = relationship(
         "ProviderConnection", back_populates="user", cascade="all, delete-orphan"
     )
+    personal_access_tokens: Mapped[list["PersonalAccessToken"]] = relationship(
+        "PersonalAccessToken", back_populates="user", cascade="all, delete-orphan"
+    )
 
 
 class PasswordResetToken(RegistryBase):
@@ -83,6 +86,67 @@ class EmailVerificationToken(RegistryBase):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     user: Mapped["User"] = relationship("User", back_populates="verification_tokens")
+
+
+class PersonalAccessToken(RegistryBase):
+    """A long-lived, scoped, revocable credential a user issues to their own tooling
+    (issue #46).
+
+    Mirrors :class:`PasswordResetToken` in shape — only the SHA-256 hash of the
+    secret half is stored, and the raw token is shown once at creation — but
+    differs in two ways that matter:
+
+    * **It is revocable, and revocation is the point.** ``revoked_at`` is the
+      first server-side kill switch for an outstanding credential in this
+      codebase; nothing else here can be withdrawn before its own expiry.
+    * **Dead rows are kept.** Expiry and revocation end a token's ability to
+      authenticate, nothing more. The audit log stores token ids, so deleting
+      rows would turn historical entries into unresolvable identifiers at exactly
+      the moment somebody is reconstructing what a leaked credential did — and
+      keeping ``token_hash`` means a presented-but-revoked token is still
+      *recognisable*, so "someone is using a credential we withdrew" stays
+      distinguishable from "someone is guessing".
+
+    ``scopes`` is a JSON-encoded list drawn from
+    :data:`backend.app.core.scopes.SCOPES`. It, ``name`` and ``expires_at`` are
+    fixed at creation: there is no update endpoint, because an editable token
+    makes its own audit trail ambiguous.
+    """
+
+    __tablename__ = "personal_access_tokens"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(
+        String, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    token_hash: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    # User-written label. Free text, and revealing on its own often enough
+    # ("garmin-sync-for-my-cardiologist") that the admin view never returns it.
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    # JSON-encoded list of scopes, e.g. '["activities:read","metrics:read"]'.
+    scopes: Mapped[str] = mapped_column(String, nullable=False, default="[]")
+    # Indexed: the daily expiry sweep filters on it, over a table that only
+    # grows because dead rows are retained.
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, index=True
+    )
+    # Written coarsely (only when more than an hour stale) — this is a WAL SQLite
+    # registry with a pool of 3, and a write on every authenticated request would
+    # be the single hottest writer in the system.
+    last_used_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # The last expiry-warning stage sent for this token ("expiring_7d",
+    # "expiring_1d", "expired"). Without it the daily sweep becomes a daily nag.
+    last_expiry_notice: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    user: Mapped["User"] = relationship(
+        "User", back_populates="personal_access_tokens"
+    )
 
 
 class Invitation(RegistryBase):
@@ -145,6 +209,17 @@ class InstanceSettings(RegistryBase):
     # instance stays invite-only until an admin flips it.
     allow_self_signup: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="0"
+    )
+    # Personal access tokens (issue #46). Unlike the two gates above this
+    # defaults **on**: they default off to preserve existing behaviour, and a new
+    # feature has none to preserve. A PAT grants strictly less than the session
+    # the user already holds — scoped, no admin, no /api/auth, no inbox, no LLM —
+    # so it adds duration, not authority. The switch exists for the self-hoster
+    # who wants to forbid long-lived credentials on their box, and turning it off
+    # refuses *authentication*, not just issuance: tokens handed out beforehand
+    # stop working immediately.
+    allow_personal_access_tokens: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default="1"
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now

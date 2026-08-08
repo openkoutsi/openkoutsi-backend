@@ -16,12 +16,18 @@ from backend.app.core.config import settings
 from backend.app.core.deps import get_ctx_and_session, get_ctx_session_athlete
 from backend.app.core.file_encryption import decrypt_file
 from backend.app.core.ssrf import check_url_safe
+from backend.app.core.scopes import pat_forbidden, pat_scope, pat_scopes
 from backend.app.db.registry import get_registry_session
 from backend.app.api.consent import CURRENT_CONSENT_VERSION
 from backend.app.api.distance import all_time_distance_bests
 from backend.app.api.power import all_time_power_bests
 from backend.app.models.message_orm import Message
-from backend.app.models.registry_orm import InstanceSettings, ProviderConnection, User
+from backend.app.models.registry_orm import (
+    InstanceSettings,
+    PersonalAccessToken,
+    ProviderConnection,
+    User,
+)
 from backend.app.models.user_orm import (
     AchievementUnlock,
     Activity,
@@ -33,6 +39,10 @@ from backend.app.models.user_orm import (
     WorkoutDefinition,
 )
 from backend.app.schemas.athlete import AthleteResponse, AthleteUpdate, TrainingStatusBody, TrainingStatusResponse
+from backend.app.services import personal_access_tokens as pat_service
+from backend.app.services.pat_expiry import (
+    EMAIL_OPT_OUT_SETTING as PAT_EXPIRY_EMAIL_SETTING,
+)
 from backend.app.services.athlete_experience import VALID_EXPERIENCE_LEVELS
 from openkoutsi.plan_schema import HOURS_BOUNDS
 
@@ -59,10 +69,23 @@ def _detect_image_type(data: bytes) -> str | None:
     return None
 
 
-router = APIRouter(prefix="/athlete", tags=["athlete"])
+
+router = APIRouter(
+    prefix="/athlete",
+    tags=["athlete"],
+    dependencies=[pat_scopes(read="athlete:read", write="athlete:write")],
+)
 
 
 _MAX_LLM_URL_LEN = 2048
+
+# Every `app_settings` key that steers where an LLM call goes or what
+# authenticates it. Closed to personal access tokens (issue #46) — see the guard
+# in `update_athlete`. `llm_models` is a per-athlete preset list whose entries
+# each carry their own `base_url`, so it belongs here too.
+_LLM_SETTING_KEYS = frozenset({
+    "llm_base_url", "llm_api_key", "llm_api_key_enc", "llm_model", "llm_models",
+})
 
 # Self-reported athlete experience level, stored in app_settings (see #18) and
 # fed into the LLM coaching/generation prompts (see #32). The canonical tuple
@@ -216,6 +239,19 @@ async def update_athlete(
         new_settings: dict = dict(body.app_settings)
         new_settings.pop("llm_api_key_set", None)
 
+        # A personal access token may never touch the LLM *configuration*, not
+        # just the endpoints that spend money (issue #46). Repointing
+        # `llm_base_url` would make the user's own browser session ship their
+        # training data to a host of the token holder's choosing on the next
+        # analysis — every PAT control still green, because the token itself
+        # never calls an LLM route. `check_url_safe` only blocks link-local
+        # metadata ranges, so any publicly resolvable host would pass.
+        if ctx.is_pat and _LLM_SETTING_KEYS & new_settings.keys():
+            raise HTTPException(
+                status_code=403,
+                detail="LLM configuration cannot be changed with a personal access token.",
+            )
+
         if "llm_base_url" in new_settings:
             raw_url = new_settings.get("llm_base_url")
             if raw_url and str(raw_url).strip():
@@ -274,6 +310,27 @@ async def update_athlete(
                 status_code=400,
                 detail="weekly_hours_min cannot be greater than weekly_hours_max.",
             )
+
+        # Expiry email for personal access tokens (issue #46). Opt-*out*: the
+        # default is on and only email is affected — the inbox message that says
+        # a credential is about to die is unconditional.
+        if PAT_EXPIRY_EMAIL_SETTING in new_settings:
+            raw_flag = new_settings.get(PAT_EXPIRY_EMAIL_SETTING)
+            if raw_flag is None or isinstance(raw_flag, bool):
+                pass
+            elif isinstance(raw_flag, (int, str)) and str(raw_flag).lower() in {
+                "true", "false", "1", "0",
+            }:
+                new_settings[PAT_EXPIRY_EMAIL_SETTING] = str(raw_flag).lower() in {
+                    "true", "1",
+                }
+            else:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Invalid {PAT_EXPIRY_EMAIL_SETTING}: must be true or false.",
+                )
+            # `False` must survive the merge below, which strips None but keeps
+            # falsy values — opting out is the whole point of the setting.
 
         if "llm_api_key" in new_settings:
             raw_key = new_settings.pop("llm_api_key")
@@ -464,7 +521,7 @@ async def get_training_status(
     )
 
 
-@router.post("/training-status", status_code=202,
+@router.post("/training-status", status_code=202, dependencies=[pat_forbidden()],
              operation_id="triggerTrainingStatus", summary="Trigger training-status analysis")
 async def trigger_training_status(
     body: TrainingStatusBody = TrainingStatusBody(),
@@ -480,7 +537,7 @@ async def trigger_training_status(
     ).scalar_one_or_none()
     access = await check_llm_access(ctx, athlete, instance, registry_session)
     if not access.allowed:
-        raise subscription_required_error()
+        raise subscription_required_error(access)
 
     if athlete.training_status_status == "pending":
         return {"status": "pending"}
@@ -671,7 +728,40 @@ async def _export_achievements(athlete: Athlete, session: AsyncSession) -> list[
     )
 
 
-@router.get("/export",
+async def _export_personal_access_tokens(
+    user_id: str, registry_session: AsyncSession
+) -> list[dict]:
+    """Personal access tokens, metadata only — never the hash (issue #46).
+
+    The first registry-sourced entry in the export: every other file here is
+    drawn from the per-user DB, and tokens live in the registry, which is why
+    ``export_athlete`` threads a registry session through to this one.
+
+    Covers dead tokens as well as live ones. Expired and revoked rows are
+    retained rather than pruned, so leaving them out would make the export a
+    less complete record than the app's own token list.
+    """
+    result = await registry_session.execute(
+        select(PersonalAccessToken)
+        .where(PersonalAccessToken.user_id == user_id)
+        .order_by(PersonalAccessToken.created_at)
+    )
+    return [
+        {
+            "id": token.id,
+            "name": token.name,
+            "scopes": pat_service.scopes_of(token),
+            "status": pat_service.status_of(token),
+            "expires_at": token.expires_at.isoformat() if token.expires_at else None,
+            "last_used_at": token.last_used_at.isoformat() if token.last_used_at else None,
+            "revoked_at": token.revoked_at.isoformat() if token.revoked_at else None,
+            "created_at": token.created_at.isoformat() if token.created_at else None,
+        }
+        for token in result.scalars().all()
+    ]
+
+
+@router.get("/export", dependencies=[pat_scope("athlete:export")],
             operation_id="exportAthlete", summary="Export all athlete data as a zip")
 async def export_athlete(
     ctx_athlete=Depends(get_ctx_session_athlete),
@@ -710,6 +800,9 @@ async def export_athlete(
         "inbox.json": await _export_inbox(session),
         "weight_log.json": await _export_weight_log(athlete, session),
         "achievements.json": await _export_achievements(athlete, session),
+        "personal_access_tokens.json": await _export_personal_access_tokens(
+            ctx.user_id, registry_session
+        ),
     }
 
     buf = io.BytesIO()

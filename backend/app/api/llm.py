@@ -67,6 +67,7 @@ from backend.app.core.deps import get_ctx_and_session
 from backend.app.core.file_encryption import decrypt_secret
 from backend.app.core.limiter import limiter
 from backend.app.core.ssrf import check_url_safe
+from backend.app.core.scopes import pat_forbidden
 from backend.app.db.registry import get_registry_session
 from backend.app.models.registry_orm import InstanceSettings
 from backend.app.models.user_orm import Athlete
@@ -88,7 +89,8 @@ async def _load_instance_settings(registry_session: AsyncSession) -> InstanceSet
     return result.scalar_one_or_none()
 
 
-router = APIRouter(prefix="/llm", tags=["llm"])
+
+router = APIRouter(prefix="/llm", tags=["llm"], dependencies=[pat_forbidden()])
 
 # ── LLM config helper ──────────────────────────────────────────────────────
 

@@ -10,7 +10,7 @@ data is written to the user's own DB on sync.
 """
 
 import logging
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query
@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.api.consent import require_consent
 from backend.app.core.config import settings
 from backend.app.core.deps import get_ctx_and_session, get_ctx_session_athlete
+from backend.app.core.scopes import pat_forbidden, pat_scopes
 from backend.app.db.registry import get_registry_session
 from backend.app.models.registry_orm import ProviderConnection
 from backend.app.models.user_orm import Activity, ActivitySource, Athlete
@@ -37,7 +38,12 @@ from openkoutsi.zones import (
 
 log = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/integrations", tags=["integrations"])
+
+router = APIRouter(
+    prefix="/integrations",
+    tags=["integrations"],
+    dependencies=[pat_scopes(read="integrations:read", write="integrations:write")],
+)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
@@ -64,9 +70,23 @@ async def _get_connection(
     return conn
 
 
+# How long a signed OAuth ``state`` stays valid. The state is bearer-equivalent
+# — `callback` is unauthenticated and trusts it alone to decide whose account the
+# provider tokens are written to — so it must not outlive the redirect round trip
+# it exists for. It previously carried no `exp` at all, which was defensible when
+# the only way to obtain one was a 60-minute session; personal access tokens
+# (issue #46) make that assumption false, so it is bounded here. Generous enough
+# to survive signing in to the provider and reading its consent screen.
+_OAUTH_STATE_TTL = timedelta(minutes=30)
+
+
 def _encode_state(user_id: str, provider: str) -> str:
     return jwt.encode(
-        {"sub": user_id, "purpose": f"{provider}_oauth"},
+        {
+            "sub": user_id,
+            "purpose": f"{provider}_oauth",
+            "exp": datetime.now(timezone.utc) + _OAUTH_STATE_TTL,
+        },
         settings.secret_key,
         algorithm="HS256",
     )
@@ -109,13 +129,22 @@ async def status(
 
 # ── OAuth connect / callback ───────────────────────────────────────────────
 
-@router.get("/{provider}/connect", dependencies=[Depends(require_consent)])
+@router.get("/{provider}/connect",
+            dependencies=[Depends(require_consent), pat_forbidden()])
 async def connect(
     provider: str,
     ctx_session=Depends(get_ctx_and_session),
     registry_session: AsyncSession = Depends(get_registry_session),
 ):
-    """Return the OAuth authorization URL for the given provider."""
+    """Return the OAuth authorization URL for the given provider.
+
+    Closed to personal access tokens despite being a GET. It is not a read: it
+    mints a signed ``state`` that ``callback`` — which is unauthenticated —
+    trusts alone to decide whose row the provider tokens are written to. A
+    read-scoped credential must not be able to produce an account-linking
+    capability, and starting an OAuth flow is a browser act that ends in a
+    redirect, so there is nothing legitimate for a script to do with the URL.
+    """
     ctx, _ = ctx_session
     client_cls = _require_provider(provider)
 

@@ -127,4 +127,5 @@ class TestPublicInstanceInfo:
             "privacy_policy_url",
             "email_enabled",
             "allow_self_signup",
+            "allow_personal_access_tokens",
         }

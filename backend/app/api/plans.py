@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.auth import UserContext
 from backend.app.core.deps import get_ctx_session_athlete
+from backend.app.core.scopes import pat_forbidden, pat_scopes
 from backend.app.db.registry import get_registry_session
 from backend.app.models.registry_orm import InstanceSettings
 from backend.app.models.user_orm import (
@@ -61,7 +62,12 @@ from backend.app.services.llm_client import LLM_ERROR_STATUS, LlmConfigError
 from backend.app.services.llm_access import check_llm_access, subscription_required_error
 from backend.app.schemas.pagination import Page, PageParams, paginate_params
 
-router = APIRouter(prefix="/plans", tags=["plans"])
+
+router = APIRouter(
+    prefix="/plans",
+    tags=["plans"],
+    dependencies=[pat_scopes(read="plans:read", write="plans:write")],
+)
 
 # Workouts are generated for the upcoming week (today → +6 days) by default.
 _GENERATE_WINDOW_DAYS = 6
@@ -281,7 +287,7 @@ async def create_plan(
         instance = instance_result.scalar_one_or_none()
         access = await check_llm_access(ctx, athlete, instance, registry_session)
         if not access.allowed:
-            raise subscription_required_error()
+            raise subscription_required_error(access)
         try:
             plan = await generate_plan_llm(
                 athlete=athlete,
@@ -604,7 +610,8 @@ async def delete_workout(workout_ctx: WorkoutCtx = Depends(get_owned_workout)):
     await session.commit()
 
 
-@router.post("/{plan_id}/regenerate", response_model=TrainingPlanResponse)
+@router.post("/{plan_id}/regenerate", response_model=TrainingPlanResponse,
+             dependencies=[pat_forbidden()])
 async def regenerate_plan(
     body: RegeneratePlanRequest,
     plan_ctx: PlanCtx = Depends(get_owned_plan_with_workouts),
@@ -655,7 +662,7 @@ async def regenerate_plan(
         instance = instance_result.scalar_one_or_none()
         access = await check_llm_access(ctx, athlete, instance, registry_session)
         if not access.allowed:
-            raise subscription_required_error()
+            raise subscription_required_error(access)
         try:
             weeks_data = await generate_plan_weeks_llm(
                 athlete=athlete,
@@ -709,7 +716,9 @@ async def regenerate_plan(
     return _plan_response_with_adherence(plan)
 
 
-@router.post("/{plan_id}/generate-upcoming/workouts", response_model=GenerateUpcomingWorkoutsResponse)
+@router.post("/{plan_id}/generate-upcoming/workouts",
+             response_model=GenerateUpcomingWorkoutsResponse,
+             dependencies=[pat_forbidden()])
 async def generate_upcoming_workouts(
     body: GenerateUpcomingWorkoutsRequest,
     plan_ctx: PlanCtx = Depends(get_owned_plan_with_workouts),
@@ -742,7 +751,7 @@ async def generate_upcoming_workouts(
     instance = instance_result.scalar_one_or_none()
     access = await check_llm_access(ctx, athlete, instance, registry_session)
     if not access.allowed:
-        raise subscription_required_error()
+        raise subscription_required_error(access)
 
     # Select in-window planned workouts, ordered by date.
     selected: list[tuple[PlannedWorkout, date]] = []

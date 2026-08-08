@@ -7,11 +7,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.auth import UserContext, get_current_user
+from backend.app.core.scopes import pat_forbidden
 from backend.app.db.registry import get_registry_session
 from backend.app.models.registry_orm import User
 from backend.app.schemas.admin import ConsentRequest, ConsentResponse
 
-router = APIRouter(prefix="/consent", tags=["consent"])
+
+router = APIRouter(prefix="/consent", tags=["consent"], dependencies=[pat_forbidden()])
 
 
 async def require_consent(
