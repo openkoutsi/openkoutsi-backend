@@ -113,25 +113,29 @@ def _roles_of(user) -> list[str]:
         return []
 
 
-async def _resolve_personal_access_token(
-    request: Request,
+async def validate_personal_access_token(
     raw_token: str,
     registry_session: AsyncSession,
-) -> UserContext:
-    """Authenticate a ``okp_``-prefixed personal access token (issue #46).
+    *,
+    method: str,
+    path: str,
+):
+    """Everything about a ``okp_`` token *except* what it is allowed to do.
 
-    Deliberately inside ``get_current_user`` rather than beside it: a second
-    identity path would be a second place for the per-user isolation guarantee to
-    be lost. Everything downstream — ``get_ctx_and_session``,
-    ``get_ctx_session_athlete``, ``require_consent``, every
-    ``Activity.athlete_id == athlete.id`` filter — sees an ordinary
-    ``UserContext`` and works unchanged.
+    Is this credential well-formed, known, unrevoked, unexpired, enabled on this
+    instance, and whose is it? Returns ``(UserContext, token_row)``; every
+    failure raises the same opaque 401 and is written to the audit log first.
+
+    Split out from :func:`_resolve_personal_access_token` because there is one
+    other surface that authorizes differently: the MCP server (issue #42) lives
+    in a mounted sub-application, which the route-policy map cannot see, and
+    gates on the *tool* being called instead. Splitting the policy question off
+    lets it reuse this without becoming a second identity path — the part that
+    decides *who the caller is*, and therefore which database and encryption key
+    their request reaches, stays a single implementation.
     """
     from backend.app.models.registry_orm import InstanceSettings, User
     from backend.app.services import personal_access_tokens as pat
-
-    method = request.method
-    path = request.url.path
 
     def deny(outcome: str, token_id: str | None, **fields) -> HTTPException:
         audit.pat_request(
@@ -173,13 +177,49 @@ async def _resolve_personal_access_token(
     if user is None:
         raise deny(audit.UNKNOWN_TOKEN, token_id)
 
+    return (
+        UserContext(
+            user_id=user.id,
+            roles=_roles_of(user),
+            scopes=pat.scopes_of(token),
+            token_kind=PERSONAL_ACCESS_TOKEN,
+            token_id=token_id,
+        ),
+        token,
+    )
+
+
+async def _resolve_personal_access_token(
+    request: Request,
+    raw_token: str,
+    registry_session: AsyncSession,
+) -> UserContext:
+    """Authenticate a ``okp_``-prefixed personal access token (issue #46).
+
+    Deliberately inside ``get_current_user`` rather than beside it: a second
+    identity path would be a second place for the per-user isolation guarantee to
+    be lost. Everything downstream — ``get_ctx_and_session``,
+    ``get_ctx_session_athlete``, ``require_consent``, every
+    ``Activity.athlete_id == athlete.id`` filter — sees an ordinary
+    ``UserContext`` and works unchanged.
+    """
+    from backend.app.services import personal_access_tokens as pat
+
+    method = request.method
+    path = request.url.path
+
+    ctx, token = await validate_personal_access_token(
+        raw_token, registry_session, method=method, path=path
+    )
+    token_id = ctx.token_id
+    scopes = ctx.scopes or []
+
     # Default-deny: a route that declared nothing is absent from the map and so
     # unreachable, and the hole cannot arrive silently with a router added later.
     # Resolved from the route rather than from what has run so far — see
     # `core.scopes` for why that distinction is load-bearing.
     access: PatAccess | None = access_for_request(request)
     required = access.scope_for(method) if access is not None else None
-    scopes = pat.scopes_of(token)
     if access is None or not access.allowed or required is None:
         audit.pat_request(
             outcome=audit.DENIED_ROUTE,
@@ -223,33 +263,23 @@ async def _resolve_personal_access_token(
         scope=required,
     )
 
-    roles = _roles_of(user)
     await registry_session.close()
-    return UserContext(
-        user_id=user.id,
-        roles=roles,
-        scopes=scopes,
-        token_kind=PERSONAL_ACCESS_TOKEN,
-        token_id=token_id,
-    )
+    return ctx
 
 
-async def get_current_user(
-    request: Request,
-    token: str = Depends(oauth2_scheme),
-    registry_session: AsyncSession = Depends(get_registry_session),
+async def validate_session_token(
+    raw_token: str, registry_session: AsyncSession
 ) -> UserContext:
-    from backend.app.models.registry_orm import User
-    from backend.app.services.personal_access_tokens import looks_like_pat
+    """Identity from a session JWT, with the registry row as the authority.
 
-    # Route on the prefix *before* attempting a JWT decode: a PAT is opaque and
-    # DB-backed, so it would only ever fail to decode.
-    if looks_like_pat(token):
-        return await _resolve_personal_access_token(request, token, registry_session)
+    Roles are re-read from the registry rather than trusted from the token
+    claim, so a role change takes effect without waiting for token expiry.
+    """
+    from backend.app.models.registry_orm import User
 
     credentials_exception = _credentials_exception()
     try:
-        payload = decode_token(token)
+        payload = decode_token(raw_token)
         user_id: str | None = payload.get("sub")
         if not user_id or payload.get("type") != "access":
             raise credentials_exception
@@ -262,12 +292,55 @@ async def get_current_user(
     user = result.scalar_one_or_none()
     if user is None:
         raise credentials_exception
-    # Prefer the authoritative roles from the registry row over the token claim,
-    # so a role change takes effect without waiting for token expiry.
-    roles = _roles_of(user)
+    return UserContext(user_id=user_id, roles=_roles_of(user))
+
+
+async def authenticate_bearer(
+    raw_token: str,
+    registry_session: AsyncSession,
+    *,
+    method: str,
+    path: str,
+) -> UserContext:
+    """Identity from a bearer value, with **no route policy applied**.
+
+    For surfaces that authorize per *operation* rather than per route: the MCP
+    server (issue #42) is mounted as a sub-application, so ``build_access_map``
+    never saw it, and the scope a call needs is a property of the tool being
+    invoked rather than of the URL it arrived at. Such a surface must therefore
+    do its own default-deny check — for the tool layer that is
+    ``backend.app.mcp.registry``, where every tool declares its scopes and an
+    undeclared one cannot be registered at all.
+
+    A personal access token still has to be live, unrevoked and enabled here;
+    only the *authorization* question is deferred.
+    """
+    from backend.app.services import personal_access_tokens as pat
+
+    if pat.looks_like_pat(raw_token):
+        ctx, token = await validate_personal_access_token(
+            raw_token, registry_session, method=method, path=path
+        )
+        await pat.touch_last_used(registry_session, token)
+        return ctx
+    return await validate_session_token(raw_token, registry_session)
+
+
+async def get_current_user(
+    request: Request,
+    token: str = Depends(oauth2_scheme),
+    registry_session: AsyncSession = Depends(get_registry_session),
+) -> UserContext:
+    from backend.app.services.personal_access_tokens import looks_like_pat
+
+    # Route on the prefix *before* attempting a JWT decode: a PAT is opaque and
+    # DB-backed, so it would only ever fail to decode.
+    if looks_like_pat(token):
+        return await _resolve_personal_access_token(request, token, registry_session)
+
+    ctx = await validate_session_token(token, registry_session)
     # Release the pool connection immediately — the user object is no longer
     # needed, but the dependency would otherwise keep the session (and its pool
     # slot) alive until request end while the per-user session is in use.
     await registry_session.close()
-
-    return UserContext(user_id=user_id, roles=roles)
+    return ctx

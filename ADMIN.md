@@ -124,6 +124,33 @@ rather than to a database shared across users. Outcomes distinguish
 `revoked` from `unknown_token`, which is why revoked rows are retained: somebody
 using a credential you withdrew is a different event from somebody guessing.
 
+MCP tool invocations are recorded on the same logger, as `mcp_tool_call` events
+carrying the tool name, the caller (token id when there is one, and whether the
+call came from a credential or from the server's own agent), the arguments, the
+duration and the outcome. The arguments are recorded because without them the
+record cannot answer the question it exists for — *what did this credential
+read?* — and they are dates, ids and window lengths rather than content. Results
+are never logged: those are the health data itself.
+
+### Tokens and the MCP endpoint
+
+`POST /mcp` accepts the same tokens as the rest of the API, and the exclusions
+in the table above still hold — a token's scopes are what it can reach, whatever
+door it knocks on. The endpoint publishes only read-only tools, and every one of
+them declares which read scopes it needs, so a token scoped to `goals:read`
+reaches the goal tool and nothing else.
+
+Two things are worth knowing when a user asks for MCP access:
+
+- **There is no `mcp:*` scope**, deliberately. A scope named after the transport
+  would tell the person ticking the box nothing about what it hands over.
+- **`athlete:export` is not callable through MCP.** One call returning the entire
+  record is the opposite of the task-shaped tools this surface exists to publish;
+  it stays a deliberate grant for a backup script, over the REST route, audited.
+
+Whether the endpoint is reachable from outside your network is a reverse-proxy
+decision — see [DEPLOY.md](DEPLOY.md).
+
 ## Password reset
 
 There are two ways to reset a password.

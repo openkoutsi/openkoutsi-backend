@@ -237,3 +237,54 @@ def test_conflicting_declarations_on_one_handler_fail_loudly():
 def test_declaring_a_scope_outside_the_vocabulary_is_impossible():
     with pytest.raises(ValueError):
         PatAccess(read="everything:always")
+
+
+# ── The one endpoint that authorizes somewhere else (issue #42) ──────────────
+
+
+def test_the_mcp_endpoint_is_outside_this_walk_by_design(app):
+    """``POST /mcp`` exists, resolves credentials, and declares no scope.
+
+    That is not an omission. The scope a call needs is a property of the *tool*
+    named in the request body, and no single declaration on the path could be
+    honest about nine differently-scoped tools. The route therefore resolves its
+    own credential — which is why ``route_requires_auth`` does not see it — and
+    defers authorization to the tool registry, whose default-deny is asserted in
+    ``tests/unit/test_mcp_registry.py``.
+    """
+    mcp = [r for r in _api_routes(app) if r.path == "/mcp"]
+    assert len(mcp) == 1, "the MCP endpoint should be registered exactly once"
+    route = mcp[0]
+    assert route.methods == {"POST"}
+    # It never reaches `get_current_user`, so the walk above never asked it to
+    # declare anything — and the resolver's map has nothing to say about it.
+    assert not route_requires_auth(route)
+    assert route_pat_access(route) is None
+    assert route.endpoint not in app.state.pat_access_by_endpoint
+
+
+def test_only_one_place_steps_outside_the_route_policy():
+    """**The control that keeps the exception an exception.**
+
+    ``authenticate_bearer`` resolves an identity without consulting the route
+    policy. Exactly one endpoint may do that — the MCP one, which has its own
+    default-deny. A second call site would be a second endpoint outside the
+    guarantee this module exists to provide, and would very likely have no
+    replacement for it, so growing one is a test failure rather than a
+    discovery someone makes later.
+    """
+    import re
+    from pathlib import Path
+
+    backend = Path(__file__).resolve().parents[2] / "backend"
+    users = set()
+    for path in backend.rglob("*.py"):
+        if path.name == "auth.py" and path.parent.name == "core":
+            continue  # where it is defined
+        source = path.read_text(encoding="utf-8")
+        # Code, not prose: a bare mention in a docstring explaining the design
+        # is not another surface stepping outside the policy.
+        if re.search(r"^(?!\s*#).*\bauthenticate_bearer\s*\(", source, re.MULTILINE):
+            users.add(str(path.relative_to(backend.parent)))
+
+    assert users == {"backend/app/mcp/server.py"}, users

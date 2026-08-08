@@ -320,6 +320,27 @@ server {
 
 The frontend has its own `server {}` block — see the openkoutsi-web repository.
 
+### Exposing (or not exposing) the MCP endpoint
+
+`POST /mcp` is the Model Context Protocol tool server (see the README). It ships
+enabled and needs no configuration, but *reachability* is a deployment decision
+you make in the proxy, exactly as for the rest of the API.
+
+It answers only to a credential this instance issued — a personal access token or
+a session token — and every tool it publishes is read-only and scoped. If you
+want it available to an external MCP client (a desktop AI assistant, say), the
+block above already covers it. If you would rather keep the tool surface to the
+server's own agent, deny it at the proxy:
+
+```nginx
+location = /mcp { return 404; }
+```
+
+Doing so leaves the rest of the API untouched. Note that a personal access token
+can reach the same underlying data through the ordinary REST routes, so closing
+`/mcp` narrows the interface rather than the exposure — the control that limits
+what a credential can see is its scopes, not this location block.
+
 ---
 
 ## 4. Strava Bridge (optional)
