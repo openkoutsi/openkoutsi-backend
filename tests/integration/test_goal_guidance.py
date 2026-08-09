@@ -103,6 +103,8 @@ class TestGoalGuidance:
         assert data["status"] is None
         assert data["verdict"] is None
         assert data["guidance"] is None
+        # Nothing generated yet, so nothing to disclose (issue #41).
+        assert data["guidance_ai_generated"] is False
 
     async def test_trigger_sets_pending(self, client, auth_headers, session):
         goal = await _seed_goal(session)
@@ -169,6 +171,8 @@ class TestGoalGuidance:
         assert "REALISM" not in data["guidance"]
         assert "real stretch" in data["guidance"]
         assert data["updated_at"] is not None
+        # The guidance is model output and says so on the wire (issue #41).
+        assert data["guidance_ai_generated"] is True
 
     async def test_denied_on_gated_instance(self, client, auth_headers, session):
         goal = await _seed_goal(session)

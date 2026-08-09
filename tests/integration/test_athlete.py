@@ -1040,6 +1040,8 @@ class TestTrainingStatus:
         assert data["status"] is None
         assert data["feedback"] is None
         assert data["generated_date"] is None
+        # Nothing generated yet, so nothing to disclose (issue #41).
+        assert data["feedback_ai_generated"] is False
 
     async def test_trigger_training_status_sets_pending(self, client, auth_headers):
         from unittest.mock import AsyncMock
@@ -1091,6 +1093,8 @@ class TestTrainingStatus:
         assert data["status"] == "done"
         assert "training well" in data["feedback"]
         assert data["generated_date"] is not None
+        # The feedback is model output and says so on the wire (issue #41).
+        assert data["feedback_ai_generated"] is True
 
     async def test_auto_training_status_first_access_triggers_analysis(
         self, client, auth_headers, session
