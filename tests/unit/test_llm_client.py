@@ -16,6 +16,7 @@ import pytest
 from backend.app.services.llm_client import (
     call_llm,
     is_response_format_unsupported_error,
+    is_tool_calling_unsupported_error,
     raise_for_llm_status,
     temperature_param,
 )
@@ -158,3 +159,59 @@ class TestIsResponseFormatUnsupportedError:
         # unrelated 400 should not false-match.
         body = '{"error": "invalid json schema in tool definition"}'
         assert is_response_format_unsupported_error(self._error(400, body)) is False
+
+
+class TestIsToolCallingUnsupportedError:
+    """The tool-calling twin of the structured-output detector (issue #43).
+
+    Same shape, same reasoning, and the same one deliberate refusal: a body that
+    says *our* function schema is broken must not be read as "this provider
+    can't do tools", or one bad pydantic model would silently drop every athlete
+    on every provider to the non-agentic path with the suite still green.
+    """
+
+    def _error(self, status: int, body: str) -> httpx.HTTPStatusError:
+        resp = _response(status, body)
+        return httpx.HTTPStatusError(
+            f"LLM request failed with status {status}: {body}",
+            request=resp.request, response=resp,
+        )
+
+    def test_matches_an_unknown_tools_parameter(self):
+        body = '{"error": {"message": "Unknown parameter: tools"}}'
+        assert is_tool_calling_unsupported_error(self._error(400, body)) is True
+
+    def test_matches_a_tool_choice_rejection(self):
+        body = '{"error": "tool_choice is not supported by this model"}'
+        assert is_tool_calling_unsupported_error(self._error(422, body)) is True
+
+    def test_matches_a_late_tool_calls_rejection(self):
+        # Some llama.cpp builds accept `tools` on the request and then reject the
+        # assistant message carrying `tool_calls` on the next one. Same fact,
+        # arriving one turn late.
+        body = '{"error": "unsupported field: tool_calls"}'
+        assert is_tool_calling_unsupported_error(self._error(400, body)) is True
+
+    def test_ignores_an_unrelated_400(self):
+        body = '{"error": {"message": "context length exceeded"}}'
+        assert is_tool_calling_unsupported_error(self._error(400, body)) is False
+
+    def test_ignores_a_5xx(self):
+        body = '{"error": "tools blew up"}'
+        assert is_tool_calling_unsupported_error(self._error(500, body)) is False
+
+    def test_an_invalid_function_schema_is_not_swallowed(self):
+        body = '{"error": {"message": "Invalid schema for function \'find_activity\': bad"}}'
+        assert is_tool_calling_unsupported_error(self._error(400, body)) is False
+
+    def test_invalid_function_parameters_is_not_swallowed(self):
+        body = '{"error": {"code": "invalid_function_parameters"}}'
+        assert is_tool_calling_unsupported_error(self._error(400, body)) is False
+
+    def test_classifies_on_the_body_not_the_exception_message(self):
+        resp = _response(400, "context length exceeded")
+        exc = httpx.HTTPStatusError(
+            "LLM request to https://host/tools/v1 failed: context length exceeded",
+            request=resp.request, response=resp,
+        )
+        assert is_tool_calling_unsupported_error(exc) is False

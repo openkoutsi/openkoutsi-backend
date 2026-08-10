@@ -51,6 +51,16 @@ class Athlete(UserBase):
     training_status_status: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     training_status_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     training_status_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # What the agentic coach is doing right now, as a progress *code* from a
+    # fixed vocabulary (issue #43) — `thinking`, `tool.get_power_profile`, … The
+    # agent loop spends its first few round trips calling tools and emitting no
+    # prose at all, so without this the card would show a bare spinner for a
+    # long time and then dump a finished answer. Deliberately a separate column
+    # rather than an envelope inside `training_status`: the frontend's
+    # `parseMoodAndParagraphs` reads that column as raw prose, and three
+    # surfaces share the parser. Cleared the moment the prose starts, so a
+    # finished card looks exactly as it did before this existed.
+    training_status_progress: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
@@ -148,6 +158,10 @@ class Activity(UserBase):
     status: Mapped[str] = mapped_column(String, default="pending")
     analysis_status: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     analysis: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # The agentic coach's current step, as a progress code (issue #43). Mirrors
+    # `Athlete.training_status_progress` — see the note there for why the codes
+    # live in their own column instead of inside the prose.
+    analysis_progress: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     athlete: Mapped["Athlete"] = relationship("Athlete", back_populates="activities")

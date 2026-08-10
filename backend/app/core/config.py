@@ -58,6 +58,16 @@ class Settings(BaseSettings):
             return []
         return [s.strip() for s in self.llm_allowed_servers.split(",") if s.strip()]
 
+    # How many agentic coaching runs (issue #43) may be in flight at once in this
+    # process. An agent loop is three to five completions instead of one, and a
+    # local model that serialises requests turns a handful of concurrent runs
+    # into a queue nobody is watching. A run that cannot get a slot immediately
+    # falls back to the single-shot blob prompt rather than waiting — degrading
+    # to the cheaper answer beats sitting on a spinner until the 30-minute
+    # pending timeout. Optional; the default suits an instance with a hosted
+    # provider. Lower it (1–2) for a single local GPU.
+    agent_max_concurrent_runs: int = 4
+
     # Path to the dedicated LLM-usage database (append-only per-call token
     # accounting for instance-paid calls; issue #9). Kept in its own SQLite file
     # so its unbounded, high-volume rows can be pruned/rotated independently of

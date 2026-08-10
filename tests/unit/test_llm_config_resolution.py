@@ -255,3 +255,83 @@ class TestInstanceFallbackHook:
         )
         assert cfg.base_url == "http://my-own/v1"
         assert cfg.source == "user"
+
+
+class TestToolsSupportedFlag:
+    """The per-preset opt-out for tool calling (issue #43).
+
+    The twin of ``structured_outputs``, and it exists for the sharper of the two
+    problems: a BYOK server that *accepts* ``tools`` and then emits nonsense
+    never produces the 400 that runtime detection needs, so the only place that
+    fact can be recorded is the preset the hoster (or the athlete) configured.
+    """
+
+    def test_on_by_default_for_an_instance_preset(self):
+        cfg = resolve_llm(
+            instance=_instance(
+                llm_models=[{"name": "gpt", "base_url": "https://api.example/v1"}]
+            )
+        )
+        assert cfg.tools_supported is True
+
+    def test_an_explicit_false_disables_it(self):
+        cfg = resolve_llm(
+            instance=_instance(
+                llm_models=[
+                    {
+                        "name": "old-llama",
+                        "base_url": "http://localhost:8080/v1",
+                        "tools_supported": False,
+                    }
+                ]
+            )
+        )
+        assert cfg.tools_supported is False
+
+    def test_a_truthy_or_absent_flag_leaves_it_on(self):
+        # Only the literal `false` opts out — an absent flag on every preset
+        # written before this shipped must not turn the feature off.
+        for entry in ({"tools_supported": True}, {"tools_supported": "yes"}, {}):
+            cfg = resolve_llm(
+                instance=_instance(
+                    llm_models=[{"name": "m", "base_url": "https://x/v1", **entry}]
+                )
+            )
+            assert cfg.tools_supported is True
+
+    def test_a_byok_preset_carries_its_own_flag(self):
+        # Under the no-mixing rule the athlete's preset is the whole config, so
+        # its opt-out has to be read from there and not from the instance's.
+        cfg = resolve_llm(
+            instance=_instance(
+                llm_models=[{"name": "mine", "base_url": "https://inst/v1"}]
+            ),
+            athlete_settings={
+                "llm_model": "mine",
+                "llm_models": [
+                    {
+                        "name": "mine",
+                        "base_url": "http://my-ollama:11434/v1",
+                        "model": "qwen",
+                        "tools_supported": False,
+                    }
+                ],
+            },
+        )
+        assert cfg.source == "user"
+        assert cfg.tools_supported is False
+
+    def test_it_is_independent_of_structured_outputs(self):
+        cfg = resolve_llm(
+            instance=_instance(
+                llm_models=[
+                    {
+                        "name": "m",
+                        "base_url": "https://x/v1",
+                        "structured_outputs": False,
+                    }
+                ]
+            )
+        )
+        assert cfg.structured_outputs is False
+        assert cfg.tools_supported is True

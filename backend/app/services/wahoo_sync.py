@@ -258,6 +258,7 @@ async def _process_wahoo_for_user(norm, athlete, conn, access_token, user_id, se
     if llm_ok and app_cfg.get("auto_analyze"):
         from backend.app.services.llm_activity_analyzer import analyze_activity_bg
         activity.analysis_status = "pending"
+        activity.analysis_progress = None
         await session.commit()
         asyncio.create_task(analyze_activity_bg(activity.id, athlete.id, user_id))
 
@@ -266,6 +267,7 @@ async def _process_wahoo_for_user(norm, athlete, conn, access_token, user_id, se
         from datetime import datetime, timezone
         athlete.training_status_status = "pending"
         athlete.training_status = None
+        athlete.training_status_progress = None
         athlete.training_status_updated_at = datetime.now(timezone.utc)
         await session.commit()
         asyncio.create_task(analyze_training_status_bg(athlete.id, user_id))

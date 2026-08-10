@@ -20,6 +20,12 @@ from sqlalchemy import select
 from ..db.user_session import get_user_session_factory
 from ..models.user_orm import Activity, Athlete, DailyMetric, PlannedWorkout
 from .athlete_experience import EXPERIENCE_GUIDANCE, experience_level
+from .llm_agent import (
+    MAX_ROUNDS_ACTIVITY,
+    AgentRequest,
+    agentic_enabled,
+    coaching_stream,
+)
 from .llm_streaming import stream_chat_completion, stream_into_db
 from .pr_detection import detect_pr_badges
 
@@ -48,7 +54,7 @@ _LOCALE_LANGUAGE: dict[str, str] = {
     "ko": "Korean",
 }
 
-_SYSTEM_PROMPT_BASE = """\
+_ANALYSIS_GUIDANCE = """\
 You are Koutsi, an expert endurance sports coach. Analyse the following workout data and \
 provide actionable coaching feedback in 3-5 paragraphs. Cover: effort quality and pacing, \
 power/heart-rate relationship if data is available, the athlete's current fatigue state and \
@@ -57,8 +63,13 @@ If the activity is linked to a planned workout, explicitly assess how well the s
 — intent, intensity and duration — and what any deviation (over- or under-doing it, or a missed \
 target) means for the athlete's training.
 Write in plain prose — no markdown headers, no bullet points, no code blocks.
-Separate each paragraph with a single blank line.
+Separate each paragraph with a single blank line.\
+"""
 
+# The format contract, its own constant so the agent loop can restate it on the
+# answering turn (issue #43) — see the note on `_MOOD_RULE` in
+# `llm_training_status_analyzer` for why that restatement is not optional.
+_MOOD_RULE = """\
 Before the feedback paragraphs, output a single line in the format: MOOD:<mood>
 where <mood> is one of: cheer, knowing, neutral, stern.
 - cheer: great session, personal records set, athlete exceeded expectations
@@ -68,20 +79,54 @@ where <mood> is one of: cheer, knowing, neutral, stern.
 The MOOD line must be the very first line, followed by a blank line, then the paragraphs.\
 """
 
-_SYSTEM_PROMPT_SUPPLEMENTAL = """\
+# Unchanged wording, assembled from the two halves above.
+_SYSTEM_PROMPT_BASE = f"{_ANALYSIS_GUIDANCE}\n\n{_MOOD_RULE}"
+
+_SUPPLEMENTAL_GUIDANCE = """\
 You are Koutsi, an encouraging cycling coach. The athlete's primary sport is cycling; \
 the workout below is a different sport, so treat it as supplemental / cross-training \
 rather than their main focus. Do NOT give a detailed coaching breakdown — no pacing, \
 power or heart-rate analysis, no multi-paragraph feedback. Instead respond with a \
 short (1-2 sentences), warm acknowledgement that recognises the work the athlete put in \
 and encourages them to keep it up.
-Write in plain prose — no markdown headers, no bullet points, no code blocks.
+Write in plain prose — no markdown headers, no bullet points, no code blocks.\
+"""
 
+_SUPPLEMENTAL_MOOD_RULE = """\
 Before the acknowledgement, output a single line in the format: MOOD:<mood>
 where <mood> is one of: cheer, knowing, neutral, stern. Use cheer for a strong effort \
 and knowing (the default) otherwise.
 The MOOD line must be the very first line, followed by a blank line, then the acknowledgement.\
 """
+
+_SYSTEM_PROMPT_SUPPLEMENTAL = f"{_SUPPLEMENTAL_GUIDANCE}\n\n{_SUPPLEMENTAL_MOOD_RULE}"
+
+# The agentic path's replacement for the blob. Narrower than the training-status
+# version because the question is: one activity, whose id is already known. The
+# interesting calls are the second ones — the comparison a fixed prompt could
+# never make, because it never knew what to compare against.
+_TOOL_GUIDANCE = """\
+You have tools that read this athlete's own training data, and this prompt \
+contains none of it. Call get_activity_detail with the activity id below first — \
+everything you need to describe the session is in that one result.
+- Then, only if it would change what you say, look wider: \
+list_recent_activities or find_activity to compare this session against similar \
+recent ones, get_training_status for the fatigue state it lands in, \
+get_power_profile if a power number looks like a breakthrough or a slump.
+- Do not call the same tool twice with the same arguments; the answer will not \
+change. Two or three calls is plenty for one session.
+- A tool that cannot answer replies with a sentence explaining why, often naming \
+what is nearby. Read it and adjust rather than repeating the call.
+- Every figure you quote must come from a tool result. Never invent one, and \
+never fill a gap with a plausible number.\
+"""
+
+
+def _language_suffix(locale: str | None) -> str:
+    if not locale:
+        return ""
+    lang = _LOCALE_LANGUAGE.get(locale.split("-")[0].lower())
+    return f" Respond in {lang}." if lang else ""
 
 
 def _build_system_prompt(
@@ -94,11 +139,58 @@ def _build_system_prompt(
         prompt += f"\n\n{EXPERIENCE_GUIDANCE}"
     else:
         prompt = _SYSTEM_PROMPT_SUPPLEMENTAL
-    if locale:
-        lang = _LOCALE_LANGUAGE.get(locale.split("-")[0].lower())
-        if lang:
-            prompt += f" Respond in {lang}."
-    return prompt
+    return prompt + _language_suffix(locale)
+
+
+def mood_rule_for(sport_type: str | None) -> str:
+    """The format contract this sport's analysis is held to (issue #43).
+
+    A supplemental session gets a one-line acknowledgement, not paragraphs, so
+    restating the *paragraph* rule on its final turn would contradict the prompt
+    it started from. Two rules, picked the same way the system prompt is.
+    """
+    return (
+        _MOOD_RULE if sport_type in CYCLING_SPORT_TYPES else _SUPPLEMENTAL_MOOD_RULE
+    )
+
+
+def _build_agentic_system_prompt(
+    locale: str | None = None, sport_type: str | None = None
+) -> str:
+    """The system prompt for the tool-driven path (issue #43).
+
+    The coaching rules and the format contract are the blob path's, unchanged;
+    only the "here is everything" middle becomes "here is how to get it". A
+    supplemental session keeps its short-acknowledgement framing — an agent loop
+    does not make a swim worth four paragraphs.
+    """
+    if sport_type in CYCLING_SPORT_TYPES:
+        prompt = f"{_ANALYSIS_GUIDANCE}\n\n{_TOOL_GUIDANCE}\n\n{_MOOD_RULE}"
+        prompt += f"\n\n{EXPERIENCE_GUIDANCE}"
+    else:
+        prompt = (
+            f"{_SUPPLEMENTAL_GUIDANCE}\n\n{_TOOL_GUIDANCE}\n\n{_SUPPLEMENTAL_MOOD_RULE}"
+        )
+    return prompt + _language_suffix(locale)
+
+
+def _build_agentic_user_prompt(activity: Activity) -> str:
+    """The brief: which activity, and enough to recognise it if a lookup fails.
+
+    The id is what the tools key on, but the date and sport are here too so a
+    model whose ``get_activity_detail`` call misses has something to search with
+    rather than a dead end.
+    """
+    when = (
+        activity.start_time.strftime("%Y-%m-%d")
+        if activity.start_time
+        else "an unknown date"
+    )
+    return (
+        f'Analyse the athlete\'s activity with id "{activity.id}" — '
+        f"a {activity.sport_type or 'unknown sport'} session on {when}.\n\n"
+        "Start by calling get_activity_detail with that id."
+    )
 
 
 # Plain-language renderings of the decoupling gate's reason codes, so the coach
@@ -310,7 +402,12 @@ def _stream_analysis(
 
 
 async def analyze_activity_bg(
-    activity_id: str, athlete_id: str, user_id: str, locale: str | None = None
+    activity_id: str,
+    athlete_id: str,
+    user_id: str,
+    locale: str | None = None,
+    *,
+    allow_agentic: bool = True,
 ) -> None:
     """
     Background task: stream LLM analysis → write chunks to DB every 500 ms
@@ -318,6 +415,13 @@ async def analyze_activity_bg(
 
     Lives in the service layer so it can be imported from both api/activities.py
     and services/strava_sync.py without circular dependencies.
+
+    ``allow_agentic=False`` forces the single-shot blob prompt whatever the
+    athlete opted into (issue #43). The provider-sync paths pass it: a backlog
+    import creates one of these per imported activity, and a few hundred
+    activities at four-to-six calls each is both a real bill and a lot of
+    concurrent loops against one local model that serialises requests — on the
+    one path where nobody reads the output one analysis at a time.
     """
     async with get_user_session_factory(user_id)() as session:
         activity_result = await session.execute(
@@ -362,23 +466,52 @@ async def analyze_activity_bg(
         def _set_analysis(text: str) -> None:
             activity.analysis = text
 
+        def _set_step(code: str | None) -> None:
+            activity.analysis_progress = code
+
         def _finish(text: str) -> None:
             activity.analysis = text
             activity.analysis_status = "done"
+            # Cleared so a finished analysis renders exactly as it did before
+            # the agentic path existed.
+            activity.analysis_progress = None
 
         def _fail() -> None:
             activity.analysis_status = "error"
+            activity.analysis_progress = None
+
+        request = (
+            AgentRequest(
+                athlete=athlete,
+                user_id=user_id,
+                session=session,
+                system_prompt=_build_agentic_system_prompt(
+                    resolved_locale, activity.sport_type
+                ),
+                user_prompt=_build_agentic_user_prompt(activity),
+                feature="activity_analysis",
+                max_rounds=MAX_ROUNDS_ACTIVITY,
+                format_rule=mood_rule_for(activity.sport_type),
+            )
+            if allow_agentic and agentic_enabled(athlete)
+            else None
+        )
 
         await stream_into_db(
             session,
-            lambda usage_out: _stream_analysis(
-                activity, athlete, user_id, fatigue=fatigue, locale=resolved_locale,
-                power_pr_badges=power_pr_badges, distance_pr_badges=distance_pr_badges,
-                planned=planned, usage_out=usage_out,
+            lambda usage_out: coaching_stream(
+                request=request,
+                blob=lambda blob_usage: _stream_analysis(
+                    activity, athlete, user_id, fatigue=fatigue, locale=resolved_locale,
+                    power_pr_badges=power_pr_badges, distance_pr_badges=distance_pr_badges,
+                    planned=planned, usage_out=blob_usage,
+                ),
+                usage_out=usage_out,
             ),
             on_progress=_set_analysis,
             on_done=_finish,
             on_error=_fail,
+            on_step=_set_step,
             user_id=user_id,
             feature="activity_analysis",
             label=f"Analysis for activity {activity_id}",

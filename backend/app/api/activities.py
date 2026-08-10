@@ -1018,6 +1018,7 @@ async def trigger_analysis(
 
     activity.analysis_status = "pending"
     activity.analysis = None
+    activity.analysis_progress = None
     await session.commit()
 
     background_tasks.add_task(

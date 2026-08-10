@@ -6834,6 +6834,17 @@
             ],
             "title": "Analysis"
           },
+          "analysis_progress": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Analysis Progress"
+          },
           "analysis_ai_generated": {
             "type": "boolean",
             "title": "Analysis Ai Generated",
@@ -11670,6 +11681,17 @@
               }
             ],
             "title": "Generated Date"
+          },
+          "progress": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Progress"
           },
           "feedback_ai_generated": {
             "type": "boolean",

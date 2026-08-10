@@ -173,6 +173,15 @@ EUROMAIL_WEBHOOK_SECRET=           # verifies inbound EuroMail webhooks (used by
 # blank to allow any URL (SSRF guards still apply).
 LLM_ALLOWED_SERVERS=               # e.g. http://localhost:11434/v1,https://api.openai.com/v1
 
+# Optional: how many agentic Koutsi runs may be in flight at once in this
+# process. An agent loop is 3–5 completions instead of one, so a handful of
+# concurrent runs against a local model that serialises requests becomes a queue
+# nobody is watching. A run that can't get a slot immediately falls back to the
+# single-shot prompt rather than waiting — a worse answer now beats a spinner
+# until the 30-minute pending timeout. Default 4; lower it to 1–2 for a single
+# local GPU, raise it for a hosted provider.
+AGENT_MAX_CONCURRENT_RUNS=4
+
 # Privacy policy (GDPR). The consent screen links to this URL. It defaults to
 # the canonical koutsi.dev policy; if you self-host you are your own data
 # controller and should point this at your own privacy policy.

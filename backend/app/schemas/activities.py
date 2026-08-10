@@ -144,6 +144,17 @@ class ActivityResponse(BaseModel):
             **values,
             "sources": [s.provider for s in (activity.sources or [])],
             "labels": activity.labels or [],
+            # Issue #43: a progress code only means anything while the run is in
+            # flight. The analyzer clears it on the way out, but a task killed
+            # between its last progress commit and settling would leave one
+            # behind, and "Koutsi is checking your power curve…" printed under a
+            # finished analysis reads as a bug. Gating on the status here means
+            # a stale code can never reach a client.
+            "analysis_progress": (
+                getattr(activity, "analysis_progress", None)
+                if getattr(activity, "analysis_status", None) == "pending"
+                else None
+            ),
             **_aerobic_ratios(activity),
         }
 
@@ -198,6 +209,12 @@ class ActivityDetailResponse(ActivityResponse):
     cp_fit_points: Optional[int] = None
     analysis_status: Optional[str] = None
     analysis: Optional[str] = None
+    # Issue #43. The agentic coach's current step while `analysis_status` is
+    # "pending" — a code from a fixed vocabulary (`thinking`, `tool.<name>`) the
+    # client localises, never a sentence. Null once the prose starts and null
+    # for the whole non-agentic path; an unrecognised code means a tool the
+    # client predates, so fall back to generic "thinking" copy.
+    analysis_progress: Optional[str] = None
 
     # Issue #41. Scoped to the analysis rather than the whole response on
     # purpose: every other field here is measured or computed from the ride
