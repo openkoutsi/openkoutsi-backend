@@ -431,6 +431,24 @@ _INVALID_TOOL_SCHEMA_MARKERS = (
 )
 
 
+def is_our_tool_schema_error(exc: httpx.HTTPStatusError) -> bool:
+    """Is ``exc`` the provider telling us *our* function schema is invalid?
+
+    The complement of :func:`is_tool_calling_unsupported_error`, split out
+    because the agent loop needs to act on it rather than merely not-match it:
+    every other upstream failure degrades to the single-shot prompt, and this
+    one must not. Tool schemas come from the registry's own pydantic models, so
+    this is a regression in one of them — hiding it behind a quietly worse
+    answer for every athlete on every provider is the failure mode the whole
+    "don't swallow an invalid schema" rule exists to prevent.
+    """
+    resp = getattr(exc, "response", None)
+    if resp is None or getattr(resp, "status_code", None) not in (400, 422):
+        return False
+    body = _response_body_text(resp).lower()
+    return any(marker in body for marker in _INVALID_TOOL_SCHEMA_MARKERS)
+
+
 def is_tool_calling_unsupported_error(exc: httpx.HTTPStatusError) -> bool:
     """Is ``exc`` an upstream rejection of the ``tools`` *param*? (issue #43)
 

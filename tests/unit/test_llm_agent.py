@@ -117,6 +117,31 @@ class FakeProvider:
         return [m for m in self.sent[turn_index]["messages"] if m.get("role") == "tool"]
 
 
+class PoisonableSession:
+    """Models what SQLAlchemy does to a session cancelled mid-statement.
+
+    The real failure is `PendingRollbackError` on every later use until someone
+    rolls back. Reproducing that through aiosqlite means racing a cancellation
+    against a genuinely slow query, which is timing-dependent; modelling the
+    documented state makes the assertion deterministic and still fails if the
+    rollback is removed.
+    """
+
+    def __init__(self, *, rollback_fails: bool = False):
+        self.usable = True
+        self.rollbacks = 0
+        self._rollback_fails = rollback_fails
+
+    def poison(self) -> None:
+        self.usable = False
+
+    async def rollback(self) -> None:
+        self.rollbacks += 1
+        if self._rollback_fails:
+            raise RuntimeError("the rollback failed too")
+        self.usable = True
+
+
 @dataclass
 class FakeTool:
     """A stand-in for one registry tool, returning a canned result."""
@@ -125,6 +150,8 @@ class FakeTool:
     result: Any = None
     error: Optional[str] = None
     delay_s: float = 0.0
+    #: Session to mark unusable when this tool is cancelled mid-flight.
+    poisons: Optional[PoisonableSession] = None
 
 
 class FakeDispatch:
@@ -142,7 +169,14 @@ class FakeDispatch:
                 tool=name, ok=False, error=f"No tool named '{name}'.", duration_ms=1.0
             )
         if tool.delay_s:
-            await asyncio.sleep(tool.delay_s)
+            try:
+                await asyncio.sleep(tool.delay_s)
+            except asyncio.CancelledError:
+                # Where the damage happens: the cancellation landed inside the
+                # call, on the caller's session.
+                if tool.poisons is not None:
+                    tool.poisons.poison()
+                raise
         if tool.error is not None:
             return ToolResult(tool=name, ok=False, error=tool.error, duration_ms=1.0)
         return ToolResult(tool=name, ok=True, data=tool.result, duration_ms=1.0)
@@ -402,6 +436,55 @@ class TestToolFailuresAreContent:
         assert prose == ANSWER
         assert "took longer than" in provider.tool_messages(1)[0]["content"]
 
+    async def test_a_cancelled_tool_call_rolls_the_session_back(self, monkeypatch):
+        # `asyncio.wait_for` cancels `call_tool` wherever it happens to be. If
+        # that lands mid-statement, SQLAlchemy invalidates the connection and
+        # every later use of the *caller's* session raises PendingRollbackError
+        # — the next tool call, the write of the answer, and `stream_into_db`'s
+        # own error handler. Returning a sentence keeps the model going while
+        # the session it will answer through is already dead.
+        monkeypatch.setattr(llm_agent, "TOOL_TIMEOUT_S", 0.02)
+        session = PoisonableSession()
+        provider = FakeProvider(
+            calls((0, "c1", "get_zone_totals", "{}")),
+            calls((0, "c2", "get_plan_status", "{}")),
+            text(ANSWER),
+        )
+        dispatch = FakeDispatch(
+            FakeTool("get_zone_totals", {}, delay_s=0.5, poisons=session),
+            FakeTool("get_plan_status", {"plans": []}),
+        )
+        prose, _ = await drive(
+            provider, dispatch, request=_request(session=session), monkeypatch=monkeypatch
+        )
+
+        assert session.rollbacks == 1
+        assert session.usable, "the session must be usable again for the answer"
+        # And the run genuinely carried on through it.
+        assert prose == ANSWER
+        assert [name for name, _ in dispatch.invocations] == [
+            "get_zone_totals",
+            "get_plan_status",
+        ]
+
+    async def test_a_rollback_that_itself_fails_does_not_kill_the_run(
+        self, monkeypatch
+    ):
+        # Best-effort: if the rollback fails the run is going to end badly
+        # anyway, and the surface's own error handling is a better place to land
+        # than an exception escaping the dispatch of one tool.
+        monkeypatch.setattr(llm_agent, "TOOL_TIMEOUT_S", 0.02)
+        session = PoisonableSession(rollback_fails=True)
+        provider = FakeProvider(
+            calls((0, "c1", "get_zone_totals", "{}")),
+            text(ANSWER),
+        )
+        dispatch = FakeDispatch(FakeTool("get_zone_totals", {}, delay_s=0.5))
+        prose, _ = await drive(
+            provider, dispatch, request=_request(session=session), monkeypatch=monkeypatch
+        )
+        assert prose == ANSWER
+
 
 class TestOneResultPerCall:
     async def test_every_call_in_a_parallel_turn_gets_exactly_one_result(
@@ -505,6 +588,73 @@ class TestIterationCap:
             )
 
 
+class TestBreadthAndBudget:
+    async def test_a_turn_asking_for_everything_runs_only_the_first_few(
+        self, monkeypatch
+    ):
+        # The round cap counts round *trips*; without this a shotgunning model
+        # does 6 x 9 calls and replays all of it into every later turn.
+        names = [
+            "get_training_status", "list_recent_activities", "get_plan_status",
+            "get_goal_progress", "get_zone_totals", "get_power_profile",
+        ]
+        provider = FakeProvider(
+            calls(*[(i, f"c{i}", n, "{}") for i, n in enumerate(names)]),
+            text(ANSWER),
+        )
+        dispatch = FakeDispatch(*[FakeTool(n, {"ok": True}) for n in names])
+        await drive(provider, dispatch, monkeypatch=monkeypatch)
+
+        assert len(dispatch.invocations) == llm_agent.MAX_CALLS_PER_TURN
+        # Every announced call still gets exactly one result — the pairing the
+        # dialect checks — and the refused ones say why rather than vanishing.
+        assistant = [m for m in provider.sent[1]["messages"] if m.get("role") == "assistant"][0]
+        answered = provider.tool_messages(1)
+        assert len(answered) == len(assistant["tool_calls"]) == len(names)
+        refusals = [m for m in answered if "was not run" in m["content"]]
+        assert len(refusals) == len(names) - llm_agent.MAX_CALLS_PER_TURN
+        assert "a few at a time" in refusals[0]["content"]
+
+    async def test_a_turn_within_the_breadth_cap_is_untouched(self, monkeypatch):
+        provider = FakeProvider(
+            calls(
+                (0, "c1", "get_training_status", "{}"),
+                (1, "c2", "get_plan_status", "{}"),
+            ),
+            text(ANSWER),
+        )
+        dispatch = FakeDispatch(
+            FakeTool("get_training_status", {"form": 1}),
+            FakeTool("get_plan_status", {"plans": []}),
+        )
+        await drive(provider, dispatch, monkeypatch=monkeypatch)
+        assert len(dispatch.invocations) == 2
+        assert not [m for m in provider.tool_messages(1) if "was not run" in m["content"]]
+
+    async def test_a_run_that_eats_its_character_budget_is_forced_to_answer(
+        self, monkeypatch
+    ):
+        # Bounds the thing that actually blows a small context window: the *sum*
+        # of tool results replayed into every subsequent turn.
+        monkeypatch.setattr(llm_agent, "MAX_RUN_RESULT_CHARS", 500)
+        provider = FakeProvider(
+            calls((0, "c1", "list_recent_activities", "{}")),
+            text(ANSWER),
+            calls((0, "c2", "list_recent_activities", "{}")),  # never reached
+        )
+        dispatch = FakeDispatch(FakeTool("list_recent_activities", {"items": ["x" * 900]}))
+        prose, steps = await drive(
+            provider, dispatch, request=_request(max_rounds=6), monkeypatch=monkeypatch
+        )
+
+        assert prose == ANSWER
+        # Two turns, not six: the budget stopped the gathering and the forced
+        # final turn — no tools offered — produced the answer.
+        assert provider.turn_count == 2
+        assert provider.sent[1]["tools"] is None
+        assert steps[-1] is None
+
+
 class TestOversizedResults:
     async def test_a_long_result_is_truncated_with_the_marker_present(
         self, monkeypatch
@@ -593,6 +743,9 @@ class TestProviderCannotDoTools:
         response = httpx.Response(status, text=body, request=request)
         return httpx.HTTPStatusError("rejected", request=request, response=response)
 
+    def _error_turn(self, status: int, body: str) -> Turn:
+        return Turn(error=self._rejection(status, body))
+
     async def test_a_400_naming_the_param_asks_for_the_blob_path(self, monkeypatch):
         provider = FakeProvider(
             Turn(error=self._rejection(400, '{"error": "Unknown parameter: tools"}'))
@@ -600,11 +753,49 @@ class TestProviderCannotDoTools:
         with pytest.raises(AgenticUnavailable):
             await drive(provider, monkeypatch=monkeypatch)
 
-    async def test_an_unrelated_400_is_a_real_error(self, monkeypatch):
+    async def test_a_context_length_400_falls_back_rather_than_failing(
+        self, monkeypatch
+    ):
+        # The failure this loop *creates*: it accumulates tool results a
+        # single-shot prompt never would, and the small windows on self-hosted
+        # models are exactly the population the fallback exists for. Failing
+        # here would show an error card on a provider where the blob prompt
+        # would have fit comfortably.
         provider = FakeProvider(
-            Turn(error=self._rejection(400, '{"error": "context length exceeded"}'))
+            self._error_turn(
+                400, '{"error": "This model\'s maximum context length is 4096 tokens"}'
+            )
         )
-        with pytest.raises(httpx.HTTPStatusError):
+        with pytest.raises(AgenticUnavailable, match="upstream error"):
+            await drive(provider, monkeypatch=monkeypatch)
+
+    @pytest.mark.parametrize(
+        "status,body",
+        [
+            (429, '{"error": "rate limit exceeded"}'),
+            (500, '{"error": "internal server error"}'),
+            (503, "upstream is restarting"),
+        ],
+    )
+    async def test_any_other_upstream_status_falls_back(
+        self, monkeypatch, status, body
+    ):
+        # No prose has been written at this point, so the blob prompt is still
+        # available and is a better answer than an error card.
+        provider = FakeProvider(self._error_turn(status, body))
+        with pytest.raises(AgenticUnavailable, match="upstream error"):
+            await drive(provider, monkeypatch=monkeypatch)
+
+    async def test_a_network_failure_falls_back(self, monkeypatch):
+        provider = FakeProvider(
+            Turn(
+                error=httpx.ConnectError(
+                    "connection reset",
+                    request=httpx.Request("POST", "http://llm.invalid/v1/chat/completions"),
+                )
+            )
+        )
+        with pytest.raises(AgenticUnavailable, match="upstream request failed"):
             await drive(provider, monkeypatch=monkeypatch)
 
     async def test_a_broken_function_schema_is_our_bug_and_surfaces(self, monkeypatch):
@@ -829,7 +1020,37 @@ class TestConversationShape:
         systems = [m for m in provider.sent[0]["messages"] if m["role"] == "system"]
         assert len(systems) == 1
 
-    async def test_the_format_rule_is_restated_on_the_forced_final_turn(
+    async def test_the_format_rule_is_restated_on_every_post_tool_turn(
+        self, monkeypatch
+    ):
+        # The reason for restating it — models obey a leading-format rule less
+        # reliably after tool results — applies to whichever turn answers, and
+        # the common shape is answering after one or two rounds rather than
+        # hitting the cap. Applying it only to the forced turn would put the
+        # mitigation on the rare path and skip the usual one.
+        provider = FakeProvider(
+            calls((0, "c1", "get_training_status", "{}")),
+            calls((0, "c2", "get_plan_status", "{}")),
+            text(ANSWER),
+        )
+        dispatch = FakeDispatch(
+            FakeTool("get_training_status", {"form": 1}),
+            FakeTool("get_plan_status", {"plans": []}),
+        )
+        await drive(provider, dispatch, monkeypatch=monkeypatch)
+
+        # Turn zero has no tool results behind it yet, so nothing to restate.
+        assert MOOD_RULE not in str(provider.sent[0]["messages"])
+        for turn in provider.sent[1:]:
+            last = turn["messages"][-1]
+            assert last["role"] == "system"
+            assert last["content"] == MOOD_RULE
+        # And it does not carry the forced turn's "stop calling tools", which
+        # would end the loop after round one.
+        assert "do not call any more tools" not in str(provider.sent[1]["messages"])
+        assert provider.sent[1]["tools"]
+
+    async def test_the_forced_final_turn_adds_the_stop_instruction(
         self, monkeypatch
     ):
         provider = FakeProvider(

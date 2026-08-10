@@ -23,6 +23,7 @@ session, so ``call_tool`` opens its own, which in a test would reach the real
 registry file rather than the in-memory fixture. Consent enforcement itself is
 covered where it belongs, in ``test_mcp_tools.py``.
 """
+import asyncio
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Optional
 from unittest.mock import AsyncMock, patch
@@ -466,6 +467,88 @@ class TestTrainingStatusAgentically:
 
         assert athlete.training_status_status == "error"
         assert athlete.training_status_progress is None
+
+
+class TestTheActivitySurfaceAlwaysSettles:
+    """`analyze_activity_bg` was the one coaching surface with no safety net.
+
+    `stream_into_db` settles the status itself, but only once it is running and
+    only while its session still works. Unlike the training-status surface this
+    one has no pending timeout to fall back on — `trigger_analysis` early-returns
+    for `analysis_status == "pending"` — so a row that never settles is an
+    activity that can never be analysed again. The agentic path adds ways to die
+    in that window, which is what makes the net worth having here.
+    """
+
+    async def test_a_failure_before_the_drain_loop_settles_the_activity(
+        self, athlete_db, wire, monkeypatch
+    ):
+        # The activity surface had no `failure_recovery` net at all, which is
+        # what made a poisoned session unrecoverable there rather than merely
+        # degraded. Any early failure exercises the net.
+        wire(ScriptedProvider(say(ANSWER)))
+        monkeypatch.setattr(
+            "backend.app.services.llm_activity_analyzer.detect_pr_badges",
+            AsyncMock(side_effect=RuntimeError("PR detection exploded")),
+        )
+
+        activity = await run_activity("act-1")
+
+        assert activity.analysis_status == "error"
+        assert activity.analysis_progress is None
+
+
+class TestTheToolsUseTheAthletesDate:
+    async def test_the_date_in_the_brief_is_the_date_the_tools_reckon_from(
+        self, athlete_db, wire
+    ):
+        """Otherwise "not due yet" and "missed" disagree across a date boundary."""
+        seen: list[date] = []
+        original = llm_agent.call_tool
+
+        async def record(caller, name, arguments=None, **kwargs):
+            seen.append(kwargs.get("today"))
+            return await original(caller, name, arguments, **kwargs)
+
+        provider = ScriptedProvider(ask("get_plan_status", "{}", "c1"), say(ANSWER))
+        wire(provider)
+
+        from sqlalchemy import select
+
+        from backend.app.db.user_session import get_user_session_factory
+
+        # An athlete far enough east that their date differs from UTC's for part
+        # of the day — the case the server's clock gets wrong.
+        async with get_user_session_factory(USER_ID)() as session:
+            athlete = (
+                await session.execute(select(Athlete).where(Athlete.id == ATHLETE_ID))
+            ).scalar_one()
+            athlete.app_settings = {**athlete.app_settings, "timezone": "Pacific/Auckland"}
+            await session.commit()
+
+        with patch.object(llm_agent, "call_tool", record):
+            await run_status()
+
+        from backend.app.core.timezones import local_now
+
+        assert seen == [local_now("Pacific/Auckland").date()]
+
+    async def test_the_activity_surface_passes_one_too(self, athlete_db, wire):
+        seen: list[date] = []
+        original = llm_agent.call_tool
+
+        async def record(caller, name, arguments=None, **kwargs):
+            seen.append(kwargs.get("today"))
+            return await original(caller, name, arguments, **kwargs)
+
+        provider = ScriptedProvider(
+            ask("get_activity_detail", '{"activity_id": "act-1"}', "c1"), say(ANSWER)
+        )
+        wire(provider)
+        with patch.object(llm_agent, "call_tool", record):
+            await run_activity("act-1")
+
+        assert seen and all(d is not None for d in seen)
 
 
 class TestTrainingStatusFallsBackToTheBlob:

@@ -537,6 +537,19 @@ async def analyze_training_status_bg(
 
             def _set_step(code: str | None) -> None:
                 athlete.training_status_progress = code
+                # `_PENDING_TIMEOUT_MINUTES` compares against this column, and
+                # was calibrated when the path made exactly one completion. An
+                # agentic run makes up to seven, and `_STREAM_TIMEOUT` is a
+                # *read* timeout — between chunks — so it bounds no turn's total
+                # duration. A slow local model can therefore cross 30 minutes
+                # while perfectly healthy, at which point the next poll declares
+                # the live run dead, shows the athlete an error, and is then
+                # overwritten by the run finishing. Touching the timestamp here
+                # turns the 30 minutes into "no progress for 30 minutes" rather
+                # than "started 30 minutes ago", which is what it should always
+                # have meant. Free: `stream_into_db` commits right after every
+                # step anyway.
+                athlete.training_status_updated_at = datetime.now(timezone.utc)
 
             def _finish(text: str) -> None:
                 athlete.training_status = text

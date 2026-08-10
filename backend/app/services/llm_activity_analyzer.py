@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, AsyncIterator
 
 from sqlalchemy import select
 
+from ..core.timezones import local_now
 from ..db.user_session import get_user_session_factory
 from ..models.user_orm import Activity, Athlete, DailyMetric, PlannedWorkout
 from .athlete_experience import EXPERIENCE_GUIDANCE, experience_level
@@ -26,7 +27,7 @@ from .llm_agent import (
     agentic_enabled,
     coaching_stream,
 )
-from .llm_streaming import stream_chat_completion, stream_into_db
+from .llm_streaming import failure_recovery, stream_chat_completion, stream_into_db
 from .pr_detection import detect_pr_badges
 
 from openkoutsi.sport_matching import CYCLING_SPORT_TYPES
@@ -423,6 +424,40 @@ async def analyze_activity_bg(
     concurrent loops against one local model that serialises requests — on the
     one path where nobody reads the output one analysis at a time.
     """
+
+    async def _clear_pending(recovery_session) -> None:
+        result = await recovery_session.execute(
+            select(Activity).where(Activity.id == activity_id)
+        )
+        stuck = result.scalar_one_or_none()
+        if stuck and stuck.analysis_status == "pending":
+            stuck.analysis_status = "error"
+            stuck.analysis_progress = None
+
+    # `stream_into_db` settles the status itself, but only once it is running —
+    # and only while its session still works. Unlike the training-status
+    # surface, this one has no pending timeout to fall back on: `trigger_analysis`
+    # early-returns for `analysis_status == "pending"`, so a row that never
+    # settles is an activity that can never be analysed again. The agentic path
+    # adds ways to die between `pending` and settled (a cancelled tool call can
+    # invalidate the very session `on_error` would commit through), which is
+    # what makes the net worth having here as well.
+    async with failure_recovery(
+        user_id, f"Analysis for activity {activity_id}", _clear_pending
+    ):
+        await _analyze_activity(
+            activity_id, athlete_id, user_id, locale, allow_agentic=allow_agentic
+        )
+
+
+async def _analyze_activity(
+    activity_id: str,
+    athlete_id: str,
+    user_id: str,
+    locale: str | None,
+    *,
+    allow_agentic: bool,
+) -> None:
     async with get_user_session_factory(user_id)() as session:
         activity_result = await session.execute(
             select(Activity).where(Activity.id == activity_id)
@@ -436,6 +471,11 @@ async def analyze_activity_bg(
 
         # Resolve locale: explicit arg → athlete app_settings → None (defaults to English)
         resolved_locale = locale or (athlete.app_settings or {}).get("locale")
+        # The athlete's own date, for the tools to reckon "the last N days" from
+        # (issue #43). The server's is a day out for anyone far enough from UTC,
+        # and this surface reaches the same date-sensitive tools the status card
+        # does.
+        athlete_today = local_now((athlete.app_settings or {}).get("timezone")).date()
 
         # Fetch fatigue metrics for the day before the workout
         workout_date = activity.start_time.date() if activity.start_time else None
@@ -492,6 +532,7 @@ async def analyze_activity_bg(
                 feature="activity_analysis",
                 max_rounds=MAX_ROUNDS_ACTIVITY,
                 format_rule=mood_rule_for(activity.sport_type),
+                today=athlete_today,
             )
             if allow_agentic and agentic_enabled(athlete)
             else None

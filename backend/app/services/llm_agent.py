@@ -84,7 +84,11 @@ from ..mcp.dispatch import ToolCaller, ToolResult, call_tool
 from ..mcp.registry import Tool, all_tools
 from ..models.user_orm import Athlete
 from .llm_access import merge_usage
-from .llm_client import ResolvedLlm, is_tool_calling_unsupported_error
+from .llm_client import (
+    ResolvedLlm,
+    is_our_tool_schema_error,
+    is_tool_calling_unsupported_error,
+)
 from .llm_streaming import (
     AgentProgress,
     StreamItem,
@@ -146,6 +150,25 @@ def progress_vocabulary() -> list[str]:
 #: carries every previous tool result in its context.
 MAX_ROUNDS_STATUS = 6
 MAX_ROUNDS_ACTIVITY = 3
+
+#: Tool calls dispatched from any single turn. The round cap bounds *round
+#: trips*, and a round trip may carry any number of parallel calls — so without
+#: this the worst case is not six calls but six times however many the model
+#: emits at once. A model that shotguns the whole registry (the failure the
+#: ``llm-eval`` agentic family exists to detect) would otherwise run 54 calls and
+#: replay every result into every later turn, each of those turns billed.
+#: Anything past this gets a result explaining it was not run, so the model can
+#: ask again rather than reason from a gap it does not know about.
+MAX_CALLS_PER_TURN = 4
+
+#: Total tool-result characters one run may accumulate. ``MAX_TOOL_RESULT_CHARS``
+#: bounds a single result; nothing bounded their sum, and the sum is what is
+#: replayed into the context of every subsequent turn. Once this is crossed the
+#: loop stops offering tools and goes to the forced final turn — the path that
+#: already exists for the round cap, reached by a different trigger. It is also
+#: the cheapest defence against blowing a small context window, which is a real
+#: risk on the self-hosted models BYOK points at.
+MAX_RUN_RESULT_CHARS = 24_000
 
 #: One tool call may not exceed this. The tools are aggregate reads over one
 #: user's SQLite file, so anything approaching it is a pathological query rather
@@ -411,6 +434,10 @@ class AgentRequest:
     max_rounds: int
     #: Restated verbatim on the final turn — see :func:`_final_reminder`.
     format_rule: str
+    #: The calendar date the tools reckon from, in the **athlete's** timezone.
+    #: Six of the nine key off it, and they are the date-boundary-sensitive ones.
+    #: The server's own date is the wrong answer for anyone far enough from UTC,
+    #: and the brief already tells the model what day it is — the two must agree.
     today: date = field(default_factory=date.today)
     tools: Optional[list[Tool]] = None
 
@@ -499,6 +526,29 @@ async def coaching_stream(
             usage_out["usage"] = merged
 
 
+def _format_reminder(format_rule: str) -> dict:
+    """The format rule alone, for a turn that follows tool results.
+
+    Distinct from :func:`_final_reminder`, which also forbids further tool
+    calls: sending *that* on every turn would end the loop after round one.
+    """
+    return {"role": "system", "content": format_rule}
+
+
+def _budget_exhausted(rounds: int, spent: int, max_rounds: int) -> Optional[str]:
+    """Which budget, if any, says stop gathering — named for the log line."""
+    if rounds >= max_rounds:
+        return f"the {max_rounds}-round cap"
+    if spent >= MAX_RUN_RESULT_CHARS:
+        return f"the {MAX_RUN_RESULT_CHARS}-character tool-result budget"
+    return None
+
+
+def _bounded(calls: list[PendingToolCall]) -> tuple[list[PendingToolCall], list[PendingToolCall]]:
+    """Split a turn's calls into the ones to run and the ones to refuse."""
+    return calls[:MAX_CALLS_PER_TURN], calls[MAX_CALLS_PER_TURN:]
+
+
 async def agentic_stream(
     request: AgentRequest, usage_out: dict
 ) -> AsyncIterator[StreamItem]:
@@ -570,8 +620,22 @@ async def _drive(
     yield AgentProgress(PROGRESS_THINKING)
 
     rounds = 0
-    while rounds < request.max_rounds:
+    spent = 0
+    while True:
+        forced = _budget_exhausted(rounds, spent, request.max_rounds)
+        if forced is not None:
+            break
+
         messages = setup.system_messages(request.system_prompt) + history
+        if rounds > 0:
+            # Restated on *every* turn that follows tool results, not only the
+            # forced one. The reason `_final_reminder` gives — models obey a
+            # leading-format instruction less reliably after tool results —
+            # applies to whichever turn ends up answering, and the common shape
+            # is answering after one or two rounds, not hitting the cap. Only
+            # the format half: the forced reminder also says "call no more
+            # tools", which here would end the loop after round one.
+            messages = messages + [_format_reminder(request.format_rule)]
         turn = _Turn()
         async for item in _collect(
             _stream_turn(setup.cfg, messages, definitions, run_usage),
@@ -609,11 +673,27 @@ async def _drive(
             yield AgentProgress(None)
             return
 
+        run, dropped = _bounded(turn.calls)
         history.append(_assistant_message(turn.text, turn.calls))
-        for call in turn.calls:
+        for call in run:
             yield AgentProgress(progress_code_for_tool(call.name))
             content = await _dispatch(request, caller, call)
+            spent += len(content)
             history.append(_tool_message(call, content))
+        for call in dropped:
+            # Still exactly one result per call — the pairing the dialect
+            # checks — but a sentence saying why, so the model knows it is
+            # missing something rather than quietly reasoning without it.
+            history.append(
+                _tool_message(
+                    call,
+                    f"'{call.name}' was not run: this turn asked for "
+                    f"{len(turn.calls)} tools at once and only the first "
+                    f"{MAX_CALLS_PER_TURN} were executed. Ask again on the next "
+                    "turn for whatever you still need, a few at a time.",
+                )
+            )
+            _log_call(request, call, "dropped_over_breadth", 0.0, None)
         rounds += 1
         # Deliberately *not* reset to `thinking` here. A tool call against one
         # user's SQLite file takes milliseconds; the model turn that reads the
@@ -623,13 +703,11 @@ async def _drive(
         # "Koutsi is checking your power curve…" should stay up while Koutsi is,
         # in fact, working out what the power curve means.
 
-    # The cap. One more turn with no tools offered at all — not merely
+    # A budget ran out. One more turn with no tools offered at all — not merely
     # `tool_choice: "none"`, which some servers ignore — so a model stuck in a
     # calling loop has nothing left to call.
     log.info(
-        "agent: hit the %d-round cap (feature=%s), forcing a final answer",
-        request.max_rounds,
-        request.feature,
+        "agent: hit %s (feature=%s), forcing a final answer", forced, request.feature
     )
     messages = (
         setup.system_messages(request.system_prompt)
@@ -721,7 +799,36 @@ async def _stream_turn(
                 cfg.model,
             )
             raise AgenticUnavailable("provider rejected the 'tools' param") from exc
-        raise
+        if definitions and is_our_tool_schema_error(exc):
+            # Our own pydantic model is broken. Degrading here would hide it
+            # behind a quietly worse answer for every athlete on every provider.
+            raise
+        # Anything else upstream — a 429, a 5xx, and above all a context-length
+        # 400. That last one is a failure *this loop creates*: it accumulates
+        # tool results a single-shot prompt never would, and the small windows
+        # on self-hosted models are exactly the population the fallback exists
+        # for. No prose has been written yet, so the blob prompt is still
+        # available and is a better answer than an error card. Logged at error
+        # because, unlike a tools rejection, this is not a settled property of
+        # the provider — it wants looking at.
+        log.error(
+            "agent: turn failed upstream (model=%s) — falling back to the "
+            "single-shot prompt: %s",
+            cfg.model,
+            exc,
+        )
+        raise AgenticUnavailable(f"upstream error: {exc}") from exc
+    except httpx.RequestError as exc:
+        # A connection reset, a read timeout, DNS. Same reasoning: nothing has
+        # been written, and the other path may well reach the same server fine
+        # with a smaller request.
+        log.error(
+            "agent: turn could not reach the provider (model=%s) — falling back "
+            "to the single-shot prompt: %s",
+            cfg.model,
+            exc,
+        )
+        raise AgenticUnavailable(f"upstream request failed: {exc}") from exc
     finally:
         merged = merge_usage(run_usage.get("usage"), turn_usage.get("usage"))
         if merged is not None:
@@ -759,11 +866,17 @@ async def _dispatch(
                 arguments,
                 session=request.session,
                 athlete=request.athlete,
+                # The athlete's date, not the server's. The brief asserts one
+                # ("Today is 2026-08-10 (Sunday) … in the athlete's own
+                # timezone"), and a tool answering from a different one turns
+                # "not due yet" into "missed" for anyone far enough from UTC.
+                today=request.today,
             ),
             timeout=TOOL_TIMEOUT_S,
         )
     except asyncio.TimeoutError:
         _log_call(request, call, "timeout", (time.perf_counter() - started) * 1000, arguments)
+        await _recover_session(request, call.name)
         return (
             f"'{call.name}' took longer than {TOOL_TIMEOUT_S:.0f} seconds and was "
             "stopped. Try a narrower request — a shorter date range or a smaller "
@@ -772,6 +885,7 @@ async def _dispatch(
     except Exception:  # pragma: no cover - call_tool is itself defensive
         log.exception("agent: dispatching %s failed unexpectedly", call.name)
         _log_call(request, call, "failed", (time.perf_counter() - started) * 1000, arguments)
+        await _recover_session(request, call.name)
         return (
             f"'{call.name}' failed unexpectedly. The failure has been logged; "
             "try a different tool or answer with what you already have."
@@ -785,6 +899,37 @@ async def _dispatch(
         arguments,
     )
     return _cap(result.text())
+
+
+async def _recover_session(request: AgentRequest, tool_name: str) -> None:
+    """Roll the caller's session back after a *cancelled* tool call.
+
+    ``asyncio.wait_for`` cancels ``call_tool`` wherever it happens to be. If that
+    lands mid-statement, SQLAlchemy invalidates the connection and every later
+    use of the session — the next tool call, the write of the answer, and
+    ``stream_into_db``'s own ``on_error`` commit — raises
+    ``PendingRollbackError``. Returning a sentence keeps the *model* going while
+    the session it will write the answer through is already dead, which on the
+    activity surface used to mean a row stuck at ``pending`` that
+    ``trigger_analysis`` would then refuse to re-run: an activity that could
+    never be analysed again.
+
+    Rolling back is safe here because nothing worth keeping is pending: progress
+    codes are committed as they are set, and ``on_progress`` rewrites the whole
+    accumulated text on each flush rather than appending to it.
+
+    An ordinary handler exception does *not* poison the session — SQLAlchemy
+    recovers from a failed statement on its own — so this is only about the
+    cancellation paths. It is best-effort: if the rollback itself fails the run
+    is going to end badly regardless, and the surface's error handling is a
+    better place to land than here.
+    """
+    try:
+        await request.session.rollback()
+    except Exception:  # pragma: no cover - defensive
+        log.exception(
+            "agent: could not roll back the session after %s was cancelled", tool_name
+        )
 
 
 def _cap(content: str) -> str:
