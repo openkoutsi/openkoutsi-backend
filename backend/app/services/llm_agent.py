@@ -90,7 +90,6 @@ from datetime import date
 from typing import Any, Optional
 
 import httpx
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.config import settings
 from ..mcp.dispatch import ToolCaller, ToolResult, call_tool
@@ -428,19 +427,15 @@ _COMMIT_AFTER_CHARS = 240
 class AgentRequest:
     """Everything one agentic run needs.
 
-    ``session`` and ``athlete`` are the caller's — already open, already under
-    the right encryption context — and are handed to
-    :func:`~backend.app.mcp.dispatch.call_tool` so a run does not open a second
-    connection to the same SQLite file per tool call. ``user_id`` is still what
-    every check and every audit record keys on; the two must describe the same
-    person, which is the caller's responsibility and is why ``call_tool``
-    re-derives the encryption key from ``user_id`` rather than trusting the
-    session.
+    Deliberately **not** the caller's session. The tools open their own, one per
+    call — see :func:`_dispatch` for why that is worth a connection checkout.
+    ``athlete`` is here only to resolve the athlete's LLM config and opt-in; the
+    copy the tools read is loaded inside their own session from ``user_id``,
+    which is what every check and every audit record keys on anyway.
     """
 
     athlete: Athlete
     user_id: str
-    session: AsyncSession
     system_prompt: str
     user_prompt: str
     feature: str
@@ -466,7 +461,15 @@ def _final_reminder(format_rule: str) -> dict:
     between the contract holding and holding usually.
     """
     return {
-        "role": "system",
+        # A *user* turn, not a system one, and that is the whole point of the
+        # placement. Several chat templates in the llama.cpp / Ollama family
+        # render only the leading system message and silently drop later ones —
+        # so a mid-conversation system reminder would be a no-op exactly on the
+        # models most likely to need it, with nothing in the logs to say so.
+        # Every template renders a user turn. The instance house style keeps its
+        # system role because it sits at the front, where those templates still
+        # pick it up.
+        "role": "user",
         "content": (
             "You now have everything you asked for. Write the athlete's feedback "
             "as your next message, using only the tool results above — do not "
@@ -543,9 +546,11 @@ def _format_reminder(format_rule: str) -> dict:
     """The format rule alone, for a turn that follows tool results.
 
     Distinct from :func:`_final_reminder`, which also forbids further tool
-    calls: sending *that* on every turn would end the loop after round one.
+    calls: sending *that* on every turn would end the loop after round one. A
+    user turn for the same reason as the final reminder — a mid-conversation
+    system message is dropped outright by some chat templates.
     """
-    return {"role": "system", "content": format_rule}
+    return {"role": "user", "content": format_rule}
 
 
 def _budget_exhausted(rounds: int, spent: int, max_rounds: int) -> Optional[str]:
@@ -864,6 +869,27 @@ async def _dispatch(
     sentence lets Koutsi try the next thing. That agreement with issue #42's
     error shaping is the whole reason the tools return
     *"No activity on 2026-07-14. Nearest rides: …"* instead of a 404.
+
+    **Each call gets its own session**, opened by ``call_tool``, rather than
+    sharing the run's. Sharing was the cheaper thing — one connection to one
+    SQLite file instead of one per call — and it was wrong, because
+    :data:`TOOL_TIMEOUT_S` cancels a call wherever it happens to be:
+
+    * a cancellation landing mid-statement invalidates the connection, so every
+      later use of the run's session raises ``PendingRollbackError`` — including
+      the write of the answer and ``stream_into_db``'s own error handler; and
+    * the ``rollback()`` that repairs *that* expires every ORM instance in the
+      session, and an expired attribute needs IO to reload, which a plain
+      attribute read cannot do under asyncio (``MissingGreenlet``). The run
+      reads ``athlete`` on every later tool call and the blob fallback reads the
+      analyzer's objects throughout — so the repair broke the degradation path
+      the timeout exists to protect.
+
+    A session nobody else holds has neither problem, and has them for no inputs
+    rather than for the ones we thought to handle. The cost is a pooled
+    connection checkout and one ``load_athlete`` per call — at most 24 per run
+    against a local file whose engine is already cached, on a path that also
+    opens a registry session per call for the consent check.
     """
     started = time.perf_counter()
     arguments, parse_error = call.parse_arguments()
@@ -877,8 +903,11 @@ async def _dispatch(
                 caller,
                 call.name,
                 arguments,
-                session=request.session,
-                athlete=request.athlete,
+                # Deliberately **not** given a session or an athlete: see
+                # `_dispatch`'s docstring. `call_tool` opens its own, which is
+                # what keeps a cancelled call from reaching anything the run
+                # still needs.
+                #
                 # The athlete's date, not the server's. The brief asserts one
                 # ("Today is 2026-08-10 (Sunday) … in the athlete's own
                 # timezone"), and a tool answering from a different one turns
@@ -889,7 +918,6 @@ async def _dispatch(
         )
     except asyncio.TimeoutError:
         _log_call(request, call, "timeout", (time.perf_counter() - started) * 1000, arguments)
-        await _recover_session(request, call.name)
         return (
             f"'{call.name}' took longer than {TOOL_TIMEOUT_S:.0f} seconds and was "
             "stopped. Try a narrower request — a shorter date range or a smaller "
@@ -898,7 +926,6 @@ async def _dispatch(
     except Exception:  # pragma: no cover - call_tool is itself defensive
         log.exception("agent: dispatching %s failed unexpectedly", call.name)
         _log_call(request, call, "failed", (time.perf_counter() - started) * 1000, arguments)
-        await _recover_session(request, call.name)
         return (
             f"'{call.name}' failed unexpectedly. The failure has been logged; "
             "try a different tool or answer with what you already have."
@@ -912,37 +939,6 @@ async def _dispatch(
         arguments,
     )
     return _cap(result.text())
-
-
-async def _recover_session(request: AgentRequest, tool_name: str) -> None:
-    """Roll the caller's session back after a *cancelled* tool call.
-
-    ``asyncio.wait_for`` cancels ``call_tool`` wherever it happens to be. If that
-    lands mid-statement, SQLAlchemy invalidates the connection and every later
-    use of the session — the next tool call, the write of the answer, and
-    ``stream_into_db``'s own ``on_error`` commit — raises
-    ``PendingRollbackError``. Returning a sentence keeps the *model* going while
-    the session it will write the answer through is already dead, which on the
-    activity surface used to mean a row stuck at ``pending`` that
-    ``trigger_analysis`` would then refuse to re-run: an activity that could
-    never be analysed again.
-
-    Rolling back is safe here because nothing worth keeping is pending: progress
-    codes are committed as they are set, and ``on_progress`` rewrites the whole
-    accumulated text on each flush rather than appending to it.
-
-    An ordinary handler exception does *not* poison the session — SQLAlchemy
-    recovers from a failed statement on its own — so this is only about the
-    cancellation paths. It is best-effort: if the rollback itself fails the run
-    is going to end badly regardless, and the surface's error handling is a
-    better place to land than here.
-    """
-    try:
-        await request.session.rollback()
-    except Exception:  # pragma: no cover - defensive
-        log.exception(
-            "agent: could not roll back the session after %s was cancelled", tool_name
-        )
 
 
 def _cap(content: str) -> str:

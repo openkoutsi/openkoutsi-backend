@@ -524,7 +524,6 @@ async def _analyze_activity(
             AgentRequest(
                 athlete=athlete,
                 user_id=user_id,
-                session=session,
                 system_prompt=_build_agentic_system_prompt(
                     resolved_locale, activity.sport_type
                 ),

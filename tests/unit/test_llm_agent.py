@@ -117,31 +117,6 @@ class FakeProvider:
         return [m for m in self.sent[turn_index]["messages"] if m.get("role") == "tool"]
 
 
-class PoisonableSession:
-    """Models what SQLAlchemy does to a session cancelled mid-statement.
-
-    The real failure is `PendingRollbackError` on every later use until someone
-    rolls back. Reproducing that through aiosqlite means racing a cancellation
-    against a genuinely slow query, which is timing-dependent; modelling the
-    documented state makes the assertion deterministic and still fails if the
-    rollback is removed.
-    """
-
-    def __init__(self, *, rollback_fails: bool = False):
-        self.usable = True
-        self.rollbacks = 0
-        self._rollback_fails = rollback_fails
-
-    def poison(self) -> None:
-        self.usable = False
-
-    async def rollback(self) -> None:
-        self.rollbacks += 1
-        if self._rollback_fails:
-            raise RuntimeError("the rollback failed too")
-        self.usable = True
-
-
 @dataclass
 class FakeTool:
     """A stand-in for one registry tool, returning a canned result."""
@@ -150,8 +125,6 @@ class FakeTool:
     result: Any = None
     error: Optional[str] = None
     delay_s: float = 0.0
-    #: Session to mark unusable when this tool is cancelled mid-flight.
-    poisons: Optional[PoisonableSession] = None
 
 
 class FakeDispatch:
@@ -169,14 +142,7 @@ class FakeDispatch:
                 tool=name, ok=False, error=f"No tool named '{name}'.", duration_ms=1.0
             )
         if tool.delay_s:
-            try:
-                await asyncio.sleep(tool.delay_s)
-            except asyncio.CancelledError:
-                # Where the damage happens: the cancellation landed inside the
-                # call, on the caller's session.
-                if tool.poisons is not None:
-                    tool.poisons.poison()
-                raise
+            await asyncio.sleep(tool.delay_s)
         if tool.error is not None:
             return ToolResult(tool=name, ok=False, error=tool.error, duration_ms=1.0)
         return ToolResult(tool=name, ok=True, data=tool.result, duration_ms=1.0)
@@ -205,7 +171,6 @@ def _request(**overrides) -> AgentRequest:
     defaults: dict = dict(
         athlete=_Athlete(),
         user_id="user-1",
-        session=object(),
         system_prompt="You are Koutsi.",
         user_prompt="Give the athlete their daily feedback.",
         feature="training_status",
@@ -436,54 +401,34 @@ class TestToolFailuresAreContent:
         assert prose == ANSWER
         assert "took longer than" in provider.tool_messages(1)[0]["content"]
 
-    async def test_a_cancelled_tool_call_rolls_the_session_back(self, monkeypatch):
-        # `asyncio.wait_for` cancels `call_tool` wherever it happens to be. If
-        # that lands mid-statement, SQLAlchemy invalidates the connection and
-        # every later use of the *caller's* session raises PendingRollbackError
-        # — the next tool call, the write of the answer, and `stream_into_db`'s
-        # own error handler. Returning a sentence keeps the model going while
-        # the session it will answer through is already dead.
-        monkeypatch.setattr(llm_agent, "TOOL_TIMEOUT_S", 0.02)
-        session = PoisonableSession()
+    async def test_the_tools_open_their_own_session(self, monkeypatch):
+        # The reason a timeout is survivable at all. `wait_for` cancels
+        # `call_tool` wherever it happens to be; on a *shared* session that
+        # invalidates the connection (every later use raises
+        # PendingRollbackError) and the `rollback()` repairing it expires every
+        # ORM instance, so later attribute reads raise MissingGreenlet — which
+        # broke the blob fallback the timeout exists to protect. A session
+        # nobody else holds has neither problem, for no inputs rather than for
+        # the ones we thought to handle.
         provider = FakeProvider(
-            calls((0, "c1", "get_zone_totals", "{}")),
-            calls((0, "c2", "get_plan_status", "{}")),
-            text(ANSWER),
+            calls((0, "c1", "get_training_status", "{}")), text(ANSWER)
         )
-        dispatch = FakeDispatch(
-            FakeTool("get_zone_totals", {}, delay_s=0.5, poisons=session),
-            FakeTool("get_plan_status", {"plans": []}),
-        )
-        prose, _ = await drive(
-            provider, dispatch, request=_request(session=session), monkeypatch=monkeypatch
-        )
+        dispatch = FakeDispatch(FakeTool("get_training_status", {"form": 1}))
 
-        assert session.rollbacks == 1
-        assert session.usable, "the session must be usable again for the answer"
-        # And the run genuinely carried on through it.
-        assert prose == ANSWER
-        assert [name for name, _ in dispatch.invocations] == [
-            "get_zone_totals",
-            "get_plan_status",
-        ]
+        seen: list[dict] = []
+        original = dispatch.__call__
 
-    async def test_a_rollback_that_itself_fails_does_not_kill_the_run(
-        self, monkeypatch
-    ):
-        # Best-effort: if the rollback fails the run is going to end badly
-        # anyway, and the surface's own error handling is a better place to land
-        # than an exception escaping the dispatch of one tool.
-        monkeypatch.setattr(llm_agent, "TOOL_TIMEOUT_S", 0.02)
-        session = PoisonableSession(rollback_fails=True)
-        provider = FakeProvider(
-            calls((0, "c1", "get_zone_totals", "{}")),
-            text(ANSWER),
-        )
-        dispatch = FakeDispatch(FakeTool("get_zone_totals", {}, delay_s=0.5))
-        prose, _ = await drive(
-            provider, dispatch, request=_request(session=session), monkeypatch=monkeypatch
-        )
-        assert prose == ANSWER
+        async def record(caller, name, arguments=None, **kwargs):
+            seen.append(kwargs)
+            return await original(caller, name, arguments, **kwargs)
+
+        await drive(provider, record, monkeypatch=monkeypatch)
+
+        assert seen, "no tool was dispatched"
+        for kwargs in seen:
+            assert "session" not in kwargs, "a shared session is the hazard"
+            assert "athlete" not in kwargs, "the athlete comes from that session too"
+            assert kwargs["today"] is not None
 
 
 class TestOneResultPerCall:
@@ -1043,7 +988,11 @@ class TestConversationShape:
         assert MOOD_RULE not in str(provider.sent[0]["messages"])
         for turn in provider.sent[1:]:
             last = turn["messages"][-1]
-            assert last["role"] == "system"
+            # A *user* turn, not a system one: several llama.cpp / Ollama chat
+            # templates render only the leading system message and silently drop
+            # later ones, which would make this reminder a no-op precisely on the
+            # models most likely to need it — and leave nothing in the logs.
+            assert last["role"] == "user"
             assert last["content"] == MOOD_RULE
         # And it does not carry the forced turn's "stop calling tools", which
         # would end the loop after round one.
@@ -1064,7 +1013,7 @@ class TestConversationShape:
 
         final = provider.sent[1]["messages"]
         assert MOOD_RULE in final[-1]["content"]
-        assert final[-1]["role"] == "system"
+        assert final[-1]["role"] == "user"  # see the note on the reminder above
         assert "do not call any more tools" in final[-1]["content"]
 
     async def test_the_tool_array_carries_the_registry_schemas(self, monkeypatch):

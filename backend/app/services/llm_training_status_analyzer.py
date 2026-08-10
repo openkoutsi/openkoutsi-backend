@@ -571,7 +571,6 @@ async def analyze_training_status_bg(
                 AgentRequest(
                     athlete=athlete,
                     user_id=user_id,
-                    session=session,
                     system_prompt=_build_agentic_system_prompt(
                         resolved_locale, coaching_style
                     ),

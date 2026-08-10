@@ -710,9 +710,12 @@ class TestTheMoodContractSurvives:
         wire(provider)
         await run_status()
 
-        final_system = provider.sent[1]["messages"][-1]
-        assert final_system["role"] == "system"
-        assert "MOOD:<mood>" in final_system["content"]
+        reminder = provider.sent[1]["messages"][-1]
+        # A user turn: some llama.cpp / Ollama chat templates render only the
+        # leading system message and drop later ones, which would make this
+        # inert on exactly the models most likely to need it.
+        assert reminder["role"] == "user"
+        assert "MOOD:<mood>" in reminder["content"]
 
     async def test_an_answer_without_a_mood_line_is_stored_as_written(
         self, athlete_db, wire
