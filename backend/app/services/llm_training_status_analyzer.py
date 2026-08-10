@@ -38,6 +38,7 @@ from .llm_streaming import (
     stream_chat_completion,
     stream_into_db,
 )
+from .stranded_runs import settle_training_status
 
 log = logging.getLogger(__name__)
 
@@ -429,10 +430,9 @@ async def analyze_training_status_bg(
             select(Athlete).where(Athlete.id == athlete_id)
         )
         stuck = result.scalar_one_or_none()
-        if stuck:
-            stuck.training_status_status = "error"
-            stuck.training_status_progress = None
-            stuck.training_status_updated_at = datetime.now(timezone.utc)
+        if stuck is not None and settle_training_status(stuck):
+            # Stamping the date stops the auto-refresh re-firing the run that
+            # just failed on the very next read.
             stuck.training_status_date = datetime.now(timezone.utc).date()
 
     async with failure_recovery(
@@ -532,24 +532,33 @@ async def analyze_training_status_bg(
                 end=today,
             )
 
-            def _set_status(text: str) -> None:
-                athlete.training_status = text
-
-            def _set_step(code: str | None) -> None:
-                athlete.training_status_progress = code
-                # `_PENDING_TIMEOUT_MINUTES` compares against this column, and
+            def _touch() -> None:
+                # `PENDING_TIMEOUT_MINUTES` compares against this column, and it
                 # was calibrated when the path made exactly one completion. An
                 # agentic run makes up to seven, and `_STREAM_TIMEOUT` is a
                 # *read* timeout — between chunks — so it bounds no turn's total
-                # duration. A slow local model can therefore cross 30 minutes
-                # while perfectly healthy, at which point the next poll declares
-                # the live run dead, shows the athlete an error, and is then
-                # overwritten by the run finishing. Touching the timestamp here
-                # turns the 30 minutes into "no progress for 30 minutes" rather
-                # than "started 30 minutes ago", which is what it should always
-                # have meant. Free: `stream_into_db` commits right after every
-                # step anyway.
+                # duration. A slow local model can therefore cross the budget
+                # while perfectly healthy. Touching the timestamp on every
+                # progress commit turns it into "no progress for N minutes"
+                # rather than "started N minutes ago", which is what it should
+                # always have meant. Free: `stream_into_db` commits right after
+                # every callback anyway.
                 athlete.training_status_updated_at = datetime.now(timezone.utc)
+
+            def _set_status(text: str) -> None:
+                athlete.training_status = text
+                # Text is progress too (issue #91). Touching the clock only on
+                # agent *steps* left the blob path — and every provider that
+                # can't do tool calling — with the original shape: one
+                # completion streaming steadily past the budget would be
+                # declared dead underneath itself, the card would flip to
+                # `error` while the run was healthy, and `_finish` would then
+                # overwrite that error with `done`.
+                _touch()
+
+            def _set_step(code: str | None) -> None:
+                athlete.training_status_progress = code
+                _touch()
 
             def _finish(text: str) -> None:
                 athlete.training_status = text

@@ -44,6 +44,7 @@ from backend.app.services.pat_expiry import (
     EMAIL_OPT_OUT_SETTING as PAT_EXPIRY_EMAIL_SETTING,
 )
 from backend.app.services.athlete_experience import VALID_EXPERIENCE_LEVELS
+from backend.app.services.stranded_runs import pending_timed_out, settle_training_status
 from openkoutsi.plan_schema import HOURS_BOUNDS
 
 _MAX_AVATAR_BYTES = 5 * 1024 * 1024  # 5 MB
@@ -447,9 +448,6 @@ async def get_avatar(
     return FileResponse(path)
 
 
-_PENDING_TIMEOUT_MINUTES = 30
-
-
 @router.get("/training-status", response_model=TrainingStatusResponse,
             operation_id="getTrainingStatus", summary="Get training-status feedback")
 async def get_training_status(
@@ -478,26 +476,21 @@ async def get_training_status(
         from backend.app.services.achievements import recompute_achievements_safe
         await recompute_achievements_safe(athlete.id, session)
 
-    # Recover from a stuck "pending" state: if the task hasn't completed within
-    # the timeout window, reset to "error" so the user can retry.
+    # Recover from a stuck "pending" state: if the run hasn't shown progress
+    # within the timeout window, reset to "error" so the user can retry. The
+    # window is an inactivity budget — the analyzer touches the timestamp on
+    # every progress commit (issue #91) — so a healthy run that simply takes a
+    # long time is no longer declared dead underneath itself.
     # A NULL updated_at with status "pending" (e.g. pre-migration row) is treated
     # as immediately timed out.
-    if athlete.training_status_status == "pending":
-        updated_at = athlete.training_status_updated_at
-        if updated_at is not None:
-            # Normalise to UTC regardless of whether the stored value is naive or aware
-            aware = updated_at if updated_at.tzinfo else updated_at.replace(tzinfo=timezone.utc)
-            timed_out = (now_utc - aware.astimezone(timezone.utc)).total_seconds() > _PENDING_TIMEOUT_MINUTES * 60
-        else:
-            timed_out = True  # pre-migration row with no timestamp — treat as timed out
-        if timed_out:
-            athlete.training_status_status = "error"
-            athlete.training_status_progress = None
-            athlete.training_status_updated_at = now_utc
-            # Set training_status_date to today so stale=False and the auto-trigger
-            # doesn't immediately re-fire after this error reset.
-            athlete.training_status_date = today
-            await session.commit()
+    if athlete.training_status_status == "pending" and pending_timed_out(
+        athlete.training_status_updated_at, now_utc
+    ):
+        settle_training_status(athlete, now_utc)
+        # Set training_status_date to today so stale=False and the auto-trigger
+        # doesn't immediately re-fire after this error reset.
+        athlete.training_status_date = today
+        await session.commit()
 
     if app_cfg.get("auto_training_status") and stale and athlete.training_status_status != "pending":
         # Issue #9: skip the instance-paid auto refresh silently for denied users

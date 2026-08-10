@@ -257,8 +257,10 @@ async def _process_wahoo_for_user(norm, athlete, conn, access_token, user_id, se
         llm_ok = await auto_analysis_allowed(user_id, athlete)
     if llm_ok and app_cfg.get("auto_analyze"):
         from backend.app.services.llm_activity_analyzer import analyze_activity_bg
+        from datetime import datetime, timezone
         activity.analysis_status = "pending"
         activity.analysis_progress = None
+        activity.analysis_updated_at = datetime.now(timezone.utc)
         await session.commit()
         asyncio.create_task(analyze_activity_bg(activity.id, athlete.id, user_id))
 

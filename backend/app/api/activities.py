@@ -44,6 +44,10 @@ from backend.app.core.scopes import pat_forbidden, pat_scopes
 from backend.app.services.fit_processor import process_fit_file, read_fit_start_time
 from backend.app.services.metrics_engine import recalculate_from
 from backend.app.services.pr_detection import detect_pr_badges
+from backend.app.services.stranded_runs import (
+    pending_timed_out,
+    settle_activity_analysis_if_timed_out,
+)
 from backend.app.services.provider_sync import (
     _add_distance_bests,
     _add_power_bests,
@@ -233,6 +237,7 @@ async def _bg_process_and_recalculate(
 
             if llm_ok and _maybe_auto_analyze(target_act.id, athlete, user_id):
                 target_act.analysis_status = "pending"
+                target_act.analysis_updated_at = datetime.now(timezone.utc)
 
             needs_status = llm_ok and _maybe_auto_training_status(athlete, user_id)
             await session.commit()
@@ -626,6 +631,13 @@ async def get_activity(
     if activity is None:
         raise HTTPException(status_code=404, detail="Activity not found")
 
+    # Same recovery the training-status and goal-guidance cards have had all
+    # along (issue #91): a run that has shown no progress for the whole budget
+    # is not coming back, so show the error and its retry rather than a spinner
+    # that never resolves.
+    if settle_activity_analysis_if_timed_out(activity):
+        await session.commit()
+
     streams_result = await session.execute(
         select(ActivityStream).where(ActivityStream.activity_id == activity_id)
     )
@@ -1013,12 +1025,19 @@ async def trigger_analysis(
     if not access.allowed:
         raise subscription_required_error(access)
 
-    if activity.analysis_status == "pending":
+    # A run still making progress owns the row; one that has gone quiet for the
+    # whole budget does not, and before issue #91 this early return was
+    # unconditional — an analysis whose process died left the activity
+    # permanently un-analysable, because every route back in came through here.
+    if activity.analysis_status == "pending" and not pending_timed_out(
+        activity.analysis_updated_at
+    ):
         return {"status": "pending"}
 
     activity.analysis_status = "pending"
     activity.analysis = None
     activity.analysis_progress = None
+    activity.analysis_updated_at = datetime.now(timezone.utc)
     await session.commit()
 
     background_tasks.add_task(
