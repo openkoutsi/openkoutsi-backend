@@ -25,6 +25,7 @@ import _bootstrap  # noqa: F401,E402
 
 from backend.app.services import (  # noqa: E402
     llm_activity_analyzer as activity_svc,
+    llm_agent as agent_svc,
     llm_goal_guidance as goal_svc,
     llm_plan_generator as plan_svc,
     llm_training_status_analyzer as status_svc,
@@ -32,6 +33,7 @@ from backend.app.services import (  # noqa: E402
 )
 from fixtures.scenarios import (  # noqa: E402
     ACTIVITY_SCENARIOS,
+    AGENTIC_SCENARIOS,
     GOAL_SCENARIOS,
     PLAN_SCENARIOS,
     STATUS_SCENARIOS,
@@ -90,7 +92,54 @@ _FAMILIES = {
     "activity": (ACTIVITY_SCENARIOS, _activity),
     "status": (STATUS_SCENARIOS, _status),
     "goal": (GOAL_SCENARIOS, _goal),
+    # `agentic` is handled separately below: it returns a whole conversation and
+    # a `tools` array rather than a [system, user] pair.
 }
+
+
+def _agentic(scenario: dict) -> dict:
+    """Build one turn of an agentic conversation, exactly as the loop would.
+
+    The system prompt, the brief, the tool definitions and the final-turn
+    reminder all come from the running code
+    (:mod:`backend.app.services.llm_agent` and the two analyzers), so a change to
+    any of them shows up here rather than being paraphrased into staleness.
+
+    On a ``final`` turn the ``tools`` array is dropped entirely and the format
+    rule is restated, which is what the loop does at its round cap — and what
+    makes "does ``MOOD:`` survive a turn that follows tool results" a question
+    about the model rather than about the harness.
+    """
+    surface = scenario["surface"]
+    if surface == "status":
+        system = status_svc._build_agentic_system_prompt(
+            (scenario["athlete"].app_settings or {}).get("locale"),
+            (scenario["athlete"].app_settings or {}).get("coaching_style"),
+        )
+        user = status_svc._build_agentic_user_prompt(scenario["now"])
+        format_rule = status_svc._MOOD_RULE
+    else:
+        activity = scenario["activity"]
+        system = activity_svc._build_agentic_system_prompt(
+            scenario.get("locale"), activity.sport_type
+        )
+        user = activity_svc._build_agentic_user_prompt(activity)
+        format_rule = activity_svc.mood_rule_for(activity.sport_type)
+
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+        *scenario["history"],
+    ]
+
+    if scenario.get("final"):
+        messages.append(agent_svc._final_reminder(format_rule))
+        return {"prompt": messages}
+
+    return {
+        "prompt": messages,
+        "config": {"tools": agent_svc.tool_definitions(agent_svc.all_tools())},
+    }
 
 # JSON families → the pydantic output schema whose shape the backend parser accepts.
 _JSON_SCHEMAS = {
@@ -103,6 +152,12 @@ def build(context: dict):
     variables = context.get("vars", {})
     family = variables["family"]
     scenario = variables["scenario"]
+    if family == "agentic":
+        if scenario not in AGENTIC_SCENARIOS:
+            raise ValueError(
+                f"unknown agentic scenario {scenario!r} (have {sorted(AGENTIC_SCENARIOS)})"
+            )
+        return _agentic(AGENTIC_SCENARIOS[scenario])
     if family not in _FAMILIES:
         raise ValueError(f"unknown family {family!r} (expected one of {sorted(_FAMILIES)})")
     scenarios, builder = _FAMILIES[family]

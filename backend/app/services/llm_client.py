@@ -97,6 +97,14 @@ class ResolvedLlm:
     # structured generation. On by default; a preset can opt out with
     # ``"structured_outputs": false`` (e.g. a server known not to support it).
     structured_outputs: bool = True
+    # Whether to send a ``tools`` array (function calling) for the agentic
+    # coaching loop (issue #43). On by default; a preset opts out with
+    # ``"tools_supported": false``. The same shape as ``structured_outputs`` and
+    # for the same reason: BYOK means the population of servers behind this
+    # ranges from good to absent to *present but wrong*, and a preset flag is the
+    # only way to say "this one lies" without waiting for a runtime rejection
+    # that never comes.
+    tools_supported: bool = True
 
 
 def _coerce_str_dict(value: Any) -> dict[str, str]:
@@ -162,6 +170,18 @@ def _preset_structured_outputs(preset: dict | None) -> bool:
     it (an absent or truthy flag ⇒ enabled).
     """
     return not (isinstance(preset, dict) and preset.get("structured_outputs") is False)
+
+
+def _preset_tools_supported(preset: dict | None) -> bool:
+    """Whether ``preset`` allows sending a ``tools`` array (issue #43).
+
+    Default is **on**, matching :func:`_preset_structured_outputs`: only an
+    explicit ``"tools_supported": false`` disables it. Runtime detection
+    (:func:`is_tool_calling_unsupported_error`) catches a server that refuses the
+    param outright; this flag exists for the harder case the hoster has to tell
+    us about — a server that accepts ``tools`` and then emits nonsense.
+    """
+    return not (isinstance(preset, dict) and preset.get("tools_supported") is False)
 
 
 def _try_decrypt(fn, *args) -> str | None:
@@ -254,6 +274,7 @@ def resolve_llm(
             source="user",
             key_source=key_source,
             structured_outputs=_preset_structured_outputs(ath_p),
+            tools_supported=_preset_tools_supported(ath_p),
         )
 
     # ── Non-BYOK: instance preset only ─────────────────────────────────────
@@ -288,6 +309,7 @@ def resolve_llm(
         source=source,
         key_source=key_source,
         structured_outputs=_preset_structured_outputs(inst_p),
+        tools_supported=_preset_tools_supported(inst_p),
     )
 
 
@@ -382,6 +404,71 @@ def is_response_format_unsupported_error(exc: httpx.HTTPStatusError) -> bool:
     if _INVALID_SCHEMA_MARKER in body:
         return False
     return any(marker in body for marker in _RESPONSE_FORMAT_UNSUPPORTED_MARKERS)
+
+
+# Tokens an OpenAI-compatible provider puts in a 400/422 body when it doesn't
+# accept the ``tools`` param at all (issue #43). ``tool_calls`` is in here too:
+# some llama.cpp builds accept ``tools`` on the request and then reject the
+# assistant message carrying ``tool_calls`` on the *next* one, which is the same
+# "this server cannot do function calling" fact arriving one turn late.
+_TOOLS_UNSUPPORTED_MARKERS = (
+    "tools",
+    "tool_choice",
+    "tool_calls",
+    "function_call",
+    "functions",
+)
+
+# An OpenAI-style "the function schema you sent is invalid" body. Tool schemas
+# are generated from the registry's pydantic models, so this is *our* bug — a
+# tool whose arguments model doesn't survive JSON Schema generation. Swallowing
+# it would silently drop every provider to the blob prompt with the suite green,
+# which is exactly the failure `_INVALID_SCHEMA_MARKER` exists to prevent for
+# structured outputs.
+_INVALID_TOOL_SCHEMA_MARKERS = (
+    "invalid schema for function",
+    "invalid_function_parameters",
+)
+
+
+def is_our_tool_schema_error(exc: httpx.HTTPStatusError) -> bool:
+    """Is ``exc`` the provider telling us *our* function schema is invalid?
+
+    The complement of :func:`is_tool_calling_unsupported_error`, split out
+    because the agent loop needs to act on it rather than merely not-match it:
+    every other upstream failure degrades to the single-shot prompt, and this
+    one must not. Tool schemas come from the registry's own pydantic models, so
+    this is a regression in one of them — hiding it behind a quietly worse
+    answer for every athlete on every provider is the failure mode the whole
+    "don't swallow an invalid schema" rule exists to prevent.
+    """
+    resp = getattr(exc, "response", None)
+    if resp is None or getattr(resp, "status_code", None) not in (400, 422):
+        return False
+    body = _response_body_text(resp).lower()
+    return any(marker in body for marker in _INVALID_TOOL_SCHEMA_MARKERS)
+
+
+def is_tool_calling_unsupported_error(exc: httpx.HTTPStatusError) -> bool:
+    """Is ``exc`` an upstream rejection of the ``tools`` *param*? (issue #43)
+
+    The tool-calling twin of :func:`is_response_format_unsupported_error`, and
+    deliberately the same shape: a 400/422 whose body names the parameter means
+    the provider cannot do function calling, so the caller should drop ``tools``
+    and fall back to the hand-built blob prompt.
+
+    Returns ``False`` for an "invalid function schema" body for the same reason
+    the structured-output check refuses an "invalid schema" one: that is a
+    regression in a tool's own arguments model, and it must surface as an error
+    rather than quietly degrade every athlete to the non-agentic path.
+    """
+    resp = getattr(exc, "response", None)
+    if resp is None or getattr(resp, "status_code", None) not in (400, 422):
+        return False
+    body = _response_body_text(resp).lower()
+    if any(marker in body for marker in _INVALID_TOOL_SCHEMA_MARKERS):
+        return False
+    return any(marker in body for marker in _TOOLS_UNSUPPORTED_MARKERS)
 
 
 def extract_json(text: str) -> str:

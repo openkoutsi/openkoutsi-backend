@@ -492,6 +492,7 @@ async def get_training_status(
             timed_out = True  # pre-migration row with no timestamp — treat as timed out
         if timed_out:
             athlete.training_status_status = "error"
+            athlete.training_status_progress = None
             athlete.training_status_updated_at = now_utc
             # Set training_status_date to today so stale=False and the auto-trigger
             # doesn't immediately re-fire after this error reset.
@@ -509,6 +510,7 @@ async def get_training_status(
         if access.allowed:
             athlete.training_status_status = "pending"
             athlete.training_status = None
+            athlete.training_status_progress = None
             athlete.training_status_updated_at = now_utc
             await session.commit()
             from backend.app.services.llm_training_status_analyzer import analyze_training_status_bg
@@ -518,6 +520,16 @@ async def get_training_status(
         status=athlete.training_status_status,
         feedback=athlete.training_status,
         generated_date=athlete.training_status_date,
+        # Only meaningful while the run is in flight (issue #43). A settled row
+        # should have had it cleared by the analyzer, but a run killed between
+        # its last progress commit and settling would leave one behind, and a
+        # stale "Koutsi is checking your power curve…" under a finished answer
+        # reads as a bug. Gating on the status here makes that impossible.
+        progress=(
+            athlete.training_status_progress
+            if athlete.training_status_status == "pending"
+            else None
+        ),
     )
 
 
@@ -545,6 +557,7 @@ async def trigger_training_status(
     now_utc = datetime.now(timezone.utc)
     athlete.training_status_status = "pending"
     athlete.training_status = None
+    athlete.training_status_progress = None
     athlete.training_status_updated_at = now_utc
     await session.commit()
 

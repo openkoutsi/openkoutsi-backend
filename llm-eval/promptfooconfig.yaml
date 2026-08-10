@@ -167,3 +167,45 @@ tests:
         value: file://asserts/checks.py:realism_prose
       # - type: llm-rubric
       #   value: The guidance is written in Finnish with an English REALISM token.
+
+  # Family 6 — the agentic loop (issue #43). Each row freezes the conversation at
+  # the turn whose behaviour is in question; promptfoo evaluates one turn, so
+  # pretending to run a whole loop here would grade the harness, not the model.
+  # Together these rows are the roster's **tool-calling verdict**: a model that
+  # fails `status / opening turn` gains nothing from the agentic path (it falls
+  # back to the blob prompt in production and still works), while one that fails
+  # `final turn` is actively unsafe for it — a missing MOOD line costs the avatar.
+  - description: "agentic / status opening turn — does it call tools, and sane ones?"
+    vars: {family: agentic, scenario: status_opening_turn}
+    assert:
+      - type: python
+        value: file://asserts/checks.py:tool_selection
+  - description: "agentic / activity opening turn — the id is in the brief"
+    vars: {family: agentic, scenario: activity_opening_turn}
+    assert:
+      - type: python
+        value: file://asserts/checks.py:tool_selection
+  - description: "agentic / recovers from a tool error rather than repeating it"
+    vars: {family: agentic, scenario: recovers_from_a_tool_error}
+    assert:
+      - type: python
+        value: file://asserts/checks.py:tool_error_recovery
+  - description: "agentic / MOOD survives a turn that follows tool results"
+    vars: {family: agentic, scenario: final_turn_after_tool_results}
+    assert:
+      - type: python
+        value: file://asserts/checks.py:mood_prose
+      # - type: llm-rubric   # optional automated quality pass
+      #   value: >-
+      #     Uses the fitness/fatigue/form figures and the plan adherence from the
+      #     tool results above, treats today's session as not yet missed, and is
+      #     direct about the threshold session that was skipped.
+  - description: "agentic / MOOD survives tool results in Finnish"
+    vars: {family: agentic, scenario: final_turn_finnish}
+    assert:
+      - type: python
+        value: file://asserts/checks.py:mood_prose
+      # - type: llm-rubric
+      #   value: >-
+      #     Written in Finnish, quotes the interval powers from the tool result,
+      #     and explains the absent decoupling figure rather than inventing one.

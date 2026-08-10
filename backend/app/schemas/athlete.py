@@ -152,6 +152,17 @@ class TrainingStatusResponse(BaseModel):
     feedback: Optional[str] = None
     generated_date: Optional[date] = None
 
+    # Issue #43. What the agentic coach is doing right now, while `status` is
+    # "pending" and no prose has arrived yet: a code from a fixed vocabulary
+    # (`thinking`, `tool.<tool_name>`), not a sentence. Codes because the client
+    # localises them — the prompts run in fourteen languages and tool names are
+    # all English — and because a code cannot leak tool internals into the card.
+    # Always null once the answer starts, and null for the whole non-agentic
+    # path. A client that does not recognise a code should fall back to its
+    # generic "thinking" copy rather than showing the code: the vocabulary grows
+    # whenever a tool is added.
+    progress: Optional[str] = None
+
     # Issue #41. The EU AI Act's transparency rules want generated content
     # marked as such, and our own web UI is only one of the clients reading this
     # endpoint — tokens, the MCP layer and third-party integrations see the same

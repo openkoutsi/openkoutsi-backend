@@ -395,8 +395,16 @@ async def sync_provider_activities(
                 # on a gated instance.
                 if await auto_analysis_allowed(user_id, athlete):
                     activity.analysis_status = "pending"
+                    activity.analysis_progress = None
                     await session.commit()
-                    asyncio.create_task(analyze_activity_bg(activity.id, athlete.id, user_id))
+                    # Issue #43: a backlog import is the one path where an agent loop's
+                    # 4–6× calls is a real bill and nobody reads the output one by
+                    # one, so it always takes the single-shot prompt.
+                    asyncio.create_task(
+                        analyze_activity_bg(
+                            activity.id, athlete.id, user_id, allow_agentic=False
+                        )
+                    )
 
         page += 1
 

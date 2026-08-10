@@ -23,6 +23,7 @@ from prompts.build import build  # noqa: E402
 from asserts import checks  # noqa: E402
 from fixtures.scenarios import (  # noqa: E402
     ACTIVITY_SCENARIOS,
+    AGENTIC_SCENARIOS,
     GOAL_SCENARIOS,
     PLAN_SCENARIOS,
     STATUS_SCENARIOS,
@@ -182,6 +183,108 @@ expect(checks.plan(plan_sample, {"vars": {"scenario": next(iter(PLAN_SCENARIOS))
 WorkoutOutput.model_validate_json(_VALID_WORKOUT)
 expect(checks.workout(_VALID_WORKOUT, {"vars": {}})["pass"],
        "workout sample validates against WorkoutOutput and the app parser")
+
+
+# ── 4. The agentic family renders a real conversation and its checks bite ─────
+#
+# The agentic rows are the only ones that send a `tools` array, and the only ones
+# whose prompt is more than a [system, user] pair — so the render check above
+# skips them and they get their own.
+print("\n[agentic] every scenario renders a conversation with the right shape")
+for name, scenario in AGENTIC_SCENARIOS.items():
+    built = build({"vars": {"family": "agentic", "scenario": name}})
+    messages = built["prompt"]
+    shape_ok = (
+        isinstance(messages, list)
+        and messages[0]["role"] == "system"
+        and messages[1]["role"] == "user"
+        and messages[0]["content"].strip()
+        and messages[1]["content"].strip()
+    )
+    expect(shape_ok, f"agentic/{name} renders a system+user opening")
+
+    # Every tool call in the seeded history must have exactly one result — the
+    # pairing a provider 400s on, and easy to get wrong by hand.
+    announced = [
+        call["id"]
+        for m in messages
+        if m.get("role") == "assistant"
+        for call in (m.get("tool_calls") or [])
+    ]
+    answered = [m["tool_call_id"] for m in messages if m.get("role") == "tool"]
+    expect(announced == answered, f"agentic/{name}: {len(announced)} calls, {len(answered)} results")
+
+    tools = built.get("config", {}).get("tools")
+    if scenario.get("final"):
+        # A final turn offers no tools at all and restates the format rule,
+        # exactly as the loop does at its round cap.
+        expect(tools is None, f"agentic/{name} sends no tools on the final turn")
+        expect(
+            messages[-1]["role"] == "system" and "MOOD:<mood>" in messages[-1]["content"],
+            f"agentic/{name} restates the MOOD rule where the model answers",
+        )
+    else:
+        well_formed = (
+            isinstance(tools, list) and tools
+            and all(
+                t.get("type") == "function"
+                and isinstance(t["function"]["name"], str)
+                and t["function"]["description"].strip()
+                and isinstance(t["function"]["parameters"], dict)
+                for t in tools
+            )
+        )
+        expect(well_formed, f"agentic/{name} sends {len(tools or [])} well-formed tool definitions")
+
+print("\n[tool_selection] check passes a sensible call, fails silence and a shotgun")
+_A_CALL = json.dumps([
+    {"id": "c1", "type": "function",
+     "function": {"name": "get_activity_detail",
+                  "arguments": '{"activity_id": "act-7f3c1a"}'}},
+])
+_WRONG_ARGS = json.dumps([
+    {"id": "c1", "type": "function",
+     "function": {"name": "get_activity_detail", "arguments": '{"activity_id": "nope"}'}},
+])
+_ctx = {"vars": {"scenario": "activity_opening_turn"}}
+good = checks.tool_selection(_A_CALL, _ctx)
+silent = checks.tool_selection("MOOD:knowing\n\nLooks like a solid ride.", _ctx)
+wrong = checks.tool_selection(_WRONG_ARGS, _ctx)
+expect(
+    good["pass"] and not silent["pass"] and not wrong["pass"],
+    f"tool_selection: good={good['pass']}; silent={silent['pass']} ({silent['reason']}); "
+    f"wrong-args={wrong['pass']}",
+)
+
+_SHOTGUN = json.dumps([
+    {"id": f"c{i}", "type": "function", "function": {"name": n, "arguments": "{}"}}
+    for i, n in enumerate([
+        "get_training_status", "list_recent_activities", "get_plan_status",
+        "get_goal_progress", "get_zone_totals",
+    ])
+])
+shotgun = checks.tool_selection(_SHOTGUN, {"vars": {"scenario": "status_opening_turn"}})
+expect(not shotgun["pass"], f"tool_selection: shotgun rejected ({shotgun['reason']})")
+
+print("\n[tool_error_recovery] check passes an adjusted call, fails a repeat")
+_recovery_ctx = {"vars": {"scenario": "recovers_from_a_tool_error"}}
+_ADJUSTED = json.dumps([
+    {"id": "c2", "type": "function",
+     "function": {"name": "get_activity_detail", "arguments": '{"activity_id": "act-7f3c1a"}'}},
+])
+_REPEATED = json.dumps([
+    {"id": "c2", "type": "function",
+     "function": {"name": "get_activity_detail", "arguments": '{"activity_id": "act-0000"}'}},
+])
+adjusted = checks.tool_error_recovery(_ADJUSTED, _recovery_ctx)
+repeated = checks.tool_error_recovery(_REPEATED, _recovery_ctx)
+answered = checks.tool_error_recovery("MOOD:knowing\n\nI could not find that ride.", _recovery_ctx)
+expect(
+    adjusted["pass"] and not repeated["pass"] and answered["pass"],
+    f"tool_error_recovery: adjusted={adjusted['pass']}; repeated={repeated['pass']} "
+    f"({repeated['reason']}); answered-instead={answered['pass']}",
+)
+
 
 print("\n" + ("PASSED" if not failures else f"FAILED ({len(failures)} problem(s))"))
 sys.exit(1 if failures else 0)

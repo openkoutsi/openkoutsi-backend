@@ -188,6 +188,7 @@ async def call_tool(
     session: Optional[AsyncSession] = None,
     athlete: Optional[Athlete] = None,
     registry_session: Optional[AsyncSession] = None,
+    today: Optional[date] = None,
 ) -> ToolResult:
     """Run one tool for one caller. Never raises for an ordinary failure.
 
@@ -200,6 +201,14 @@ async def call_tool(
 
     ``registry_session`` is used only for the consent check; omitted, one is
     opened and closed around that check.
+
+    ``today`` is the calendar date the tools reckon from — "this week", "the
+    last 28 days", "days remaining". It matters because *the athlete's* date is
+    not the server's: six tools key off it, and the ones that do are exactly the
+    date-boundary-sensitive ones, where being a day out turns "not due yet" into
+    "missed". A caller that knows the athlete's timezone should pass their local
+    date; omitted, it falls back to the process's own, which is what an external
+    MCP client gets until it can say otherwise.
     """
     started = time.perf_counter()
     arguments = arguments or {}
@@ -282,10 +291,10 @@ async def call_tool(
             # HKDF derivation; the `else` branch gets the same thing from
             # `open_user_session`.
             set_user_encryption_context(caller.user_id)
-            result = await _run(tool, caller, session, athlete, parsed)
+            result = await _run(tool, caller, session, athlete, parsed, today)
         else:
             async with open_user_session(caller.user_id) as owned:
-                result = await _run(tool, caller, owned, None, parsed)
+                result = await _run(tool, caller, owned, None, parsed, today)
     except ToolError as exc:
         return fail(audit.TOOL_ERROR, exc.rendered())
     except Exception:  # pragma: no cover - defensive; a handler bug, not a miss
@@ -322,6 +331,7 @@ async def _run(
     session: AsyncSession,
     athlete: Optional[Athlete],
     parsed: BaseModel,
+    today: Optional[date] = None,
 ) -> BaseModel:
     """Resolve the athlete and hand the handler its :class:`ToolRun`."""
     from fastapi import HTTPException
@@ -339,4 +349,7 @@ async def _run(
                 "wizard in the web app."
             ) from exc
 
-    return await tool.handler(ToolRun(caller=caller, session=session, athlete=athlete), parsed)
+    run = ToolRun(caller=caller, session=session, athlete=athlete)
+    if today is not None:
+        run.today = today
+    return await tool.handler(run, parsed)

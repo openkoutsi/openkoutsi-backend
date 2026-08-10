@@ -234,6 +234,50 @@ def parse_usage(usage: Any) -> tuple[int | None, int | None, int | None]:
     return prompt, completion, total
 
 
+def merge_usage(total: Any, addition: Any) -> dict | None:
+    """Add one completion's ``usage`` onto a running total (issue #43).
+
+    A single-shot analysis is one call and one usage object. An agent loop is
+    three to five, each reported independently by the provider, and recording
+    only the last would under-report the run by however many turns it took —
+    the concrete bug the issue names, not a theoretical one. Summing here keeps
+    ``GET /api/admin/llm-usage/summary`` honest without every caller having to
+    remember.
+
+    Absent parts stay absent rather than becoming zero: a provider that reports
+    no ``completion_tokens`` has told us nothing, and ``0`` is a claim.
+
+    Each side is normalised **before** the addition, deriving a missing
+    ``total_tokens`` from that side's own parts exactly as :func:`parse_usage`
+    does. Doing it per side rather than once at the end is what makes a run that
+    mixes reporting styles add up: a turn that reported only ``total_tokens: 50``
+    followed by one that reported only ``400 + 300`` cost 750, and reconciling
+    the two afterwards can only see a total of 50 against parts of 700.
+    """
+    if not isinstance(addition, dict):
+        return total if isinstance(total, dict) else None
+
+    left = _normalised_usage(total)
+    right = _normalised_usage(addition)
+
+    merged: dict = {}
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        known = [side[key] for side in (left, right) if side[key] is not None]
+        if known:
+            merged[key] = sum(known)
+    return merged or None
+
+
+def _normalised_usage(usage: Any) -> dict[str, int | None]:
+    """One side of a merge, as ``{prompt, completion, total}`` with total filled in."""
+    prompt, completion, total = parse_usage(usage if isinstance(usage, dict) else None)
+    return {
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "total_tokens": total,
+    }
+
+
 def provider_label(cfg: ResolvedLlm) -> str | None:
     """Which provider served the call — the resolved base-URL host (issue #9).
 

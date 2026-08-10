@@ -7,6 +7,7 @@ from backend.app.models.registry_orm import LlmEntitlement
 from backend.app.services.llm_access import (
     byok_active,
     is_entitled,
+    merge_usage,
     parse_usage,
     provider_label,
     usage_from_sse_data,
@@ -127,3 +128,64 @@ class TestByokActive:
 
     def test_none_athlete(self):
         assert byok_active(None) is False
+
+
+class TestMergeUsage:
+    """Summing a run's turns (issue #43).
+
+    An agent loop is three to five completions, each billed separately. Keeping
+    only the last would make ``GET /api/admin/llm-usage/summary`` under-report
+    every agentic analysis by however many turns it took — the concrete
+    accounting bug the issue names, so it gets its own tests rather than being
+    assumed correct.
+    """
+
+    def test_sums_the_parts_across_two_calls(self):
+        merged = merge_usage(
+            {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 120},
+            {"prompt_tokens": 400, "completion_tokens": 300, "total_tokens": 700},
+        )
+        assert merged == {
+            "prompt_tokens": 500,
+            "completion_tokens": 320,
+            "total_tokens": 820,
+        }
+
+    def test_the_first_call_starts_from_nothing(self):
+        addition = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        assert merge_usage(None, addition) == addition
+
+    def test_a_turn_reporting_nothing_leaves_the_total_alone(self):
+        total = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+        assert merge_usage(total, None) == total
+
+    def test_nothing_at_all_stays_nothing(self):
+        # Recorded with nulls, never estimated — the same rule `parse_usage` follows.
+        assert merge_usage(None, None) is None
+
+    def test_absent_parts_stay_absent_rather_than_becoming_zero(self):
+        # A provider that reports no completion_tokens has told us nothing; 0 is
+        # a claim, and a wrong one.
+        merged = merge_usage({"prompt_tokens": 10}, {"prompt_tokens": 30})
+        assert merged["prompt_tokens"] == 40
+        assert "completion_tokens" not in merged
+
+    def test_a_total_can_never_be_smaller_than_its_own_parts(self):
+        # One turn reported only a total, the next only the parts. Trusting the
+        # summed `total_tokens` alone would report 50 for 50 + 400 + 300.
+        merged = merge_usage(
+            {"total_tokens": 50},
+            {"prompt_tokens": 400, "completion_tokens": 300},
+        )
+        assert merged["total_tokens"] == 750
+
+    def test_a_non_dict_addition_is_ignored(self):
+        total = {"prompt_tokens": 10}
+        assert merge_usage(total, "nonsense") == total
+        assert merge_usage("nonsense", None) is None
+
+    def test_booleans_are_not_token_counts(self):
+        assert merge_usage({"prompt_tokens": True}, {"prompt_tokens": 5}) == {
+            "prompt_tokens": 5,
+            "total_tokens": 5,
+        }

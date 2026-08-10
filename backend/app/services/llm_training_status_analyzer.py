@@ -27,6 +27,12 @@ from .intensity_distribution import (
     DEFAULT_WINDOW_DAYS,
     compute_intensity_distribution,
 )
+from .llm_agent import (
+    MAX_ROUNDS_STATUS,
+    AgentRequest,
+    agentic_enabled,
+    coaching_stream,
+)
 from .llm_streaming import (
     failure_recovery,
     stream_chat_completion,
@@ -52,7 +58,7 @@ _LOCALE_LANGUAGE: dict[str, str] = {
     "ko": "Korean",
 }
 
-_SYSTEM_PROMPT_BASE = """\
+_STATUS_GUIDANCE = """\
 You are Koutsi, an expert endurance sports coach. Review the athlete's overall \
 training state and provide direct, actionable daily coaching feedback in 3-5 paragraphs. \
 Cover: recent training load trend, current fitness and fatigue state, \
@@ -75,8 +81,16 @@ reason (illness, injury, travel, rest) should temper your criticism, while a pat
 excuses warrants a firmer response.
 - Rest days are a planned, intentional part of the training plan. They do not have to be \
 performed and there is nothing to complete on them. Never treat a rest day as missed, skipped, \
-or a sign of poor adherence — an athlete taking their scheduled rest is following the plan correctly.
+or a sign of poor adherence — an athlete taking their scheduled rest is following the plan correctly.\
+"""
 
+# The format contract, kept as its own constant because the agentic path has to
+# restate it (issue #43). `parseMoodAndParagraphs` reads this line to choose
+# Koutsi's avatar and the llm-eval harness asserts on it, and models are
+# measurably worse at obeying a leading-format rule on a turn that follows tool
+# results than on a clean single-shot prompt — so the agent loop repeats it
+# where the model is about to answer rather than trusting turn one to carry.
+_MOOD_RULE = """\
 Before the feedback paragraphs, output a single line in the format: MOOD:<mood>
 where <mood> is one of: cheer, knowing, neutral, stern.
 - cheer: athlete is training well and making great progress
@@ -84,6 +98,30 @@ where <mood> is one of: cheer, knowing, neutral, stern.
 - neutral: routine week with no strong positive or negative takeaway
 - knowing: all other cases (default)
 The MOOD line must be the very first line, followed by a blank line, then the paragraphs.\
+"""
+
+# Unchanged wording, assembled from the two halves above.
+_SYSTEM_PROMPT_BASE = f"{_STATUS_GUIDANCE}\n\n{_MOOD_RULE}"
+
+# What replaces the blob on the agentic path: the same coaching rules, plus how
+# to go and get the facts. Deliberately explicit that the prompt carries no data
+# — a model handed tools and a familiar-looking question will otherwise answer
+# from the question alone.
+_TOOL_GUIDANCE = """\
+You have tools that read this athlete's own training data, and this prompt \
+contains none of it. An answer written without calling any tool is guesswork, so \
+gather what you need first, then write the feedback.
+- Start broad and narrow down. get_training_status gives fitness, fatigue and \
+form; list_recent_activities gives what the athlete has actually been doing; \
+get_plan_status gives this week's planned sessions and whether they were done.
+- Follow the thread. If a number looks off, go and look at the sessions behind \
+it so you can say why, instead of restating the number.
+- Do not call the same tool twice with the same arguments; the answer will not \
+change. Prefer a few well-chosen calls over many.
+- A tool that cannot answer replies with a sentence explaining why, often naming \
+what is nearby. Read it and adjust rather than repeating the call.
+- Every figure you quote must come from a tool result. Never invent one, and \
+never fill a gap with a plausible number.\
 """
 
 _COACHING_STYLE_PROMPTS: dict[str, str] = {
@@ -104,8 +142,13 @@ def _local_now(tz_str: str | None) -> datetime:
     return local_now(tz_str)
 
 
-def _build_system_prompt(locale: str | None = None, coaching_style: str | None = None) -> str:
-    prompt = _SYSTEM_PROMPT_BASE
+def _decorate(prompt: str, locale: str | None, coaching_style: str | None) -> str:
+    """Append the experience guidance, the house coaching style and the language.
+
+    Shared by both paths so the agentic answer sounds like the single-shot one:
+    the same experience calibration, the same tone the athlete chose, the same
+    language. The ``MOOD:`` token stays English in every locale by design.
+    """
     prompt += f"\n\n{EXPERIENCE_GUIDANCE}"
     if coaching_style and coaching_style in _COACHING_STYLE_PROMPTS:
         prompt += f"\n\n{_COACHING_STYLE_PROMPTS[coaching_style]}"
@@ -114,6 +157,42 @@ def _build_system_prompt(locale: str | None = None, coaching_style: str | None =
         if lang:
             prompt += f" Respond in {lang}."
     return prompt
+
+
+def _build_system_prompt(locale: str | None = None, coaching_style: str | None = None) -> str:
+    return _decorate(_SYSTEM_PROMPT_BASE, locale, coaching_style)
+
+
+def _build_agentic_system_prompt(
+    locale: str | None = None, coaching_style: str | None = None
+) -> str:
+    """The system prompt for the tool-driven path (issue #43).
+
+    The coaching rules and the format contract are byte-for-byte the ones the
+    blob path uses — only the middle changes, from "here is everything" to "here
+    is how to go and get it". Keeping the rules identical is what makes an
+    ``llm-eval`` head-to-head between the two paths mean anything.
+    """
+    return _decorate(
+        f"{_STATUS_GUIDANCE}\n\n{_TOOL_GUIDANCE}\n\n{_MOOD_RULE}", locale, coaching_style
+    )
+
+
+def _build_agentic_user_prompt(now: datetime) -> str:
+    """The brief. Everything else the model wants, it asks for.
+
+    Today's date is here rather than in a tool because every judgement in the
+    answer is relative to it — "not due yet" versus "missed" turns on it — and a
+    model that has to spend a round trip discovering what day it is will
+    sometimes not bother.
+    """
+    today = now.date()
+    tz_label = now.strftime("%Z") or "UTC"
+    return (
+        f"Today is {today.isoformat()} ({today.strftime('%A')}), "
+        f"{now.strftime('%H:%M')} {tz_label} in the athlete's own timezone.\n\n"
+        "Give this athlete their daily training-status feedback."
+    )
 
 
 _SHAPE_TEXT = {
@@ -331,10 +410,18 @@ async def analyze_training_status_bg(
     athlete_id: str,
     user_id: str,
     locale: str | None = None,
+    *,
+    allow_agentic: bool = True,
 ) -> None:
     """
     Background task: stream LLM training status → write chunks to DB every 500 ms
     → set final training_status_status to 'done' or 'error'.
+
+    ``allow_agentic=False`` forces the single-shot blob prompt regardless of what
+    the athlete opted into (issue #43). Used by the provider-sync paths: a
+    backlog import fires one of these per athlete alongside a task per imported
+    activity, and multiplying that by an agent loop's four-to-six calls is a real
+    bill on the one path nobody is watching the output of.
     """
 
     async def _clear_pending(recovery_session) -> None:
@@ -344,6 +431,7 @@ async def analyze_training_status_bg(
         stuck = result.scalar_one_or_none()
         if stuck:
             stuck.training_status_status = "error"
+            stuck.training_status_progress = None
             stuck.training_status_updated_at = datetime.now(timezone.utc)
             stuck.training_status_date = datetime.now(timezone.utc).date()
 
@@ -447,29 +535,72 @@ async def analyze_training_status_bg(
             def _set_status(text: str) -> None:
                 athlete.training_status = text
 
+            def _set_step(code: str | None) -> None:
+                athlete.training_status_progress = code
+                # `_PENDING_TIMEOUT_MINUTES` compares against this column, and
+                # was calibrated when the path made exactly one completion. An
+                # agentic run makes up to seven, and `_STREAM_TIMEOUT` is a
+                # *read* timeout — between chunks — so it bounds no turn's total
+                # duration. A slow local model can therefore cross 30 minutes
+                # while perfectly healthy, at which point the next poll declares
+                # the live run dead, shows the athlete an error, and is then
+                # overwritten by the run finishing. Touching the timestamp here
+                # turns the 30 minutes into "no progress for 30 minutes" rather
+                # than "started 30 minutes ago", which is what it should always
+                # have meant. Free: `stream_into_db` commits right after every
+                # step anyway.
+                athlete.training_status_updated_at = datetime.now(timezone.utc)
+
             def _finish(text: str) -> None:
                 athlete.training_status = text
                 athlete.training_status_status = "done"
+                # The card must end up looking exactly as it did before the
+                # agentic path existed; a leftover step line under a finished
+                # answer would be the tell that it doesn't.
+                athlete.training_status_progress = None
                 athlete.training_status_date = today
                 athlete.training_status_updated_at = datetime.now(timezone.utc)
 
             def _fail() -> None:
                 athlete.training_status_status = "error"
+                athlete.training_status_progress = None
                 athlete.training_status_date = today
                 athlete.training_status_updated_at = datetime.now(timezone.utc)
 
+            request = (
+                AgentRequest(
+                    athlete=athlete,
+                    user_id=user_id,
+                    system_prompt=_build_agentic_system_prompt(
+                        resolved_locale, coaching_style
+                    ),
+                    user_prompt=_build_agentic_user_prompt(now),
+                    feature="training_status",
+                    max_rounds=MAX_ROUNDS_STATUS,
+                    format_rule=_MOOD_RULE,
+                    today=today,
+                )
+                if allow_agentic and agentic_enabled(athlete)
+                else None
+            )
+
             await stream_into_db(
                 session,
-                lambda usage_out: _stream_status_analysis(
-                    athlete, user_id,
-                    recent_activities, current_metric,
-                    active_plans, active_goals,
-                    now, locale=resolved_locale, coaching_style=coaching_style,
-                    usage_out=usage_out, distribution=distribution,
+                lambda usage_out: coaching_stream(
+                    request=request,
+                    blob=lambda blob_usage: _stream_status_analysis(
+                        athlete, user_id,
+                        recent_activities, current_metric,
+                        active_plans, active_goals,
+                        now, locale=resolved_locale, coaching_style=coaching_style,
+                        usage_out=blob_usage, distribution=distribution,
+                    ),
+                    usage_out=usage_out,
                 ),
                 on_progress=_set_status,
                 on_done=_finish,
                 on_error=_fail,
+                on_step=_set_step,
                 user_id=user_id,
                 feature="training_status",
                 label=f"Training status analysis for athlete {athlete_id}",
