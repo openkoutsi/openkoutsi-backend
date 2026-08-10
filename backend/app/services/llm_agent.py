@@ -47,14 +47,27 @@ rejects the ``tools`` param (400/422)         falls back, via ``is_tool_calling_
 is flagged ``"tools_supported": false``       never tried
 accepts ``tools`` and calls none              falls back — an answer built from no data
 emits malformed tool-call JSON                the error becomes a tool result; the run continues
-keeps calling tools past the cap              one forced final turn, then falls back
+keeps calling tools past a budget             one forced final turn, then falls back
+fails any other way before prose is written   falls back — 429, 5xx, a dropped connection,
+                                              and above all a context-length 400, which is a
+                                              failure *this loop creates*
+says our own function schema is invalid       **raises** — that is our bug, not their limit
 ============================================  ===========================================
 
 :exc:`AgenticUnavailable` is the one signal for all of them, and it carries a
 hard rule: it may only be raised *before the first character of prose has been
 yielded*. Once text is out it has been committed to the DB, and a fallback would
 staple a second answer onto the first. :func:`agentic_stream` enforces that
-rather than trusting it.
+rather than trusting it — and that invariant is exactly what makes the broad
+"any other failure" rule safe.
+
+Two budgets stop the gathering, and both route to the same forced final turn:
+the round cap (:data:`MAX_ROUNDS_STATUS` / :data:`MAX_ROUNDS_ACTIVITY`) and the
+run's total tool-result size (:data:`MAX_RUN_RESULT_CHARS`). The second exists
+because the first bounds the wrong quantity — a round may carry any number of
+parallel calls, and it is their *sum*, replayed into every later turn, that
+spends the context window and the money. :data:`MAX_CALLS_PER_TURN` bounds the
+breadth of a single turn for the same reason.
 
 The blob builders are not legacy
 --------------------------------
