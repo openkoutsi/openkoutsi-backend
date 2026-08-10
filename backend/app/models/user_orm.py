@@ -162,6 +162,16 @@ class Activity(UserBase):
     # `Athlete.training_status_progress` — see the note there for why the codes
     # live in their own column instead of inside the prose.
     analysis_progress: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # When the analysis last moved (issue #91). Written when the run is
+    # triggered and touched on every progress commit, so it is an *inactivity*
+    # clock rather than a start time — the same role
+    # `Athlete.training_status_updated_at` and `Goal.guidance_updated_at` play
+    # for the other two LLM surfaces. Without it a `pending` row left behind by
+    # a killed process could never be aged out, and `trigger_analysis`
+    # early-returns on `pending`, so that activity could never be analysed again.
+    analysis_updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     athlete: Mapped["Athlete"] = relationship("Athlete", back_populates="activities")

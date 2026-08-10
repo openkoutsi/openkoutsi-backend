@@ -23,9 +23,24 @@ async def lifespan(app: FastAPI):
     from backend.app.api.strava import strava_bridge_poller
     from backend.app.api.wahoo import wahoo_bridge_poller
     from backend.app.services.pat_expiry import pat_expiry_sweeper
+    from backend.app.services.stranded_runs import settle_stranded_runs
 
     await init_registry_db()
     await init_usage_db()
+
+    # Nothing that writes a `pending` LLM status survives this process (issue
+    # #91): the auto-analyse paths run under `asyncio.create_task` and the
+    # explicit triggers under `BackgroundTasks`, so an ordinary redeploy strands
+    # whatever was in flight. A `pending` row at this point is therefore dead by
+    # definition, and settling it here — before the first request is served, so
+    # a live run can't be caught by it — is what stops a redeploy costing an
+    # athlete an analysis they can never re-request.
+    try:
+        settled = await settle_stranded_runs()
+        if settled:
+            log.info("Settled %d LLM run(s) stranded by the last shutdown", settled)
+    except Exception:
+        log.exception("Could not settle stranded LLM runs")
 
     # Background work here is periodic asyncio tasks rather than a scheduler
     # dependency; the token-expiry sweep (issue #46) joins the bridge pollers on

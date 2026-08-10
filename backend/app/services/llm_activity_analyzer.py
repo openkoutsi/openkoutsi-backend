@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING, AsyncIterator
 
 from sqlalchemy import select
@@ -29,6 +30,7 @@ from .llm_agent import (
 )
 from .llm_streaming import failure_recovery, stream_chat_completion, stream_into_db
 from .pr_detection import detect_pr_badges
+from .stranded_runs import settle_activity_analysis
 
 from openkoutsi.sport_matching import CYCLING_SPORT_TYPES
 from openkoutsi.training_math import efficiency_factor, variability_index
@@ -430,9 +432,8 @@ async def analyze_activity_bg(
             select(Activity).where(Activity.id == activity_id)
         )
         stuck = result.scalar_one_or_none()
-        if stuck and stuck.analysis_status == "pending":
-            stuck.analysis_status = "error"
-            stuck.analysis_progress = None
+        if stuck is not None:
+            settle_activity_analysis(stuck)
 
     # `stream_into_db` settles the status itself, but only once it is running —
     # and only while its session still works. Unlike the training-status
@@ -503,11 +504,21 @@ async def _analyze_activity(
         from .activity_workout_matcher import resolve_planned_workout_for_activity
         planned = await resolve_planned_workout_for_activity(session, activity)
 
+        def _touch() -> None:
+            # The clock the pending timeout reads (issue #91). Touched on every
+            # progress commit, not just at the start, so the budget means "no
+            # progress for N minutes" rather than "started N minutes ago" — a
+            # long agentic run stays alive as long as it is visibly working, and
+            # a run whose process died stops looking alive the moment it does.
+            activity.analysis_updated_at = datetime.now(timezone.utc)
+
         def _set_analysis(text: str) -> None:
             activity.analysis = text
+            _touch()
 
         def _set_step(code: str | None) -> None:
             activity.analysis_progress = code
+            _touch()
 
         def _finish(text: str) -> None:
             activity.analysis = text
@@ -515,10 +526,12 @@ async def _analyze_activity(
             # Cleared so a finished analysis renders exactly as it did before
             # the agentic path existed.
             activity.analysis_progress = None
+            _touch()
 
         def _fail() -> None:
             activity.analysis_status = "error"
             activity.analysis_progress = None
+            _touch()
 
         request = (
             AgentRequest(

@@ -20,6 +20,7 @@ from backend.app.schemas.goals import (
 )
 from backend.app.schemas.pagination import Page, PageParams, paginate_params
 from backend.app.services.achievements import recompute_achievements_safe
+from backend.app.services.stranded_runs import pending_timed_out, settle_goal_guidance
 
 
 router = APIRouter(
@@ -27,10 +28,6 @@ router = APIRouter(
     tags=["goals"],
     dependencies=[pat_scopes(read="goals:read", write="goals:write")],
 )
-
-# Recover from a stuck "pending" guidance state: if the background task hasn't
-# completed within this window, reset to "error" so the user can retry.
-_PENDING_TIMEOUT_MINUTES = 30
 
 
 @router.get("", response_model=Page[GoalResponse],
@@ -128,20 +125,16 @@ async def get_goal_guidance(
     ctx, session, athlete = ctx_athlete
     goal = await _get_owned_goal(goal_id, athlete, session)
 
-    # Recover from a stuck "pending" state: if the task hasn't completed within
-    # the timeout window, reset to "error" so the user can retry. A NULL
-    # updated_at with status "pending" is treated as immediately timed out.
+    # Recover from a stuck "pending" state: if the run hasn't shown progress
+    # within the timeout window, reset to "error" so the user can retry. The
+    # window is an inactivity budget — the generator touches the timestamp on
+    # every progress commit (issue #91) — so a slow but healthy stream is no
+    # longer declared dead while it is still writing. A NULL updated_at with
+    # status "pending" is treated as immediately timed out.
     if goal.guidance_status == "pending":
         now_utc = datetime.now(timezone.utc)
-        updated_at = goal.guidance_updated_at
-        if updated_at is not None:
-            aware = updated_at if updated_at.tzinfo else updated_at.replace(tzinfo=timezone.utc)
-            timed_out = (now_utc - aware.astimezone(timezone.utc)).total_seconds() > _PENDING_TIMEOUT_MINUTES * 60
-        else:
-            timed_out = True
-        if timed_out:
-            goal.guidance_status = "error"
-            goal.guidance_updated_at = now_utc
+        if pending_timed_out(goal.guidance_updated_at, now_utc):
+            settle_goal_guidance(goal, now_utc)
             await session.commit()
 
     return GoalGuidanceResponse(

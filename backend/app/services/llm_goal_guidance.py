@@ -36,6 +36,7 @@ from .llm_training_status_analyzer import (
     _LOCALE_LANGUAGE,
     _local_now,
 )
+from .stranded_runs import settle_goal_guidance
 
 log = logging.getLogger(__name__)
 
@@ -232,9 +233,8 @@ async def generate_goal_guidance_bg(
     async def _clear_pending(recovery_session) -> None:
         result = await recovery_session.execute(select(Goal).where(Goal.id == goal_id))
         stuck = result.scalar_one_or_none()
-        if stuck:
-            stuck.guidance_status = "error"
-            stuck.guidance_updated_at = datetime.now(timezone.utc)
+        if stuck is not None:
+            settle_goal_guidance(stuck)
 
     async with failure_recovery(
         user_id, f"Goal guidance for goal {goal_id}", _clear_pending
@@ -298,6 +298,12 @@ async def generate_goal_guidance_bg(
                 # Persist tag-free prose so a mid-stream poll never returns the
                 # raw REALISM: line (see _stream_display_prose).
                 goal.guidance = _stream_display_prose(text)
+                # And touch the clock the pending timeout reads (issue #91):
+                # without this the budget counts from the trigger, so a single
+                # completion streaming steadily past it is declared dead while
+                # it is still writing — the card flips to `error`, the run keeps
+                # spending, and `_finish` then overwrites the error with `done`.
+                goal.guidance_updated_at = datetime.now(timezone.utc)
 
             def _finish(text: str) -> None:
                 verdict, prose = _parse_verdict(text)

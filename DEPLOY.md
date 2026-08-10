@@ -257,6 +257,23 @@ This step is only needed when upgrading an existing deployment — new installs 
 >   "INSERT INTO planned_workout_activities SELECT * FROM planned_workout_activities_dropped_019"
 > ```
 
+> **Note:** per-user migration `021_activity_analysis_updated_at` adds a nullable
+> `activities.analysis_updated_at` column — the clock a stuck `pending` analysis
+> is aged out against, which that surface previously had no equivalent of. It
+> adds no rows, deletes none, backfills nothing (a row stranded before the column
+> existed reads as timed out, which is the right answer for it), and needs no new
+> environment variables. Applied automatically by the entrypoint's per-user
+> migration loop, or by the helper script above.
+>
+> Related runtime behaviour, needing no configuration: on startup the API settles
+> every `pending` LLM run left behind by the previous process — training status,
+> goal guidance and activity analysis — before it accepts its first request.
+> Nothing that writes a `pending` status survives a restart, so those rows are
+> dead by definition, and an activity left in one could never be re-analysed.
+> Expect a `Settled N LLM run(s) stranded by the last shutdown` line after a
+> redeploy that interrupted a generation. The sweep walks `data/users/*/user.db`
+> and inherits the same single-process assumption as the bridge pollers.
+
 ### Backing up before a migration
 
 Per-user databases run in **WAL mode**, so `cp user.db` on its own can miss

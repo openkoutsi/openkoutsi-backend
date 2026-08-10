@@ -396,6 +396,7 @@ async def sync_provider_activities(
                 if await auto_analysis_allowed(user_id, athlete):
                     activity.analysis_status = "pending"
                     activity.analysis_progress = None
+                    activity.analysis_updated_at = datetime.now(timezone.utc)
                     await session.commit()
                     # Issue #43: a backlog import is the one path where an agent loop's
                     # 4–6× calls is a real bill and nobody reads the output one by

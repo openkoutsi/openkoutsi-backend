@@ -269,6 +269,7 @@ async def _process_event_for_user(
             from backend.app.services.llm_activity_analyzer import analyze_activity_bg
             activity.analysis_status = "pending"
             activity.analysis_progress = None
+            activity.analysis_updated_at = datetime.now(timezone.utc)
             await session.commit()
             asyncio.create_task(analyze_activity_bg(activity.id, athlete.id, user_id))
 

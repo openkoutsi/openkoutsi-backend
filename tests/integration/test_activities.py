@@ -4,7 +4,7 @@ Integration tests for /api/activities endpoints.
 FIT upload tests call process_fit_file() and recalculate_from() directly
 (bypassing the suppressed background task) to verify end-to-end behavior.
 """
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1468,3 +1468,116 @@ class TestActivitySearchAndFilter:
         data = resp.json()
         assert data["total"] == 1
         assert data["items"][0]["duration_s"] == 7200
+
+
+# ── Recovering a stranded analysis (issue #91) ────────────────────────────────
+
+class TestAnalysisPendingRecovery:
+    """`pending` is a claim that a run is in flight — and it can outlive the run.
+
+    Nothing that sets it survives the process: `trigger_analysis` hands off to
+    `BackgroundTasks`, the auto-analyse paths to `asyncio.create_task`, and a
+    redeploy takes both. Because this endpoint used to early-return for
+    `pending` unconditionally, such a row meant that activity could never be
+    analysed again, by any route.
+    """
+
+    async def _stuck_activity(self, client, auth_headers, session, *, age_minutes):
+        create = await client.post(
+            "/api/activities",
+            json={"sport_type": "Ride", "start_time": "2025-06-01T10:00:00Z", "duration_s": 3600},
+            headers=auth_headers,
+        )
+        activity_id = create.json()["id"]
+        activity = (
+            await session.execute(select(Activity).where(Activity.id == activity_id))
+        ).scalar_one()
+        activity.analysis_status = "pending"
+        activity.analysis_progress = "thinking"
+        activity.analysis_updated_at = datetime.now(timezone.utc) - timedelta(
+            minutes=age_minutes
+        )
+        await session.commit()
+        return activity_id
+
+    async def test_a_run_still_reporting_progress_keeps_the_row(
+        self, client, auth_headers, session
+    ):
+        activity_id = await self._stuck_activity(
+            client, auth_headers, session, age_minutes=1
+        )
+        resp = await client.post(
+            f"/api/activities/{activity_id}/analyze", headers=auth_headers
+        )
+        assert resp.status_code == 202
+        assert resp.json() == {"status": "pending"}
+        # Untouched: a second trigger must not restart a live run.
+        activity = (
+            await session.execute(select(Activity).where(Activity.id == activity_id))
+        ).scalar_one()
+        await session.refresh(activity)
+        assert activity.analysis_progress == "thinking"
+
+    async def test_a_stranded_run_can_be_triggered_again(
+        self, client, auth_headers, session
+    ):
+        activity_id = await self._stuck_activity(
+            client, auth_headers, session, age_minutes=120
+        )
+        resp = await client.post(
+            f"/api/activities/{activity_id}/analyze", headers=auth_headers
+        )
+        assert resp.status_code == 202
+
+        activity = (
+            await session.execute(select(Activity).where(Activity.id == activity_id))
+        ).scalar_one()
+        await session.refresh(activity)
+        # A *fresh* run: the clock is restarted and the dead run's step is gone.
+        assert activity.analysis_status == "pending"
+        assert activity.analysis_progress is None
+        assert activity.analysis_updated_at is not None
+
+    async def test_a_row_with_no_clock_at_all_can_be_triggered_again(
+        self, client, auth_headers, session
+    ):
+        """The pre-migration case: `pending` written before the column existed."""
+        activity_id = await self._stuck_activity(
+            client, auth_headers, session, age_minutes=1
+        )
+        activity = (
+            await session.execute(select(Activity).where(Activity.id == activity_id))
+        ).scalar_one()
+        activity.analysis_updated_at = None
+        await session.commit()
+
+        resp = await client.post(
+            f"/api/activities/{activity_id}/analyze", headers=auth_headers
+        )
+        assert resp.status_code == 202
+        await session.refresh(activity)
+        assert activity.analysis_updated_at is not None
+
+    async def test_reading_the_activity_stops_the_spinner(
+        self, client, auth_headers, session
+    ):
+        """The other two surfaces have flipped a timed-out `pending` to `error`
+        on read since they were written; this one showed a spinner forever.
+        """
+        activity_id = await self._stuck_activity(
+            client, auth_headers, session, age_minutes=120
+        )
+        resp = await client.get(f"/api/activities/{activity_id}", headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.json()["analysis_status"] == "error"
+        assert resp.json()["analysis_progress"] is None
+
+    async def test_reading_a_live_run_still_shows_it_running(
+        self, client, auth_headers, session
+    ):
+        activity_id = await self._stuck_activity(
+            client, auth_headers, session, age_minutes=1
+        )
+        resp = await client.get(f"/api/activities/{activity_id}", headers=auth_headers)
+        assert resp.json()["analysis_status"] == "pending"
+        assert resp.json()["analysis_progress"] == "thinking"
