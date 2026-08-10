@@ -70,7 +70,8 @@ import asyncio
 import json
 import logging
 import time
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Optional
@@ -165,19 +166,35 @@ TRUNCATION_MARKER = (
 )
 
 #: Runs in flight in this process. See ``Settings.agent_max_concurrent_runs``.
-_run_slots: Optional[asyncio.Semaphore] = None
+#:
+#: A plain counter rather than an :class:`asyncio.Semaphore`, because the one
+#: thing this guard must never do is *wait* — and waiting is a semaphore's whole
+#: purpose. Testing ``.locked()`` before ``async with`` looks non-blocking and is
+#: not: between the check and the acquire, another run can take the last slot,
+#: and this one then blocks on exactly the acquire it meant to skip. A counter
+#: closes that gap by construction — asyncio is cooperative, there is no
+#: ``await`` between reading it and incrementing it, so the check and the claim
+#: are one indivisible step.
+_active_runs = 0
 
 
-def _slots() -> asyncio.Semaphore:
-    """The concurrency guard, built on first use.
+@contextmanager
+def _run_slot() -> Iterator[None]:
+    """Claim a slot for one run, or refuse immediately.
 
-    Lazily, because a semaphore binds to the running loop and this module is
-    imported at app construction time.
+    Refusing is the design. Waiting would push the run towards the 30-minute
+    pending timeout with the athlete watching a spinner, and the blob prompt is
+    a worse answer available *now* — the better trade under load.
     """
-    global _run_slots
-    if _run_slots is None:
-        _run_slots = asyncio.Semaphore(max(1, int(settings.agent_max_concurrent_runs)))
-    return _run_slots
+    global _active_runs
+    limit = max(1, int(settings.agent_max_concurrent_runs))
+    if _active_runs >= limit:
+        raise AgenticUnavailable(f"all {limit} agent slots are in use")
+    _active_runs += 1
+    try:
+        yield
+    finally:
+        _active_runs -= 1
 
 
 class AgenticUnavailable(Exception):
@@ -519,14 +536,9 @@ async def agentic_stream(
 
 
 async def _run(request: AgentRequest, usage_out: dict) -> AsyncIterator[StreamItem]:
-    if _slots().locked():
-        # Non-blocking on purpose. Waiting for a slot would push the run towards
-        # the 30-minute pending timeout with the athlete watching a spinner; the
-        # blob prompt is a worse answer available immediately, which is the
-        # better trade under load.
-        raise AgenticUnavailable("no agent slot free")
-
-    async with _slots():
+    # Claimed before the first `await`, so a burst of runs starting together
+    # cannot all see a free slot and then all take it.
+    with _run_slot():
         setup = await resolve_stream_setup(
             request.athlete, request.user_id, usage_out=usage_out
         )

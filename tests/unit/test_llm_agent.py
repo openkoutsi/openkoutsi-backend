@@ -28,6 +28,7 @@ from typing import Any, Optional
 import httpx
 import pytest
 
+from backend.app.core.config import settings
 from backend.app.mcp.dispatch import ToolResult
 from backend.app.services import llm_agent
 from backend.app.services.llm_agent import (
@@ -183,10 +184,10 @@ def _request(**overrides) -> AgentRequest:
 
 @pytest.fixture(autouse=True)
 def _fresh_slots(monkeypatch):
-    """The concurrency semaphore is process-wide; give each test its own."""
-    monkeypatch.setattr(llm_agent, "_run_slots", None)
+    """The in-flight count is process-wide; each test starts from zero."""
+    monkeypatch.setattr(llm_agent, "_active_runs", 0)
     yield
-    monkeypatch.setattr(llm_agent, "_run_slots", None)
+    monkeypatch.setattr(llm_agent, "_active_runs", 0)
 
 
 async def drive(
@@ -651,12 +652,77 @@ class TestConcurrencyGuard:
     ):
         # Waiting would push the run towards the 30-minute pending timeout with
         # the athlete watching a spinner. The cheaper answer, now, is better.
-        monkeypatch.setattr(llm_agent, "_run_slots", asyncio.Semaphore(1))
-        async with llm_agent._slots():
+        monkeypatch.setattr(settings, "agent_max_concurrent_runs", 1)
+        with llm_agent._run_slot():
             provider = FakeProvider()
             with pytest.raises(AgenticUnavailable):
                 await drive(provider, monkeypatch=monkeypatch)
             assert provider.turn_count == 0
+
+    async def test_the_slot_is_released_when_the_run_ends(self, monkeypatch):
+        monkeypatch.setattr(settings, "agent_max_concurrent_runs", 1)
+        dispatch = FakeDispatch(FakeTool("get_training_status", {"form": 1}))
+        for _ in range(2):
+            provider = FakeProvider(
+                calls((0, "c1", "get_training_status", "{}")), text(ANSWER)
+            )
+            prose, _ = await drive(provider, dispatch, monkeypatch=monkeypatch)
+            assert prose == ANSWER
+        assert llm_agent._active_runs == 0
+
+    async def test_a_failed_run_does_not_leak_its_slot(self, monkeypatch):
+        monkeypatch.setattr(settings, "agent_max_concurrent_runs", 1)
+        with pytest.raises(AgenticUnavailable):
+            await drive(FakeProvider(text(ANSWER)), monkeypatch=monkeypatch)
+        assert llm_agent._active_runs == 0
+
+    async def test_a_second_run_is_refused_while_the_first_is_mid_flight(
+        self, monkeypatch
+    ):
+        # The property the guard actually promises, pinned against a run that is
+        # genuinely suspended inside the loop rather than one holding the slot
+        # synchronously: the second run is *refused*, not queued behind it.
+        #
+        # This is where an `asyncio.Semaphore` was the wrong primitive. Checking
+        # `.locked()` and then acquiring was correct only because CPython's
+        # uncontended `acquire()` happens not to suspend — an undocumented fast
+        # path, in a class whose `locked()` semantics have already changed once.
+        # A counter claimed before the first `await` needs no such guarantee.
+        monkeypatch.setattr(settings, "agent_max_concurrent_runs", 1)
+        released = asyncio.Event()
+        entered = asyncio.Event()
+
+        async def hold(cfg, messages, *, tools=None, tool_choice=None, usage_out=None):
+            entered.set()
+            await released.wait()
+            yield TextDelta(ANSWER)
+
+        async def _resolve(athlete, user_id, *, usage_out=None):
+            return _setup()
+
+        monkeypatch.setattr(llm_agent, "resolve_stream_setup", _resolve)
+        monkeypatch.setattr(llm_agent, "call_tool", FakeDispatch())
+
+        async def first() -> None:
+            monkeypatch.setattr(llm_agent, "stream_completion_events", hold)
+            with pytest.raises(AgenticUnavailable):
+                # Turn zero prose → falls back, but only after holding the slot.
+                async for _ in agentic_stream(_request(), {}):
+                    pass
+
+        holder = asyncio.create_task(first())
+        await entered.wait()
+        assert llm_agent._active_runs == 1
+
+        second = FakeProvider()
+        with pytest.raises(AgenticUnavailable, match="slots are in use"):
+            await drive(second, monkeypatch=monkeypatch)
+        # Refused outright rather than queued behind the run in flight.
+        assert second.turn_count == 0
+
+        released.set()
+        await holder
+        assert llm_agent._active_runs == 0
 
 
 class TestLateToolCallsAndLateFallback:

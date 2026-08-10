@@ -151,7 +151,8 @@ def wire(monkeypatch):
         monkeypatch.setattr(
             "backend.app.mcp.dispatch._consent_ok", AsyncMock(return_value=True)
         )
-        monkeypatch.setattr(llm_agent, "_run_slots", None)
+        # The in-flight count is process-wide; start every run from zero.
+        monkeypatch.setattr(llm_agent, "_active_runs", 0)
         if not record_usage:
             # Most tests here have nothing to say about accounting, and the real
             # recorder would open the usage DB on every run.
