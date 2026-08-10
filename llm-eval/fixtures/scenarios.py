@@ -300,3 +300,167 @@ GOAL_SCENARIOS: dict[str, dict] = {
         coaching_style="encouraging", locale="fi", fitness=70.0, fatigue=66.0, form=4.0,
     ),
 }
+
+
+# ── Family 6: the agentic loop (issue #43) ───────────────────────────────────
+#
+# The other five families are one prompt in, one answer out, which is what those
+# call sites do. The agentic path is a *conversation*, and promptfoo evaluates
+# one turn per row — so rather than pretend to run a loop, each scenario here
+# freezes the conversation at the turn whose behaviour is actually in question
+# and asks a single thing of the model:
+#
+#   turn zero        does it call tools at all, and the right ones?
+#   after an error   does it adjust, or repeat the call that just failed?
+#   the final turn   does `MOOD:` survive a turn that follows tool results?
+#
+# That third one is the reason this family exists. Models are measurably worse
+# at obeying a leading-format instruction after tool results than on a clean
+# single-shot prompt, and the whole avatar contract rests on that line — so the
+# roster needs evidence per model, not an assumption.
+#
+# The tool results below are hand-written stand-ins shaped like the real tools'
+# output. The *prompts* still come from the real builders, which is the property
+# that matters: what the model reads is what production sends.
+
+_agentic_ride = Activity(
+    id="act-7f3c1a",
+    sport_type="Ride",
+    start_time=datetime(2026, 7, 8, 16, 30, tzinfo=timezone.utc),
+    duration_s=5280,
+    distance_m=48200.0,
+    avg_power=212.0,
+    weighted_power=238.0,
+    avg_hr=151.0,
+    load=118.0,
+)
+
+_TRAINING_STATUS_RESULT = (
+    '{"as_of": "2026-07-09", "stale": false, "fitness": 71.4, "fatigue": 84.2, '
+    '"form": -12.8, "form_label": "tired", "load_today": 0.0, '
+    '"fitness_change_7d": 2.1, "fitness_change_28d": 9.6, '
+    '"volume": {"days": 28, "activities": 16, "duration_s": 158400, '
+    '"distance_m": 1120000.0, "load_total": 1284.0}, '
+    '"profile": {"ftp_w": 250, "max_hr": 186, "experience_level": "intermediate"}}'
+)
+
+_PLAN_STATUS_RESULT = (
+    '{"plans": [{"name": "Base to Build", "week_number": 2, "weeks": 8, '
+    '"adherence_pct": 62.0, "this_week": ['
+    '{"day": "2026-07-06", "workout_type": "endurance", "status": "completed"}, '
+    '{"day": "2026-07-08", "workout_type": "threshold", "status": "not completed"}, '
+    '{"day": "2026-07-09", "workout_type": "recovery", "status": "today"}, '
+    '{"day": "2026-07-11", "workout_type": "long", "status": "upcoming"}]}]}'
+)
+
+# The shape issue #42 insists on: a failure is a sentence naming what is nearby,
+# not a 404. A model that reads it should look at 2026-07-08, not retry 07-14.
+_ACTIVITY_NOT_FOUND = (
+    "No activity with id 'act-0000'. The athlete's three most recent rides are "
+    "act-7f3c1a (2026-07-08, threshold, 1 h 28), act-91bd20 (2026-07-06, "
+    "endurance, 2 h 12) and act-4e77c9 (2026-07-04, recovery, 0 h 45)."
+)
+
+_ACTIVITY_DETAIL_RESULT = (
+    '{"activity_id": "act-7f3c1a", "date": "2026-07-08", "sport_type": "Ride", '
+    '"workout_category": "threshold", "duration_s": 5280, "distance_m": 48200.0, '
+    '"avg_power_w": 212, "weighted_power_w": 238, "avg_hr_bpm": 151, "load": 118.0, '
+    '"efficiency_factor": 1.58, "variability_index": 1.12, '
+    '"decoupling_pct": null, "decoupling_reason": "variable_effort", '
+    '"intervals": [{"n": 1, "duration_s": 480, "avg_power_w": 268}, '
+    '{"n": 2, "duration_s": 480, "avg_power_w": 264}, '
+    '{"n": 3, "duration_s": 480, "avg_power_w": 251}], '
+    '"notes": "Legs felt heavy on the third one.", "rpe": 8}'
+)
+
+
+def _call(name: str, arguments: str, call_id: str) -> dict:
+    """An assistant turn that made one tool call, in the OpenAI dialect."""
+    return {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {"id": call_id, "type": "function",
+             "function": {"name": name, "arguments": arguments}},
+        ],
+    }
+
+
+def _result(call_id: str, content: str) -> dict:
+    return {"role": "tool", "tool_call_id": call_id, "content": content}
+
+
+AGENTIC_SCENARIOS: dict[str, dict] = {
+    # Handed tools and a broad question, does it go and look?
+    "status_opening_turn": {
+        "surface": "status",
+        "athlete": _athlete(
+            ftp=250, max_hr=186,
+            app_settings={"coaching_style": "friendly", "locale": "en", "timezone": "UTC"},
+        ),
+        "now": _now,
+        "history": [],
+        "must_call_tool": True,
+        # Any of these is a defensible opening move for "how am I doing?".
+        # `get_activity_detail` is not: it needs an id nothing has given yet.
+        "allowed_tools": {
+            "get_training_status", "list_recent_activities", "get_plan_status",
+            "get_intensity_distribution", "get_zone_totals", "get_goal_progress",
+            "get_power_profile", "find_activity",
+        },
+        # Calling everything at once is not research, it is a shotgun — and it
+        # costs the context window the later turns need.
+        "max_calls": 4,
+    },
+    # A narrow question with the id already in the brief: one obvious first call.
+    "activity_opening_turn": {
+        "surface": "activity",
+        "activity": _agentic_ride,
+        "locale": None,
+        "history": [],
+        "must_call_tool": True,
+        "allowed_tools": {"get_activity_detail"},
+        "max_calls": 2,
+        "expected_arguments": {"activity_id": "act-7f3c1a"},
+    },
+    # The tool answered with prose explaining the miss and naming the neighbours.
+    # Reading it and adjusting is the behaviour; retrying the same id is not.
+    "recovers_from_a_tool_error": {
+        "surface": "activity",
+        "activity": _agentic_ride,
+        "locale": None,
+        "history": [
+            _call("get_activity_detail", '{"activity_id": "act-0000"}', "call_1"),
+            _result("call_1", _ACTIVITY_NOT_FOUND),
+        ],
+        "must_not_repeat": ("get_activity_detail", {"activity_id": "act-0000"}),
+    },
+    # Everything asked for has come back. Does the format contract survive a turn
+    # that follows tool results?
+    "final_turn_after_tool_results": {
+        "surface": "status",
+        "athlete": _athlete(
+            ftp=250, max_hr=186,
+            app_settings={"coaching_style": "stern", "locale": "en", "timezone": "UTC"},
+        ),
+        "now": _now,
+        "history": [
+            _call("get_training_status", "{}", "call_1"),
+            _result("call_1", _TRAINING_STATUS_RESULT),
+            _call("get_plan_status", "{}", "call_2"),
+            _result("call_2", _PLAN_STATUS_RESULT),
+        ],
+        "final": True,
+    },
+    # The same question, in Finnish, with the MOOD token still English.
+    "final_turn_finnish": {
+        "surface": "activity",
+        "activity": _agentic_ride,
+        "locale": "fi",
+        "history": [
+            _call("get_activity_detail", '{"activity_id": "act-7f3c1a"}', "call_1"),
+            _result("call_1", _ACTIVITY_DETAIL_RESULT),
+        ],
+        "final": True,
+    },
+}
