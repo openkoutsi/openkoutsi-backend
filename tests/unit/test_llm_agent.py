@@ -1137,3 +1137,188 @@ class TestProgressVocabulary:
         # that contract silently.
         for code in progress_vocabulary():
             assert code == PROGRESS_THINKING or code.startswith("tool.")
+
+
+# ── Conversational runs (issue #44) ─────────────────────────────────────────
+
+
+class TestConversationalRuns:
+    """The three behaviours a chat turn needs that a card must not have.
+
+    Each is a case where the right answer for a background generation is the
+    wrong one for a dialogue, so they are opt-in on ``AgentRequest`` rather than
+    changes to the shared path.
+    """
+
+    async def test_history_replaces_the_single_prompt(self, monkeypatch):
+        provider = FakeProvider(text("MOOD:knowing\n\nThe last rep is a pacing problem."))
+        history = [
+            {"role": "user", "content": "Why do my intervals fall apart?"},
+            {"role": "assistant", "content": "MOOD:knowing\n\nTell me which session."},
+            {"role": "user", "content": "The threshold ones on Tuesday."},
+        ]
+        await drive(
+            provider,
+            request=_request(history=history, conversational=True),
+            monkeypatch=monkeypatch,
+        )
+        sent = provider.sent[0]["messages"]
+        # The stored dialogue arrives intact and in order, and the surface's own
+        # `user_prompt` is nowhere in it.
+        assert [m["content"] for m in sent if m["role"] != "system"] == [
+            "Why do my intervals fall apart?",
+            "MOOD:knowing\n\nTell me which session.",
+            "The threshold ones on Tuesday.",
+        ]
+        assert all(
+            "Give the athlete their daily feedback." not in m["content"] for m in sent
+        )
+
+    async def test_the_loop_never_writes_back_into_the_caller_list(self, monkeypatch):
+        """Tool traffic must not leak into what the caller stores.
+
+        ``_drive`` appends assistant and tool messages as it goes. If it appended
+        to the caller's own list, a chat turn would end with the loop's scratch
+        work — tool call ids, raw JSON results — sitting in the transcript that
+        gets replayed into every later turn and written to the GDPR export.
+        """
+        provider = FakeProvider(
+            calls((0, "c1", "get_training_status", '{"days": 7}')),
+            text("MOOD:knowing\n\nForm is fine."),
+        )
+        dispatch = FakeDispatch(FakeTool("get_training_status", {"ctl": 60}))
+        history = [{"role": "user", "content": "How is my form?"}]
+        await drive(
+            provider,
+            dispatch,
+            request=_request(history=history, conversational=True),
+            monkeypatch=monkeypatch,
+        )
+        assert history == [{"role": "user", "content": "How is my form?"}]
+
+    async def test_a_question_needing_no_tools_is_answered(self, monkeypatch):
+        """Turn-zero prose is the answer here, where on a card it is guesswork.
+
+        "What does TSB actually mean?" has no lookup behind it. The card path
+        suppresses this turn and falls back; a conversation that refused to
+        answer until it had called a tool would be a worse coach, not a safer
+        one.
+        """
+        provider = FakeProvider(text("MOOD:neutral\n\nTSB is fitness minus fatigue."))
+        prose, steps = await drive(
+            provider,
+            request=_request(history=[{"role": "user", "content": "What is TSB?"}],
+                             conversational=True),
+            monkeypatch=monkeypatch,
+        )
+        assert prose == "MOOD:neutral\n\nTSB is fitness minus fatigue."
+        assert provider.turn_count == 1
+        assert steps[-1] is None
+
+    async def test_the_card_still_discards_a_turn_zero_answer(self, monkeypatch):
+        """The behaviour above must not have leaked into the non-chat path."""
+        provider = FakeProvider(text("MOOD:knowing\n\nAnswered without looking."))
+        with pytest.raises(AgenticUnavailable):
+            await drive(provider, request=_request(), monkeypatch=monkeypatch)
+
+    async def test_preamble_is_still_withheld_in_a_conversation(self, monkeypatch):
+        """Allowing turn-zero prose must not let a preamble become the answer."""
+        provider = FakeProvider(
+            calls(
+                (0, "c1", "get_training_status", "{}"),
+                preamble="Let me look at your last four weeks. ",
+            ),
+            text("MOOD:knowing\n\nYour form is negative because of last week."),
+        )
+        dispatch = FakeDispatch(FakeTool("get_training_status", {"ctl": 60}))
+        prose, _ = await drive(
+            provider,
+            dispatch,
+            request=_request(history=[{"role": "user", "content": "How am I doing?"}],
+                             conversational=True),
+            monkeypatch=monkeypatch,
+        )
+        assert prose == "MOOD:knowing\n\nYour form is negative because of last week."
+        assert "Let me look at" not in prose
+
+    async def test_failures_carry_a_code_for_the_athlete(self, monkeypatch):
+        provider = FakeProvider()
+        with pytest.raises(AgenticUnavailable) as excinfo:
+            await drive(
+                provider,
+                request=_request(conversational=True),
+                setup=_setup(tools_supported=False),
+                monkeypatch=monkeypatch,
+            )
+        assert excinfo.value.code == llm_agent.CODE_TOOLS_UNSUPPORTED
+
+    async def test_an_upstream_failure_is_marked_retryable(self, monkeypatch):
+        provider = FakeProvider(
+            Turn(error=httpx.HTTPStatusError(
+                "boom",
+                request=httpx.Request("POST", "http://llm.invalid/v1/chat/completions"),
+                response=httpx.Response(
+                    503, request=httpx.Request("POST", "http://llm.invalid/v1")
+                ),
+            ))
+        )
+        with pytest.raises(AgenticUnavailable) as excinfo:
+            await drive(
+                provider,
+                request=_request(conversational=True,
+                                 history=[{"role": "user", "content": "hi"}]),
+                monkeypatch=monkeypatch,
+            )
+        assert excinfo.value.code == llm_agent.CODE_UPSTREAM
+
+
+class TestInteractiveSlotWaiting:
+    """A chat turn queues for a slot; a background run still refuses at once."""
+
+    async def test_a_background_run_refuses_immediately(self, monkeypatch):
+        monkeypatch.setattr(settings, "agent_max_concurrent_runs", 1)
+        with llm_agent._run_slot():
+            with pytest.raises(AgenticUnavailable) as excinfo:
+                with llm_agent._run_slot():
+                    pass
+        assert excinfo.value.code == llm_agent.CODE_BUSY
+        assert llm_agent._active_runs == 0
+
+    async def test_an_interactive_turn_waits_for_a_slot_to_free(self, monkeypatch):
+        monkeypatch.setattr(settings, "agent_max_concurrent_runs", 1)
+        monkeypatch.setattr(llm_agent, "_SLOT_POLL_INTERVAL_S", 0.01)
+
+        holder_released = asyncio.Event()
+
+        async def _hold() -> None:
+            with llm_agent._run_slot():
+                await asyncio.sleep(0.05)
+            holder_released.set()
+
+        async def _wait() -> str:
+            async with llm_agent._waited_run_slot(5.0):
+                return "got in"
+
+        hold_task = asyncio.create_task(_hold())
+        await asyncio.sleep(0)  # let the holder claim the only slot
+        assert await _wait() == "got in"
+        await hold_task
+        assert holder_released.is_set()
+        assert llm_agent._active_runs == 0
+
+    async def test_the_wait_is_bounded(self, monkeypatch):
+        monkeypatch.setattr(settings, "agent_max_concurrent_runs", 1)
+        monkeypatch.setattr(llm_agent, "_SLOT_POLL_INTERVAL_S", 0.01)
+        with llm_agent._run_slot():
+            with pytest.raises(AgenticUnavailable) as excinfo:
+                async with llm_agent._waited_run_slot(0.05):
+                    pass
+        assert excinfo.value.code == llm_agent.CODE_BUSY
+        assert llm_agent._active_runs == 0
+
+    async def test_a_waiting_turn_releases_its_slot_on_failure(self, monkeypatch):
+        monkeypatch.setattr(settings, "agent_max_concurrent_runs", 1)
+        with pytest.raises(RuntimeError):
+            async with llm_agent._waited_run_slot(1.0):
+                raise RuntimeError("the run itself failed")
+        assert llm_agent._active_runs == 0

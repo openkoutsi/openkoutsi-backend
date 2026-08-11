@@ -556,6 +556,7 @@ class TestExportAthlete:
             "daily_metrics.json",
             "personal_records.json",
             "inbox.json",
+            "chat.json",
             "weight_log.json",
         } <= names
 
@@ -836,6 +837,49 @@ class TestExportAthlete:
         assert len(inbox) == 1
         assert inbox[0]["type"] == "welcome"
         assert inbox[0]["data"] == {"foo": "bar"}
+
+    async def test_export_chat(self, client, auth_headers, session):
+        """Koutsi conversations are in the export from day one (issue #21).
+
+        Health-adjacent free text the athlete wrote about their own body, so
+        leaving it out would make the export a less complete record than the
+        chat page itself.
+        """
+        from backend.app.models.chat_orm import ChatConversation, ChatMessage
+
+        session.add(ChatConversation(id="conv-1", title="Should I be worried?"))
+        session.add(
+            ChatMessage(
+                id="cm-1",
+                conversation_id="conv-1",
+                role="user",
+                content="Should I be worried?",
+            )
+        )
+        session.add(
+            ChatMessage(
+                id="cm-2",
+                conversation_id="conv-1",
+                role="assistant",
+                content="MOOD:knowing\n\nNo.",
+                status="complete",
+                tool_names=["get_training_status"],
+            )
+        )
+        await session.commit()
+
+        resp = await client.get("/api/athlete/export", headers=auth_headers)
+        with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
+            chat = json.loads(zf.read("chat.json"))
+
+        assert len(chat) == 1
+        assert chat[0]["title"] == "Should I be worried?"
+        # Nested, because the thread is the unit that means anything: a flat
+        # message list would make the reader rebuild it with a join.
+        assert [m["role"] for m in chat[0]["messages"]] == ["user", "assistant"]
+        assert chat[0]["messages"][1]["tool_names"] == ["get_training_status"]
+        # The conversation id is on the thread, not repeated on every message.
+        assert "conversation_id" not in chat[0]["messages"][0]
 
     async def test_export_weight_log(
         self, client, auth_headers, session, seeded_athlete

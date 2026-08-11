@@ -25,10 +25,23 @@ from starlette.requests import Request
 def principal_key(request: Request) -> str:
     """Rate-limit key: the authenticated user when there is one, else the IP.
 
-    ``request.state.pat_user_id`` is set by the resolver in ``core.auth``, which
-    runs as a dependency and therefore before the endpoint the limiter wraps.
+    ``request.state.principal_user_id`` is set by both resolvers in ``core.auth``
+    — the personal-access-token path and the session-JWT path — which run as
+    dependencies and therefore before the endpoint the limiter wraps.
+
+    Session requests were originally left on the address key, which was the
+    right call when the only per-principal limits protected token traffic. Chat
+    (issue #44) is what makes it wrong: it is athlete-triggered, expensive, and
+    closed to tokens, so an address key would rate-limit a household behind one
+    NAT as a single user while leaving an actual user free to open two browsers.
+
+    ``pat_user_id`` stays readable as a fallback: it is the attribute the audit
+    log and per-token attribution use, and reading it here keeps the key stable
+    for anything that sets it directly.
     """
-    user_id = getattr(request.state, "pat_user_id", None)
+    user_id = getattr(request.state, "principal_user_id", None) or getattr(
+        request.state, "pat_user_id", None
+    )
     if user_id:
         return f"user:{user_id}"
     return get_remote_address(request)

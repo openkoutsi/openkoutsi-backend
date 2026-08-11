@@ -21,6 +21,7 @@ from backend.app.db.registry import get_registry_session
 from backend.app.api.consent import CURRENT_CONSENT_VERSION
 from backend.app.api.distance import all_time_distance_bests
 from backend.app.api.power import all_time_power_bests
+from backend.app.models.chat_orm import ChatConversation, ChatMessage
 from backend.app.models.message_orm import Message
 from backend.app.models.registry_orm import (
     InstanceSettings,
@@ -709,6 +710,44 @@ async def _export_inbox(session: AsyncSession) -> list[dict]:
     )
 
 
+async def _export_chat(session: AsyncSession) -> list[dict]:
+    """Koutsi conversations, nested message-in-thread (issue #44).
+
+    Health-adjacent free text the athlete wrote about their own body, so it
+    belongs in the export from the day the feature ships rather than after
+    somebody notices — which is what issue #21 exists to remember.
+
+    Nested rather than two flat files because the thread is the unit that means
+    anything: a list of messages with conversation ids in it would be a join the
+    reader has to perform to get back what they actually wrote. ``tool_names``
+    comes along as the record of what Koutsi consulted; the tool *results* were
+    never stored (see ``models.chat_orm``), so there is nothing else to give.
+    """
+    conversations = (
+        (
+            await session.execute(
+                select(ChatConversation).order_by(ChatConversation.created_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    messages = (
+        (await session.execute(select(ChatMessage).order_by(ChatMessage.created_at)))
+        .scalars()
+        .all()
+    )
+    by_conversation: dict[str, list[dict]] = {}
+    for message in messages:
+        by_conversation.setdefault(message.conversation_id, []).append(
+            _dump(message, exclude=("conversation_id",))
+        )
+    return [
+        _dump(conversation, messages=by_conversation.get(conversation.id, []))
+        for conversation in conversations
+    ]
+
+
 async def _export_weight_log(athlete: Athlete, session: AsyncSession) -> list[dict]:
     return await _export_rows(
         session,
@@ -804,6 +843,7 @@ async def export_athlete(
         "daily_metrics.json": await _export_daily_metrics(athlete, session),
         "personal_records.json": personal_records,
         "inbox.json": await _export_inbox(session),
+        "chat.json": await _export_chat(session),
         "weight_log.json": await _export_weight_log(athlete, session),
         "achievements.json": await _export_achievements(athlete, session),
         "personal_access_tokens.json": await _export_personal_access_tokens(

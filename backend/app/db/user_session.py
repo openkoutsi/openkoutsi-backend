@@ -40,9 +40,11 @@ async def get_user_session(user_id: str) -> AsyncSession:
 async def init_user_db(user_id: str) -> None:
     """Create all per-user tables in a new user DB (idempotent).
 
-    Imports both model modules so every table bound to ``UserBase`` (the athlete
-    profile, all training data and the message inbox) is created.
+    Imports every model module so all tables bound to ``UserBase`` (the athlete
+    profile, all training data, the message inbox and the Koutsi conversations)
+    are created.
     """
+    import backend.app.models.chat_orm  # noqa: F401
     import backend.app.models.message_orm  # noqa: F401
     import backend.app.models.user_orm  # noqa: F401
 

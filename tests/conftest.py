@@ -25,6 +25,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from backend.app.core.auth import UserContext, create_access_token
 from backend.app.core.deps import get_ctx_and_session
 from backend.app.db.base import RegistryBase, UserBase
+# Imported for their side effect: `UserBase.metadata` is only complete once every
+# model module has been imported, and `create_all` below builds whatever is in it
+# at that moment. Without this the tables present in a test would depend on which
+# fixture happened to import which module first.
+import backend.app.models.chat_orm  # noqa: F401,E402
+import backend.app.models.message_orm  # noqa: F401,E402
+import backend.app.models.user_orm  # noqa: F401,E402
 from backend.app.db.registry import get_registry_session
 from backend.main import create_app
 
