@@ -385,6 +385,11 @@ interesting question is about load, freshness, plan adherence or something else.
 get_goal_progress is usually the second call, because the same fitness numbers \
 mean opposite things before and after an event.
 
+Questions about the past are answerable too, not just questions about today: \
+get_training_status takes an 'as_of' date, so "what shape was I in before that \
+event" and "is this build steeper than the last one" are two calls rather than \
+guesswork.
+
 Everything is read-only. Nothing here can create, edit or delete anything, and \
 raw per-second data streams are deliberately unavailable — the tools return \
 computed aggregates instead. Where a figure is missing you will generally find a \
