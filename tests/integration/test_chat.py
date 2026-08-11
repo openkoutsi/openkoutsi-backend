@@ -959,3 +959,126 @@ class TestAvailabilityReflectsLiveSettings:
         body = (await client.get(f"{_PREFIX}/availability", headers=auth_headers)).json()
         assert body["max_turns_per_conversation"] == 7
         assert body["max_message_chars"] == 123
+
+
+class TestRetryingAnOlderFailure:
+    """A retried row need not be last, and the history must follow it.
+
+    The run builds its history from the messages *before* the row it is
+    answering, not from everything else in the thread. Those are the same set
+    for a fresh question — which is why the difference stayed invisible until
+    retries existed — but for an older retry "everything else" both loses the
+    question being answered and feeds the model messages from after it.
+    """
+
+    async def _thread_with_an_older_failure(self, client, auth_headers):
+        from sqlalchemy import select
+
+        created = await client.post(
+            f"{_PREFIX}/conversations", json={"message": "Q1"}, headers=auth_headers
+        )
+        body = created.json()
+        conversation_id = body["id"]
+        first_answer = body["messages"][1]["id"]
+
+        async with get_user_session_factory(_TEST_USER_ID)() as s:
+            row = (
+                await s.execute(select(ChatMessage).where(ChatMessage.id == first_answer))
+            ).scalar_one()
+            row.status = STATUS_ERROR
+            row.error_code = llm_agent.CODE_UPSTREAM
+            await s.commit()
+
+        # The athlete rephrased rather than retrying, and that turn worked.
+        second = await client.post(
+            f"{_PREFIX}/conversations/{conversation_id}/messages",
+            json={"message": "Q2"}, headers=auth_headers,
+        )
+        second_answer = second.json()["id"]
+        async with get_user_session_factory(_TEST_USER_ID)() as s:
+            row = (
+                await s.execute(select(ChatMessage).where(ChatMessage.id == second_answer))
+            ).scalar_one()
+            row.status = STATUS_COMPLETE
+            row.content = "MOOD:knowing\n\nA2"
+            await s.commit()
+        return conversation_id, first_answer
+
+    async def test_the_retried_question_is_the_one_sent(
+        self, client, auth_headers, no_turns, scripted_turn, usage_db
+    ):
+        from tests.unit.test_llm_agent import text
+
+        await _seed_athlete()
+        conversation_id, first_answer = await self._thread_with_an_older_failure(
+            client, auth_headers
+        )
+        # Through the endpoint, which is what re-queues the row — running the
+        # task against a still-`error` row would (correctly) abort on the
+        # ownership check.
+        assert (
+            await client.post(
+                f"{_PREFIX}/conversations/{conversation_id}/messages/{first_answer}/retry",
+                json={}, headers=auth_headers,
+            )
+        ).status_code == 202
+
+        provider = scripted_turn.provider(text("MOOD:knowing\n\nAn answer to Q1."))
+        scripted_turn(provider)
+
+        from backend.app.services.llm_chat import run_chat_turn_bg
+
+        await run_chat_turn_bg(_TEST_USER_ID, conversation_id, first_answer)
+
+        sent = [m for m in provider.sent[0]["messages"] if m["role"] != "system"]
+        # The question being answered is present, and it is the last thing said —
+        # a history ending on an assistant turn would ask the model to continue a
+        # finished exchange with nothing pending.
+        assert sent == [{"role": "user", "content": "Q1"}]
+
+    async def test_nothing_after_the_retried_row_leaks_in(
+        self, client, auth_headers, no_turns, scripted_turn, usage_db
+    ):
+        from tests.unit.test_llm_agent import text
+
+        await _seed_athlete()
+        conversation_id, first_answer = await self._thread_with_an_older_failure(
+            client, auth_headers
+        )
+        assert (
+            await client.post(
+                f"{_PREFIX}/conversations/{conversation_id}/messages/{first_answer}/retry",
+                json={}, headers=auth_headers,
+            )
+        ).status_code == 202
+
+        provider = scripted_turn.provider(text("MOOD:knowing\n\nAn answer to Q1."))
+        scripted_turn(provider)
+
+        from backend.app.services.llm_chat import run_chat_turn_bg
+
+        await run_chat_turn_bg(_TEST_USER_ID, conversation_id, first_answer)
+
+        blob = " ".join(m["content"] for m in provider.sent[0]["messages"])
+        assert "Q2" not in blob
+        assert "A2" not in blob
+
+    async def test_a_retry_is_refused_while_another_turn_is_live(
+        self, client, auth_headers, no_turns
+    ):
+        """Two runs on one thread would hold two of the four agent slots."""
+        await _seed_athlete()
+        conversation_id, first_answer = await self._thread_with_an_older_failure(
+            client, auth_headers
+        )
+        # A third question, left in flight.
+        await client.post(
+            f"{_PREFIX}/conversations/{conversation_id}/messages",
+            json={"message": "Q3"}, headers=auth_headers,
+        )
+        resp = await client.post(
+            f"{_PREFIX}/conversations/{conversation_id}/messages/{first_answer}/retry",
+            json={}, headers=auth_headers,
+        )
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["code"] == "chat_turn_in_flight"

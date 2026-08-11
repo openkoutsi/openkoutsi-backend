@@ -463,13 +463,24 @@ async def _turn_stream(
     there are a handful per run, and each one is a natural place to stop before
     committing to another round of paid work.
     """
+    checked_prose = False
     try:
         async for item in agentic_stream(request, usage_out):
-            if isinstance(item, AgentProgress) and not await _still_ours(
+            # Progress markers, plus the first character of prose. The markers
+            # alone leave one gap: the final answering turn emits no marker, so a
+            # settle landing between the last one and the first text delta would
+            # be undone by ``_set_text`` writing ``pending`` unconditionally.
+            # Narrow — text flushes touch the clock every 500 ms, so the row
+            # cannot go stale once prose is arriving — but it is one query per
+            # run to close rather than to document.
+            first_prose = isinstance(item, str) and bool(item) and not checked_prose
+            if (isinstance(item, AgentProgress) or first_prose) and not await _still_ours(
                 session, message_id
             ):
                 error["abandoned"] = True
                 raise ChatTurnAbandoned(message_id)
+            if first_prose:
+                checked_prose = True
             yield item
     except AgenticUnavailable as exc:
         error["code"] = exc.code
@@ -533,21 +544,35 @@ async def run_chat_turn_bg(
             now = local_now(app_cfg.get("timezone"))
             today = now.date()
 
-            prior = (
+            # Everything *before* the row being written, not merely everything
+            # other than it. The two are the same thing for a fresh question,
+            # which is why the difference stayed invisible until retries existed:
+            # a retried row need not be last, and "all but this one" then feeds
+            # the model messages from after the question it is answering — and
+            # loses that question entirely, since the pairing rule gives its
+            # answer slot away to a later turn. The result was a completed
+            # exchange with nothing pending, which the model would dutifully
+            # continue and we would store as the answer.
+            #
+            # Sliced by position rather than by ``created_at``: ``_start_turn``
+            # stamps a question and its answer-to-be with the same instant, so a
+            # timestamp comparison would drop the question along with the rest.
+            thread = (
                 (
                     await session.execute(
                         select(ChatMessage)
-                        .where(
-                            ChatMessage.conversation_id == conversation_id,
-                            ChatMessage.id != assistant_message_id,
-                        )
+                        .where(ChatMessage.conversation_id == conversation_id)
                         .order_by(ChatMessage.created_at.asc())
                     )
                 )
                 .scalars()
                 .all()
             )
-            history = build_wire_history(list(prior))
+            position = next(
+                (i for i, m in enumerate(thread) if m.id == assistant_message_id),
+                len(thread),
+            )
+            history = build_wire_history(list(thread[:position]))
 
             tool_names: list[str] = []
             error: dict = {"code": CODE_UNAVAILABLE}

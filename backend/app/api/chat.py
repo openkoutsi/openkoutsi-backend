@@ -473,6 +473,14 @@ async def retry_message(
     Re-running the existing row avoids all three: one question, one answer slot,
     one charge. The failed row goes back to ``queued`` and the same background
     task picks it up, so the client polls exactly as it did the first time.
+
+    Any failed row in the thread may be retried, not only the newest. That is
+    safe because the run builds its history from the messages *before* the row it
+    is answering (see ``llm_chat.run_chat_turn_bg``) rather than from everything
+    else in the thread — so an older retry gets the question it is actually
+    answering and nothing from after it. The web app only ever offers the newest,
+    but this endpoint does not lean on that: two client-side guards are not where
+    a server-side invariant belongs.
     """
     ctx, session = ctx_session
     athlete = await _athlete(session)
@@ -496,6 +504,21 @@ async def retry_message(
             detail={
                 "code": CHAT_TURN_IN_FLIGHT,
                 "message": "That answer is not waiting to be retried.",
+            },
+        )
+
+    # Same one-at-a-time rule `_start_turn` applies: retrying an older failure
+    # while a newer question is still being answered would put two runs on one
+    # thread, each holding an agent slot.
+    if any(
+        m.status in (STATUS_QUEUED, STATUS_PENDING)
+        for m in await _messages_of(session, conversation_id)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": CHAT_TURN_IN_FLIGHT,
+                "message": "Koutsi is still answering your last question.",
             },
         )
 
