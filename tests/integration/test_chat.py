@@ -436,8 +436,73 @@ class TestTurnExecution:
         assert answer.status == STATUS_COMPLETE
         assert answer.content == "MOOD:knowing\n\nYour form is negative because of last week."
         assert answer.progress is None
-        # The footer's material: names only, never arguments or results.
+        # The steps the thread draws: names only, never arguments or results.
         assert answer.tool_names == ["get_training_status"]
+
+    async def test_a_live_turn_carries_the_steps_it_has_already_taken(
+        self, client, auth_headers, no_turns, scripted_turn, usage_db
+    ):
+        """A poll mid-run sees the finished lookups, not only the current one.
+
+        The thread shows each lookup where it happened, which it can only do if
+        the row carries them while the run is still gathering. Writing
+        ``tool_names`` once at the end would leave the timeline empty through the
+        slow part and then land three steps at once alongside the answer, as
+        though none of them had taken any time.
+        """
+        from sqlalchemy import select
+
+        from tests.unit.test_llm_agent import FakeDispatch, calls, text
+
+        await _seed_athlete()
+        conversation_id, answer_id = await self._start(client, auth_headers)
+
+        seen: list[list[str] | None] = []
+
+        class _PeekingDispatch(FakeDispatch):
+            """Reads the row as a polling browser would: from its own session.
+
+            The run holds the row in its own identity map with
+            ``expire_on_commit=False``, so asking it would answer the wrong
+            question — this has to go to the file, which is where the steps are
+            committed.
+            """
+
+            async def __call__(self, caller, name, arguments=None, **kwargs):
+                async with get_user_session_factory(_TEST_USER_ID)() as s:
+                    row = (
+                        await s.execute(
+                            select(ChatMessage).where(ChatMessage.id == answer_id)
+                        )
+                    ).scalar_one()
+                    seen.append(row.tool_names)
+                return await super().__call__(caller, name, arguments, **kwargs)
+
+        scripted_turn(
+            scripted_turn.provider(
+                calls((0, "c1", "get_training_status", "{}")),
+                calls((0, "c2", "get_goal_progress", "{}")),
+                text("MOOD:knowing\n\nThree weeks out, you are fine."),
+            ),
+            _PeekingDispatch(
+                scripted_turn.tool("get_training_status", {"ctl": 60}),
+                scripted_turn.tool("get_goal_progress", {"on_track": True}),
+            ),
+        )
+
+        from backend.app.services.llm_chat import run_chat_turn_bg
+
+        await run_chat_turn_bg(_TEST_USER_ID, conversation_id, answer_id)
+
+        # Each dispatch sees every step up to and including its own: the marker
+        # is written and committed before the call it announces is made.
+        assert seen == [
+            ["get_training_status"],
+            ["get_training_status", "get_goal_progress"],
+        ]
+        answer = (await _rows())[1]
+        assert answer.status == STATUS_COMPLETE
+        assert answer.tool_names == ["get_training_status", "get_goal_progress"]
 
     async def test_the_stored_transcript_holds_no_synthetic_turns(
         self, client, auth_headers, no_turns, scripted_turn, usage_db

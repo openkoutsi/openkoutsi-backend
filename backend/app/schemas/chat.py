@@ -18,8 +18,9 @@ class ChatMessageResponse(BaseModel):
     #: Why a turn failed, as a key the web app localises — see
     #: ``services.llm_agent``'s ``CODE_*`` constants.
     error_code: Optional[str] = None
-    #: Registry tool names this turn consulted, for the "Koutsi looked at…"
-    #: footer. Never the arguments and never the results.
+    #: Registry tool names this turn consulted, in call order, for the steps the
+    #: thread shows ahead of the answer. Present and growing while the turn is
+    #: still gathering. Never the arguments and never the results.
     tool_names: Optional[list[str]] = None
     created_at: datetime
 

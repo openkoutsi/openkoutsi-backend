@@ -599,10 +599,22 @@ async def run_chat_turn_bg(
                     name = code[len(PROGRESS_TOOL_PREFIX) :]
                     # The loop holds one code across the tool call *and* the turn
                     # that reads its result, so the same name arrives twice in a
-                    # row; the footer wants the list of what was consulted, not a
+                    # row; the thread wants the list of what was consulted, not a
                     # transcript of the progress line.
                     if not tool_names or tool_names[-1] != name:
                         tool_names.append(name)
+                    # Written through on every step rather than only at the end.
+                    # The thread shows each lookup where it happened, in front of
+                    # the answer it fed, so a turn still gathering has to be able
+                    # to show the steps already behind it — otherwise the
+                    # timeline stays empty for the whole slow part and then three
+                    # steps appear at once, with the answer, having apparently
+                    # taken no time at all.
+                    #
+                    # Copied on assignment: handing SQLAlchemy the same list
+                    # object back is no net change to flush, so the row would sit
+                    # on whatever the first step wrote.
+                    row.tool_names = list(tool_names)
                 _touch()
 
             def _finish(text: str) -> None:
@@ -612,7 +624,7 @@ async def run_chat_turn_bg(
                 # A row that was force-failed and then answered anyway must not
                 # keep the failure's code alongside a `complete` status.
                 row.error_code = None
-                row.tool_names = tool_names or None
+                row.tool_names = list(tool_names) if tool_names else None
                 usage = (usage_ref.get("ref") or {}).get("usage") or {}
                 row.prompt_tokens = usage.get("prompt_tokens")
                 row.completion_tokens = usage.get("completion_tokens")
@@ -635,7 +647,7 @@ async def run_chat_turn_bg(
                 row.status = STATUS_ERROR
                 row.progress = None
                 row.error_code = error["code"]
-                row.tool_names = tool_names or None
+                row.tool_names = list(tool_names) if tool_names else None
                 _touch()
 
             request = AgentRequest(

@@ -29,8 +29,11 @@ and the issue left room for it. Three reasons, in order of weight:
    answered; the lookups in between are working, and the GDPR export is more
    honest for containing the conversation rather than the machinery.
 
-``tool_names`` keeps only the names, for the "Koutsi looked at…" footer, drawn
-from the same vocabulary as issue #43's progress codes.
+``tool_names`` keeps only the names, in call order, so the thread can show each
+lookup where it happened — drawn from the same vocabulary as issue #43's progress
+codes. It is written through on every step rather than only when the turn
+settles, because a turn that is still gathering is exactly when that record is
+worth showing.
 """
 
 import uuid
@@ -126,8 +129,10 @@ class ChatMessage(UserBase):
     #: gets "Koutsi is busy finishing your daily check-in" rather than one
     #: generic apology for five quite different causes.
     error_code: Mapped[Optional[str]] = mapped_column(String, nullable=True)
-    #: Registry tool names this turn called, in call order, for the
-    #: "Koutsi looked at…" footer. Never the arguments or the results.
+    #: Registry tool names this turn called, in call order, for the steps the
+    #: thread shows ahead of the answer. Grows as the run makes them, so a live
+    #: turn's timeline is the one being built rather than one that appears whole
+    #: at the end. Never the arguments or the results.
     tool_names: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     prompt_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     completion_tokens: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
