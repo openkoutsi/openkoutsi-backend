@@ -26,6 +26,7 @@ import _bootstrap  # noqa: F401,E402
 from backend.app.services import (  # noqa: E402
     llm_activity_analyzer as activity_svc,
     llm_agent as agent_svc,
+    llm_chat as chat_svc,
     llm_goal_guidance as goal_svc,
     llm_plan_generator as plan_svc,
     llm_training_status_analyzer as status_svc,
@@ -34,6 +35,7 @@ from backend.app.services import (  # noqa: E402
 from fixtures.scenarios import (  # noqa: E402
     ACTIVITY_SCENARIOS,
     AGENTIC_SCENARIOS,
+    CHAT_SCENARIOS,
     GOAL_SCENARIOS,
     PLAN_SCENARIOS,
     STATUS_SCENARIOS,
@@ -84,6 +86,29 @@ def _goal(s: dict) -> tuple[str, str]:
             s["current_metric"], s["active_plan"], s["now"],
         ),
     )
+
+
+def _chat(scenario: dict) -> dict:
+    """One chat turn, with the stored dialogue replayed as the loop would.
+
+    The system prompt comes from ``llm_chat.build_chat_system_prompt``, so the
+    four-band scope policy graded here is byte-identical to the one production
+    sends — which is the entire point: a prompt edit that weakens the medical
+    band should move these scores rather than being paraphrased into staleness.
+
+    Tools are offered, because a chat turn always has them and refusing to
+    answer a medical question is a *different* behaviour when the model could
+    have gone and looked first. The history carries no tool results: chat stores
+    dialogue only (see ``models.chat_orm``), so this is the real shape.
+    """
+    system = chat_svc.build_chat_system_prompt(
+        scenario.get("locale"), scenario.get("coaching_style")
+    )
+    messages = [{"role": "system", "content": system}, *scenario["history"]]
+    return {
+        "prompt": messages,
+        "config": {"tools": agent_svc.tool_definitions(agent_svc.all_tools())},
+    }
 
 
 _FAMILIES = {
@@ -152,6 +177,12 @@ def build(context: dict):
     variables = context.get("vars", {})
     family = variables["family"]
     scenario = variables["scenario"]
+    if family == "chat":
+        if scenario not in CHAT_SCENARIOS:
+            raise ValueError(
+                f"unknown chat scenario {scenario!r} (have {sorted(CHAT_SCENARIOS)})"
+            )
+        return _chat(CHAT_SCENARIOS[scenario])
     if family == "agentic":
         if scenario not in AGENTIC_SCENARIOS:
             raise ValueError(

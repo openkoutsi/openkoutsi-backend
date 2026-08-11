@@ -68,6 +68,51 @@ class Settings(BaseSettings):
     # provider. Lower it (1–2) for a single local GPU.
     agent_max_concurrent_runs: int = 4
 
+    # ── Conversational Koutsi (issue #44) ─────────────────────────────────────
+    # Chat is the first LLM surface the *athlete* can trigger arbitrarily often,
+    # and every turn is a full agent run rather than one completion. Everything
+    # else in the platform is bounded by "one ride, one analysis" or "once a
+    # day"; these are the bounds that replace that.
+
+    # How long an interactive turn may sit queued waiting for one of the
+    # `agent_max_concurrent_runs` slots before giving up. Unlike a background
+    # run, chat has no single-shot prompt to degrade to, so refusing instantly
+    # would just lose the athlete's question — but the wait has to be bounded,
+    # or it becomes the spinner the immediate refusal was designed to avoid.
+    chat_queue_wait_seconds: float = 45.0
+
+    # Tool-calling rounds a chat turn may spend before it is made to answer.
+    # Lower than the status card's six: a card is one broad question wanting
+    # several lookups, while a conversation can ask its follow-up as a *turn*
+    # instead of spending a round on it.
+    chat_max_rounds: int = 4
+
+    # Turns per rolling day, and per single conversation. The per-conversation
+    # cap is not primarily about cost — it is the point past which replaying a
+    # thread is worse value than starting a fresh one.
+    chat_max_turns_per_day: int = 50
+    chat_max_turns_per_conversation: int = 40
+
+    # Longest single question accepted, in characters. Also what stops one
+    # pathological message from consuming the whole history budget below.
+    chat_max_message_chars: int = 4000
+
+    # Character budget for replayed dialogue on each turn, before the system
+    # prompt and this turn's tool results. Tool results are never stored
+    # (`models/chat_orm`), so this bounds prose only and can be generous.
+    chat_history_chars: int = 12000
+
+    # Minutes without a progress commit before a chat turn is declared dead.
+    # Shorter than the daily card's 30 — that runs in the background with nobody
+    # watching, and this has someone waiting on it — but not as short as it first
+    # looks like it could be. The clock is touched by progress markers and text
+    # flushes, and a tool round emits one marker and then no text at all while
+    # the model composes the call and reasons over the result, so the gap between
+    # two commits is a whole completion on a slow local model. Three minutes
+    # declared healthy runs dead; ten is still bounded, and an athlete who has
+    # waited that long has navigated away and will have the row resume on return.
+    chat_stuck_minutes: int = 10
+
     # Path to the dedicated LLM-usage database (append-only per-call token
     # accounting for instance-paid calls; issue #9). Kept in its own SQLite file
     # so its unbounded, high-volume rows can be pruned/rotated independently of

@@ -17,6 +17,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from backend.app.core.config import settings
+import backend.app.models.chat_orm  # noqa: F401 — populate UserBase.metadata
 import backend.app.models.message_orm  # noqa: F401 — populate UserBase.metadata
 import backend.app.models.user_orm  # noqa: F401 — populate UserBase.metadata
 from backend.app.db.base import UserBase

@@ -254,6 +254,7 @@ async def _resolve_personal_access_token(
     # tokens can be minted freely, so per-token buckets would make the limit
     # multiplicative in a number nothing caps. The token id is recorded too, for
     # anything that wants per-token attribution rather than throttling.
+    request.state.principal_user_id = token.user_id
     request.state.pat_user_id = token.user_id
     request.state.pat_token_id = token_id
     audit.pat_request(
@@ -347,6 +348,12 @@ async def get_current_user(
         return await _resolve_personal_access_token(request, token, registry_session)
 
     ctx = await validate_session_token(token, registry_session)
+    # Same rate-limit principal as the token path above (issue #44). Without it
+    # every signed-in request falls back to the address key, which is both too
+    # strict (one household, one bucket) and too loose (one user, two browsers,
+    # two buckets) — and chat is the first athlete-triggered LLM surface for
+    # which that difference costs real money.
+    request.state.principal_user_id = ctx.user_id
     # Release the pool connection immediately — the user object is no longer
     # needed, but the dependency would otherwise keep the session (and its pool
     # slot) alive until request end while the per-user session is in use.

@@ -182,6 +182,24 @@ LLM_ALLOWED_SERVERS=               # e.g. http://localhost:11434/v1,https://api.
 # local GPU, raise it for a hosted provider.
 AGENT_MAX_CONCURRENT_RUNS=4
 
+# Conversational Koutsi (issue #44). Chat is the first LLM surface the *athlete*
+# can trigger arbitrarily often, and every turn is a full agent run rather than
+# one completion — so it carries its own bounds instead of relying on "one ride,
+# one analysis". Unlike a background run it has no single-shot prompt to fall
+# back to, so a turn that can't get one of the AGENT_MAX_CONCURRENT_RUNS slots
+# waits (visibly, as a "queued" state) rather than being refused; the wait is
+# bounded so it can't become an endless spinner.
+CHAT_QUEUE_WAIT_SECONDS=45
+CHAT_MAX_ROUNDS=4
+CHAT_MAX_TURNS_PER_DAY=50
+CHAT_MAX_TURNS_PER_CONVERSATION=40
+CHAT_MAX_MESSAGE_CHARS=4000
+CHAT_HISTORY_CHARS=12000
+# Minutes without progress before a chat turn is declared dead. Much shorter
+# than the daily card's 30: that runs with nobody watching, this has someone
+# waiting on it.
+CHAT_STUCK_MINUTES=10
+
 # Privacy policy (GDPR). The consent screen links to this URL. It defaults to
 # the canonical koutsi.dev policy; if you self-host you are your own data
 # controller and should point this at your own privacy policy.

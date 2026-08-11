@@ -135,6 +135,7 @@ def create_app() -> FastAPI:
     from backend.app.api.health import router as health_router
     from backend.app.api.messages import router as messages_router
     from backend.app.api.achievements import router as achievements_router
+    from backend.app.api.chat import router as chat_router
     from backend.app.api.tokens import router as tokens_router
     from backend.app.mcp.server import create_mcp_router
 
@@ -172,6 +173,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router, prefix="/api")
     app.include_router(messages_router, prefix="/api")
     app.include_router(achievements_router, prefix="/api")
+    app.include_router(chat_router, prefix="/api")
     app.include_router(tokens_router, prefix="/api")
 
     # Resolve every route's personal-access-token policy once, here, rather

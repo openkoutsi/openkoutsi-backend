@@ -84,7 +84,7 @@ import json
 import logging
 import time
 from collections.abc import AsyncIterator, Callable, Iterator
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Optional
@@ -200,6 +200,28 @@ TRUNCATION_MARKER = (
     "you need the rest.]"
 )
 
+# ── Why a run could not be served agentically ───────────────────────────────
+#
+# Carried on :class:`AgenticUnavailable`. Surfaces with a blob prompt ignore
+# these entirely; chat renders one localised sentence per code.
+
+#: No more specific cause — the default.
+CODE_UNAVAILABLE = "unavailable"
+#: Every agent slot was taken, and stayed taken for as long as we waited.
+CODE_BUSY = "busy"
+#: This model cannot call tools: flagged ``tools_supported=false``, or it
+#: rejected the ``tools`` param outright. A settled property of the provider
+#: rather than a transient failure, so the web app disables chat on it rather
+#: than inviting a retry that will fail the same way.
+CODE_TOOLS_UNSUPPORTED = "tools_unsupported"
+#: The provider answered, but with neither tool calls nor prose.
+CODE_NO_ANSWER = "no_answer"
+#: A 429, a 5xx, or a context-length 400 — worth retrying.
+CODE_UPSTREAM = "upstream"
+#: The provider could not be reached at all: reset connection, timeout, DNS.
+CODE_UNREACHABLE = "unreachable"
+
+
 #: Runs in flight in this process. See ``Settings.agent_max_concurrent_runs``.
 #:
 #: A plain counter rather than an :class:`asyncio.Semaphore`, because the one
@@ -213,32 +235,111 @@ TRUNCATION_MARKER = (
 _active_runs = 0
 
 
+def _try_claim_slot() -> bool:
+    """Take a slot if one is free. Never waits, never raises.
+
+    The check and the claim are one indivisible step by construction: asyncio is
+    cooperative and there is no ``await`` between reading the counter and
+    incrementing it, which is the property the counter exists for (see
+    :data:`_active_runs`). Both acquisition policies below are built on this, so
+    neither can reintroduce the check-then-acquire gap.
+    """
+    global _active_runs
+    if _active_runs >= max(1, int(settings.agent_max_concurrent_runs)):
+        return False
+    _active_runs += 1
+    return True
+
+
+def _release_slot() -> None:
+    global _active_runs
+    _active_runs -= 1
+
+
 @contextmanager
 def _run_slot() -> Iterator[None]:
-    """Claim a slot for one run, or refuse immediately.
+    """Claim a slot for one background run, or refuse immediately.
 
     Refusing is the design. Waiting would push the run towards the 30-minute
     pending timeout with the athlete watching a spinner, and the blob prompt is
     a worse answer available *now* — the better trade under load.
     """
-    global _active_runs
-    limit = max(1, int(settings.agent_max_concurrent_runs))
-    if _active_runs >= limit:
-        raise AgenticUnavailable(f"all {limit} agent slots are in use")
-    _active_runs += 1
+    if not _try_claim_slot():
+        limit = max(1, int(settings.agent_max_concurrent_runs))
+        raise AgenticUnavailable(
+            f"all {limit} agent slots are in use", code=CODE_BUSY
+        )
     try:
         yield
     finally:
-        _active_runs -= 1
+        _release_slot()
+
+
+#: How often a queued interactive turn re-checks for a free slot.
+_SLOT_POLL_INTERVAL_S = 0.25
+
+
+@asynccontextmanager
+async def _waited_run_slot(timeout_s: float) -> AsyncIterator[None]:
+    """Claim a slot for an interactive run, waiting up to ``timeout_s`` (#44).
+
+    The opposite trade from :func:`_run_slot`, for the opposite situation. That
+    one refuses instantly because a *better answer exists* — the blob prompt —
+    and waiting would only delay it. Chat has no blob prompt, so refusing
+    instantly buys nothing and costs the athlete their question: the four slots
+    are shared with the background training-status runs that fire on dashboard
+    load, and "ask a question just after opening the dashboard" is an ordinary
+    thing to do, not an edge case.
+
+    So an interactive turn waits, and the wait is *visible* — the assistant row
+    sits in ``queued`` until the slot is claimed, which is a state the athlete
+    can read rather than a spinner that means nothing. The bound is what keeps
+    this from becoming the failure mode :func:`_run_slot` was written to avoid.
+
+    Polling rather than an :class:`asyncio.Event` signalled on release: the
+    counter is a plain module global shared by whatever loops this process runs,
+    and an Event is bound to the loop that created it. A quarter-second poll on
+    a path that is idle unless the instance is saturated is not worth the
+    loop-affinity bug that would buy. Waiters are not FIFO — under contention
+    whichever turn next wakes wins — which on a single-athlete instance with
+    four slots is a distinction without a difference.
+    """
+    deadline = time.monotonic() + max(0.0, timeout_s)
+    while not _try_claim_slot():
+        if time.monotonic() >= deadline:
+            limit = max(1, int(settings.agent_max_concurrent_runs))
+            raise AgenticUnavailable(
+                f"all {limit} agent slots were still in use after "
+                f"{timeout_s:.0f}s",
+                code=CODE_BUSY,
+            )
+        await asyncio.sleep(_SLOT_POLL_INTERVAL_S)
+    try:
+        yield
+    finally:
+        _release_slot()
 
 
 class AgenticUnavailable(Exception):
     """This run cannot be served agentically; use the blob prompt instead.
 
-    Never surfaced to the athlete. It means "take the other path", and every
-    raise site is a runtime discovery about the provider or the load on this
-    process, not an error in the request.
+    Never surfaced to the athlete **on the surfaces that have a blob prompt**.
+    For them it means "take the other path", and every raise site is a runtime
+    discovery about the provider or the load on this process, not an error in
+    the request.
+
+    Chat (issue #44) has no other path — the question is arbitrary, so there is
+    no pre-assembled context to fall back to — which is what ``code`` is for.
+    There it is the difference between five quite different causes and one
+    generic apology: "Koutsi is busy finishing your daily check-in, try again in
+    a moment" is a true and actionable sentence, and "something went wrong" is
+    neither. A machine key rather than the message, because the message is a log
+    line and the athlete reads fourteen languages.
     """
+
+    def __init__(self, message: str, *, code: str = CODE_UNAVAILABLE) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 # ── The OpenAI chat-completions tool dialect ────────────────────────────────
@@ -449,6 +550,33 @@ class AgentRequest:
     today: date = field(default_factory=date.today)
     tools: Optional[list[Tool]] = None
 
+    # ── Conversational runs (issue #44) ─────────────────────────────────────
+
+    #: Prior turns, oldest first, as ``{"role": …, "content": …}``. When set it
+    #: replaces ``user_prompt`` as the loop's starting history, with the new
+    #: question already its last entry — trimming and system-prompt assembly
+    #: happen in :mod:`.llm_chat`, which owns what a conversation *is*, leaving
+    #: this loop the one job it already had.
+    history: Optional[list[dict]] = None
+
+    #: Is a human waiting on this run? Three behaviours turn on it, and all
+    #: three are cases where the right answer for a card is the wrong one for a
+    #: conversation:
+    #:
+    #: * the first turn's prose may be the answer. The card suppresses it,
+    #:   correctly — an answer written before looking at anything is guesswork
+    #:   about *this athlete's training*. But "what does TSB actually mean?" is
+    #:   a coaching question with no lookup behind it, and refusing to answer it
+    #:   without calling a tool first would be a worse conversation, not a
+    #:   safer one;
+    #: * a slot is waited for rather than refused (:func:`_waited_run_slot`);
+    #: * failures carry a ``code`` the athlete sees, since there is no blob
+    #:   prompt to quietly serve instead.
+    conversational: bool = False
+
+    #: How long an interactive turn may sit queued before giving up.
+    slot_wait_s: float = 0.0
+
 
 def _final_reminder(format_rule: str) -> dict:
     """The format rule, restated as a system message on the answering turn.
@@ -603,16 +731,32 @@ async def agentic_stream(
         raise
 
 
-async def _run(request: AgentRequest, usage_out: dict) -> AsyncIterator[StreamItem]:
+@asynccontextmanager
+async def _slot_for(request: AgentRequest) -> AsyncIterator[None]:
+    """The acquisition policy this run's caller is entitled to.
+
+    A background run refuses instantly and falls back; an interactive one waits,
+    because it has nothing to fall back to. See :func:`_waited_run_slot`.
+    """
+    if request.conversational and request.slot_wait_s > 0:
+        async with _waited_run_slot(request.slot_wait_s):
+            yield
+        return
     # Claimed before the first `await`, so a burst of runs starting together
     # cannot all see a free slot and then all take it.
     with _run_slot():
+        yield
+
+
+async def _run(request: AgentRequest, usage_out: dict) -> AsyncIterator[StreamItem]:
+    async with _slot_for(request):
         setup = await resolve_stream_setup(
             request.athlete, request.user_id, usage_out=usage_out
         )
         if not setup.cfg.tools_supported:
             raise AgenticUnavailable(
-                f"preset for model {setup.cfg.model!r} is flagged tools_supported=false"
+                f"preset for model {setup.cfg.model!r} is flagged tools_supported=false",
+                code=CODE_TOOLS_UNSUPPORTED,
             )
 
         async for item in _drive(request, setup, usage_out):
@@ -633,7 +777,18 @@ async def _drive(
     # house style (`llm_analysis_context`) is a system message on turn five as
     # much as on turn one — the hoster's rules are not something three tool
     # results are allowed to push out of the model's attention.
-    history: list[dict] = [{"role": "user", "content": request.user_prompt}]
+    #
+    # A conversational run starts from the stored dialogue (issue #44) with the
+    # new question already at the end of it; every other run starts from the one
+    # prompt its surface built. Copied either way: the tool rounds below append
+    # to this list, and those appends must not reach the caller's list — that is
+    # the trimmed *wire* history, and writing tool traffic back into it is how
+    # the loop's scratch work would end up in the stored transcript.
+    history: list[dict] = (
+        list(request.history)
+        if request.history is not None
+        else [{"role": "user", "content": request.user_prompt}]
+    )
 
     yield AgentProgress(PROGRESS_THINKING)
 
@@ -658,11 +813,19 @@ async def _drive(
         async for item in _collect(
             _stream_turn(setup.cfg, messages, definitions, run_usage),
             turn,
-            # Turn zero's prose is never the answer: it would be one written
-            # without having looked at anything, since the agentic prompt
-            # carries no data of its own. Collect it for the replayed assistant
-            # message, but never emit it.
-            allow_text=rounds > 0,
+            # Turn zero's prose is never the answer *on a card*: it would be one
+            # written without having looked at anything, since the agentic
+            # prompt carries no data of its own. Collect it for the replayed
+            # assistant message, but never emit it.
+            #
+            # A conversation is the exception (issue #44). Not every question
+            # has a lookup behind it — "what does TSB actually mean?", "why do
+            # you keep saying my form is negative?" — and there the answer
+            # written straight off is the right one. The preamble guard below
+            # still applies: prose that turns out to precede a tool call is
+            # discarded, so "let me look at your last four weeks…" never lands
+            # in the answer even here.
+            allow_text=rounds > 0 or request.conversational,
         ):
             yield item
 
@@ -674,7 +837,14 @@ async def _drive(
             raise AgenticUnavailable(
                 "the provider accepted 'tools' but called none"
                 if rounds == 0
-                else "the provider returned neither tool calls nor an answer"
+                else "the provider returned neither tool calls nor an answer",
+                # On a card, "called no tools" means an answer built from no
+                # data, and the blob prompt is strictly better. A conversational
+                # run never reaches here for that reason — its turn-zero prose
+                # is allowed, so answering without tools sets `emitted` and
+                # returns above. Getting here at all means the provider produced
+                # nothing whatsoever.
+                code=CODE_NO_ANSWER if request.conversational else CODE_UNAVAILABLE,
             )
 
         if turn.emitted:
@@ -738,7 +908,9 @@ async def _drive(
     ):
         yield item
     if not final.emitted:
-        raise AgenticUnavailable("the forced final turn produced no answer")
+        raise AgenticUnavailable(
+            "the forced final turn produced no answer", code=CODE_NO_ANSWER
+        )
     yield AgentProgress(None)
 
 
@@ -816,7 +988,9 @@ async def _stream_turn(
                 "(model=%s) — falling back to the single-shot prompt",
                 cfg.model,
             )
-            raise AgenticUnavailable("provider rejected the 'tools' param") from exc
+            raise AgenticUnavailable(
+                "provider rejected the 'tools' param", code=CODE_TOOLS_UNSUPPORTED
+            ) from exc
         if definitions and is_our_tool_schema_error(exc):
             # Our own pydantic model is broken. Degrading here would hide it
             # behind a quietly worse answer for every athlete on every provider.
@@ -835,7 +1009,7 @@ async def _stream_turn(
             cfg.model,
             exc,
         )
-        raise AgenticUnavailable(f"upstream error: {exc}") from exc
+        raise AgenticUnavailable(f"upstream error: {exc}", code=CODE_UPSTREAM) from exc
     except httpx.RequestError as exc:
         # A connection reset, a read timeout, DNS. Same reasoning: nothing has
         # been written, and the other path may well reach the same server fine
@@ -846,7 +1020,9 @@ async def _stream_turn(
             cfg.model,
             exc,
         )
-        raise AgenticUnavailable(f"upstream request failed: {exc}") from exc
+        raise AgenticUnavailable(
+            f"upstream request failed: {exc}", code=CODE_UNREACHABLE
+        ) from exc
     finally:
         merged = merge_usage(run_usage.get("usage"), turn_usage.get("usage"))
         if merged is not None:
