@@ -29,6 +29,7 @@ from backend.app.db.user_session import get_user_session_factory, init_user_db
 from backend.app.models.chat_orm import (
     ROLE_ASSISTANT,
     ROLE_USER,
+    STATUS_ERROR,
     STATUS_PENDING,
     STATUS_QUEUED,
     ChatConversation,
@@ -42,6 +43,7 @@ from backend.app.schemas.chat import (
     ChatConversationDetail,
     ChatConversationSummary,
     ChatMessageResponse,
+    ChatRetryBody,
     ChatTurnBody,
 )
 from backend.app.services.llm_access import check_llm_access, subscription_required_error
@@ -116,9 +118,7 @@ async def _require_chat_access(
         raise subscription_required_error(access)
 
 
-async def _enforce_budgets(
-    session: AsyncSession, athlete: Athlete, conversation_id: str
-) -> None:
+async def _enforce_daily_budget(session: AsyncSession, athlete: Athlete) -> None:
     now = local_now((athlete.app_settings or {}).get("timezone"))
     if await turns_used_today(session, now=now) >= settings.chat_max_turns_per_day:
         raise _budget_error(
@@ -126,6 +126,12 @@ async def _enforce_budgets(
             "You have used all of today's questions. More become available as "
             "the day rolls on.",
         )
+
+
+async def _enforce_budgets(
+    session: AsyncSession, athlete: Athlete, conversation_id: str
+) -> None:
+    await _enforce_daily_budget(session, athlete)
     if (
         await turns_in_conversation(session, conversation_id)
         >= settings.chat_max_turns_per_conversation
@@ -195,6 +201,13 @@ async def _start_turn(
     ``queued`` from the first moment precisely so the athlete's next poll shows
     the question *and* something happening under it, whether or not an agent
     slot was free — the wait is a state, not a gap.
+
+    The one-turn-at-a-time check below is **best effort, not an invariant**: the
+    read and the insert are separated by awaits with no uniqueness constraint
+    underneath, so two simultaneous posts to the same conversation could both
+    pass it. The web app disables the composer while a turn is live, so this is
+    not reachable by accident, and the blast radius is one athlete's own thread —
+    but do not build anything on it holding absolutely.
     """
     existing = await _messages_of(session, conversation.id)
     if any(
@@ -283,6 +296,8 @@ async def get_availability(
         tools_supported=tools_supported,
         entitled=access.allowed,
         turns_remaining_today=max(0, settings.chat_max_turns_per_day - used),
+        max_turns_per_conversation=settings.chat_max_turns_per_conversation,
+        max_message_chars=settings.chat_max_message_chars,
     )
 
 
@@ -313,15 +328,23 @@ async def create_conversation(
     athlete = await _athlete(session)
     await _require_chat_access(ctx, athlete, registry_session)
 
+    # Refuse *before* the row exists. Committing the conversation first and then
+    # validating leaves a titleless orphan in the athlete's rail for every
+    # rejected opening message — and they accumulate fastest when the athlete is
+    # already being told no, since a spent budget refuses every attempt.
+    text = _validate_message(body.message) if body.message is not None else None
+    if text is not None:
+        # Only the daily cap can bind here; a conversation that does not exist
+        # yet trivially satisfies the per-conversation one.
+        await _enforce_daily_budget(session, athlete)
+
     now = datetime.now(timezone.utc)
     conversation = ChatConversation(created_at=now, updated_at=now)
     session.add(conversation)
     await session.commit()
     await session.refresh(conversation)
 
-    if body.message is not None:
-        text = _validate_message(body.message)
-        await _enforce_budgets(session, athlete, conversation.id)
+    if text is not None:
         await _start_turn(ctx, session, athlete, conversation, text, body.locale)
 
     messages = await _messages_of(session, conversation.id)
@@ -372,6 +395,13 @@ async def delete_conversation(
     is documentation rather than behaviour, and relying on it here would orphan
     every row of a thread an athlete believed they had deleted — health-adjacent
     free text they wrote about their own body.
+
+    A live turn is **not** a reason to refuse. This is a privacy action, and the
+    confirm dialog says the whole thread goes; making the athlete wait out an
+    answer they no longer want — possibly minutes on a slow local model — would
+    be the wrong trade. The run notices on its next progress marker that its row
+    has gone (``llm_chat._still_ours``), stands down and releases its slot,
+    rather than finishing and writing into rows that no longer exist.
     """
     _, session = ctx_session
     conversation = await _get_conversation(conversation_id, session)
@@ -412,5 +442,81 @@ async def send_message(
 
     answer = await _start_turn(
         ctx, session, athlete, conversation, text, body.locale
+    )
+    return ChatMessageResponse.model_validate(answer)
+
+
+@router.post("/conversations/{conversation_id}/messages/{message_id}/retry",
+             response_model=ChatMessageResponse, status_code=202,
+             operation_id="retryChatMessage", summary="Re-run a failed answer")
+@limiter.limit("60/hour")
+async def retry_message(
+    # slowapi reads the key off the request, so the parameter is required by
+    # the decorator even though the handler never touches it.
+    request: Request,
+    conversation_id: str,
+    message_id: str,
+    body: ChatRetryBody = ChatRetryBody(),
+    ctx_session=Depends(get_chat_session),
+    registry_session: AsyncSession = Depends(get_registry_session),
+):
+    """Run a failed turn again **in place**, rather than asking anew.
+
+    The obvious client-side retry — re-post the same text — is wrong in three
+    ways at once, and they compound on exactly the setup most likely to need a
+    retry (a local model that is flaky or not running). The athlete's question
+    appears in the thread twice, verbatim, right after something has visibly
+    gone wrong; the second attempt spends another turn of the daily budget; and
+    the replayed history ends with the same question adjacent to itself, which
+    several chat templates either reject or silently merge.
+
+    Re-running the existing row avoids all three: one question, one answer slot,
+    one charge. The failed row goes back to ``queued`` and the same background
+    task picks it up, so the client polls exactly as it did the first time.
+    """
+    ctx, session = ctx_session
+    athlete = await _athlete(session)
+    await _require_chat_access(ctx, athlete, registry_session)
+    await _get_conversation(conversation_id, session)
+
+    result = await session.execute(
+        select(ChatMessage).where(
+            ChatMessage.id == message_id,
+            ChatMessage.conversation_id == conversation_id,
+        )
+    )
+    answer = result.scalar_one_or_none()
+    if answer is None or answer.role != ROLE_ASSISTANT:
+        raise HTTPException(status_code=404, detail="Message not found")
+    if answer.status != STATUS_ERROR:
+        # Only a failure can be retried. A completed answer would need a new
+        # question, and a live one is already doing what the caller wants.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": CHAT_TURN_IN_FLIGHT,
+                "message": "That answer is not waiting to be retried.",
+            },
+        )
+
+    # The daily cap still applies — a retry is a real run. It is the
+    # *per-conversation* one that must not: the row already exists and is
+    # already counted, so charging it again would make a thread at its limit
+    # impossible to repair.
+    await _enforce_daily_budget(session, athlete)
+
+    now = datetime.now(timezone.utc)
+    answer.status = STATUS_QUEUED
+    answer.content = ""
+    answer.progress = None
+    answer.error_code = None
+    answer.tool_names = None
+    answer.prompt_tokens = None
+    answer.completion_tokens = None
+    answer.updated_at = now
+    await session.commit()
+
+    asyncio.create_task(
+        run_chat_turn_bg(ctx.user_id, conversation_id, answer.id, body.locale)
     )
     return ChatMessageResponse.model_validate(answer)

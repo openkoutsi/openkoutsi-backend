@@ -124,15 +124,25 @@ class TestHistoryTrimming:
             _msg(ROLE_USER, "c" * 40),
         ]
         out = build_wire_history(rows, budget_chars=90)
-        assert [m["content"][0] for m in out] == ["b", "c"]
+        assert [m["content"][0] for m in out] == ["c"]
+
+    def test_turns_are_atomic_so_the_window_never_opens_on_an_answer(self):
+        """Trimming drops whole turns, never half of one.
+
+        A window opening on an assistant message is rejected by
+        Anthropic-compatible gateways outright, and it is what row-at-a-time
+        trimming produces as soon as the budget lands mid-turn.
+        """
+        rows = [
+            _msg(ROLE_USER, "q" * 100),
+            _msg(ROLE_ASSISTANT, "a" * 100),
+            _msg(ROLE_USER, "now"),
+        ]
+        out = build_wire_history(rows, budget_chars=150)
+        assert out[0]["role"] == "user"
+        assert out == [{"role": "user", "content": "now"}]
 
     def test_the_window_stays_contiguous(self):
-        """Never keep a question whose answer was dropped.
-
-        The alternative — preferring the athlete's own text — fits more turns in
-        the same budget and leaves the model reading questions with no answers
-        under them, which it will either answer again or contradict.
-        """
         rows = [
             _msg(ROLE_USER, "q1" * 30),
             _msg(ROLE_ASSISTANT, "a1" * 30),
@@ -141,11 +151,77 @@ class TestHistoryTrimming:
             _msg(ROLE_USER, "q3"),
         ]
         out = build_wire_history(rows, budget_chars=200)
-        roles = [m["role"] for m in out]
-        # Whatever survived, it is a suffix of the original dialogue.
         contents = [m["content"] for m in out]
         assert contents == [r.content for r in rows][-len(contents):]
-        assert roles[-1] == "user"
+        assert out[-1]["role"] == "user"
+
+
+class TestHistoryAlternation:
+    """Roles must strictly alternate, and a failed turn is what breaks it.
+
+    Not a style preference. Everything leaves through the OpenAI
+    chat-completions dialect, but several common Jinja chat templates behind it
+    either reject non-alternating roles or silently merge them — and those are
+    the BYOK local-model setups this feature is built for. It would have broken
+    first on the request right after a failure, which is the retry.
+    """
+
+    def _roles(self, rows):
+        return [m["role"] for m in build_wire_history(rows, budget_chars=10_000)]
+
+    def test_a_failed_turn_does_not_leave_two_adjacent_questions(self):
+        rows = [
+            _msg(ROLE_USER, "Q1"),
+            _msg(ROLE_ASSISTANT, "A1"),
+            _msg(ROLE_USER, "Q2"),
+            _msg(ROLE_ASSISTANT, "", status=STATUS_ERROR),
+            _msg(ROLE_USER, "Q3"),
+        ]
+        assert self._roles(rows) == ["user", "assistant", "user"]
+        assert [m["content"] for m in build_wire_history(rows, budget_chars=10_000)] == [
+            "Q1",
+            "A1",
+            "Q3",
+        ]
+
+    def test_an_unanswered_question_is_dropped_rather_than_dangled(self):
+        """Koutsi never saw it, and leaving it invites answering the wrong one.
+
+        `_CHAT_TOOL_GUIDANCE` tells the model to follow the thread, so a question
+        with no reply under it is an invitation to answer that instead of the
+        one actually being asked.
+        """
+        rows = [
+            _msg(ROLE_USER, "unanswered"),
+            _msg(ROLE_ASSISTANT, "", status=STATUS_ERROR),
+            _msg(ROLE_USER, "live"),
+        ]
+        assert build_wire_history(rows, budget_chars=10_000) == [
+            {"role": "user", "content": "live"}
+        ]
+
+    def test_a_pending_answer_does_not_dangle_its_question_either(self):
+        rows = [
+            _msg(ROLE_USER, "earlier"),
+            _msg(ROLE_ASSISTANT, "half written", status=STATUS_PENDING),
+            _msg(ROLE_USER, "live"),
+        ]
+        assert self._roles(rows) == ["user"]
+
+    def test_alternation_holds_across_several_failures(self):
+        rows = [
+            _msg(ROLE_USER, "Q1"),
+            _msg(ROLE_ASSISTANT, "", status=STATUS_ERROR),
+            _msg(ROLE_USER, "Q2"),
+            _msg(ROLE_ASSISTANT, "A2"),
+            _msg(ROLE_USER, "Q3"),
+            _msg(ROLE_ASSISTANT, "", status=STATUS_ERROR),
+            _msg(ROLE_USER, "Q4"),
+        ]
+        roles = self._roles(rows)
+        assert roles == ["user", "assistant", "user"]
+        for a, b in zip(roles, roles[1:]):
+            assert a != b
 
     def test_the_newest_message_is_never_dropped(self):
         rows = [_msg(ROLE_USER, "x" * 500)]
@@ -156,7 +232,13 @@ class TestHistoryTrimming:
 
     def test_unfinished_and_failed_turns_are_not_replayed(self):
         """A pending row has nothing to say and a failed one is not something
-        Koutsi said — replaying either would put words in its mouth."""
+        Koutsi said — replaying either would put words in its mouth.
+
+        The question they failed to answer goes with them. An earlier version of
+        this test asserted that ``first`` survived alongside ``second``, which is
+        exactly the two-adjacent-user-messages shape that breaks strict chat
+        templates — the assertion was encoding the bug.
+        """
         rows = [
             _msg(ROLE_USER, "first"),
             _msg(ROLE_ASSISTANT, "half-written", status=STATUS_PENDING),
@@ -164,7 +246,6 @@ class TestHistoryTrimming:
             _msg(ROLE_USER, "second"),
         ]
         assert build_wire_history(rows, budget_chars=1000) == [
-            {"role": "user", "content": "first"},
             {"role": "user", "content": "second"},
         ]
 

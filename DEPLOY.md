@@ -198,7 +198,7 @@ CHAT_HISTORY_CHARS=12000
 # Minutes without progress before a chat turn is declared dead. Much shorter
 # than the daily card's 30: that runs with nobody watching, this has someone
 # waiting on it.
-CHAT_STUCK_MINUTES=3
+CHAT_STUCK_MINUTES=10
 
 # Privacy policy (GDPR). The consent screen links to this URL. It defaults to
 # the canonical koutsi.dev policy; if you self-host you are your own data

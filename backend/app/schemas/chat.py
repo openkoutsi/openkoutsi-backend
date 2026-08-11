@@ -3,8 +3,6 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
-from backend.app.core.config import settings
-
 
 class ChatMessageResponse(BaseModel):
     id: str
@@ -56,6 +54,17 @@ class ChatTurnBody(BaseModel):
     locale: Optional[str] = None
 
 
+class ChatRetryBody(BaseModel):
+    """Nothing but the locale — a retry re-runs a question already stored.
+
+    Deliberately not :class:`ChatTurnBody`: taking a message here would invite a
+    client to change the question while claiming to retry it, which is the very
+    thing running the turn in place exists to prevent.
+    """
+
+    locale: Optional[str] = None
+
+
 class ChatConversationCreate(BaseModel):
     #: Optional opening question. When given, the conversation is created and
     #: the first turn started in one round trip.
@@ -81,5 +90,10 @@ class ChatAvailability(BaseModel):
     #: False when the instance gate (issue #9) denies this user.
     entitled: bool
     turns_remaining_today: int
-    max_turns_per_conversation: int = settings.chat_max_turns_per_conversation
-    max_message_chars: int = settings.chat_max_message_chars
+    # Filled by the handler, not defaulted from `settings` here: a default is
+    # evaluated once at import and baked into the class, so it would report a
+    # snapshot of the config rather than what the API is currently enforcing.
+    # The web app gates its composer on both, so a divergence means the UI and
+    # the API disagree about the limit.
+    max_turns_per_conversation: int
+    max_message_chars: int

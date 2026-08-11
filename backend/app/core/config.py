@@ -103,9 +103,15 @@ class Settings(BaseSettings):
     chat_history_chars: int = 12000
 
     # Minutes without a progress commit before a chat turn is declared dead.
-    # Far shorter than the daily card's 30: that runs in the background with
-    # nobody watching, and this has someone waiting on it.
-    chat_stuck_minutes: int = 3
+    # Shorter than the daily card's 30 — that runs in the background with nobody
+    # watching, and this has someone waiting on it — but not as short as it first
+    # looks like it could be. The clock is touched by progress markers and text
+    # flushes, and a tool round emits one marker and then no text at all while
+    # the model composes the call and reasons over the result, so the gap between
+    # two commits is a whole completion on a slow local model. Three minutes
+    # declared healthy runs dead; ten is still bounded, and an athlete who has
+    # waited that long has navigated away and will have the row resume on return.
+    chat_stuck_minutes: int = 10
 
     # Path to the dedicated LLM-usage database (append-only per-call token
     # accounting for instance-paid calls; issue #9). Kept in its own SQLite file

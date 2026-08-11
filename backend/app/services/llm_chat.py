@@ -51,9 +51,9 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import AsyncIterator, Optional
+from typing import Any, AsyncIterator, Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.config import settings
@@ -71,13 +71,16 @@ from ..models.chat_orm import (
 )
 from ..models.user_orm import Athlete
 from .llm_agent import (
+    CODE_BUSY,
+    CODE_TOOLS_UNSUPPORTED,
     CODE_UNAVAILABLE,
+    CODE_UNREACHABLE,
     PROGRESS_TOOL_PREFIX,
     AgenticUnavailable,
     AgentRequest,
     agentic_stream,
 )
-from .llm_streaming import failure_recovery, stream_into_db
+from .llm_streaming import AgentProgress, failure_recovery, stream_into_db
 from .llm_training_status_analyzer import _decorate
 
 log = logging.getLogger(__name__)
@@ -216,44 +219,70 @@ def build_wire_history(
 ) -> list[dict]:
     """The stored dialogue, trimmed, as chat-completion messages.
 
-    Newest-first trimming that keeps a **contiguous** window. The alternative —
-    dropping old assistant prose to keep more of the athlete's questions — fits
-    more turns in the same budget and was rejected: it leaves questions whose
-    answers are missing, and a model reading that will either repeat an answer it
-    already gave or contradict it. A conversation with a gap in the middle is
-    worse than a shorter one.
+    **Complete turns are the unit**, not individual rows, and that is what keeps
+    the result strictly alternating. Filtering rows independently — every user
+    row, only ``complete`` assistant rows — is the obvious implementation and
+    produces a malformed conversation the moment a turn fails, which is exactly
+    the event this feature makes ordinary: two adjacent user messages, or the
+    same question twice after a retry, or a window that opens on an assistant
+    turn once trimming bites.
 
-    The newest message is always included, truncated if it alone would blow the
-    budget, so a turn can never be dropped down to nothing. The API caps a single
-    message at ``chat_max_message_chars`` precisely so this is a backstop rather
-    than a routine event.
+    That matters more here than the shape suggests. Everything leaves through
+    the OpenAI chat-completions dialect, but the servers behind it are not
+    uniformly permissive: several common Jinja chat templates either reject
+    non-alternating roles or silently merge them, and those are precisely the
+    BYOK local-model setups this module exists to accommodate. It would have
+    broken first on the request right after a failure — the retry.
 
-    Only settled prose is replayed: a row still ``pending`` has no content worth
-    sending, and a failed one is not something Koutsi said.
+    So a user turn is replayed only with the completed answer it received. One
+    whose answer failed is **dropped**, which is also closer to the truth: Koutsi
+    never saw it, and leaving it dangling invites the model to answer the old
+    question instead of the new one.
+
+    The newest question is always kept, truncated if it alone would blow the
+    budget, so a turn can never be trimmed down to nothing. The API caps a single
+    message at ``chat_max_message_chars`` so that stays a backstop rather than a
+    routine event.
     """
     budget = budget_chars if budget_chars is not None else settings.chat_history_chars
-    usable = [
-        row
-        for row in rows
-        if (row.content or "").strip()
-        and (row.role == ROLE_USER or row.status == STATUS_COMPLETE)
-    ]
-    if not usable:
-        return []
+
+    # Pair each question with the answer it actually got. `unanswered` ends up
+    # holding the question being answered right now — the only one allowed to
+    # appear without a reply after it.
+    turns: list[list[ChatMessage]] = []
+    unanswered: Optional[ChatMessage] = None
+    for row in rows:
+        has_text = bool((row.content or "").strip())
+        if row.role == ROLE_USER:
+            if has_text:
+                unanswered = row
+            continue
+        if unanswered is not None and row.status == STATUS_COMPLETE and has_text:
+            turns.append([unanswered, row])
+        # Answered or abandoned, the question is spoken for either way: a
+        # pending row has nothing to say yet and a failed one is not something
+        # Koutsi said, so neither leaves the question hanging for the next turn.
+        unanswered = None
+    if unanswered is not None:
+        turns.append([unanswered])
 
     out: list[dict] = []
     spent = 0
-    for row in reversed(usable):
-        content = row.content
+    for turn in reversed(turns):
+        contents = [row.content for row in turn]
+        size = sum(len(c) for c in contents)
         if not out:
-            # The turn being answered. Truncated rather than dropped.
-            if len(content) > budget:
-                content = content[:budget]
-        elif spent + len(content) > budget:
+            # The newest turn is never dropped, only cut down to fit.
+            if size > budget:
+                contents = [c[:budget] for c in contents]
+                size = sum(len(c) for c in contents)
+        elif spent + size > budget:
             break
-        out.append({"role": row.role, "content": content})
-        spent += len(content)
-    out.reverse()
+        out = [
+            {"role": row.role, "content": content}
+            for row, content in zip(turn, contents)
+        ] + out
+        spent += size
     return out
 
 
@@ -276,8 +305,33 @@ def conversation_title(first_message: str, *, limit: int = 60) -> str:
 # ── Budgets ─────────────────────────────────────────────────────────────────
 
 
+#: Failures the athlete is not charged for, because nothing was ever asked of a
+#: provider on their behalf.
+#:
+#: ``busy`` means no agent slot came free and ``tools_unsupported`` means the run
+#: was refused before any request was built; ``unreachable`` got as far as a
+#: connection attempt that failed. Charging a turn for these would be charging
+#: the athlete for openkoutsi's own unavailability — and it compounds, because
+#: the web app offers a retry on exactly these codes, so a local model that is
+#: simply not running could otherwise eat a day's allowance without a single
+#: request reaching anything.
+#:
+#: ``upstream`` and ``no_answer`` are *not* here: those reached a provider and
+#: spent tokens, which somebody paid for.
+UNCHARGED_ERROR_CODES = (CODE_BUSY, CODE_TOOLS_UNSUPPORTED, CODE_UNREACHABLE)
+
+
+def _chargeable() -> Any:
+    """Predicate for turns that count against a budget."""
+    return or_(
+        ChatMessage.status != STATUS_ERROR,
+        ChatMessage.error_code.is_(None),
+        ChatMessage.error_code.notin_(UNCHARGED_ERROR_CODES),
+    )
+
+
 async def turns_used_today(session: AsyncSession, *, now: datetime) -> int:
-    """Assistant turns started in the athlete's own last 24 hours.
+    """Chargeable assistant turns started in the athlete's own last 24 hours.
 
     A rolling window rather than a calendar day: a calendar reset needs the
     athlete's timezone to mean anything, and "you get more at midnight somewhere"
@@ -287,7 +341,11 @@ async def turns_used_today(session: AsyncSession, *, now: datetime) -> int:
     result = await session.execute(
         select(func.count())
         .select_from(ChatMessage)
-        .where(ChatMessage.role == ROLE_ASSISTANT, ChatMessage.created_at >= since)
+        .where(
+            ChatMessage.role == ROLE_ASSISTANT,
+            ChatMessage.created_at >= since,
+            _chargeable(),
+        )
     )
     return int(result.scalar_one())
 
@@ -323,6 +381,13 @@ async def settle_stuck_turns(session: AsyncSession, *, now: datetime) -> int:
     issue #91 had to introduce for the daily card, and for the same reason: an
     agent run against a slow local model is many completions and must not be
     declared dead while it is healthy.
+
+    This runs in the *reader's* session and cannot cancel anything, so on its own
+    it would only be an opinion: a merely-slow run would carry on and overwrite
+    the failure with an answer the athlete had already been told was not coming.
+    :func:`_still_ours` is the other half — the run re-reads this column at every
+    progress marker and stands down when it finds it has been overruled, which is
+    what makes the settle stick and stops two runs sharing one thread.
     """
     cutoff = chat_stuck_cutoff(now)
     result = await session.execute(
@@ -344,8 +409,45 @@ async def settle_stuck_turns(session: AsyncSession, *, now: datetime) -> int:
 # ── Running a turn ──────────────────────────────────────────────────────────
 
 
+class ChatTurnAbandoned(Exception):
+    """This run no longer owns its row, so it should stop and let go of its slot.
+
+    Two things cause it, and they want the same response. The athlete deleted
+    the conversation — in which case there is nowhere for the answer to land and
+    continuing would keep a slot and keep paying a provider for it — or
+    :func:`settle_stuck_turns` declared the run dead while it was merely slow, in
+    which case the athlete has already been shown a failure and may have acted
+    on it.
+    """
+
+
+async def _still_ours(session: AsyncSession, message_id: str) -> bool:
+    """Is this run still the one writing to its row?
+
+    Deliberately a **column** select rather than an entity load: the run's
+    session already holds the row in its identity map with
+    ``expire_on_commit=False``, so an entity query would hand back the cached
+    copy and answer the wrong question. This one goes to the file, which is where
+    the reader's session committed.
+
+    Cheap enough to do per progress marker — a handful per run, against a local
+    SQLite file, next to completions taking seconds each.
+    """
+    result = await session.execute(
+        select(ChatMessage.status).where(ChatMessage.id == message_id)
+    )
+    status = result.scalar_one_or_none()
+    # NULL means the row is gone: the conversation was deleted under us.
+    return status in (STATUS_QUEUED, STATUS_PENDING)
+
+
 async def _turn_stream(
-    request: AgentRequest, usage_out: dict, error: dict
+    request: AgentRequest,
+    usage_out: dict,
+    error: dict,
+    *,
+    session: AsyncSession,
+    message_id: str,
 ) -> AsyncIterator:
     """``agentic_stream``, with the failure reason kept for the athlete.
 
@@ -355,9 +457,19 @@ async def _turn_stream(
     question, so the exception is the answer here and its ``code`` is what turns
     it into a sentence the athlete can act on. Re-raised either way, so
     ``stream_into_db`` settles the row exactly as it does for any other failure.
+
+    Also the run's one chance to notice it has been overruled. The check rides on
+    progress markers rather than on a timer: they are the loop's own heartbeat,
+    there are a handful per run, and each one is a natural place to stop before
+    committing to another round of paid work.
     """
     try:
         async for item in agentic_stream(request, usage_out):
+            if isinstance(item, AgentProgress) and not await _still_ours(
+                session, message_id
+            ):
+                error["abandoned"] = True
+                raise ChatTurnAbandoned(message_id)
             yield item
     except AgenticUnavailable as exc:
         error["code"] = exc.code
@@ -439,6 +551,11 @@ async def run_chat_turn_bg(
 
             tool_names: list[str] = []
             error: dict = {"code": CODE_UNAVAILABLE}
+            # `stream_into_db` owns the usage dict and hands it to the stream
+            # factory; keeping the reference lets the finished row carry the
+            # turn's token counts rather than shipping two permanently-NULL
+            # columns in every GDPR export.
+            usage_ref: dict = {}
 
             def _touch() -> None:
                 row.updated_at = datetime.now(timezone.utc)
@@ -467,12 +584,29 @@ async def run_chat_turn_bg(
                 row.content = text
                 row.status = STATUS_COMPLETE
                 row.progress = None
+                # A row that was force-failed and then answered anyway must not
+                # keep the failure's code alongside a `complete` status.
+                row.error_code = None
                 row.tool_names = tool_names or None
+                usage = (usage_ref.get("ref") or {}).get("usage") or {}
+                row.prompt_tokens = usage.get("prompt_tokens")
+                row.completion_tokens = usage.get("completion_tokens")
                 _touch()
                 if conversation is not None:
                     conversation.updated_at = row.updated_at
 
             def _fail() -> None:
+                if error.get("abandoned"):
+                    # The row was deleted, or the stuck-turn settler declared
+                    # this run dead. Writing now would either resurrect a message
+                    # the athlete deleted or overwrite a state they have already
+                    # been shown and may have acted on. Standing down is the
+                    # whole point of having noticed.
+                    log.info(
+                        "chat: turn %s stood down — its row is no longer ours",
+                        assistant_message_id,
+                    )
+                    return
                 row.status = STATUS_ERROR
                 row.progress = None
                 row.error_code = error["code"]
@@ -498,9 +632,19 @@ async def run_chat_turn_bg(
                 slot_wait_s=settings.chat_queue_wait_seconds,
             )
 
+            def _make_stream(usage_out: dict) -> AsyncIterator:
+                usage_ref["ref"] = usage_out
+                return _turn_stream(
+                    request,
+                    usage_out,
+                    error,
+                    session=session,
+                    message_id=assistant_message_id,
+                )
+
             await stream_into_db(
                 session,
-                lambda usage_out: _turn_stream(request, usage_out, error),
+                _make_stream,
                 on_progress=_set_text,
                 on_done=_finish,
                 on_error=_fail,

@@ -6213,7 +6213,7 @@
           "chat"
         ],
         "summary": "Delete a conversation",
-        "description": "Remove a conversation and everything said in it.\n\nThe messages are deleted explicitly rather than left to the foreign key:\n``PRAGMA foreign_keys`` is off on these connections, so ``ON DELETE CASCADE``\nis documentation rather than behaviour, and relying on it here would orphan\nevery row of a thread an athlete believed they had deleted \u2014 health-adjacent\nfree text they wrote about their own body.\n\n**Not available to personal access tokens.**",
+        "description": "Remove a conversation and everything said in it.\n\nThe messages are deleted explicitly rather than left to the foreign key:\n``PRAGMA foreign_keys`` is off on these connections, so ``ON DELETE CASCADE``\nis documentation rather than behaviour, and relying on it here would orphan\nevery row of a thread an athlete believed they had deleted \u2014 health-adjacent\nfree text they wrote about their own body.\n\nA live turn is **not** a reason to refuse. This is a privacy action, and the\nconfirm dialog says the whole thread goes; making the athlete wait out an\nanswer they no longer want \u2014 possibly minutes on a slow local model \u2014 would\nbe the wrong trade. The run notices on its next progress marker that its row\nhas gone (``llm_chat._still_ours``), stands down and releases its slot,\nrather than finishing and writing into rows that no longer exist.\n\n**Not available to personal access tokens.**",
         "operationId": "deleteChatConversation",
         "security": [
           {
@@ -6281,6 +6281,76 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/ChatTurnBody"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatMessageResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-personal-access-token": {
+          "allowed": false
+        }
+      }
+    },
+    "/api/chat/conversations/{conversation_id}/messages/{message_id}/retry": {
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Re-run a failed answer",
+        "description": "Run a failed turn again **in place**, rather than asking anew.\n\nThe obvious client-side retry \u2014 re-post the same text \u2014 is wrong in three\nways at once, and they compound on exactly the setup most likely to need a\nretry (a local model that is flaky or not running). The athlete's question\nappears in the thread twice, verbatim, right after something has visibly\ngone wrong; the second attempt spends another turn of the daily budget; and\nthe replayed history ends with the same question adjacent to itself, which\nseveral chat templates either reject or silently merge.\n\nRe-running the existing row avoids all three: one question, one answer slot,\none charge. The failed row goes back to ``queued`` and the same background\ntask picks it up, so the client polls exactly as it did the first time.\n\n**Not available to personal access tokens.**",
+        "operationId": "retryChatMessage",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "conversation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Conversation Id"
+            }
+          },
+          {
+            "name": "message_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Message Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatRetryBody",
+                "default": {}
               }
             }
           }
@@ -7976,13 +8046,11 @@
           },
           "max_turns_per_conversation": {
             "type": "integer",
-            "title": "Max Turns Per Conversation",
-            "default": 40
+            "title": "Max Turns Per Conversation"
           },
           "max_message_chars": {
             "type": "integer",
-            "title": "Max Message Chars",
-            "default": 4000
+            "title": "Max Message Chars"
           }
         },
         "type": "object",
@@ -7990,7 +8058,9 @@
           "enabled",
           "tools_supported",
           "entitled",
-          "turns_remaining_today"
+          "turns_remaining_today",
+          "max_turns_per_conversation",
+          "max_message_chars"
         ],
         "title": "ChatAvailability",
         "description": "What the chat surface may do right now, so the UI can say why not.\n\nChat is the one LLM surface with no single-shot prompt to fall back on, so\nthe reasons it might be unusable have to be answerable *before* the athlete\ntypes rather than discovered as a failed turn."
@@ -8178,6 +8248,24 @@
           "created_at"
         ],
         "title": "ChatMessageResponse"
+      },
+      "ChatRetryBody": {
+        "properties": {
+          "locale": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Locale"
+          }
+        },
+        "type": "object",
+        "title": "ChatRetryBody",
+        "description": "Nothing but the locale \u2014 a retry re-runs a question already stored.\n\nDeliberately not :class:`ChatTurnBody`: taking a message here would invite a\nclient to change the question while claiming to retry it, which is the very\nthing running the turn in place exists to prevent."
       },
       "ChatTurnBody": {
         "properties": {
