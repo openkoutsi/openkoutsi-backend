@@ -323,6 +323,181 @@ async def test_training_status_reports_form_in_words_and_the_profile_context(
     assert data["volume"]["activities"] == 2
     # 30 days of stored metrics means a week-ago figure exists to compare against.
     assert data["fitness_change_7d"] is not None
+    # With no 'as_of' the answer is about today, and says so (issue #48).
+    assert data["as_of"] == date.today().isoformat()
+    assert data["requested_as_of"] == date.today().isoformat()
+    assert data["stale"] is False
+
+
+# ── Training status on a past date (issue #48) ───────────────────────────────
+
+
+async def test_training_status_answers_for_a_past_date(
+    caller, session, training_data, registry_session
+):
+    """'Where was I then' — the question the tool could not answer before.
+
+    The fixture's only rides are one and two days old, so ten days ago the
+    athlete was genuinely unloaded and today they are not. A correct past answer
+    is therefore a *different* set of numbers, not today's row with a different
+    date on it.
+    """
+    then = date.today() - timedelta(days=10)
+    past = (await run(
+        "get_training_status", {"as_of": then.isoformat()}, caller=caller,
+        session=session, athlete=training_data, registry_session=registry_session,
+    )).data
+    now = (await run(
+        "get_training_status", caller=caller, session=session,
+        athlete=training_data, registry_session=registry_session,
+    )).data
+
+    assert past["as_of"] == then.isoformat()
+    assert past["requested_as_of"] == then.isoformat()
+    assert past["stale"] is False
+    assert past["fatigue"] < now["fatigue"]
+    assert past["form"] > now["form"]  # unloaded then, carrying the rides now
+    assert past["form_label"] in {"peak", "fresh", "neutral", "tired", "overreached"}
+    assert past["form_label"] != now["form_label"]
+    # The profile context still comes along — the numbers are no more readable
+    # without it for a past date than for today.
+    assert past["athlete"]["ftp_w"] == 250
+
+
+async def test_asking_for_today_explicitly_is_the_same_answer_as_asking_for_nothing(
+    caller, session, training_data, registry_session
+):
+    """The default is a value of the argument, not a separate code path."""
+    implicit = (await run(
+        "get_training_status", caller=caller, session=session,
+        athlete=training_data, registry_session=registry_session,
+    )).data
+    explicit = (await run(
+        "get_training_status", {"as_of": date.today().isoformat()}, caller=caller,
+        session=session, athlete=training_data, registry_session=registry_session,
+    )).data
+    assert implicit == explicit
+
+
+async def test_the_volume_window_moves_with_the_date_it_was_asked_about(
+    caller, session, training_data, registry_session
+):
+    """The part that makes a past answer trustworthy rather than misleading.
+
+    Both fixture rides are 1 and 2 days old. A window ending five days ago must
+    not count them: Fitness from March beside every ride since would read as a
+    training block that never happened, and nothing in the response would show
+    the model that the two halves disagree.
+    """
+    then = (await run(
+        "get_training_status",
+        {"as_of": (date.today() - timedelta(days=5)).isoformat(), "window_days": 7},
+        caller=caller, session=session, athlete=training_data,
+        registry_session=registry_session,
+    )).data["volume"]
+    now = (await run(
+        "get_training_status", {"window_days": 7}, caller=caller, session=session,
+        athlete=training_data, registry_session=registry_session,
+    )).data["volume"]
+
+    assert then["days"] == 7 and now["days"] == 7
+    assert then["activities"] == 0
+    assert then["duration_s"] == 0
+    assert then["distance_m"] == 0
+    assert then["load_total"] == 0
+    # The same window ending today does find them, so this is a window that
+    # moved rather than one that stopped counting.
+    assert now["activities"] == 2
+    assert now["load_total"] > 0
+
+
+async def test_the_fitness_trend_is_measured_from_the_date_asked_about(
+    caller, session, training_data, registry_session
+):
+    """At the very start of the history there is nothing a week earlier to
+    compare against, so the trend is honestly null rather than measured from
+    today's figures."""
+    oldest = date.today() - timedelta(days=29)
+    result = await run(
+        "get_training_status", {"as_of": oldest.isoformat()}, caller=caller,
+        session=session, athlete=training_data, registry_session=registry_session,
+    )
+    assert result.data["as_of"] == oldest.isoformat()
+    assert result.data["fitness_change_7d"] is None
+    assert result.data["fitness_change_28d"] is None
+
+
+async def test_a_future_date_is_refused_with_a_sentence_naming_today(
+    caller, session, training_data, registry_session
+):
+    ahead = date.today() + timedelta(days=3)
+    result = await run(
+        "get_training_status", {"as_of": ahead.isoformat()}, caller=caller,
+        session=session, athlete=training_data, registry_session=registry_session,
+    )
+    assert not result.ok
+    assert ahead.isoformat() in result.error
+    assert date.today().isoformat() in result.error
+    # The model is told what to do next, not just what went wrong.
+    assert "get_plan_status" in result.error
+
+
+async def test_a_date_before_the_history_names_where_the_history_starts(
+    caller, session, training_data, registry_session
+):
+    """A refusal that only said 'nothing there' would cost a call to find out
+    where 'there' begins."""
+    result = await run(
+        "get_training_status",
+        {"as_of": (date.today() - timedelta(days=400)).isoformat()},
+        caller=caller, session=session, athlete=training_data,
+        registry_session=registry_session,
+    )
+    assert not result.ok
+    assert (date.today() - timedelta(days=29)).isoformat() in result.error
+
+
+async def test_a_brand_new_athlete_is_told_their_history_starts_today(
+    caller, session, seeded_athlete, registry_session
+):
+    """Zeros for an explicit past date are indistinguishable from a genuine
+    week off, and the model would report a collapse that never happened.
+
+    With no date asked for, zeros stay the right answer — that is the
+    empty-athlete test above, which every tool has to pass.
+    """
+    empty = (await run(
+        "get_training_status", caller=caller, session=session,
+        athlete=seeded_athlete, registry_session=registry_session,
+    ))
+    assert empty.ok and empty.data["fitness"] == 0.0
+
+    refused = await run(
+        "get_training_status",
+        {"as_of": (date.today() - timedelta(days=3)).isoformat()},
+        caller=caller, session=session, athlete=seeded_athlete,
+        registry_session=registry_session,
+    )
+    assert not refused.ok
+    assert "No training metrics stored on or before" in refused.error
+    # The catch-up writes today's row, so today is exactly where this athlete's
+    # history begins — and saying so is what lets the model retry correctly.
+    assert date.today().isoformat() in refused.error
+
+
+async def test_a_past_date_still_needs_both_scopes(
+    session, training_data, registry_session
+):
+    """The new argument is not a way around the profile grant."""
+    metrics_only = ToolCaller(user_id=_TEST_USER_ID, scopes=["metrics:read"], kind="pat")
+    result = await run(
+        "get_training_status",
+        {"as_of": (date.today() - timedelta(days=5)).isoformat()},
+        caller=metrics_only, session=session, athlete=training_data,
+        registry_session=registry_session,
+    )
+    assert not result.ok
+    assert "athlete:read" in result.error
 
 
 async def test_list_recent_activities_can_drop_commutes(
