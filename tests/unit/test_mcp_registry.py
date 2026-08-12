@@ -34,6 +34,7 @@ from backend.app.mcp.registry import (
 EXPECTED_TOOLS = {
     "find_activity",
     "get_activity_detail",
+    "get_athlete_profile",
     "get_goal_progress",
     "get_intensity_distribution",
     "get_plan_status",
@@ -50,7 +51,7 @@ def test_the_expected_tools_are_registered():
 
 def test_there_are_tools_to_check():
     """Guards the rest of this module against passing vacuously."""
-    assert len(all_tools()) == 9
+    assert len(all_tools()) == 10
 
 
 # ── Default deny ─────────────────────────────────────────────────────────────
@@ -391,6 +392,60 @@ def test_the_published_descriptor_is_what_an_mcp_client_expects():
 def test_the_response_bound_is_small_enough_to_matter():
     """64 KiB is a bound on a *context window*, not on a database row."""
     assert MAX_RESULT_BYTES <= 128 * 1024
+
+
+def test_every_read_scope_opens_something_on_its_own():
+    """No scope is callable only in company.
+
+    ``athlete:read`` used to be one: both tools declaring it also demanded
+    ``metrics:read``, so a token granted exactly the profile scope could call
+    nothing at all and had no way to find that out except by trying. A scope a
+    user can tick and spend on nothing is a worse lie than a missing one.
+    """
+    reachable = {
+        scope
+        for t in all_tools()
+        if len(t.scopes) == 1
+        for scope in t.scopes
+    }
+    assert reachable == {
+        "activities:read",
+        "athlete:read",
+        "goals:read",
+        "metrics:read",
+        "plans:read",
+    }
+
+
+def test_the_coaching_styles_match_the_prompts_that_implement_them():
+    """A style the profile tool reports has to be one something can honour.
+
+    The vocabulary lives in ``athlete_experience`` and the prompt text lives
+    with the prompts, so the two can drift — and the failure would be silent:
+    a style reported to a model that no prompt implements, or a style the
+    athlete set that the tool refuses to pass on.
+    """
+    from backend.app.services.athlete_experience import VALID_COACHING_STYLES
+    from backend.app.services.llm_training_status_analyzer import (
+        _COACHING_STYLE_PROMPTS,
+    )
+
+    assert set(_COACHING_STYLE_PROMPTS) == set(VALID_COACHING_STYLES)
+
+
+def test_the_profile_tool_returns_no_identifying_fields():
+    """The line between a profile tool and ``athlete:export``.
+
+    Name, date of birth and avatar are on the same record and are exactly what
+    a coaching model has no use for, so their absence is asserted on the schema
+    rather than left to whoever next edits the handler.
+    """
+    schema = get_tool("get_athlete_profile").output_schema()
+    everywhere = {name for name, _ in _properties(schema)}
+    assert {"date_of_birth", "avatar_url", "avatar_path", "user_id"} & everywhere == set()
+    # `name` does appear — but only inside the zone models, where it is the
+    # zone's label. The profile itself must not carry one.
+    assert "name" not in (schema.get("properties") or {})
 
 
 def test_the_activity_labels_match_the_rest_of_the_platform():
