@@ -1,10 +1,20 @@
-"""Shared helpers for surfacing the athlete's self-reported experience level
-in LLM prompts (issue #32).
+"""Shared helpers for the athlete's self-reported profile settings (issue #32).
 
-The level is stored on ``athlete.app_settings["experience_level"]`` (added in
-#18). This module is the single source of truth for the valid levels and for
-turning a stored value into prompt text, so the athlete API (validation) and the
-LLM prompt builders stay in sync.
+``app_settings`` is a free-form JSON dict — the athlete API validates
+``experience_level`` on write but not ``coaching_style``, and nothing validates
+either one retroactively when the vocabulary changes. So every consumer needs
+the same answer to "what did they actually say", and needs a stale or bogus
+stored value to read as *absent* rather than being passed on to a prompt or a
+tool result.
+
+This module is the single source of truth for those vocabularies:
+
+- ``experience_level`` — stored on ``app_settings["experience_level"]`` (#18),
+  imported by the athlete API for write-validation and by the prompt builders.
+- ``coaching_style`` — stored on ``app_settings["coaching_style"]``, never
+  validated on write. The prompt *text* for each style lives with the prompts
+  (``llm_training_status_analyzer._COACHING_STYLE_PROMPTS``); the set of names
+  lives here, and a test pins the two together.
 """
 from __future__ import annotations
 
@@ -46,4 +56,29 @@ def experience_level(app_settings: Optional[dict]) -> Optional[str]:
     level = app_settings.get("experience_level")
     if level and str(level).strip() in VALID_EXPERIENCE_LEVELS:
         return str(level).strip()
+    return None
+
+
+# The tones the athlete can ask to be coached in. Unlike the experience level
+# this is *not* validated when written, so anything reading it has to treat the
+# vocabulary as the authority rather than the stored string.
+VALID_COACHING_STYLES = (
+    "stern",
+    "friendly",
+    "encouraging",
+)
+
+
+def coaching_style(app_settings: Optional[dict]) -> Optional[str]:
+    """Return the athlete's stored coaching style, or ``None`` if unset/unknown.
+
+    Same defensive shape as :func:`experience_level`: anything outside
+    :data:`VALID_COACHING_STYLES` is treated as absent, because a style nothing
+    recognises cannot be honoured and reporting it would invite a reader to try.
+    """
+    if not isinstance(app_settings, dict):
+        return None
+    style = app_settings.get("coaching_style")
+    if style and str(style).strip() in VALID_COACHING_STYLES:
+        return str(style).strip()
     return None

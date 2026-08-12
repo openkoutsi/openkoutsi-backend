@@ -860,6 +860,154 @@ async def test_the_session_method_is_reported_as_such(
     assert result.data["basis"] is None
 
 
+# ── Athlete profile ──────────────────────────────────────────────────────────
+
+
+async def test_the_profile_reports_physiology_and_both_zone_sets(
+    caller, session, training_data, registry_session
+):
+    """The zone boundaries are the point: every zone figure the other tools
+    return is measured against these, and nothing else published them."""
+    result = await run(
+        "get_athlete_profile", caller=caller, session=session,
+        athlete=training_data, registry_session=registry_session,
+    )
+    data = result.data
+    assert data["ftp_w"] == 250
+    assert data["max_hr_bpm"] == 185
+    assert data["resting_hr_bpm"] == 48
+    assert data["weight_kg"] == 74.0
+    assert data["experience_level"] == "intermediate"
+
+    assert len(data["power_zones"]) == 7
+    assert len(data["hr_zones"]) == 5
+    assert data["power_zones"][3]["low_w"] == 217
+    assert data["power_zones"][3]["high_w"] == 237
+    assert data["hr_zones"][0]["low_bpm"] == 0
+
+
+async def test_the_open_ended_top_power_zone_has_no_ceiling(
+    caller, session, training_data, registry_session
+):
+    """Z7 is stored with 9999 standing in for 'no ceiling'. Passed through as a
+    number it becomes a 9999 W boundary a model will quote back."""
+    result = await run(
+        "get_athlete_profile", caller=caller, session=session,
+        athlete=training_data, registry_session=registry_session,
+    )
+    top = result.data["power_zones"][-1]
+    assert top["low_w"] == 300
+    assert top["high_w"] is None
+
+
+async def test_the_stored_preferences_are_reported(
+    caller, session, training_data, registry_session
+):
+    training_data.app_settings = {
+        **(training_data.app_settings or {}),
+        "coaching_style": "stern",
+        "timezone": "Europe/Helsinki",
+        "weekly_hours_min": 6,
+        "weekly_hours_max": 9.5,
+    }
+    await session.commit()
+
+    result = await run(
+        "get_athlete_profile", caller=caller, session=session,
+        athlete=training_data, registry_session=registry_session,
+    )
+    data = result.data
+    assert data["coaching_style"] == "stern"
+    assert data["timezone"] == "Europe/Helsinki"
+    assert data["weekly_hours_low"] == 6.0
+    assert data["weekly_hours_high"] == 9.5
+
+
+async def test_an_unusable_stored_setting_reads_as_absent(
+    caller, session, training_data, registry_session
+):
+    """``coaching_style`` and ``timezone`` are free-form keys nothing validates
+    on write, so the tool has to be the one that refuses to pass on a value
+    nothing can honour."""
+    training_data.app_settings = {
+        "experience_level": "world champion",
+        "coaching_style": "sarcastic",
+        "timezone": "Mars/Olympus",
+        "weekly_hours_min": "lots",
+    }
+    await session.commit()
+
+    result = await run(
+        "get_athlete_profile", caller=caller, session=session,
+        athlete=training_data, registry_session=registry_session,
+    )
+    data = result.data
+    assert data["experience_level"] is None
+    assert data["coaching_style"] is None
+    assert data["timezone"] is None
+    assert data["weekly_hours_low"] is None
+
+
+async def test_a_malformed_zone_entry_is_skipped_rather_than_failing_the_call(
+    caller, session, training_data, registry_session
+):
+    """The zone lists are JSON columns. Losing one zone still leaves a model
+    most of what it asked for; losing the call leaves it nothing."""
+    training_data.hr_zones = [
+        {"name": "Z1", "low": 0, "high": 120},
+        {"name": "Z2", "low": "wat", "high": 140},
+        "not a zone at all",
+        {"name": "Z4", "low": 160, "high": 172},
+    ]
+    await session.commit()
+
+    result = await run(
+        "get_athlete_profile", caller=caller, session=session,
+        athlete=training_data, registry_session=registry_session,
+    )
+    assert result.ok, result.error
+    assert [z["name"] for z in result.data["hr_zones"]] == ["Z1", "Z4"]
+
+
+async def test_the_date_of_birth_becomes_an_age_and_never_travels(
+    caller, session, training_data, registry_session
+):
+    """The line between this tool and ``athlete:export``: an age is what a coach
+    uses, and it is far less identifying than the date it came from."""
+    training_data.name = "Test Athlete"
+    training_data.date_of_birth = date(1990, 6, 1)
+    await session.commit()
+
+    result = await run(
+        "get_athlete_profile", caller=caller, session=session,
+        athlete=training_data, registry_session=registry_session,
+    )
+    today = date.today()
+    expected = today.year - 1990 - ((today.month, today.day) < (6, 1))
+    assert result.data["age_years"] == expected
+    assert "date_of_birth" not in result.data
+    assert "1990" not in result.text()
+    assert "Test Athlete" not in result.text()
+
+
+async def test_an_unconfigured_profile_reports_nulls_rather_than_zeros(
+    caller, session, seeded_athlete, registry_session
+):
+    """A new athlete has set none of this. Zeros would read as a 0 W threshold
+    and zones that exist and are all at the bottom."""
+    result = await run(
+        "get_athlete_profile", caller=caller, session=session,
+        athlete=seeded_athlete, registry_session=registry_session,
+    )
+    data = result.data
+    assert data["ftp_w"] is None
+    assert data["max_hr_bpm"] is None
+    assert data["weight_kg"] is None
+    assert data["age_years"] is None
+    assert data["power_zones"] == []
+    assert data["hr_zones"] == []
+
+
 # ── Scope enforcement ────────────────────────────────────────────────────────
 
 
@@ -871,6 +1019,9 @@ async def test_the_session_method_is_reported_as_such(
         ("get_activity_detail", "activities:read"),
         ("get_plan_status", "plans:read"),
         ("get_goal_progress", "goals:read"),
+        # The one tool ``athlete:read`` opens on its own — before it, that scope
+        # could be granted and spent on nothing.
+        ("get_athlete_profile", "athlete:read"),
         ("get_zone_totals", "metrics:read"),
         ("get_intensity_distribution", "metrics:read"),
     ],

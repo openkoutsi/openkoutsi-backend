@@ -253,7 +253,7 @@ async def test_a_session_jwt_also_works(client, auth_headers, seeded_athlete):
     token = auth_headers["Authorization"].removeprefix("Bearer ")
     resp = await rpc(client, "tools/list", token=token)
     assert resp.status_code == 200
-    assert len(resp.json()["result"]["tools"]) == 9
+    assert len(resp.json()["result"]["tools"]) == 10
 
 
 # ── tools/list ───────────────────────────────────────────────────────────────
@@ -262,7 +262,7 @@ async def test_a_session_jwt_also_works(client, auth_headers, seeded_athlete):
 async def test_tools_list_publishes_usable_schemas(client, issue_token):
     resp = await rpc(client, "tools/list", token=await issue_token())
     tools = {t["name"]: t for t in resp.json()["result"]["tools"]}
-    assert len(tools) == 9
+    assert len(tools) == 10
 
     status = tools["get_training_status"]
     assert status["inputSchema"]["type"] == "object"
@@ -277,7 +277,7 @@ async def test_tools_the_credential_cannot_call_are_still_listed(client, issue_t
     scopes each needs travel in ``_meta``, so a client can explain the gap."""
     resp = await rpc(client, "tools/list", token=await issue_token(["goals:read"]))
     tools = resp.json()["result"]["tools"]
-    assert len(tools) == 9
+    assert len(tools) == 10
     assert any(t["name"] == "get_plan_status" for t in tools)
 
 
@@ -330,6 +330,35 @@ async def test_the_default_deny_the_route_walk_cannot_provide(
         result = resp.json()["result"]
         assert result["isError"] is True, refused_tool
         assert "missing" in result["content"][0]["text"]
+
+
+async def test_a_profile_only_token_can_still_do_something(
+    client, issue_token, mcp_athlete
+):
+    """``athlete:read`` used to be a grant nothing could spend.
+
+    Both tools declaring it also demanded ``metrics:read``, so a user who ticked
+    exactly the profile box got a credential that answered nothing and said only
+    "missing metrics:read" when asked why. ``get_athlete_profile`` is what makes
+    the box mean what it says.
+    """
+    token = await issue_token(["athlete:read"])
+
+    allowed = await rpc(
+        client, "tools/call", {"name": "get_athlete_profile", "arguments": {}},
+        token=token,
+    )
+    result = allowed.json()["result"]
+    assert result["isError"] is False
+    assert "power_zones" in result["structuredContent"]
+
+    # Still no wider than what it declared.
+    refused = await rpc(
+        client, "tools/call", {"name": "get_training_status", "arguments": {}},
+        token=token,
+    )
+    assert refused.json()["result"]["isError"] is True
+    assert "metrics:read" in refused.json()["result"]["content"][0]["text"]
 
 
 async def test_a_scopeless_token_reaches_nothing(client, issue_token, mcp_athlete):
@@ -474,7 +503,7 @@ async def test_the_auth_scheme_is_case_insensitive(client, issue_token, scheme):
         headers={"Authorization": f"{scheme} {token}"},
     )
     assert resp.status_code == 200, scheme
-    assert len(resp.json()["result"]["tools"]) == 9
+    assert len(resp.json()["result"]["tools"]) == 10
 
 
 async def test_extra_whitespace_in_the_header_is_tolerated(client, issue_token):
