@@ -338,7 +338,30 @@ Optionally, admins can enable **self-serve email signup** (Settings tab, or `all
 uv run uvicorn backend.main:app --host 0.0.0.0 --port 8000
 ```
 
-For production add `--workers 2` (or use gunicorn with uvicorn workers).
+**Run exactly one process — no `--workers`, no gunicorn.** The backend is
+single-process by design, and several things depend on that:
+
+- The **bridge pollers** and the **token-expiry sweep** are `lifespan` asyncio
+  tasks with no leader election. A poller fetches every unclaimed event, processes
+  it, and only then claims it, so a second process reprocesses the same events —
+  duplicate activity imports, duplicate LLM analyses, duplicate spend.
+- The **stranded-run sweep** settles every `pending` LLM row at startup on the
+  premise that nothing writing one survived the last shutdown (the
+  `Settled N LLM run(s) stranded by the last shutdown` behaviour noted under
+  *Migrating existing user databases* above). With two processes that premise is
+  false: starting the second settles the first one's **live** runs.
+- **`AGENT_MAX_CONCURRENT_RUNS`** is an in-process counter, so N processes allow
+  N times the concurrency you configured against your LLM.
+- **Rate limits** (login, password reset, chat, uploads, MCP) are held in memory,
+  so N processes give each caller N times the intended allowance. For login and
+  password reset that is a weakened brute-force defence, not just a looser quota.
+- The **per-user activity lock** that stops two concurrent syncs creating
+  duplicate activities for one ride is an `asyncio.Lock`, which spans one process.
+
+The container image already does this — its entrypoint execs a single uvicorn
+worker. Give the box more CPU/RAM rather than more processes; see
+[SCALING.md](https://github.com/openkoutsi/openkoutsi-ops/blob/main/SCALING.md)
+in the ops repository.
 
 ---
 
