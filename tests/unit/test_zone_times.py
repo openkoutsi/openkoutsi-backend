@@ -52,3 +52,34 @@ class TestComputeZoneTimes:
         # cope with (issue #38).
         result = compute_zone_times({"power": [100] * 60}, None, _POWER_ZONES)
         assert result == {"power": {"Z1 Recovery": 60}}
+
+
+class TestGappyStreams:
+    """A gap is time in no zone, not time in Z1 (issue #76).
+
+    Streams span the whole elapsed ride with ``None`` where a sensor recorded
+    nothing. That value must be dropped before the integer cast inside
+    ``time_in_zones``: NaN casts to INT64_MIN, which clamps into the lowest zone
+    and would book a ten-minute strap dropout as ten minutes of recovery riding.
+    """
+
+    def test_gaps_are_not_counted_as_a_zone(self):
+        result = compute_zone_times(
+            {"heartrate": [150] * 60 + [None] * 30}, _HR_ZONES, None
+        )
+        assert result == {"hr": {"Z3": 60}}
+
+    def test_a_gap_does_not_become_the_lowest_zone(self):
+        result = compute_zone_times(
+            {"heartrate": [180] * 10 + [None] * 100}, _HR_ZONES, None
+        )
+        assert result == {"hr": {"Z5": 10}}
+
+    def test_totals_reflect_recorded_time_not_elapsed(self):
+        result = compute_zone_times(
+            {"power": [200] * 30 + [None] * 30 + [200] * 30}, None, _POWER_ZONES
+        )
+        assert sum(result["power"].values()) == 60
+
+    def test_an_all_gap_stream_contributes_nothing(self):
+        assert compute_zone_times({"heartrate": [None] * 50}, _HR_ZONES, None) is None

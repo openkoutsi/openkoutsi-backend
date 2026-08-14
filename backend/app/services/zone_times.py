@@ -28,12 +28,19 @@ def compute_zone_times(
     Returns ``None`` when nothing can be computed (no configured zones, or no
     matching stream), so callers can leave ``zone_times`` unset rather than
     persisting an empty snapshot.
+
+    A stream that is present but carries only gaps accumulates no time and is
+    dropped for the same reason: the snapshot is frozen permanently, and a
+    ``{"hr": {}}`` claims the ride was measured and spent no time anywhere,
+    which is a different statement from having nothing to say.
     """
     result: dict[str, dict[str, int]] = {}
     if hr_zones and streams.get("heartrate"):
-        result["hr"] = time_in_zones(streams["heartrate"], hr_zones)
+        if times := time_in_zones(streams["heartrate"], hr_zones):
+            result["hr"] = times
     if power_zones and streams.get("power"):
-        result["power"] = time_in_zones(streams["power"], power_zones)
+        if times := time_in_zones(streams["power"], power_zones):
+            result["power"] = times
     return result or None
 
 

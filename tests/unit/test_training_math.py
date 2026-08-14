@@ -11,6 +11,7 @@ import numpy as np
 import pytest
 
 from openkoutsi.training_math import (
+    best_time_for_distance,
     aerobic_decoupling,
     calculate_load,
     compute_power_bests,
@@ -175,3 +176,65 @@ class TestArrayBoundary:
         assert compute_torque_stream(np.array([200.0]), np.array([90.0])) == pytest.approx(
             [200.0 * 60.0 / (2 * math.pi * 90.0)]
         )
+
+
+# ── reading a gap ───────────────────────────────────────────────────────────
+#
+# Since issue #76 a stream spans the whole elapsed ride with ``None`` where a
+# channel had no sample, so every function here had to decide what a gap means.
+# The split is deliberate and not uniform: a *rider* claim (average power, a
+# best) ignores gaps, because a sensor that missed a second is not evidence the
+# rider stopped; a *clock* claim (a fastest kilometre) counts them, because the
+# seconds have to be real.
+
+class TestGappyStreams:
+    def test_weighted_power_ignores_gaps(self):
+        # Identical to the same ride with the dropout simply absent, which is
+        # exactly what the old parser handed over.
+        steady = [250.0] * 120
+        gappy = steady[:60] + [None] * 30 + steady[60:]
+        assert weighted_power(gappy) == pytest.approx(weighted_power(steady))
+
+    def test_a_gap_cannot_lower_weighted_power(self):
+        # Reading a dropout as zero watts would let a failed sensor cut the
+        # rider's Load for the day.
+        assert weighted_power([250.0] * 60 + [None] * 60) == pytest.approx(250.0)
+
+    def test_power_bests_ignore_gaps(self):
+        steady = [300.0] * 60 + [100.0] * 60
+        gappy = [300.0] * 60 + [None] * 20 + [100.0] * 60
+        assert compute_power_bests(gappy)[60] == pytest.approx(
+            compute_power_bests(steady)[60]
+        )
+
+    def test_distance_bests_count_a_gap_as_lost_time(self):
+        # 10 m/s for 60 s either side of a 60 s hole. Ignoring the hole would
+        # report a 1 km best of 100 s; the rider was not moving 10 m/s through
+        # a stretch nothing was recorded for.
+        gappy = [10.0] * 60 + [None] * 60 + [10.0] * 60
+        assert best_time_for_distance(gappy, 1000) == 160
+
+    def test_distance_best_is_refused_when_the_gap_eats_the_distance(self):
+        assert best_time_for_distance([10.0] * 50 + [None] * 60, 1000) is None
+
+    def test_torque_is_a_gap_where_either_input_is(self):
+        # `cadence is None` must not fall through the coasting branch and
+        # report a confident 0.0 Nm.
+        assert compute_torque_stream([200.0, 200.0], [90.0, None])[1] is None
+        assert compute_torque_stream([200.0, None], [90.0, 90.0])[1] is None
+
+    def test_torque_over_a_gap_is_json_serialisable(self):
+        stream = compute_torque_stream([200.0, None], [90.0, 90.0])
+        assert json.loads(json.dumps(stream)) == stream
+
+    def test_decoupling_pairs_across_a_gap_by_position(self):
+        # Power rises in the second half while HR holds, so decoupling must come
+        # out negative. Under the old parser the HR dropout pulled every later
+        # sample forward and the two halves stopped describing the same minutes.
+        power = [200.0] * 1800 + [260.0] * 1800
+        hr = [150.0] * 600 + [None] * 200 + [150.0] * 2800
+        assert aerobic_decoupling(power, hr) < 0
+
+    def test_an_all_gap_stream_reads_as_no_data(self):
+        assert weighted_power([None] * 120) is None
+        assert compute_power_bests([None] * 120) == {}

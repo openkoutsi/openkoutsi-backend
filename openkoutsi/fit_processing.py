@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 from typing import Optional, Sequence
 
-import numpy as np
+from . import streams
 
 
 _FIT_SPORT_MAP = {
@@ -54,9 +54,13 @@ def build_auto_intervals(activity_start: datetime, duration_s: int, interval_s: 
     return intervals
 
 
-def mean_nonzero(values: Sequence[float]) -> Optional[float]:
-    """Mean of the positive samples, ignoring the zeros a paused sensor records."""
-    arr = np.asarray(values, dtype=float)
+def mean_nonzero(values: Sequence[float | None]) -> Optional[float]:
+    """Mean of the positive samples, ignoring the zeros a paused sensor records.
+
+    Gaps drop out for free: ``nan > 0`` is False, so a second the sensor never
+    reported is excluded on the same footing as a second it reported zero.
+    """
+    arr = streams.as_array(values)
     nonzero = arr[arr > 0]
     return float(nonzero.mean()) if nonzero.size else None
 
@@ -72,15 +76,20 @@ def compute_interval_stats(
 
     raw:          list of {start_time, duration_s, distance_m}
     activity_start: overall activity start (naive or tz-aware)
-    stream_map:   dict of stream_type → per-second float list
+    stream_map:   dict of stream_type → per-second float list, gaps as None
     is_auto:      whether these are auto-generated (vs. device-recorded) intervals
+
+    The slicing below indexes streams by second offset, which has always assumed
+    index == second and, since issue #76, actually gets it: before that a
+    dropout shifted every later sample earlier, so a lap's window drifted off
+    the seconds it was supposed to cover.
     """
     if activity_start.tzinfo is not None:
         activity_start = activity_start.replace(tzinfo=None)
 
     # Converted once for the whole activity rather than per interval per stream.
-    streams = {
-        key: np.asarray(data, dtype=float)
+    arrays = {
+        key: streams.as_array(data)
         for key, data in stream_map.items()
         if data is not None and len(data)
     }
@@ -96,7 +105,7 @@ def compute_interval_stats(
         end = start_offset_s + duration_s
 
         def _slice_mean(key: str) -> Optional[float]:
-            data = streams.get(key)
+            data = arrays.get(key)
             if data is None:
                 return None
             return mean_nonzero(data[start_offset_s:end])

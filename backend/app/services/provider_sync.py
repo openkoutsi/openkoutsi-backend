@@ -58,6 +58,7 @@ from openkoutsi.training_math import (
     weighted_power,
 )
 from openkoutsi.fit import summarizeWorkout, extractIntervals
+from openkoutsi.streams import to_json_stream
 
 log = logging.getLogger(__name__)
 
@@ -592,12 +593,16 @@ async def _fill_from_source(
         src.fit_file_encrypted = encrypted
 
         if profile is not None:
+            # Resampled onto the shared 1 Hz clock by the parser, gaps as None
+            # (issue #76) — the same shape the upload path stores.
             streams = {
-                "power": [float(v) for v in profile.power],
-                "heartrate": [float(v) for v in profile.heartRate],
-                "cadence": [float(v) for v in profile.cadence],
-                "speed": [v / 3.6 for v in profile.speed],
-                "altitude": [float(v) for v in profile.altitude],
+                "power": to_json_stream(profile.power),
+                "heartrate": to_json_stream(profile.heartRate),
+                "cadence": to_json_stream(profile.cadence),
+                "speed": to_json_stream(
+                    [None if v is None else v / 3.6 for v in profile.speed]
+                ),
+                "altitude": to_json_stream(profile.altitude),
             }
             has_power = bool(streams["power"])
             has_hr = bool(streams["heartrate"])
@@ -658,11 +663,15 @@ async def _fill_from_source(
     except Exception:
         streams_raw = {}
 
+    # The provider client is responsible for putting its streams on the shared
+    # 1 Hz clock before they get here (see ``providers.strava``); this only
+    # normalises which keys exist.
     streams = {
-        key: streams_raw.get(key, [])
+        key: to_json_stream(streams_raw.get(key, []))
         for key in ("power", "heartrate", "cadence", "speed", "altitude")
     }
-    power_data, hr_data = streams["power"], streams["heartrate"]
+    power_data = [v for v in streams["power"] if v is not None]
+    hr_data = [v for v in streams["heartrate"] if v is not None]
 
     await _apply_import(
         activity, athlete, session,

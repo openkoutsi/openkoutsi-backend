@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from openkoutsi.fit import summarizeWorkout, getStartTime, extractIntervals
 from openkoutsi.categorization import classify_workout
+from openkoutsi.streams import to_json_stream
 from openkoutsi.fit_processing import (
     resolve_sport_type,
     auto_interval_s,
@@ -83,14 +84,19 @@ async def process_fit_file(
     category = classify_workout(intensity, vi)
     activity.workout_category = category.value if category else None
 
-    power_data = [float(v) for v in profile.power]
-    cadence_data = [float(v) for v in profile.cadence]
-    stream_map = {
+    # Every channel is on the one 1 Hz clock the parser resampled onto, gaps as
+    # None (issue #76), and ``to_json_stream`` is what keeps a NaN from ever
+    # reaching the JSON column.
+    power_data = to_json_stream(profile.power)
+    cadence_data = to_json_stream(profile.cadence)
+    stream_map: dict[str, list[float | None]] = {
         "power": power_data,
-        "heartrate": [float(v) for v in profile.heartRate],
+        "heartrate": to_json_stream(profile.heartRate),
         "cadence": cadence_data,
-        "speed": [v / 3.6 for v in profile.speed],  # km/h -> m/s
-        "altitude": [float(v) for v in profile.altitude],
+        "speed": to_json_stream(
+            [None if v is None else v / 3.6 for v in profile.speed]  # km/h -> m/s
+        ),
+        "altitude": to_json_stream(profile.altitude),
         "torque": compute_torque_stream(power_data, cadence_data),
     }
     for stream_type, data in stream_map.items():

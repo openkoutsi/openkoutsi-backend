@@ -3,7 +3,7 @@ from typing import cast, Optional
 
 import fitdecode
 
-from . import workout
+from . import streams, workout
 
 
 def extractIntervals(fileish) -> list[dict]:
@@ -58,6 +58,15 @@ def getStartTime(fileish) -> Optional[datetime]:
     return None
 
 def summarizeWorkout(fileish) -> workout.Profile:
+    """Parse a FIT activity into a :class:`workout.Profile`.
+
+    The streams come back on one shared 1 Hz clock: index ``i`` is second ``i``
+    from the first record, in every channel, with ``None`` where a channel had
+    no sample. See ``openkoutsi.streams`` for why that matters — briefly, this
+    used to append one sample per record *that carried the field*, so a strap
+    dropout shifted every later heart-rate sample against power instead of
+    leaving a hole (issue #76).
+    """
     fr = fitdecode.FitReader(fileish)
 
     first_ts: datetime | None = None
@@ -67,11 +76,14 @@ def summarizeWorkout(fileish) -> workout.Profile:
     elevation_gain_from_session = 0
     sport_from_file: str | None = None
 
-    heart_rate: list[float] = []
-    speed: list[float] = []
-    power: list[float] = []
-    cadence: list[float] = []
-    altitude: list[float] = []
+    # Record timestamps in file order, and per channel the (record index, value)
+    # pairs. Held as record indices rather than seconds because the offsets are
+    # only known once the first timestamp is, and a file whose first record is
+    # missing a timestamp would otherwise anchor the clock to the wrong record.
+    record_timestamps: list[datetime] = []
+    pending: dict[str, list[tuple[int, float]]] = {
+        name: [] for name in ("heartRate", "speed", "power", "cadence", "altitude")
+    }
 
     for frame in fr:
         if frame.frame_type != fitdecode.FIT_FRAME_DATA:
@@ -99,30 +111,48 @@ def summarizeWorkout(fileish) -> workout.Profile:
 
         elif frame.name == "record":
             ts = frame.get_value("timestamp", fallback=None)
-            if ts is not None:
-                if first_ts is None:
-                    first_ts = ts
-                last_ts = ts
+            if ts is None:
+                # Nothing to hang this record's samples off. Dropping it loses
+                # one second of data; keeping it would have to guess a position
+                # on the clock, which is the guess this whole change removes.
+                continue
+            if isinstance(ts, datetime) and ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            if first_ts is None:
+                first_ts = ts
+            last_ts = ts
+
+            i = len(record_timestamps)
+            record_timestamps.append(ts)
 
             hr = frame.get_value("heart_rate", fallback=None)
             if hr is not None:
-                heart_rate.append(float(hr))
+                pending["heartRate"].append((i, float(hr)))
 
             spd = frame.get_value("speed", fallback=None)
             if spd is not None:
-                speed.append(float(spd) * 3.6)  # m/s -> km/h
+                pending["speed"].append((i, float(spd) * 3.6))  # m/s -> km/h
 
             pwr = frame.get_value("power", fallback=None)
             if pwr is not None:
-                power.append(float(pwr))
+                pending["power"].append((i, float(pwr)))
 
             cad = frame.get_value("cadence", fallback=None)
             if cad is not None:
-                cadence.append(float(cad))
+                pending["cadence"].append((i, float(cad)))
 
             alt = frame.get_value("altitude", fallback=None)
             if alt is not None:
-                altitude.append(float(alt))
+                pending["altitude"].append((i, float(alt)))
+
+    offsets, length = streams.second_offsets(record_timestamps)
+    resampled = streams.resample_1hz(
+        {
+            name: [(offsets[i], value) for i, value in samples if offsets[i] >= 0]
+            for name, samples in pending.items()
+        },
+        length,
+    )
 
     if duration_from_session is not None:
         duration = duration_from_session
@@ -139,10 +169,10 @@ def summarizeWorkout(fileish) -> workout.Profile:
         duration=duration,
         distance=distance_from_session,
         elevationGain=elevation_gain_from_session,
-        heartRate=heart_rate,
-        speed=speed,
-        power=power,
-        cadence=cadence,
-        altitude=altitude,
+        heartRate=resampled["heartRate"],
+        speed=resampled["speed"],
+        power=resampled["power"],
+        cadence=resampled["cadence"],
+        altitude=resampled["altitude"],
         sport_type=sport_from_file,
     )

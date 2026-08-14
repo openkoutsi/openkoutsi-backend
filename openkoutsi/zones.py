@@ -3,6 +3,8 @@ from typing import Iterable, List, Sequence
 
 import numpy as np
 
+from . import streams as stream_utils
+
 # The canonical zone models. Zone lists used to be arbitrary-length, which made
 # anything built on top of them (see ``intensity_distribution``) guess at what a
 # given zone meant. They are now fixed: seven power zones (Coggan) and five HR
@@ -36,18 +38,26 @@ HR_ZONE_NAMES = (
 )
 
 
-def time_in_zones(samples: Iterable[float], zone_defs: Sequence[dict]) -> dict[str, int]:
+def time_in_zones(
+    samples: Iterable[float | None], zone_defs: Sequence[dict]
+) -> dict[str, int]:
     """Accumulate time spent in each zone from a per-second sample stream.
 
     ``samples`` is a 1 Hz stream (one value per second), so each sample counts
     as one second. ``zone_defs`` is the athlete's zone list — ``[{"low", "high",
     "name"}, ...]``. Returns ``{zone_name: seconds}``. Values below Z1 / above
     the last zone are clamped into the nearest zone by ``Zones.getZone``.
+
+    Gaps (``None``/``NaN``, see ``openkoutsi.streams``) are seconds the sensor
+    recorded nothing, and are counted as time in no zone at all rather than
+    apportioned to one. They must be dropped *before* the cast below: ``NaN``
+    casts to ``INT64_MIN``, which then clamps into Z1 and would book a
+    ten-minute strap dropout as ten minutes of recovery riding.
     """
     zones = Zones(*[(z["low"], z["high"]) for z in zone_defs])
     # ``.astype`` truncates toward zero, matching the ``int(v)`` this used to do
     # per sample before handing the value to ``getZone``.
-    values = np.fromiter(samples, dtype=float).astype(np.int64)
+    values = stream_utils.present(stream_utils.as_array(samples)).astype(np.int64)
     counts = np.bincount(zones.zoneIndices(values), minlength=len(zone_defs))
 
     out: dict[str, int] = {}

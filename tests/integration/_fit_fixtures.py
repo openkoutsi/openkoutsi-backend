@@ -64,17 +64,28 @@ class FitCapabilities:
 
 @lru_cache(maxsize=None)
 def capabilities(path: Path) -> FitCapabilities:
-    """Inspect a FIT fixture once and report which streams it carries."""
+    """Inspect a FIT fixture once and report which streams it carries.
+
+    Streams come back on a 1 Hz grid with ``None`` where a channel had no sample
+    (see ``openkoutsi.streams``), so "has this capability" means *carries at
+    least one reading*, not merely "is a non-empty list" — a fixture with a
+    dropout has both.
+    """
     from openkoutsi.fit import summarizeWorkout
 
     prof = summarizeWorkout(str(path))
-    # speed samples are km/h at 1 Hz; integrate to metres.
-    integrated_distance_m = sum(v / 3.6 for v in prof.speed)
+
+    def recorded(stream) -> list[float]:
+        return [v for v in stream if v is not None]
+
+    # speed samples are km/h at 1 Hz; integrate to metres. A gap contributes no
+    # distance, which is the same reading `compute_distance_bests` takes.
+    integrated_distance_m = sum(v / 3.6 for v in recorded(prof.speed))
     return FitCapabilities(
-        has_power=bool(prof.power),
-        has_speed=bool(prof.speed),
-        has_hr=bool(prof.heartRate),
-        has_cadence=bool(prof.cadence),
+        has_power=bool(recorded(prof.power)),
+        has_speed=bool(recorded(prof.speed)),
+        has_hr=bool(recorded(prof.heartRate)),
+        has_cadence=bool(recorded(prof.cadence)),
         covers_min_distance=integrated_distance_m >= _MIN_DISTANCE_BEST_M,
         duration_s=prof.duration,
     )
