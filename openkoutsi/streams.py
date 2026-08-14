@@ -35,9 +35,10 @@ Two rules the rest of the codebase is written against:
   are the two sides of that split.
 
 Streams stored before this existed are dense with no gaps, so every helper here
-and every consumer downstream reads them exactly as it always did. Those
-activities stay on the old convention until they are individually reprocessed;
-there is no migration.
+and every consumer downstream reads them exactly as it always did. There is no
+migration and nothing rewrites an activity's streams after ingestion, so those
+rides keep the old convention for good — which is why "handles both shapes" is a
+permanent requirement of everything downstream rather than a transitional one.
 """
 from __future__ import annotations
 

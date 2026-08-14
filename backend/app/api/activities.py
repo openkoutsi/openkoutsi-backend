@@ -263,93 +263,6 @@ async def _bg_process_and_recalculate(
             raise
 
 
-# The recorded channels, as opposed to the ones openkoutsi derives (torque,
-# w_bal). Only these come from the device file, so only these get replaced when
-# the file is re-parsed.
-_RECORDED_STREAM_TYPES = ("power", "heartrate", "cadence", "speed", "altitude")
-
-
-def _load_fit_bytes(activity: Activity, user_id: str) -> bytes | None:
-    """The device file backing this activity, decrypted, or None.
-
-    Picks the highest-priority source that has one, and refuses any path that
-    escapes the user's own FIT directory.
-    """
-    fit_sources = [s for s in (activity.sources or []) if s.fit_file_path]
-    if not fit_sources:
-        return None
-    best = min(fit_sources, key=lambda s: _source_priority(s.provider, True))
-    fit_path = Path(best.fit_file_path).resolve()
-    expected_dir = settings.user_fit_dir(user_id).resolve()
-    if not fit_path.is_relative_to(expected_dir) or not fit_path.exists():
-        return None
-    if best.fit_file_encrypted:
-        return decrypt_file(fit_path, user_id)
-    return fit_path.read_bytes()
-
-
-async def _refresh_recorded_streams(
-    session: AsyncSession,
-    activity_id: str,
-    stream_map: dict[str, list],
-    fit_bytes: bytes,
-) -> dict[str, list]:
-    """Re-derive the recorded streams from the device file and store them.
-
-    Returns the updated stream map. A file that fails to parse leaves the stored
-    streams untouched — a reprocess should never cost an athlete the data they
-    already had.
-    """
-    import io
-
-    from openkoutsi.fit import summarizeWorkout
-    from openkoutsi.streams import to_json_stream
-
-    try:
-        profile = summarizeWorkout(io.BytesIO(fit_bytes))
-    except Exception:
-        return stream_map
-
-    parsed = {
-        "power": to_json_stream(profile.power),
-        "heartrate": to_json_stream(profile.heartRate),
-        "cadence": to_json_stream(profile.cadence),
-        "speed": to_json_stream(
-            [None if v is None else v / 3.6 for v in profile.speed]  # km/h -> m/s
-        ),
-        "altitude": to_json_stream(profile.altitude),
-    }
-    if not any(parsed.values()):
-        # A file with no records at all. Keep whatever is stored rather than
-        # replacing real streams with nothing.
-        return stream_map
-
-    await session.execute(
-        delete(ActivityStream).where(
-            ActivityStream.activity_id == activity_id,
-            ActivityStream.stream_type.in_(_RECORDED_STREAM_TYPES),
-        )
-    )
-    await session.flush()
-
-    updated = dict(stream_map)
-    for stream_type in _RECORDED_STREAM_TYPES:
-        data = parsed[stream_type]
-        if data:
-            session.add(
-                ActivityStream(
-                    id=str(uuid.uuid4()),
-                    activity_id=activity_id,
-                    stream_type=stream_type,
-                    data=data,
-                )
-            )
-            updated[stream_type] = data
-        else:
-            updated.pop(stream_type, None)
-    return updated
-
-
 async def _bg_recalculate(athlete_id: str, from_date: date, user_id: str) -> None:
     async with get_user_session_factory(user_id)() as session:
         await recalculate_from(athlete_id, from_date, session)
@@ -847,28 +760,15 @@ async def reprocess_activity(
     if activity.status != "processed":
         raise HTTPException(status_code=400, detail="Activity has not been processed yet")
 
-    # The FIT file, if this activity still has one. Read once and reused: the
-    # recorded streams are re-derived from it below, and the laps are read from
-    # it further down.
-    fit_bytes = _load_fit_bytes(activity, ctx.user_id)
-
     streams_result = await session.execute(
         select(ActivityStream).where(ActivityStream.activity_id == activity_id)
     )
+    # Recomputed from the streams as stored, never re-parsed from the device
+    # file. An activity keeps the streams it was ingested with, including their
+    # shape: rides stored before issue #76 stay on the old dense convention,
+    # where the index is a sample rather than a second, and reach the shared
+    # clock only by being ingested again. Every consumer below reads both shapes.
     stream_map = {s.stream_type: s.data for s in streams_result.scalars()}
-
-    # Re-parse the recorded streams from the device file when we have one. This
-    # is the route an activity takes onto the shared 1 Hz clock (issue #76):
-    # streams stored before that change are dense lists whose index is a sample
-    # rather than a second, and nothing else rewrites them — there is no bulk
-    # migration, so a reprocess is how an athlete brings an old ride onto the
-    # convention the derived metrics below assume. Activities with no FIT (a
-    # Strava-only import) keep the streams they have and are recomputed from
-    # those, exactly as before.
-    if fit_bytes is not None:
-        stream_map = await _refresh_recorded_streams(
-            session, activity_id, stream_map, fit_bytes
-        )
 
     power_data: list[float | None] = stream_map.get("power") or []
     speed_data: list[float | None] = stream_map.get("speed") or []
@@ -945,7 +845,17 @@ async def reprocess_activity(
         _add_distance_bests(activity, athlete, session, speed_data)
 
     # Re-extract intervals from the FIT file, or auto-split when there is none.
-    fileish = io.BytesIO(fit_bytes) if fit_bytes is not None else None
+    fileish = None
+    fit_sources = [s for s in (activity.sources or []) if s.fit_file_path]
+    if fit_sources:
+        best = min(fit_sources, key=lambda s: _source_priority(s.provider, True))
+        fit_path = Path(best.fit_file_path).resolve()
+        expected_dir = settings.user_fit_dir(ctx.user_id).resolve()
+        if fit_path.is_relative_to(expected_dir) and fit_path.exists():
+            if best.fit_file_encrypted:
+                fileish = io.BytesIO(decrypt_file(fit_path, ctx.user_id))
+            else:
+                fileish = str(fit_path)
 
     await rebuild_intervals(activity, session, fileish, stream_map, replace=True)
 

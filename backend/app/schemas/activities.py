@@ -193,9 +193,10 @@ class RpeQueueResponse(BaseModel):
 # A consumer must not read a null as a zero — zero watts is coasting, a null is
 # the absence of a measurement — and must not assume the streams are dense.
 #
-# Activities processed before this convention landed carry dense lists with no
-# nulls, whose index is a sample rather than a second; they move onto the shared
-# clock when reprocessed. See ``openkoutsi.streams``.
+# Activities ingested before this convention landed carry dense lists with no
+# nulls, whose index is a sample rather than a second. Nothing rewrites an
+# activity's streams afterwards, so both shapes are served indefinitely and a
+# client has to handle either. See ``openkoutsi.streams``.
 StreamMap = dict[str, list[Optional[float]]]
 
 
