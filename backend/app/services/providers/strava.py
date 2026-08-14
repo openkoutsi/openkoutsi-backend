@@ -14,6 +14,7 @@ import httpx
 
 from backend.app.core.config import settings
 from backend.app.services.providers.base import BaseProviderClient, NormalizedActivity, ZoneData
+from openkoutsi.streams import resample_from_time_stream
 
 _AUTH_BASE = "https://www.strava.com"
 _API_BASE = f"{_AUTH_BASE}/api/v3"
@@ -159,7 +160,21 @@ class StravaProviderClient(BaseProviderClient):
         _map(raw, result, "cadence", "cadence")
         _map(raw, result, "velocity_smooth", "speed")
         _map(raw, result, "altitude", "altitude")
-        return result
+
+        # Strava's arrays are internally index-aligned but not necessarily 1 Hz:
+        # index i is the i-th *sample*, and the `time` array says which second
+        # that was. Putting them on the same grid the FIT parser produces is what
+        # lets one contract cover both ingest paths (issue #76) — without it, a
+        # Strava ride's `w_bal` integrates joules-per-sample as though they were
+        # joules-per-second, and every consumer that reads an index as a clock
+        # reads a different clock depending on where the activity came from.
+        time_offsets = [float(v) for v in raw.get("time", {}).get("data", [])]
+        if not time_offsets:
+            # Nothing to resample against. The arrays stay as Strava sent them,
+            # which is what this path did before — index-aligned to each other,
+            # just not to a clock.
+            return result
+        return resample_from_time_stream(time_offsets, result)
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────

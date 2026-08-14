@@ -7062,7 +7062,16 @@
           },
           "streams": {
             "additionalProperties": {
-              "items": {},
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "type": "array"
             },
             "type": "object",
@@ -7504,7 +7513,16 @@
         "properties": {
           "streams": {
             "additionalProperties": {
-              "items": {},
+              "items": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "type": "array"
             },
             "type": "object",

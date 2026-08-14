@@ -23,11 +23,27 @@ uv run python scripts/generate_synthetic_fit_fixtures.py
 
 They span the capability matrix the tests care about:
 
-| File | Power | Speed | GPS |
-| --- | --- | --- | --- |
-| `synthetic_bike_power_gps.fit` | ✓ | ✓ | ✓ |
-| `synthetic_run_no_power.fit` | – | ✓ | ✓ |
-| `synthetic_indoor_no_gps.fit` | ✓ | – | – |
+| File | Power | Speed | GPS | Notes |
+| --- | --- | --- | --- | --- |
+| `synthetic_bike_power_gps.fit` | ✓ | ✓ | ✓ | |
+| `synthetic_run_no_power.fit` | – | ✓ | ✓ | |
+| `synthetic_indoor_no_gps.fit` | ✓ | – | – | |
+| `synthetic_bike_hr_dropout.fit` | ✓ | ✓ | – | gappy streams — see below |
+
+### `synthetic_bike_hr_dropout.fit`
+
+A 600-second ride carrying the two kinds of hole a real file has, which is what
+the stream-alignment contract exists for (backend issue #76):
+
+- **A heart-rate dropout**, seconds 120–240: the strap loses contact while every
+  other channel keeps recording. Before #76 this shifted every later HR sample
+  120 positions earlier relative to power instead of leaving a gap.
+- **A device pause**, seconds 400–460: no `record` frame at all, so every channel
+  has a hole at the same place, and the session's timer time (540 s) is genuinely
+  shorter than the elapsed grid (600 s).
+
+Tests import the window boundaries from
+`scripts/generate_synthetic_fit_fixtures.py` rather than restating them.
 
 ## Adding a real ride
 

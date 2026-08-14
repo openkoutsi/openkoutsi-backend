@@ -4,6 +4,8 @@ import json
 
 import numpy as np
 
+from . import streams as stream_utils
+
 
 @dataclass
 class Profile:
@@ -18,11 +20,15 @@ class Profile:
     peakHR: float  # BPM
     peakCadence: float  # RPM
     avgCadence: float  # RPM
-    heartRate: list[float]  # BPM at each second
-    speed: list[float]  # km/h at each second
-    power: list[float]  # W at each second
-    cadence: list[float]  # RPM at each second
-    altitude: list[float]  # metres at each second
+    # Streams on a common 1 Hz clock: index i is second i from the first record,
+    # in every channel, with None where that channel had no sample. See
+    # ``openkoutsi.streams`` for the contract. An empty list means the activity
+    # has no such channel at all, which is not the same as a channel of gaps.
+    heartRate: list[float | None]  # BPM at each second
+    speed: list[float | None]  # km/h at each second
+    power: list[float | None]  # W at each second
+    cadence: list[float | None]  # RPM at each second
+    altitude: list[float | None]  # metres at each second
 
     sport_type: str | None  # raw sport string from FIT file, e.g. "running"
 
@@ -32,11 +38,11 @@ class Profile:
         duration: int,
         distance: int,
         elevationGain: int,
-        heartRate: list[float],
-        speed: list[float],
-        power: list[float],
-        cadence: list[float],
-        altitude: list[float] | None = None,
+        heartRate: list[float | None],
+        speed: list[float | None],
+        power: list[float | None],
+        cadence: list[float | None],
+        altitude: list[float | None] | None = None,
         sport_type: str | None = None,
     ):
         self.start_time = start_time
@@ -50,10 +56,14 @@ class Profile:
         self.altitude = altitude or []
         self.sport_type = sport_type
 
-        hr = np.asarray(heartRate, dtype=float)
-        spd = np.asarray(speed, dtype=float)
-        pwr = np.asarray(power, dtype=float)
-        cad = np.asarray(cadence, dtype=float)
+        # Averaged over the samples that exist, not over the grid: a strap that
+        # dropped for ten minutes should not pull average HR toward zero. This
+        # is what these figures meant before the streams carried gaps, when a
+        # dropout simply shortened the list.
+        hr = stream_utils.present(heartRate)
+        spd = stream_utils.present(speed)
+        pwr = stream_utils.present(power)
+        cad = stream_utils.present(cadence)
 
         self.avgHeartRate = float(hr.mean()) if hr.size else 0.0
         self.avgSpeed = float(spd.mean()) if spd.size else 0.0
@@ -91,9 +101,12 @@ class Profile:
                 "peakHR": self.peakHR,
                 "peakCadence": self.peakCadence,
                 "avgCadence": self.avgCadence,
-                "heartRate": self.heartRate,
-                "speed": self.speed,
-                "power": self.power,
-                "cadence": self.cadence,
+                # Gaps as JSON null: ``json.dumps`` would happily emit a bare
+                # ``NaN`` token, which is not valid JSON and which Postgres
+                # rejects even though SQLite accepts it.
+                "heartRate": stream_utils.to_json_stream(self.heartRate),
+                "speed": stream_utils.to_json_stream(self.speed),
+                "power": stream_utils.to_json_stream(self.power),
+                "cadence": stream_utils.to_json_stream(self.cadence),
             }
         )

@@ -763,10 +763,16 @@ async def reprocess_activity(
     streams_result = await session.execute(
         select(ActivityStream).where(ActivityStream.activity_id == activity_id)
     )
+    # Recomputed from the streams as stored, never re-parsed from the device
+    # file. An activity keeps the streams it was ingested with, including their
+    # shape: rides stored before issue #76 stay on the old dense convention,
+    # where the index is a sample rather than a second, and reach the shared
+    # clock only by being ingested again. Every consumer below reads both shapes.
     stream_map = {s.stream_type: s.data for s in streams_result.scalars()}
-    power_data: list[float] = stream_map.get("power") or []
-    speed_data: list[float] = stream_map.get("speed") or []
-    cadence_data: list[float] = stream_map.get("cadence") or []
+
+    power_data: list[float | None] = stream_map.get("power") or []
+    speed_data: list[float | None] = stream_map.get("speed") or []
+    cadence_data: list[float | None] = stream_map.get("cadence") or []
 
     # Derive and persist torque from stored power + cadence so activities
     # uploaded before torque existed pick it up on reprocess.

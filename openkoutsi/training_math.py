@@ -14,6 +14,8 @@ from typing import Sequence
 
 import numpy as np
 
+from . import streams
+
 POWER_BEST_DURATIONS: list[int] = [
     1, 3, 5, 10, 15, 30, 45, 60, 120, 180, 300, 480, 600,
     900, 1200, 1800, 2700, 3600, 7200, 10800, 14400,
@@ -33,23 +35,31 @@ def _peak_from_prefix(c: np.ndarray, duration_s: int) -> float | None:
     return float((c[duration_s:] - c[:-duration_s]).max()) / duration_s
 
 
-def peak_average_power(stream: Sequence[float], duration_s: int) -> float | None:
+def peak_average_power(
+    stream: Sequence[float | None], duration_s: int
+) -> float | None:
     """
     Return the highest mean wattage over any contiguous `duration_s`-second
     window in `stream`.  Returns None if the stream is shorter than the window.
 
     One prefix sum serves every window, so each duration costs a single
     vectorised subtraction rather than a pass over the stream.
+
+    Gaps are dropped rather than counted as zero watts, so the window closes
+    over the samples that exist.  That is what this saw before the streams
+    carried gaps, when a dropout silently shortened the list — a best is a claim
+    about the rider, and a power meter that missed a second is not evidence the
+    rider stopped pedalling.
     """
-    return _peak_from_prefix(_prefix_sum(np.asarray(stream, dtype=float)), duration_s)
+    return _peak_from_prefix(_prefix_sum(streams.present(stream)), duration_s)
 
 
-def compute_power_bests(stream: Sequence[float]) -> dict[int, float]:
+def compute_power_bests(stream: Sequence[float | None]) -> dict[int, float]:
     """
     Compute peak_average_power for every standard duration in POWER_BEST_DURATIONS.
     Only returns entries where the stream is long enough to cover the duration.
     """
-    c = _prefix_sum(np.asarray(stream, dtype=float))
+    c = _prefix_sum(streams.present(stream))
     return {
         d: v
         for d in POWER_BEST_DURATIONS
@@ -355,22 +365,29 @@ def _fastest_window(cum: np.ndarray, distance_m: int) -> int | None:
     return best if best <= n else None
 
 
-def best_time_for_distance(speed_stream: Sequence[float], distance_m: int) -> int | None:
+def best_time_for_distance(
+    speed_stream: Sequence[float | None], distance_m: int
+) -> int | None:
     """
     Return the minimum number of seconds to cover `distance_m` metres in
     `speed_stream` (m/s values at 1-second intervals).
 
     Returns None if the total distance in the stream is less than distance_m.
+
+    Unlike the power bests, a gap counts as a second at zero speed rather than
+    being dropped.  The answer here is a *time*, so the seconds have to be real:
+    closing the window over a dropout would stitch the metres either side of it
+    together and report a fastest kilometre that was never ridden.
     """
-    return _fastest_window(_prefix_sum(np.asarray(speed_stream, dtype=float)), distance_m)
+    return _fastest_window(_prefix_sum(streams.filled(speed_stream)), distance_m)
 
 
-def compute_distance_bests(speed_stream: Sequence[float]) -> dict[int, int]:
+def compute_distance_bests(speed_stream: Sequence[float | None]) -> dict[int, int]:
     """
     Compute best_time_for_distance for every standard distance.
     Only returns entries where the stream covers that distance.
     """
-    cum = _prefix_sum(np.asarray(speed_stream, dtype=float))
+    cum = _prefix_sum(streams.filled(speed_stream))
     return {
         d: t
         for d in DISTANCE_BEST_DISTANCES
@@ -378,10 +395,16 @@ def compute_distance_bests(speed_stream: Sequence[float]) -> dict[int, int]:
     }
 
 
-def weighted_power(power_series: Sequence[float]) -> float | None:
-    """30-second rolling average → raise to 4th power → mean → 4th root."""
+def weighted_power(power_series: Sequence[float | None]) -> float | None:
+    """30-second rolling average → raise to 4th power → mean → 4th root.
+
+    Gaps are dropped rather than read as zero watts, so the rolling window
+    closes over the recorded samples — the same series this saw before streams
+    carried gaps.  Reading a dropout as zero would let a failed sensor lower a
+    rider's weighted power, and with it their Load for the day.
+    """
     window = 30
-    series = np.asarray(power_series, dtype=float)
+    series = streams.present(power_series)
     if series.size < window:
         return None
     cum = _prefix_sum(series)
@@ -390,26 +413,35 @@ def weighted_power(power_series: Sequence[float]) -> float | None:
 
 
 def compute_torque_stream(
-    power: Sequence[float], cadence: Sequence[float]
-) -> list[float]:
+    power: Sequence[float | None], cadence: Sequence[float | None]
+) -> list[float | None]:
     """Per-second crank torque (Nm) derived from power (W) and cadence (rpm).
 
     torque = power · 60 / (2π · cadence).  Returns 0.0 where cadence is 0 or
     negative (coasting / no pedalling).  Returns an empty list if either input
-    is empty; the result length is the shorter of the two inputs (FIT streams
-    can differ in length).
+    is empty.
+
+    This is a *paired* metric, so it reads the grid as it stands: a second where
+    either channel has a gap yields a gap, because there is no torque to state
+    without both halves of the product.  Both inputs are grid-length now, so the
+    ``min`` below is a formality — kept because streams stored before issue #76
+    can still differ in length.
     """
     n = min(len(power), len(cadence))
     if n == 0:
         return []
-    p = np.asarray(power, dtype=float)[:n]
-    c = np.asarray(cadence, dtype=float)[:n]
+    p = streams.as_array(power)[:n]
+    c = streams.as_array(cadence)[:n]
     pedalling = c > 0
     # Mask the divisor rather than the result: dividing by the raw cadence would
     # warn (and produce inf) on the coasting samples before np.where drops them.
-    return np.where(
+    torque = np.where(
         pedalling, p * (60.0 / (2.0 * math.pi)) / np.where(pedalling, c, 1.0), 0.0
-    ).tolist()
+    )
+    # ``pedalling`` is False at a cadence gap, so the np.where above would have
+    # quietly turned it into a confident 0.0 Nm.
+    gaps = np.isnan(p) | np.isnan(c)
+    return streams.to_json_stream(np.where(gaps, np.nan, torque))
 
 
 # ---------------------------------------------------------------------------
@@ -458,18 +490,20 @@ def _half_power(segment: np.ndarray) -> float | None:
 
     Weighted power is the defensible choice on variable terrain, but it needs
     the 30-second rolling window; shorter halves fall back to the arithmetic
-    mean.  Returns None for an empty or zero-power segment.
+    mean.  Returns None for an empty or zero-power segment, or for one that is
+    all gaps.
     """
-    if segment.size == 0:
+    recorded = streams.present(segment)
+    if recorded.size == 0:
         return None
-    value = weighted_power(segment) if segment.size >= 30 else None
+    value = weighted_power(recorded) if recorded.size >= 30 else None
     if value is None:
-        value = float(segment.mean())
+        value = float(recorded.mean())
     return value if value > 0 else None
 
 
 def aerobic_decoupling(
-    power: Sequence[float], heartrate: Sequence[float]
+    power: Sequence[float | None], heartrate: Sequence[float | None]
 ) -> float | None:
     """
     Power:HR decoupling (Pw:HR drift) as a percentage.
@@ -484,12 +518,18 @@ def aerobic_decoupling(
     to the shorter one; on an odd number of samples the middle sample is
     dropped so both halves stay the same length.
 
+    This is the metric issue #76 was written for: it multiplies power against
+    the heart rate at the *same index*, so it is only meaningful because the
+    streams now share a clock.  Within each half the two channels are summarised
+    over the samples they actually have, so a gap costs a second of evidence
+    rather than pairing a wattage against somebody else's heartbeat.
+
     Returns None if either half has no usable power or heart rate.  This is raw
     math with no validity checks — see `decoupling_unavailable_reason` for
     whether the answer is meaningful at all.
     """
-    watts = np.asarray(power, dtype=float)
-    beats = np.asarray(heartrate, dtype=float)
+    watts = streams.as_array(power)
+    beats = streams.as_array(heartrate)
     n = min(watts.size, beats.size)
     half = n // 2
     if half == 0:
@@ -534,11 +574,22 @@ DECOUPLING_MAX_VI = 1.10
 # as a durability verdict when it is really a pacing choice.
 DECOUPLING_MAX_HALF_POWER_DELTA = 0.10
 
-# The two streams are paired sample-for-sample, but the FIT parser appends each
-# channel independently, so a strap dropout shifts heart rate against power
-# rather than leaving a gap. A length difference beyond this fraction of the
-# shorter stream means the pairing can't be trusted.
-DECOUPLING_MAX_LENGTH_MISMATCH = 0.05
+# The two streams are paired sample-for-sample, so the question is how much of
+# the ride they can speak to *together*. Measured as the seconds carrying both
+# channels over the seconds carrying the better-covered one: below this
+# fraction, the two are describing different parts of the ride.
+#
+# This used to compare the two streams' *lengths*, because the parser appended
+# each channel independently and a strap dropout shifted heart rate against
+# power rather than leaving a gap — a length difference was the only symptom
+# available. It caught one large dropout and missed the case that motivated
+# issue #76: two channels each dropping a similar number of records at different
+# points in the ride, ending up near-identical in length while being internally
+# misaligned. Now that the streams share a clock, the overlap can just be
+# counted, and the same threshold covers both symptoms — including on streams
+# stored before #76, where a short channel has no gaps to count and simply
+# contributes nothing past where it stops.
+DECOUPLING_MIN_PAIRED_COVERAGE = 0.95
 
 # Smallest first-half ratio, relative to the larger of the two halves, that the
 # percentage formula can be evaluated at without amplifying noise.
@@ -560,8 +611,8 @@ def _positive_in_both_halves(stream: np.ndarray, n: int) -> bool:
 
 def decoupling_unavailable_reason(
     duration_s: int | None,
-    power: Sequence[float] | None,
-    heartrate: Sequence[float] | None,
+    power: Sequence[float | None] | None,
+    heartrate: Sequence[float | None] | None,
     workout_category: str | None = None,
     vi: float | None = None,
 ) -> str | None:
@@ -580,8 +631,8 @@ def decoupling_unavailable_reason(
     Data problems are reported before qualification problems, so the athlete is
     told the thing actually blocking the measurement.
     """
-    watts = np.asarray([] if power is None else power, dtype=float)
-    hr = np.asarray([] if heartrate is None else heartrate, dtype=float)
+    watts = streams.as_array(power)
+    hr = streams.as_array(heartrate)
     n = min(watts.size, hr.size)
 
     # Content-aware, not just emptiness: a paired-but-silent meter records a
@@ -600,17 +651,21 @@ def decoupling_unavailable_reason(
     if not _positive_in_both_halves(hr, n):
         return "no_hr"
 
-    shorter = n
-    if shorter and abs(watts.size - hr.size) > DECOUPLING_MAX_LENGTH_MISMATCH * shorter:
+    # Seconds where both channels have something to say — the only seconds this
+    # metric can actually use.
+    paired = streams.paired_count(watts, hr)
+    covered = max(streams.present(watts).size, streams.present(hr).size)
+    if covered and paired < DECOUPLING_MIN_PAIRED_COVERAGE * covered:
         return "stream_mismatch"
 
     # Both clocks matter: `duration_s` is elapsed time from the FIT header, while
-    # the halves are split by sample count. A ride with four hours elapsed but
-    # forty minutes recorded clears the elapsed check and then gets split into
-    # two twenty-minute halves.
+    # the halves are split by position on the grid. A ride with four hours
+    # elapsed but forty minutes recorded clears the elapsed check and then gets
+    # split into two halves that are mostly gap, so the paired seconds are
+    # counted rather than the width of the grid they are spread across.
     if (duration_s or 0) < DECOUPLING_MIN_DURATION_S:
         return "too_short"
-    if n < DECOUPLING_MIN_DURATION_S:
+    if paired < DECOUPLING_MIN_DURATION_S:
         return "too_short"
 
     beats = hr[hr > 0]
@@ -625,8 +680,12 @@ def decoupling_unavailable_reason(
     # Variability index catches surging but is blind to a monotonic ramp, which
     # is precisely the shape that produces a large spurious drift number.
     half = n // 2
-    first_mean = float(watts[:half].mean())
-    second_mean = float(watts[n - half:n].mean())
+    first_recorded = streams.present(watts[:half])
+    second_recorded = streams.present(watts[n - half:n])
+    if first_recorded.size == 0 or second_recorded.size == 0:
+        return "no_power"
+    first_mean = float(first_recorded.mean())
+    second_mean = float(second_recorded.mean())
     reference = max(first_mean, second_mean)
     if reference > 0 and abs(first_mean - second_mean) / reference > DECOUPLING_MAX_HALF_POWER_DELTA:
         return "uneven_pacing"
@@ -659,7 +718,7 @@ def cp_wprime_plausible(cp: float | None, w_prime: float | None) -> bool:
 
 
 def w_bal_stream(
-    power: list[float], cp: float | None, w_prime: float | None
+    power: list[float | None], cp: float | None, w_prime: float | None
 ) -> list[float]:
     """
     Per-second W' balance (joules remaining) from a power stream.
@@ -677,18 +736,28 @@ def w_bal_stream(
     is no power stream, or when CP/W' are missing or implausible, since a W'
     curve built on a guessed W' would be fiction.
 
-    **Assumes a 1 Hz power stream.** The arithmetic is joules per *sample* and
-    only equals joules per second at one sample per second; on a file recorded
-    at another rate (Garmin smart recording, for instance) the depletion rate is
-    wrong by the sampling ratio and the error accumulates across the ride.
-    Nothing here resamples — the caller is responsible for checking.
+    **Requires a 1 Hz power stream.** The arithmetic is joules per *sample* and
+    only equals joules per second at one sample per second. Since issue #76 the
+    parser guarantees that — index ``i`` is second ``i`` — so this is now exact
+    rather than assumed. It is still not self-checking: a stream from somewhere
+    other than ``openkoutsi.streams`` (a pre-#76 row, a provider that skipped
+    the resampler) can still be at another rate, and the caller is responsible
+    for deciding whether the sampling supports the integration — see
+    ``services.aerobic_metrics._sampling_supports_integration``.
+
+    Gaps count as seconds at zero watts, i.e. as recovery. This is the *time*
+    reading of a gap rather than the *sample* one: the integration is over the
+    clock, so a second with no reading has to be a second, and a rider who was
+    not measurably above CP was not spending W'. A stream gappy enough for that
+    to distort the curve should have been rejected by the caller's coverage
+    check before reaching here.
     """
     if not power or not cp_wprime_plausible(cp, w_prime):
         return []
 
     balance = w_prime
     out: list[float] = []
-    for p in power:
+    for p in streams.filled(power):
         if p > cp:
             balance -= p - cp
         else:

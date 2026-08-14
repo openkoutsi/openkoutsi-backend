@@ -6,6 +6,7 @@ values and synthetic streams with known injected behaviour.
 """
 import pytest
 
+from backend.app.services.aerobic_metrics import _sampling_supports_integration
 from openkoutsi.training_math import (
     DECOUPLING_MAX_VI,
     DECOUPLING_MIN_DURATION_S,
@@ -339,3 +340,90 @@ class TestWBalStream:
     )
     def test_missing_or_invalid_inputs_return_empty(self, power, cp, w_prime):
         assert w_bal_stream(power, cp, w_prime) == []
+
+
+class TestGappyStreams:
+    """Gaps make the misalignment measurable rather than invisible (issue #76).
+
+    The #74 guard compared the two streams' lengths, which is the only symptom a
+    dropout had while the parser appended each channel independently. It caught
+    one large dropout and missed the case that motivated #76: two channels each
+    losing a similar number of records at different points, ending up the same
+    length while being internally misaligned. On streams that share a clock the
+    overlap can simply be counted.
+    """
+
+    def test_interleaved_dropouts_of_equal_size_are_refused(self):
+        # Equal lengths, equal sample counts — invisible to a length check.
+        power = [200.0] * 1000 + [None] * 400 + [200.0] * 2600
+        hr = [150.0] * 2600 + [None] * 400 + [150.0] * 1000
+        assert len(power) == len(hr)
+        assert decoupling_unavailable_reason(
+            4000, power, hr, "endurance", 1.02
+        ) == "stream_mismatch"
+
+    def test_a_gap_shared_by_both_channels_is_not_a_mismatch(self):
+        # A device pause leaves the same hole in every channel. The two still
+        # describe the same seconds, so the pairing is sound.
+        power = [200.0] * 2000 + [None] * 200 + [200.0] * 2000
+        hr = [150.0 + (i % 5) for i in range(2000)] + [None] * 200 + [150.0] * 2000
+        assert decoupling_unavailable_reason(4200, power, hr, "endurance", 1.02) is None
+
+    def test_a_small_shared_gap_stays_inside_tolerance(self):
+        power = [200.0] * 3950 + [None] * 50
+        hr = [150.0 + (i % 5) for i in range(3950)] + [None] * 50
+        assert decoupling_unavailable_reason(4000, power, hr, "endurance", 1.02) is None
+
+    def test_paired_seconds_are_counted_not_the_width_of_the_grid(self):
+        # Four hours elapsed, forty minutes recorded — the halves would be
+        # mostly gap. Sparse but *aligned*, so it is short rather than mismatched.
+        power = ([200.0] + [None] * 5) * 2400
+        hr = ([150.0] + [None] * 5) * 2400
+        assert decoupling_unavailable_reason(
+            14400, power, hr, "endurance", 1.02
+        ) == "too_short"
+
+
+class TestSamplingGuard:
+    """``w_bal`` needs 1 Hz, and gaps make that checkable rather than inferred."""
+
+    def test_a_dense_grid_supports_integration(self):
+        assert _sampling_supports_integration([200.0] * 3600, 3600) is True
+
+    def test_a_low_rate_recording_is_rejected(self):
+        # One reading every four seconds: the depletion rate would be wrong by
+        # the sampling ratio. Before #76 this was indistinguishable from a 1 Hz
+        # ride with a dropout, because only the list length was visible.
+        smart = ([200.0] + [None] * 3) * 900
+        assert _sampling_supports_integration(smart, 3600) is False
+
+    def test_a_ride_with_cafe_stops_still_passes(self):
+        # Deliberately loose: a genuine 1 Hz ride that stops for a while has
+        # fewer readings than elapsed seconds and must keep the feature.
+        with_stops = [200.0] * 2400 + [None] * 1200
+        assert _sampling_supports_integration(with_stops, 2400) is True
+
+    def test_pre_issue_76_dense_streams_are_judged_as_before(self):
+        # No gaps to count, so this falls back to length vs. duration_s.
+        assert _sampling_supports_integration([200.0] * 2000, 3600) is True
+        assert _sampling_supports_integration([200.0] * 900, 3600) is False
+
+    def test_an_empty_stream_cannot_be_integrated(self):
+        assert _sampling_supports_integration([], 3600) is False
+
+
+class TestWBalOverGaps:
+    def test_a_gap_is_a_second_of_recovery(self):
+        # The integration is over the clock, so a second with no reading has to
+        # be a second — and a rider not measurably above CP is not spending W'.
+        cp, w_prime = 250.0, 20000.0
+        drained = w_bal_stream([400.0] * 100, cp, w_prime)
+        recovered = w_bal_stream([400.0] * 100 + [None] * 200, cp, w_prime)
+        assert len(recovered) == 300
+        assert recovered[99] == pytest.approx(drained[-1])
+        assert recovered[-1] > recovered[99]
+
+    def test_the_stream_spans_the_whole_grid(self):
+        out = w_bal_stream([200.0, None, 200.0], 250.0, 20000.0)
+        assert len(out) == 3
+        assert all(isinstance(v, float) for v in out)

@@ -187,12 +187,25 @@ class RpeQueueResponse(BaseModel):
     rpe_head: Optional[str] = None
 
 
+# Every stream is a 1 Hz series on one shared clock: index i is second i of the
+# activity, in every channel, and ``null`` means that channel had no sample at
+# that second (a sensor dropout, or a stretch the device did not record at all).
+# A consumer must not read a null as a zero — zero watts is coasting, a null is
+# the absence of a measurement — and must not assume the streams are dense.
+#
+# Activities ingested before this convention landed carry dense lists with no
+# nulls, whose index is a sample rather than a second. Nothing rewrites an
+# activity's streams afterwards, so both shapes are served indefinitely and a
+# client has to handle either. See ``openkoutsi.streams``.
+StreamMap = dict[str, list[Optional[float]]]
+
+
 class ActivityStreamsResponse(BaseModel):
-    streams: dict[str, list[Any]] = {}
+    streams: StreamMap = {}
 
 
 class ActivityDetailResponse(ActivityResponse):
-    streams: dict[str, list[Any]] = {}
+    streams: StreamMap = {}
     power_bests: dict[int, float] = {}
     distance_bests: dict[int, int] = {}
     power_pr_badges: dict[int, dict[str, str]] = {}

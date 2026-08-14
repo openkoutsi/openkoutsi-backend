@@ -27,6 +27,7 @@ from backend.app.services.power_profile import (
     cp_wprime_as_of,
     fit_cp_wprime,
 )
+from openkoutsi import streams
 from openkoutsi.training_math import (
     aerobic_decoupling,
     decoupling_unavailable_reason,
@@ -35,13 +36,19 @@ from openkoutsi.training_math import (
 )
 
 # W' balance arithmetic is joules per sample and only equals joules per second at
-# 1 Hz. A stream carrying far fewer samples than the ride has elapsed seconds was
-# either recorded at a lower rate (Garmin smart recording) or is too gappy to
-# integrate, and the depletion rate would be wrong by the sampling ratio.
+# 1 Hz. A stream carrying far fewer readings than the ride has seconds was either
+# recorded at a lower rate (Garmin smart recording) or is too gappy to integrate,
+# and the curve would be wrong by the sampling ratio.
 #
 # The threshold is deliberately loose: a genuine 1 Hz ride with long stops also
-# has fewer samples than elapsed seconds, and a tight bound would quietly remove
+# has fewer readings than elapsed seconds, and a tight bound would quietly remove
 # the feature from anyone who stops at a café.
+#
+# Issue #76 made this exact rather than inferred. It used to compare a dense
+# list's *length* against elapsed seconds, which is the same number for a 1 Hz
+# ride with a dropout and for a low-rate recording — the two were indistinguish-
+# able. Streams now span the full elapsed grid with gaps marked, so the fraction
+# that carries a reading can simply be counted.
 MIN_SAMPLE_COVERAGE = 0.5
 
 
@@ -66,8 +73,10 @@ async def apply_aerobic_metrics(
     them, so a ride's own efforts count toward the power profile it is judged
     against.
     """
-    power: list[float] = [float(v) for v in (stream_map.get("power") or [])]
-    heartrate: list[float] = [float(v) for v in (stream_map.get("heartrate") or [])]
+    # ``to_json_stream`` rather than a ``float()`` comprehension: these lists can
+    # carry gaps, and ``float(None)`` raises.
+    power = streams.to_json_stream(stream_map.get("power") or [])
+    heartrate = streams.to_json_stream(stream_map.get("heartrate") or [])
 
     vi = variability_index(activity.weighted_power, activity.avg_power)
     reason = decoupling_unavailable_reason(
@@ -87,7 +96,7 @@ async def apply_aerobic_metrics(
     activity.w_prime_j = None
     activity.cp_fit_points = None
 
-    if not any(v > 0 for v in power):
+    if not _has_power(power):
         return []
 
     # A dateless activity can't be fit "as of" anything, and falling through to
@@ -111,12 +120,29 @@ async def apply_aerobic_metrics(
     return [round(v) for v in w_bal_stream(power, cp, w_prime)]
 
 
-def _sampling_supports_integration(power: list[float], duration_s: int | None) -> bool:
-    """Is this power stream dense enough to integrate as one sample per second?"""
+def _has_power(power: list[float | None]) -> bool:
+    """Did this stream record any actual wattage? Gaps and zeros are neither."""
+    return any(v is not None and v > 0 for v in power)
+
+
+def _sampling_supports_integration(
+    power: list[float | None], duration_s: int | None
+) -> bool:
+    """Is this power stream dense enough to integrate as one sample per second?
+
+    Measured against the grid the stream spans, so a gappy ride is judged on how
+    much of *itself* it recorded. Streams stored before issue #76 are dense with
+    no gaps and fall back to the length-vs-``duration_s`` comparison this always
+    made, which keeps those activities answering as they did.
+    """
+    if not power:
+        return False
+    recorded = round(streams.present_ratio(power) * len(power))
     if not duration_s or duration_s <= 0:
-        # No elapsed time to compare against — nothing to contradict 1 Hz.
-        return True
-    return len(power) >= MIN_SAMPLE_COVERAGE * duration_s
+        # No elapsed time to compare against — nothing to contradict 1 Hz beyond
+        # the stream's own gaps.
+        return recorded >= MIN_SAMPLE_COVERAGE * len(power)
+    return recorded >= MIN_SAMPLE_COVERAGE * max(duration_s, len(power))
 
 
 async def replace_w_bal_stream(
@@ -256,9 +282,9 @@ async def _rebuild_w_bal(
         )
     )
     stored = row.scalar_one_or_none()
-    power = [float(v) for v in (stored or [])]
+    power = streams.to_json_stream(stored or [])
 
-    if not any(v > 0 for v in power) or not _sampling_supports_integration(
+    if not _has_power(power) or not _sampling_supports_integration(
         power, activity.duration_s
     ):
         await replace_w_bal_stream(session, activity.id, [])
