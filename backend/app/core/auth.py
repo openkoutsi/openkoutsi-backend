@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -65,6 +66,29 @@ def hash_password(plain: str) -> str:
 
 def verify_password(plain: str, hashed: str) -> bool:
     return _bcrypt.checkpw(plain.encode(), hashed.encode())
+
+
+# bcrypt is deliberately slow — at the default cost that is ~0.27 s of pure CPU,
+# and it is CPU held *inside the event loop* when called from an async handler.
+# One login therefore stalls every other request in the process for a quarter of
+# a second, which is a whole-instance latency spike caused by a single user
+# signing in. The work itself is the point and cannot be made cheaper, so it goes
+# to a worker thread instead: `hashpw`/`checkpw` release the GIL, so the loop is
+# genuinely free while they run.
+#
+# The synchronous pair above stays. Tests hash directly (`tests/conftest.py`),
+# and so would any script or migration that is not already in an event loop;
+# these wrappers are for the request path, which is where the blocking matters.
+
+
+async def hash_password_async(plain: str) -> str:
+    """:func:`hash_password`, off the event loop."""
+    return await asyncio.to_thread(hash_password, plain)
+
+
+async def verify_password_async(plain: str, hashed: str) -> bool:
+    """:func:`verify_password`, off the event loop."""
+    return await asyncio.to_thread(verify_password, plain, hashed)
 
 
 def create_access_token(user_id: str, roles: list[str]) -> str:

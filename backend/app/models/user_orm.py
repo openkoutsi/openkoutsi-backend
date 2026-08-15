@@ -18,6 +18,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.app.db.base import UserBase
+from backend.app.db.leases import LeaseMixin
 
 
 def _uuid() -> str:
@@ -558,3 +559,20 @@ class WahooWorkoutUpload(UserBase):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
     )
+
+
+class SyncLease(UserBase, LeaseMixin):
+    """Cross-process mutual exclusion for this user's write paths (issue #50).
+
+    One row per named section. Today the only name in use is
+    ``activity-create:{athlete_id}``, which serialises the ±5-minute duplicate
+    check against the insert that follows it: without something at this level,
+    the only guard is an ``asyncio.Lock``, and an ``asyncio.Lock`` is a statement
+    about one event loop rather than about the database it is protecting.
+
+    It lives in the per-user DB rather than the registry because that is the file
+    the writes it guards land in — a lease is only meaningful to writers holding
+    the same database open.
+    """
+
+    __tablename__ = "sync_leases"

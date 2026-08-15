@@ -782,6 +782,7 @@ class TestProviderAcceptsToolsButCallsNone:
             await drive(provider, monkeypatch=monkeypatch)
 
 
+@pytest.mark.replica_unsafe  # `_active_runs` counts runs in *this* process
 class TestConcurrencyGuard:
     async def test_a_run_that_cannot_get_a_slot_falls_back_instead_of_waiting(
         self, monkeypatch

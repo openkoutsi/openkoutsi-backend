@@ -20,14 +20,16 @@ import dataclasses
 import io
 import logging
 import uuid
+from collections import OrderedDict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.config import settings
 from backend.app.core.file_encryption import encrypt_file
+from backend.app.db import leases
 from backend.app.models.registry_orm import ProviderConnection
 from backend.app.models.user_orm import (
     Activity,
@@ -37,6 +39,7 @@ from backend.app.models.user_orm import (
     ActivitySource,
     ActivityStream,
     Athlete,
+    SyncLease,
 )
 from openkoutsi.categorization import classify_workout
 from openkoutsi.fit_processing import (
@@ -67,18 +70,63 @@ _DUPLICATE_WINDOW = timedelta(minutes=5)
 # Sentinel: _fill_from_source uses this to know FIT hasn't been fetched yet
 _NOTFETCHED = object()
 
+# How long the activity-creation lease may be held before another caller may
+# take it over. Generous because the section it covers can include a FIT
+# download and parse on the attach path — expiring under a holder that is merely
+# slow would hand the same lease to two callers, which is the duplicate this
+# exists to prevent. See `backend.app.db.leases`.
+_ACTIVITY_LEASE_TTL = timedelta(minutes=5)
+_ACTIVITY_LEASE_WAIT = 60.0
+
 # Per-(user_id, athlete_id) lock that serialises the dedup-window-query +
 # create/attach operation. Prevents the race condition where two concurrent
 # syncs both see "no existing activity" and each create a new one for the
 # same real-world workout.
-_activity_creation_locks: dict[tuple[str, str], asyncio.Lock] = {}
+#
+# This is the *in-process* half of that guard; the durable half is the
+# `SyncLease` taken inside it (issue #50). Keeping both is deliberate: this one
+# is free and settles the common case without touching the database, and the
+# lease is what makes the guarantee true beyond one event loop.
+#
+# Bounded, because it is keyed by athlete and never had an eviction path: on a
+# long-lived process syncing many users it only grew. Entries are dropped oldest
+# first and *only while unheld* — evicting a held lock would hand the same
+# athlete two different locks and silently undo the mutual exclusion.
+_MAX_ACTIVITY_LOCKS = 256
+
+# The loop is cached alongside each lock because an `asyncio.Lock` is meaningful
+# only to the loop it was created on — using one from another loop raises. A
+# server process has exactly one loop for its lifetime, so this never fires in
+# production; it is what keeps a *cache* from outliving the thing it caches.
+_activity_creation_locks: OrderedDict[
+    tuple[str, str], tuple[asyncio.AbstractEventLoop, asyncio.Lock]
+] = OrderedDict()
 
 
 def _get_activity_lock(user_id: str, athlete_id: str) -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
     key = (user_id, athlete_id)
-    if key not in _activity_creation_locks:
-        _activity_creation_locks[key] = asyncio.Lock()
-    return _activity_creation_locks[key]
+
+    cached = _activity_creation_locks.get(key)
+    if cached is not None and cached[0] is loop:
+        _activity_creation_locks.move_to_end(key)
+        return cached[1]
+
+    def _evictable(entry: tuple[asyncio.AbstractEventLoop, asyncio.Lock]) -> bool:
+        # A lock from another loop cannot be held by anything that is running.
+        return entry[0] is not loop or not entry[1].locked()
+
+    while len(_activity_creation_locks) >= _MAX_ACTIVITY_LOCKS:
+        stale = next(
+            (k for k, v in _activity_creation_locks.items() if _evictable(v)), None
+        )
+        if stale is None:
+            break  # every lock is in use; the cap yields rather than corrupt.
+        del _activity_creation_locks[stale]
+
+    lock = asyncio.Lock()
+    _activity_creation_locks[key] = (loop, lock)
+    return lock
 
 
 # ── Priority ──────────────────────────────────────────────────────────────────
@@ -118,18 +166,128 @@ _REFRESH_LOOKAHEAD: dict[str, timedelta] = {
 }
 _DEFAULT_REFRESH_LOOKAHEAD = timedelta(minutes=1)
 
+# How long a claimed rotation may run before another caller may take it over.
+# Generously longer than a refresh round trip: the cost of it being too short is
+# a double rotation, which is the bug this exists to prevent. It is a
+# crash-recovery bound, not a timeout — the happy path always releases early.
+_REFRESH_LOCK_TTL = timedelta(seconds=60)
+# How long a caller that lost the claim waits for the winner's tokens before
+# giving up and using whatever is on the row.
+_REFRESH_WAIT_SECONDS = 30.0
+_REFRESH_POLL_SECONDS = 0.05
 
-async def ensure_fresh_token(conn: ProviderConnection, session: AsyncSession) -> str:
-    """Refresh the access token if it will expire soon. Returns current token."""
+
+def _needs_refresh(conn: ProviderConnection, now: datetime | None = None) -> bool:
+    """Whether this connection's access token is close enough to expiry to rotate."""
     expires_at = conn.token_expires_at
-    if expires_at is not None and expires_at.tzinfo is None:
+    if expires_at is None or not conn.refresh_token:
+        return False
+    if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
     lookahead = _REFRESH_LOOKAHEAD.get(conn.provider, _DEFAULT_REFRESH_LOOKAHEAD)
-    if expires_at and datetime.now(timezone.utc) + lookahead >= expires_at and conn.refresh_token:
-        client_cls = PROVIDERS.get(conn.provider)
-        if client_cls is None:
-            log.warning("Unknown provider %s — cannot refresh token", conn.provider)
-            return conn.access_token or ""
+    return (now or datetime.now(timezone.utc)) + lookahead >= expires_at
+
+
+async def _claim_refresh(conn: ProviderConnection, session: AsyncSession) -> bool:
+    """Try to become the one caller that rotates this connection's tokens.
+
+    A conditional UPDATE, so the *database* picks the winner. That is what makes
+    this hold between processes as well as between tasks — and the rotation is
+    already worth serialising within one process, since two syncs for the same
+    user interleave across the ``await`` on the provider's refresh endpoint.
+    """
+    now = datetime.now(timezone.utc)
+    result = await session.execute(
+        update(ProviderConnection)
+        .where(
+            ProviderConnection.id == conn.id,
+            or_(
+                ProviderConnection.refresh_lock_until.is_(None),
+                ProviderConnection.refresh_lock_until <= now,
+            ),
+        )
+        .values(refresh_lock_until=now + _REFRESH_LOCK_TTL)
+        # The database decides the winner; nothing in the identity map should be
+        # second-guessing that, and SQLite hands these columns back naive, which
+        # the in-Python evaluator cannot compare against an aware `now` anyway.
+        .execution_options(synchronize_session=False)
+    )
+    await session.commit()
+    return result.rowcount == 1
+
+
+async def _release_refresh(conn_id: str, session: AsyncSession) -> None:
+    """Hand the claim back. Takes the id, not the row: the caller may have just
+    rolled back, which expires every instance in the session."""
+    await session.execute(
+        update(ProviderConnection)
+        .where(ProviderConnection.id == conn_id)
+        .values(refresh_lock_until=None)
+        .execution_options(synchronize_session=False)
+    )
+    await session.commit()
+
+
+async def _await_rotation(conn: ProviderConnection, session: AsyncSession) -> None:
+    """Wait for whoever won the claim, so ``conn`` ends up holding *their* tokens.
+
+    The rollback on each pass is load-bearing: registry sessions are
+    ``expire_on_commit=False`` and SQLite hands out a snapshot for the life of a
+    read transaction, so without ending the transaction first this would re-read
+    its own stale view forever and hand back the token the winner has just had
+    revoked.
+    """
+    deadline = asyncio.get_running_loop().time() + _REFRESH_WAIT_SECONDS
+    while True:
+        await asyncio.sleep(_REFRESH_POLL_SECONDS)
+        await session.rollback()
+        await session.refresh(conn)
+        lock_until = conn.refresh_lock_until
+        if lock_until is not None and lock_until.tzinfo is None:
+            lock_until = lock_until.replace(tzinfo=timezone.utc)
+        if lock_until is None or lock_until <= datetime.now(timezone.utc):
+            return
+        if asyncio.get_running_loop().time() >= deadline:
+            log.warning(
+                "Timed out waiting for a concurrent %s token refresh for user %s",
+                conn.provider,
+                conn.user_id,
+            )
+            return
+
+
+async def ensure_fresh_token(conn: ProviderConnection, session: AsyncSession) -> str:
+    """Refresh the access token if it will expire soon. Returns current token.
+
+    At most one caller rotates. The others wait for it and return the token it
+    stored, rather than presenting a refresh token the provider has already
+    revoked — Wahoo revokes on rotation (see ``_REFRESH_LOOKAHEAD`` above), so a
+    lost race used to cost the user their connection permanently (issue #50).
+    """
+    if not _needs_refresh(conn):
+        return conn.access_token or ""
+
+    client_cls = PROVIDERS.get(conn.provider)
+    if client_cls is None:
+        log.warning("Unknown provider %s — cannot refresh token", conn.provider)
+        return conn.access_token or ""
+
+    if not await _claim_refresh(conn, session):
+        await _await_rotation(conn, session)
+        return conn.access_token or ""
+
+    # Read off the row before anything can expire it — a rollback below detaches
+    # every loaded attribute, and reloading one would need IO we may not have.
+    conn_id, user_id = conn.id, conn.user_id
+    try:
+        # Re-read under the claim. Between deciding a refresh was due and winning
+        # the right to do it, another process may have rotated already — and
+        # rotating a second time is exactly what this lock exists to prevent.
+        await session.refresh(conn)
+        if not _needs_refresh(conn):
+            token = conn.access_token or ""
+            await _release_refresh(conn_id, session)
+            return token
 
         try:
             tokens = await client_cls.refresh_access_token(conn.refresh_token)  # type: ignore[arg-type]
@@ -147,8 +305,23 @@ async def ensure_fresh_token(conn: ProviderConnection, session: AsyncSession) ->
         conn.token_expires_at = datetime.fromtimestamp(
             tokens["expires_at"], tz=timezone.utc
         )
+        # Released in the same commit that publishes the new tokens, so no waiter
+        # can ever observe a free lock next to the tokens it replaced.
+        conn.refresh_lock_until = None
         await session.commit()
-        log.info("Refreshed %s token for user %s", conn.provider, conn.user_id)
+        log.info("Refreshed %s token for user %s", conn.provider, user_id)
+    except Exception:
+        # A failed rotation must not hold the claim for the whole TTL: the next
+        # caller should get to try, not wait a minute to find out it may.
+        # Cancellation and process death are deliberately *not* handled here —
+        # releasing needs IO that a cancelled task cannot do, which is precisely
+        # what the deadline on the claim is for.
+        try:
+            await session.rollback()
+            await _release_refresh(conn_id, session)
+        except Exception:
+            log.exception("Could not release the refresh lock for user %s", user_id)
+        raise
 
     return conn.access_token or ""
 
@@ -253,12 +426,27 @@ async def sync_provider_activities(
             # within milliseconds) cannot both see "no existing activity" and
             # each create a duplicate record.
             #
+            # Two guards, not one (issue #50). The `asyncio.Lock` settles the
+            # common case without touching the database, but it only speaks for
+            # this event loop — so the `SyncLease` inside it repeats the same
+            # exclusion in a place every writer of this database can see. The
+            # lock is the fast path; the lease is the guarantee.
+            #
             # Critical invariant: the new Activity row must be COMMITTED before
-            # this lock is released.  A flush alone is not sufficient — under
+            # either is released.  A flush alone is not sufficient — under
             # READ COMMITTED isolation (and SQLite WAL mode) another session
             # that acquires the lock after the flush but before the commit will
             # still see an empty dedup window and create a duplicate.
-            async with _get_activity_lock(user_id, athlete.id):
+            async with (
+                _get_activity_lock(user_id, athlete.id),
+                leases.hold(
+                    session,
+                    SyncLease,
+                    f"activity-create:{athlete.id}",
+                    ttl=_ACTIVITY_LEASE_TTL,
+                    wait=_ACTIVITY_LEASE_WAIT,
+                ),
+            ):
                 # ── Activity within the time window? ──────────────────────
                 if norm.start_time is not None:
                     act_result = await session.execute(

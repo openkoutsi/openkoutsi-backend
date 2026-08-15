@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.core.auth import create_access_token, hash_password
+from backend.app.core.auth import create_access_token, hash_password_async
 from backend.app.core.limiter import limiter
 from backend.app.core.scopes import pat_forbidden
 from backend.app.db.registry import get_registry_session
@@ -44,7 +44,7 @@ async def first_run_setup(
     user = User(
         id=str(uuid.uuid4()),
         username=body.admin_username,
-        password_hash=hash_password(body.admin_password),
+        password_hash=await hash_password_async(body.admin_password),
         roles=json.dumps(roles),
     )
     session.add(user)
