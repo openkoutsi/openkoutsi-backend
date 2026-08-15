@@ -175,6 +175,9 @@ _REFRESH_LOCK_TTL = timedelta(seconds=60)
 # giving up and using whatever is on the row.
 _REFRESH_WAIT_SECONDS = 30.0
 _REFRESH_POLL_SECONDS = 0.05
+# Claim-or-wait turns before a caller settles for the token on the row. Two: one
+# to wait for the caller already rotating, one to rotate itself if that failed.
+_REFRESH_ATTEMPTS = 2
 
 
 def _needs_refresh(conn: ProviderConnection, now: datetime | None = None) -> bool:
@@ -259,10 +262,21 @@ async def _await_rotation(conn: ProviderConnection, session: AsyncSession) -> No
 async def ensure_fresh_token(conn: ProviderConnection, session: AsyncSession) -> str:
     """Refresh the access token if it will expire soon. Returns current token.
 
-    At most one caller rotates. The others wait for it and return the token it
-    stored, rather than presenting a refresh token the provider has already
-    revoked — Wahoo revokes on rotation (see ``_REFRESH_LOOKAHEAD`` above), so a
-    lost race used to cost the user their connection permanently (issue #50).
+    At most one caller rotates at a time. The others wait for it and return the
+    token it stored, rather than presenting a refresh token the provider has
+    already revoked — Wahoo revokes on rotation (see ``_REFRESH_LOOKAHEAD``
+    above), so a lost race used to cost the user their connection permanently
+    (issue #50).
+
+    Waiting is not the same as giving up. If the winner's attempt fails it
+    releases the claim, and a caller that was already waiting takes its own turn
+    rather than returning a token it can see is expiring — otherwise one
+    transient 5xx would take down every caller queued behind it, which is worse
+    than the independent attempts this replaced.
+
+    The one path that still returns a token known to be stale is
+    ``_await_rotation`` timing out; it logs, and the caller then fails at the
+    provider exactly as it did before this existed.
     """
     if not _needs_refresh(conn):
         return conn.access_token or ""
@@ -272,10 +286,22 @@ async def ensure_fresh_token(conn: ProviderConnection, session: AsyncSession) ->
         log.warning("Unknown provider %s — cannot refresh token", conn.provider)
         return conn.access_token or ""
 
-    if not await _claim_refresh(conn, session):
+    # One turn to wait for whoever is already rotating, one to do it ourselves if
+    # their attempt failed. Bounded, so two callers failing in turn cannot
+    # ping-pong indefinitely between waiting and retrying.
+    for _ in range(_REFRESH_ATTEMPTS):
+        if await _claim_refresh(conn, session):
+            return await _rotate_under_claim(conn, session, client_cls)
         await _await_rotation(conn, session)
-        return conn.access_token or ""
+        if not _needs_refresh(conn):
+            return conn.access_token or ""
+    return conn.access_token or ""
 
+
+async def _rotate_under_claim(
+    conn: ProviderConnection, session: AsyncSession, client_cls
+) -> str:
+    """Do the rotation, holding the claim. Returns the resulting access token."""
     # Read off the row before anything can expire it — a rollback below detaches
     # every loaded attribute, and reloading one would need IO we may not have.
     conn_id, user_id = conn.id, conn.user_id
@@ -335,7 +361,7 @@ async def sync_provider_activities(
     session: AsyncSession,
     *,
     user_id: str,
-    access_token: str | None = None,
+    access_token: str,
 ) -> tuple[int, date | None]:
     """
     Import all activities from a provider that aren't already in the database.
@@ -346,6 +372,15 @@ async def sync_provider_activities(
         repopulate the Activity if the new source has higher priority.
       - Otherwise → create a new Activity + ActivitySource.
 
+    ``access_token`` is the caller's to supply, and required. ``session`` here is
+    the **per-user** database — every model this function touches belongs to it —
+    while ``connection`` is a registry row. Refreshing a token therefore needs a
+    session this function does not have, so it used to accept ``None`` and call
+    :func:`ensure_fresh_token` with the wrong session: harmless while that only
+    mutated the ORM object, a ``no such table: provider_connections`` now that it
+    claims the rotation with a real statement. Every caller already passes a
+    token; the signature now says so.
+
     Returns (count_created_or_updated, earliest_start_date).
     """
     provider_name = connection.provider
@@ -354,8 +389,6 @@ async def sync_provider_activities(
         log.error("No client registered for provider %s", provider_name)
         return 0, None
 
-    if access_token is None:
-        access_token = await ensure_fresh_token(connection, session)
     client = client_cls()
 
     count = 0

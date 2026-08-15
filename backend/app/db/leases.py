@@ -17,9 +17,12 @@ comfortably longer than the section it protects: expiring under a holder that is
 merely slow hands the same lease to two callers, which is the failure the lease
 exists to prevent.
 
-Generic over the model so one implementation serves both databases — the
+Generic over the *model*, so one implementation serves both databases — the
 per-user DB (activity creation) and, in future, the registry (leader election for
-the background pollers).
+the background pollers). Not generic over the *dialect*: the claim-on-first-use
+insert is ``sqlalchemy.dialects.sqlite``'s ``ON CONFLICT DO NOTHING``. Every
+database in this application is SQLite, so that costs nothing today; it is
+recorded here so the reuse above is not mistaken for portability.
 """
 
 from __future__ import annotations
@@ -38,8 +41,16 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 log = logging.getLogger(__name__)
 
-#: Default gap between attempts while waiting for a held lease.
+#: Gap before the first re-attempt when the lease is held. Each further attempt
+#: doubles it, up to :data:`MAX_POLL_SECONDS`.
+#:
+#: The backoff is not politeness. A poll is a write transaction, SQLite has one
+#: write lock per database, and the thing the waiter is waiting for is the holder
+#: *committing* — so polling hard actively delays the event being polled for. The
+#: sections under a lease are measured in seconds (a FIT download and parse, on
+#: the attach path), which a half-second poll tracks perfectly well.
 POLL_SECONDS = 0.02
+MAX_POLL_SECONDS = 0.5
 
 
 class LeaseMixin:
@@ -74,7 +85,13 @@ async def acquire(
     merely flushed.
     """
     token = uuid.uuid4().hex
-    deadline = asyncio.get_running_loop().time() + wait
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + wait
+    # The insert can only ever match while the row is absent, which is decided
+    # once and for all on the first pass. Re-trying it every poll was doubling
+    # the wait loop's write traffic to no possible effect.
+    insert_attempted = False
+    delay = poll
 
     while True:
         now = datetime.now(timezone.utc)
@@ -103,18 +120,22 @@ async def acquire(
         # First ever use of this lease name — insert it already claimed, so the
         # create and the claim are one statement and two callers racing to
         # create it cannot both come away holding it.
-        created = await session.execute(
-            sqlite_insert(model)
-            .values(name=name, holder=token, expires_at=now + ttl)
-            .on_conflict_do_nothing(index_elements=[model.name])
-        )
-        await session.commit()
-        if created.rowcount == 1:
-            return token
+        if not insert_attempted:
+            insert_attempted = True
+            created = await session.execute(
+                sqlite_insert(model)
+                .values(name=name, holder=token, expires_at=now + ttl)
+                .on_conflict_do_nothing(index_elements=[model.name])
+            )
+            await session.commit()
+            if created.rowcount == 1:
+                return token
 
-        if asyncio.get_running_loop().time() >= deadline:
+        remaining = deadline - loop.time()
+        if remaining <= 0:
             return None
-        await asyncio.sleep(poll)
+        await asyncio.sleep(min(delay, remaining))
+        delay = min(delay * 2, MAX_POLL_SECONDS)
 
 
 async def release(
@@ -146,15 +167,41 @@ async def hold(
     an admission gate, and refusing to import an activity because a lease was
     busy would turn a rare duplicate into a routine failure. The warning is what
     makes the degraded case visible.
+
+    **This owns the session's transaction boundaries.** Taking and releasing a
+    lease both have to be visible to other connections, so both commit — and
+    ``commit`` flushes first. A block that raises therefore gets an explicit
+    rollback before the release, because otherwise the act of tidying up after a
+    failure would publish the very work the failure should have discarded: on the
+    attach path in ``provider_sync`` that is a flushed ``ActivitySource`` and the
+    deletion of every stream and best belonging to the activity. Do not carry
+    unrelated uncommitted work across this block.
     """
     token = await acquire(session, model, name, ttl=ttl, wait=wait)
     if token is None:
-        log.warning("Gave up waiting for lease %s after %ss", name, wait)
+        log.warning(
+            "Gave up waiting for lease %s after %ss — proceeding with in-process "
+            "locking only, which is this process's own tasks and nothing else",
+            name,
+            wait,
+        )
+
+    failed = False
     try:
         yield token
+    except BaseException:
+        failed = True
+        raise
     finally:
         if token is not None:
             try:
+                if failed and session.in_transaction():
+                    # Discard the block's half-finished work *before* the release
+                    # commits. This also un-poisons a session left in
+                    # pending-rollback by a failed flush, which would otherwise
+                    # make the release below raise and strand the lease for its
+                    # entire TTL.
+                    await session.rollback()
                 await release(session, model, name, token)
             except Exception:
                 # The deadline covers this: the lease frees itself shortly.

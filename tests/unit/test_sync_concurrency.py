@@ -24,7 +24,13 @@ import backend.app.models.registry_orm  # noqa: F401 — populate RegistryBase.m
 import backend.app.models.user_orm  # noqa: F401 — populate UserBase.metadata
 from backend.app.db.base import RegistryBase, UserBase, _set_wal_mode
 from backend.app.models.registry_orm import ProviderConnection, User
-from backend.app.models.user_orm import Activity, ActivitySource, Athlete
+from backend.app.models.user_orm import (
+    Activity,
+    ActivitySource,
+    ActivityStream,
+    Athlete,
+    SyncLease,
+)
 from backend.app.services.provider_sync import ensure_fresh_token, sync_provider_activities
 from backend.app.services.providers.base import NormalizedActivity
 
@@ -191,11 +197,19 @@ def _norm(ext_id: str, source: str, start_time: datetime) -> NormalizedActivity:
     )
 
 
-def _provider_returning(norm: NormalizedActivity) -> MagicMock:
-    """A provider client that offers exactly one activity and has no FIT file."""
+def _provider_returning(norm: NormalizedActivity, *, fit: bytes | None = None) -> MagicMock:
+    """A provider client that offers exactly one activity.
+
+    ``fit`` decides the source priority the import will compute: bytes make this
+    a FIT-capable provider (priority 2, ahead of Strava's 3), which is what sends
+    the import down the repopulate path rather than the record-the-source one.
+    """
     client = MagicMock()
     client.list_activities = AsyncMock(side_effect=[[norm], []])
-    client.download_fit_file = AsyncMock(side_effect=Exception("no FIT"))
+    if fit is None:
+        client.download_fit_file = AsyncMock(side_effect=Exception("no FIT"))
+    else:
+        client.download_fit_file = AsyncMock(return_value=fit)
     client.get_activity_streams = AsyncMock(return_value={})
     return MagicMock(return_value=client)
 
@@ -216,7 +230,9 @@ async def user_db(tmp_path):
     await engine.dispose()
 
 
-async def _sync_from(factory, provider_name: str, norm: NormalizedActivity) -> None:
+async def _sync_from(
+    factory, provider_name: str, norm: NormalizedActivity, *, fit: bytes | None = None
+) -> None:
     """Import one activity, on this caller's own session."""
     async with factory() as session:
         athlete = (
@@ -227,7 +243,7 @@ async def _sync_from(factory, provider_name: str, norm: NormalizedActivity) -> N
         conn.provider = provider_name
         with patch(
             "backend.app.services.provider_sync.PROVIDERS",
-            {provider_name: _provider_returning(norm)},
+            {provider_name: _provider_returning(norm, fit=fit)},
         ):
             await sync_provider_activities(
                 athlete, conn, session, user_id=_USER_ID, access_token="tok"
@@ -327,3 +343,145 @@ class TestConcurrentDuplicateImport:
         activities, sources = await _activity_and_source_counts(user_db)
         assert activities == 2
         assert sources == 2
+
+
+# ── Failure inside the guarded section ──────────────────────────────────────
+
+
+class TestAFailedImportCommitsNothing:
+    """Releasing the lease must not publish the work that failed.
+
+    ``leases.release`` commits, and ``commit`` flushes first, so the tidy-up at
+    the end of a failed section is in a position to make that section's partial
+    writes durable. The attach path is where that bites: by the time
+    ``_fill_from_source`` does its unguarded disk and parse work,
+    ``_repopulate_activity`` has already deleted every stream and best belonging
+    to the activity it is rebuilding.
+    """
+
+    async def test_a_failure_after_the_deletes_leaves_the_streams_intact(self, user_db):
+        start = datetime(2026, 6, 1, 10, 0, tzinfo=timezone.utc)
+
+        # An activity already imported from Strava, with a stream to lose.
+        async with user_db() as session:
+            activity = Activity(
+                id="act-1", athlete_id="athlete-1", name="Morning Ride",
+                start_time=start, duration_s=3600, status="processed",
+            )
+            session.add(activity)
+            await session.flush()
+            session.add(
+                ActivitySource(activity_id="act-1", provider="strava", external_id="s-1")
+            )
+            session.add(
+                ActivityStream(
+                    id="stream-1", activity_id="act-1", stream_type="power",
+                    data=[100, 200, 300],
+                )
+            )
+            await session.commit()
+
+        # Wahoo arrives with a FIT file, so it outranks Strava and repopulates —
+        # and then the rebuild blows up partway through, after the deletes.
+        with patch(
+            "backend.app.services.provider_sync._fill_from_source",
+            AsyncMock(side_effect=OSError("No space left on device")),
+        ):
+            with pytest.raises(OSError):
+                await _sync_from(
+                    user_db,
+                    "wahoo",
+                    _norm("w-1", "wahoo", start + timedelta(minutes=2)),
+                    fit=b"a FIT file, which outranks Strava's streams",
+                )
+
+        async with user_db() as reader:
+            streams = (await reader.execute(select(ActivityStream))).scalars().all()
+            activities = (await reader.execute(select(Activity))).scalars().all()
+
+        # The deletion was rolled back with the rest of the failed section.
+        assert [s.stream_type for s in streams] == ["power"]
+        assert len(activities) == 1
+
+    async def test_the_lease_is_free_again_after_a_failed_import(self, user_db):
+        """So the next activity in the same sync does not wait out the TTL."""
+        start = datetime(2026, 6, 1, 10, 0, tzinfo=timezone.utc)
+
+        with patch(
+            "backend.app.services.provider_sync._populate_activity",
+            AsyncMock(side_effect=OSError("No space left on device")),
+        ):
+            with pytest.raises(OSError):
+                await _sync_from(user_db, "strava", _norm("s-1", "strava", start))
+
+        async with user_db() as session:
+            lease = (
+                await session.execute(
+                    select(SyncLease).where(
+                        SyncLease.name == "activity-create:athlete-1"
+                    )
+                )
+            ).scalar_one()
+        assert lease.holder is None
+
+
+class _FailsThenWorksProvider:
+    """Fails the first rotation, succeeds on the next.
+
+    Stands in for a transient provider fault — a 5xx, a connection timeout, a
+    malformed token payload. The refresh token is *not* revoked by a failed
+    attempt, which is what makes a second try worth making.
+    """
+
+    def __init__(self, delay: float = 0.1):
+        self.delay = delay
+        self.presented: list[str] = []
+
+    async def refresh_access_token(self, refresh_token: str) -> dict:
+        self.presented.append(refresh_token)
+        await asyncio.sleep(self.delay)
+        if len(self.presented) == 1:
+            raise RuntimeError("provider returned 503")
+        return {
+            "access_token": "access-2",
+            "refresh_token": "refresh-2",
+            "expires_at": int(
+                (datetime.now(timezone.utc) + timedelta(hours=6)).timestamp()
+            ),
+        }
+
+
+class TestTheWaiterIsNotTakenDownWithTheWinner:
+    async def test_the_waiter_rotates_itself_when_the_winners_attempt_fails(
+        self, registry_db
+    ):
+        """Before the claim, both callers refreshed independently, so one failing
+        did not cost the other its token. Waiting must not undo that."""
+        provider = _FailsThenWorksProvider()
+
+        with patch("backend.app.services.provider_sync.PROVIDERS", {"wahoo": provider}):
+            results = await asyncio.gather(
+                _fresh_token_from_own_session(registry_db),
+                _fresh_token_from_own_session(registry_db),
+                return_exceptions=True,
+            )
+
+        # The winner's caller sees the provider error — that is its own call
+        # failing, and swallowing it would be worse.
+        errors = [r for r in results if isinstance(r, BaseException)]
+        tokens = [r for r in results if not isinstance(r, BaseException)]
+        assert len(errors) == 1
+        assert len(tokens) == 1
+
+        # The waiter did not simply hand back the expiring token it started with.
+        assert tokens == ["access-2"]
+        assert provider.presented == ["refresh-1", "refresh-1"]
+
+        async with registry_db() as session:
+            stored = (
+                await session.execute(
+                    select(ProviderConnection).where(ProviderConnection.id == "conn-1")
+                )
+            ).scalar_one()
+        assert stored.access_token == "access-2"
+        assert stored.refresh_lock_until is None

@@ -197,3 +197,86 @@ class TestHold:
                 ran = True
                 assert token is None
             assert ran
+
+
+class TestHoldAndTheCallersTransaction:
+    """`hold` finishes by committing, so what it does with a *failed* block matters.
+
+    `release()` ends in `session.commit()` and `commit()` flushes first, which
+    means tidying up after a failure could publish the very work the failure
+    should have discarded.
+    """
+
+    async def test_a_failed_block_does_not_get_its_work_committed(self, factory):
+        from backend.app.models.user_orm import Activity, Athlete
+
+        async with factory() as setup:
+            setup.add(Athlete(id="ath-1", global_user_id="u", ftp_tests=[]))
+            await setup.commit()
+
+        async with factory() as session:
+            with pytest.raises(RuntimeError):
+                async with leases.hold(
+                    session, SyncLease, "activity-create:ath-1", ttl=_TTL, wait=5.0
+                ):
+                    session.add(
+                        Activity(athlete_id="ath-1", name="half-written", status="pending")
+                    )
+                    await session.flush()
+                    raise RuntimeError("FIT parse blew up mid-section")
+
+        async with factory() as reader:
+            rows = (await reader.execute(select(Activity))).scalars().all()
+        assert [r.name for r in rows] == []
+
+    async def test_the_lease_is_freed_even_when_the_failure_poisoned_the_session(
+        self, factory
+    ):
+        """A failed *flush* leaves the session in pending-rollback.
+
+        `release`'s own statement then raises, the guard below swallows it, and
+        the lease sits held for its whole TTL — after which every later caller in
+        that sync pays the full wait before giving up and proceeding unguarded.
+        A flush error is the right shape here: a raw `execute` failure leaves the
+        session usable, but the commit at the end of `_fill_from_source` does not.
+        """
+        from sqlalchemy.exc import IntegrityError
+
+        async with factory() as session:
+            with pytest.raises(IntegrityError):
+                async with leases.hold(
+                    session, SyncLease, "job", ttl=_TTL, wait=5.0
+                ):
+                    # Collides with the lease row `hold` just claimed.
+                    session.add(SyncLease(name="job"))
+                    await session.flush()
+
+        async with factory() as next_caller:
+            assert await leases.acquire(
+                next_caller, SyncLease, "job", ttl=_TTL, wait=0.5
+            ) is not None
+
+
+class TestWaitLoopCost:
+    async def test_the_insert_is_attempted_once_however_long_the_wait(self, factory):
+        """The INSERT can only ever match on the first pass; retrying it is pure
+        write traffic against the lock the holder needs to release."""
+        async with factory() as holder, factory() as waiter:
+            await leases.acquire(holder, SyncLease, "job", ttl=_TTL, wait=1.0)
+
+            statements: list[str] = []
+            real_execute = waiter.execute
+
+            async def spy(statement, *args, **kwargs):
+                statements.append(str(statement).split()[0].upper())
+                return await real_execute(statement, *args, **kwargs)
+
+            waiter.execute = spy  # type: ignore[method-assign]
+            assert await leases.acquire(
+                waiter, SyncLease, "job", ttl=_TTL, wait=0.4
+            ) is None
+
+        assert statements.count("INSERT") == 1
+        # And the polling itself must not be a write storm: a 0.4 s wait should
+        # cost a handful of statements, not dozens.
+        assert len(statements) <= 12, statements
