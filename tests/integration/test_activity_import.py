@@ -574,9 +574,12 @@ class TestImportedActivityLifecycle:
 
         response = await client.get(f"/api/activities/{activity.id}/fit", headers=auth_headers)
         assert response.status_code == 200
-        # Starlette encodes the filename per RFC 5987, so match the extension
-        # rather than the exact header spelling.
-        assert response.headers["content-disposition"].endswith(".gpx")
+        # The two branches of the download endpoint spell the header
+        # differently — Starlette's FileResponse uses RFC 5987 encoding, the
+        # decrypt branch a plain quoted filename — so match the extension
+        # rather than the spelling.
+        disposition = response.headers["content-disposition"]
+        assert ".gpx" in disposition and ".fit" not in disposition
         # Byte-for-byte what was imported, not a conversion of it.
         assert b"<trkpt" in response.content
 
@@ -594,6 +597,48 @@ class TestImportedActivityLifecycle:
         assert body["id"] == activity.id
         assert body["load"] is not None
         assert body["intervals"], "reprocess rebuilds the interval breakdown"
+
+    async def test_an_encrypted_import_is_still_downloadable_and_reprocessable(
+        self, client, auth_headers, session
+    ):
+        """The path production actually takes.
+
+        Originals are encrypted at rest, but the suite has no ``ENCRYPTION_KEY``
+        so every other test here exercises the plaintext fallback. That leaves
+        the interesting half untested: an imported GPX is encrypted on disk and
+        both readers — the download and the reprocess — have to decrypt it *and*
+        know it is a GPX rather than a FIT.
+        """
+        from unittest.mock import patch
+
+        from cryptography.fernet import Fernet
+
+        from backend.app.core import config
+
+        with patch.object(config.settings, "encryption_key", Fernet.generate_key().decode()):
+            await import_files(client, auth_headers, session, [("ride.gpx", RIDE_GPX.read_bytes())])
+
+            source = (await session.execute(select(ActivitySource))).scalar_one()
+            assert source.fit_file_encrypted is True
+            assert source.format == "gpx"
+            # Genuinely encrypted on disk — not the plaintext file with a flag.
+            assert b"<trkpt" not in Path(source.fit_file_path).read_bytes()
+
+            activity = (await session.execute(select(Activity))).scalar_one()
+
+            download = await client.get(
+                f"/api/activities/{activity.id}/fit", headers=auth_headers
+            )
+            assert download.status_code == 200
+            assert b"<trkpt" in download.content
+            disposition = download.headers["content-disposition"]
+            assert ".gpx" in disposition and ".fit" not in disposition
+
+            reprocess = await client.post(
+                f"/api/activities/{activity.id}/reprocess", headers=auth_headers
+            )
+            assert reprocess.status_code == 200
+            assert reprocess.json()["intervals"]
 
     async def test_reprocess_keeps_tcx_laps(self, client, auth_headers, session):
         await import_files(client, auth_headers, session, [("ride.tcx", RIDE_TCX.read_bytes())])

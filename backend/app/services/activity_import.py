@@ -296,12 +296,30 @@ async def _import_one(
             expanded.name, OUTCOME_FAILED, reason=f"Could not process the file: {exc}", fmt=fmt
         )
 
+    # Read before anything that could expire it: a rollback below would turn
+    # this into a lazy load, and a lazy load here is implicit IO in a place that
+    # cannot await it.
+    activity_id = activity.id
+
     try:
         encrypt_file(stored, user_id)
-        source.fit_file_encrypted = True
-        await session.commit()
     except Exception:
+        # Not fatal, and not a reason to roll anything back — the activity is
+        # already committed and the file is readable, just not encrypted.
         log.warning("Failed to encrypt imported file %s — left in plaintext", stored, exc_info=True)
+    else:
+        source.fit_file_encrypted = True
+        try:
+            await session.commit()
+        except Exception:
+            # A failed commit leaves the session needing a rollback, and without
+            # one every *later* file in the job fails on its first flush.
+            log.exception("Could not record that %s was encrypted", stored)
+            try:
+                await session.rollback()
+                await session.refresh(athlete)
+            except Exception:
+                log.exception("Could not recover the session after a failed commit")
 
     # Linking is per-activity by nature (a ride matches the workout planned for
     # its own day), unlike the metrics recalculation the job does once at the end.
@@ -310,7 +328,7 @@ async def _import_one(
     return _result(
         expanded.name,
         OUTCOME_IMPORTED,
-        activity_id=activity.id,
+        activity_id=activity_id,
         fmt=fmt,
     )
 
