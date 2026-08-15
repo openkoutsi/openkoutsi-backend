@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Sequence
 
 from . import streams
+from .sport_matching import canonical_sport_type
 
 
 _FIT_SPORT_MAP = {
@@ -15,16 +16,30 @@ _FIT_SPORT_MAP = {
     "swimming": "Swim",
     "walking": "Walk",
     "hiking": "Hike",
+    # TCX names cycling this way in its ``Sport`` attribute; GPX writers use the
+    # spellings above or a canonical Strava name, which the lookup below covers.
+    "biking": "Ride",
 }
 
 
 def resolve_sport_type(fit_sport: str | None) -> str:
-    """Normalise a raw fitdecode sport string to a Strava-style name."""
+    """Normalise a raw sport string from an activity file to a Strava-style name.
+
+    Named for the FIT files it was written against, but every format's parser
+    goes through it — a GPX ``<type>``, a TCX ``Sport`` attribute and a FIT
+    ``sport`` message all arrive here, and all three have their own vocabulary.
+    """
     if fit_sport is None:
         return "Cycling"
     mapped = _FIT_SPORT_MAP.get(fit_sport.lower())
     if mapped:
         return mapped
+    # A file that already names a sport openkoutsi knows keeps that name rather
+    # than being title-cased into a near-miss ("virtualride" → "Virtualride",
+    # which matches nothing).
+    canonical = canonical_sport_type(fit_sport)
+    if canonical:
+        return canonical
     return fit_sport.title()
 
 

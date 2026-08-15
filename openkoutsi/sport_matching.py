@@ -74,6 +74,29 @@ _WORKOUT_TYPE_TO_CATEGORY: dict[str, str] = {
 }
 
 
+# The canonical spellings, keyed by their own lowercase form. Files written by
+# other tools name the same sport in whatever case they like — a Strava GPX
+# writes ``<type>ride</type>``, a TCX writes ``Sport="Biking"`` — and a sport
+# type that differs from the canonical spelling only in case is invisible to
+# every map in this module.
+_CANONICAL_BY_LOWER: dict[str, str] = {
+    sport.lower(): sport for sport in _ACTIVITY_SPORT_TO_CATEGORY
+}
+
+
+def canonical_sport_type(raw: Optional[str]) -> Optional[str]:
+    """The canonical spelling of a sport openkoutsi knows, or ``None``.
+
+    Case- and separator-insensitive, so ``ride``, ``Ride``, ``virtual_ride`` and
+    ``VirtualRide`` all resolve. Returns ``None`` for anything unrecognised —
+    callers decide whether to pass the raw string through or fall back.
+    """
+    if not raw:
+        return None
+    key = raw.strip().lower().replace("_", "").replace("-", "").replace(" ", "")
+    return _CANONICAL_BY_LOWER.get(key)
+
+
 def activity_category(sport_type: Optional[str]) -> Optional[str]:
     """Canonical sport category for an activity's ``sport_type``, or None.
 

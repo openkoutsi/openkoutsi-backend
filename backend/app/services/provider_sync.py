@@ -60,7 +60,8 @@ from openkoutsi.training_math import (
     variability_index,
     weighted_power,
 )
-from openkoutsi.fit import summarizeWorkout, extractIntervals
+from openkoutsi.activity_formats import parser_for
+from openkoutsi.fit import summarizeWorkout
 from openkoutsi.streams import to_json_stream
 
 log = logging.getLogger(__name__)
@@ -1026,13 +1027,19 @@ async def rebuild_intervals(
     stream_map: dict[str, list],
     *,
     replace: bool = False,
+    fmt: str = "fit",
 ) -> None:
-    """Give this activity its interval breakdown, from FIT laps or an auto-split.
+    """Give this activity its interval breakdown, from recorded laps or an auto-split.
 
-    ``fileish`` is anything ``extractIntervals`` accepts — a path, a file object,
-    or ``None`` when there is no FIT to read. A file with no usable lap records
-    (or no file at all) falls back to fixed-length auto-splits sized by the ride
-    duration, so every processed activity ends up with a breakdown.
+    ``fileish`` is anything the format's ``extractIntervals`` accepts — a path, a
+    file object, or ``None`` when there is no original file to read. A file with
+    no usable lap records (or no file at all) falls back to fixed-length
+    auto-splits sized by the ride duration, so every processed activity ends up
+    with a breakdown.
+
+    ``fmt`` names which parser to read the laps with (issue #36). GPX has no lap
+    concept and always auto-splits; TCX carries the athlete's own splits, same as
+    FIT.
 
     ``replace=True`` clears the existing rows first, for the reprocess and
     attach-a-FIT paths that run against an activity which already has intervals;
@@ -1044,7 +1051,7 @@ async def rebuild_intervals(
         )
         await session.flush()
 
-    raw = extractIntervals(fileish) if fileish is not None else []
+    raw = parser_for(fmt).extractIntervals(fileish) if fileish is not None else []
     is_auto = len(raw) <= 1
     if is_auto:
         # A stream can outrun the recorded duration; split across the longer of

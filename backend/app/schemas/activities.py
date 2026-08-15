@@ -117,6 +117,12 @@ class ActivityResponse(BaseModel):
     notes: Optional[str] = None
     rpe: Optional[int] = None
     has_fit_file: bool = False
+    # Which format the stored original is in — `fit`, `gpx` or `tcx` (issue
+    # #36). Null when there is no file. `has_fit_file` keeps its name and its
+    # meaning ("there is an original to download"); this says what the download
+    # will actually be, so the UI can label the button and explain why a
+    # GPX-sourced ride has no power data.
+    original_format: Optional[str] = None
     status: str
     created_at: datetime
 

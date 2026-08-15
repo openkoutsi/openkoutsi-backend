@@ -1537,6 +1537,164 @@
         }
       }
     },
+    "/api/activities/import": {
+      "post": {
+        "tags": [
+          "activities"
+        ],
+        "summary": "Import many activity files, or an archive of them",
+        "description": "Start a bulk import and return the job to poll (issue #36).\n\nAccepts `.fit`, `.gpx`, `.tcx`, any of those gzipped, and `.zip` archives\ncontaining a mix of them \u2014 which is exactly the shape of a Strava bulk\nexport. The response is the job, not the activities: an export is thousands\nof files and tens of minutes of parsing, so the work happens in the\nbackground and the client polls `GET /activities/imports/{id}`.\n\n**On the rate limit.** The single-file upload is limited to 30/hour, which\nis what makes importing a history one file at a time impossible. The limit\nhere is on *jobs* rather than files, because a job is the unit of work an\nathlete actually asks for; one job may legitimately carry three thousand\nfiles. A second job while one is still running is refused (409) rather than\nqueued \u2014 two imports writing to one SQLite database interleave badly, and\nthe athlete has no reason to want it.\n\n**Personal access token scope:** `activities:write`",
+        "operationId": "importActivities",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_importActivities"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportJobResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "activities:write"
+        }
+      }
+    },
+    "/api/activities/imports": {
+      "get": {
+        "tags": [
+          "activities"
+        ],
+        "summary": "Recent bulk imports",
+        "description": "Recent import jobs, newest first, without the per-file detail.\n\nThe detail list can hold thousands of rows, which is worth fetching for the\none job being looked at and not for a list of them.\n\n**Personal access token scope:** `activities:read`",
+        "operationId": "listImports",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "maximum": 100,
+              "minimum": 1,
+              "default": 20,
+              "title": "Limit"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportJobListResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "activities:read"
+        }
+      }
+    },
+    "/api/activities/imports/{import_id}": {
+      "get": {
+        "tags": [
+          "activities"
+        ],
+        "summary": "Progress and per-file outcome of an import",
+        "description": "\n\n**Personal access token scope:** `activities:read`",
+        "operationId": "getImport",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "import_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Import Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportJobResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "activities:read"
+        }
+      }
+    },
     "/api/activities": {
       "post": {
         "tags": [
@@ -2164,7 +2322,7 @@
           "activities"
         ],
         "summary": "Download Fit File",
-        "description": "\n\n**Personal access token scope:** `activities:read`",
+        "description": "Download the original activity file.\n\nStill spelled `/fit` \u2014 that is the path the web client has always called and\nthe one an athlete's bookmark points at \u2014 but since issue #36 the file it\nserves is whatever was uploaded: a FIT, a GPX or a TCX. The extension of the\ndownloaded file follows the source's stored format, so an imported GPX comes\nback as a GPX rather than as something that claims to be a FIT and is not.\n\n**Personal access token scope:** `activities:read`",
         "operationId": "download_fit_file_api_activities__activity_id__fit_get",
         "security": [
           {
@@ -7051,6 +7209,17 @@
             "title": "Has Fit File",
             "default": false
           },
+          "original_format": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Format"
+          },
           "status": {
             "type": "string",
             "title": "Status"
@@ -7489,6 +7658,17 @@
             "type": "boolean",
             "title": "Has Fit File",
             "default": false
+          },
+          "original_format": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Original Format"
           },
           "status": {
             "type": "string",
@@ -8015,6 +8195,24 @@
         },
         "type": "object",
         "title": "AthleteUpdate"
+      },
+      "Body_importActivities": {
+        "properties": {
+          "files": {
+            "items": {
+              "type": "string",
+              "contentMediaType": "application/octet-stream"
+            },
+            "type": "array",
+            "title": "Files",
+            "description": "Activity files, .gz files, or .zip archives"
+          }
+        },
+        "type": "object",
+        "required": [
+          "files"
+        ],
+        "title": "Body_importActivities"
       },
       "Body_setAvatar": {
         "properties": {
@@ -9248,6 +9446,282 @@
         },
         "type": "object",
         "title": "HTTPValidationError"
+      },
+      "ImportFileResult": {
+        "properties": {
+          "filename": {
+            "type": "string",
+            "title": "Filename"
+          },
+          "outcome": {
+            "type": "string",
+            "title": "Outcome"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "activity_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Activity Id"
+          },
+          "format": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Format"
+          }
+        },
+        "type": "object",
+        "required": [
+          "filename",
+          "outcome"
+        ],
+        "title": "ImportFileResult",
+        "description": "What happened to one file in an import.\n\n``outcome`` is one of ``imported``, ``skipped_duplicate`` or ``failed``.\n``reason`` is prose written for the athlete \u2014 \"An activity starting at this\ntime already exists\", \"Not a FIT, GPX or TCX activity file\" \u2014 because a\ncount of failures is not something anyone can act on and a list of names\nwith reasons is."
+      },
+      "ImportJobListResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ImportJobSummary"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "total": {
+            "type": "integer",
+            "title": "Total"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "total"
+        ],
+        "title": "ImportJobListResponse"
+      },
+      "ImportJobResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "source_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Name"
+          },
+          "total_files": {
+            "type": "integer",
+            "title": "Total Files",
+            "default": 0
+          },
+          "imported": {
+            "type": "integer",
+            "title": "Imported",
+            "default": 0
+          },
+          "skipped_duplicate": {
+            "type": "integer",
+            "title": "Skipped Duplicate",
+            "default": 0
+          },
+          "failed": {
+            "type": "integer",
+            "title": "Failed",
+            "default": 0
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "results": {
+            "items": {
+              "$ref": "#/components/schemas/ImportFileResult"
+            },
+            "type": "array",
+            "title": "Results"
+          },
+          "processed": {
+            "type": "integer",
+            "title": "Processed",
+            "description": "Files finished with, of ``total_files``.\n\nProgress is reported as a count rather than a percentage because\n``total_files`` is 0 until the archives have been walked, and a\npercentage of an unknown total is a lie with a number on it.",
+            "readOnly": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "status",
+          "created_at",
+          "processed"
+        ],
+        "title": "ImportJobResponse",
+        "description": "One import job in full, including every file's outcome."
+      },
+      "ImportJobSummary": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "source_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Name"
+          },
+          "total_files": {
+            "type": "integer",
+            "title": "Total Files",
+            "default": 0
+          },
+          "imported": {
+            "type": "integer",
+            "title": "Imported",
+            "default": 0
+          },
+          "skipped_duplicate": {
+            "type": "integer",
+            "title": "Skipped Duplicate",
+            "default": 0
+          },
+          "failed": {
+            "type": "integer",
+            "title": "Failed",
+            "default": 0
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
+          "processed": {
+            "type": "integer",
+            "title": "Processed",
+            "description": "Files finished with, of ``total_files``.\n\nProgress is reported as a count rather than a percentage because\n``total_files`` is 0 until the archives have been walked, and a\npercentage of an unknown total is a lie with a number on it.",
+            "readOnly": true
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "status",
+          "created_at",
+          "processed"
+        ],
+        "title": "ImportJobSummary",
+        "description": "An import job without its per-file detail, for the list view."
       },
       "InstanceInfoResponse": {
         "properties": {

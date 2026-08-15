@@ -1,4 +1,4 @@
-# FIT test fixtures
+# Activity test fixtures
 
 Every `*.fit` file in this directory is picked up automatically and used to
 parametrize the FIT-processing integration tests (`test_activities.py`,
@@ -7,6 +7,9 @@ it gets exercised through the upload → parse → analyse pipeline — no test 
 needed. Tests gate producer-specific assertions on what each file actually
 contains (see `tests/integration/_fit_fixtures.py`), so a run with no power or an
 indoor ride with no speed is handled correctly rather than failing.
+
+The `*.gpx` and `*.tcx` files are named explicitly by the import tests rather
+than discovered, because those tests turn on which format a given file is.
 
 This directory is the **one committed exception** to `testdata/` being
 git-ignored, so anything placed here **will** be committed. Only add files that
@@ -44,6 +47,29 @@ the stream-alignment contract exists for (backend issue #76):
 
 Tests import the window boundaries from
 `scripts/generate_synthetic_fit_fixtures.py` rather than restating them.
+
+## Synthetic GPX and TCX fixtures
+
+The two XML formats a Strava bulk export contains (issue #36). Regenerate with:
+
+```console
+uv run python scripts/generate_synthetic_activity_fixtures.py
+```
+
+| File | Power | HR | Laps | Notes |
+| --- | --- | --- | --- | --- |
+| `synthetic_ride.gpx` | ✓ | ✓ | – | 1 Hz, Garmin `TrackPointExtension` + Strava-style `<power>` |
+| `synthetic_hr_only.gpx` | – | ✓ | – | what most GPX in the wild actually is |
+| `synthetic_ride.tcx` | ✓ | ✓ | 2 | device distance per point, two 5-minute laps |
+| `synthetic_ride.gpx.gz` | ✓ | ✓ | – | the gzip form the export ships |
+
+`synthetic_ride.gpx` and `synthetic_ride.tcx` describe **the same ride**: ten
+minutes at a steady 8 m/s with a single 60 m climb. That is what lets the tests
+assert two independent parsers agree on distance, ascent and the averages, which
+is the property that makes importing a mixed archive trustworthy.
+
+Their coordinates trace a line through open water in the Gulf of Bothnia, so —
+unlike a real ride — they identify nobody.
 
 ## Adding a real ride
 
