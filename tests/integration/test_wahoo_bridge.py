@@ -203,6 +203,7 @@ class TestPollingEndpointAuth:
         assert resp.status_code == 200
 
 
+@pytest.mark.replica_unsafe  # assumes a single poller, claiming after it processes
 class TestPollerHappyPath:
     async def test_webhook_processed_and_claimed(self, bridge_client, patched_bridge):
         _, sessions = patched_bridge
@@ -227,6 +228,7 @@ class TestPollerHappyPath:
         assert event.claimed_at is not None
 
 
+@pytest.mark.replica_unsafe  # assumes a single poller, claiming after it processes
 class TestBackendOfflineRecovery:
     async def test_queued_events_all_processed_when_backend_comes_online(
         self, bridge_client, patched_bridge

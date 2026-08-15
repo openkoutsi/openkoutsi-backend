@@ -199,6 +199,7 @@ async def _read(user_id: str):
     return athlete, goal, activities
 
 
+@pytest.mark.replica_unsafe  # settles every pending row, whoever owns it
 class TestStartupSweep:
     async def test_it_settles_every_surface_in_every_users_database(self):
         """A `pending` row at boot is from a process that no longer exists.
@@ -291,6 +292,7 @@ class TestStartupSweep:
 # ── The wiring ──────────────────────────────────────────────────────────────
 
 
+@pytest.mark.replica_unsafe  # a boot is not evidence the other process died
 class TestTheSweepRunsAtStartup:
     async def _lifespan(self, sweep):
         from unittest.mock import AsyncMock, patch

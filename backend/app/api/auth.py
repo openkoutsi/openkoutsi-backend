@@ -17,8 +17,8 @@ from backend.app.core.auth import (
     create_refresh_token,
     decode_token,
     get_current_user,
-    hash_password,
-    verify_password,
+    hash_password_async,
+    verify_password_async,
 )
 from backend.app.core.config import settings
 from backend.app.core.limiter import limiter
@@ -151,7 +151,7 @@ async def login(
             )
         )
         user = result.scalar_one_or_none()
-    if user is None or not verify_password(body.password, user.password_hash):
+    if user is None or not await verify_password_async(body.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     roles = _roles_of(user)
@@ -198,7 +198,7 @@ async def register(
     user = User(
         id=str(uuid.uuid4()),
         username=body.username,
-        password_hash=hash_password(body.password),
+        password_hash=await hash_password_async(body.password),
         roles=json.dumps(roles),
     )
     session.add(user)
@@ -272,7 +272,7 @@ async def delete_account(
         select(User).where(User.id == ctx.user_id, User.deleted_at.is_(None))
     )
     user = result.scalar_one_or_none()
-    if user is None or not verify_password(body.password, user.password_hash):
+    if user is None or not await verify_password_async(body.password, user.password_hash):
         raise HTTPException(status_code=401, detail="Invalid password")
 
     # Revoke all provider connections (best-effort)
@@ -329,7 +329,7 @@ async def reset_password(
     if user is None:
         raise HTTPException(status_code=400, detail="Invalid or expired token")
 
-    user.password_hash = hash_password(body.new_password)
+    user.password_hash = await hash_password_async(body.new_password)
     token_row.used_at = now
     # Whatever prompted the reset — a suspected compromise, most of the time —
     # applies to the credentials this account handed out just as much as to the
@@ -378,14 +378,14 @@ async def signup(
             user = User(
                 id=str(uuid.uuid4()),
                 email=email,
-                password_hash=hash_password(body.password),
+                password_hash=await hash_password_async(body.password),
                 roles=json.dumps(["user"]),
             )
             session.add(user)
             await session.flush()
         else:
             # Pending re-signup: let the latest attempt set the password.
-            user.password_hash = hash_password(body.password)
+            user.password_hash = await hash_password_async(body.password)
 
         prior = await session.execute(
             select(EmailVerificationToken).where(

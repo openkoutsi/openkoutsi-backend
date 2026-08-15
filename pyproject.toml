@@ -36,6 +36,15 @@ dev = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 filterwarnings = ["ignore::DeprecationWarning:passlib"]
+# `replica_unsafe` marks a test whose subject holds state in *this process* —
+# an in-memory counter, a module-global dict, a `lifespan` task with no leader
+# election — so the test is only true while exactly one process runs. These are
+# not failing or flaky tests; they are the inventory of what a second replica
+# would break, kept findable rather than discovered by failure (issue #50).
+# List them with: uv run python -m pytest -m replica_unsafe --collect-only -q
+markers = [
+    "replica_unsafe: encodes a single-process assumption; revisit before running a second replica",
+]
 
 [tool.coverage.run]
 omit = [

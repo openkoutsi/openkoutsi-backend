@@ -22,18 +22,33 @@ from backend.app.services.providers.base import NormalizedActivity
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 
-def _mock_conn(
+_TEST_USER_ID = "test-user-00000000"  # the user conftest's registry_session seeds
+
+
+async def _real_conn(
+    registry_session,
     provider: str = "strava",
     *,
     access_token: str = "access-tok",
     refresh_token: str = "refresh-tok",
     token_expires_at: datetime | None = None,
 ) -> ProviderConnection:
-    conn = MagicMock(spec=ProviderConnection)
-    conn.provider = provider
-    conn.access_token = access_token
-    conn.refresh_token = refresh_token
-    conn.token_expires_at = token_expires_at
+    """A persisted ProviderConnection row.
+
+    A mock will not do here any more: ``ensure_fresh_token`` claims the right to
+    rotate with a conditional UPDATE against this row (issue #50), so the row has
+    to exist for the claim to be winnable.
+    """
+    conn = ProviderConnection(
+        user_id=_TEST_USER_ID,
+        provider=provider,
+        access_token=access_token,
+        refresh_token=refresh_token,
+        token_expires_at=token_expires_at,
+    )
+    registry_session.add(conn)
+    await registry_session.commit()
+    await registry_session.refresh(conn)
     return conn
 
 
@@ -89,21 +104,23 @@ _ACCESS_TOKEN = "access-tok"
 
 
 class TestEnsureFreshToken:
-    async def test_valid_token_returned_unchanged(self, session):
-        conn = _mock_conn(
-            token_expires_at=datetime.now(timezone.utc) + timedelta(hours=1)
+    async def test_valid_token_returned_unchanged(self, registry_session):
+        conn = await _real_conn(
+            registry_session,
+            token_expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
         )
-        token = await ensure_fresh_token(conn, session)
+        token = await ensure_fresh_token(conn, registry_session)
         assert token == "access-tok"
 
-    async def test_no_expiry_returns_current_token(self, session):
-        conn = _mock_conn(token_expires_at=None)
-        token = await ensure_fresh_token(conn, session)
+    async def test_no_expiry_returns_current_token(self, registry_session):
+        conn = await _real_conn(registry_session, token_expires_at=None)
+        token = await ensure_fresh_token(conn, registry_session)
         assert token == "access-tok"
 
-    async def test_expired_token_is_refreshed(self, session):
-        conn = _mock_conn(
-            token_expires_at=datetime.now(timezone.utc) - timedelta(hours=1)
+    async def test_expired_token_is_refreshed(self, registry_session):
+        conn = await _real_conn(
+            registry_session,
+            token_expires_at=datetime.now(timezone.utc) - timedelta(hours=1),
         )
         mock_cls = MagicMock()
         mock_cls.refresh_access_token = AsyncMock(
@@ -115,14 +132,15 @@ class TestEnsureFreshToken:
         )
 
         with patch("backend.app.services.provider_sync.PROVIDERS", {"strava": mock_cls}):
-            token = await ensure_fresh_token(conn, session)
+            token = await ensure_fresh_token(conn, registry_session)
 
         assert token == "refreshed-token"
         mock_cls.refresh_access_token.assert_called_once_with("refresh-tok")
 
-    async def test_expired_token_updates_connection_attributes(self, session):
-        conn = _mock_conn(
-            token_expires_at=datetime.now(timezone.utc) - timedelta(hours=1)
+    async def test_expired_token_updates_connection_attributes(self, registry_session):
+        conn = await _real_conn(
+            registry_session,
+            token_expires_at=datetime.now(timezone.utc) - timedelta(hours=1),
         )
         mock_cls = MagicMock()
         mock_cls.refresh_access_token = AsyncMock(
@@ -134,22 +152,28 @@ class TestEnsureFreshToken:
         )
 
         with patch("backend.app.services.provider_sync.PROVIDERS", {"strava": mock_cls}):
-            await ensure_fresh_token(conn, session)
+            await ensure_fresh_token(conn, registry_session)
 
         assert conn.access_token == "new-access"
         assert conn.refresh_token == "new-refresh"
 
-    async def test_unknown_provider_returns_current_token_without_error(self, session):
-        conn = _mock_conn(
+    async def test_unknown_provider_returns_current_token_without_error(
+        self, registry_session
+    ):
+        conn = await _real_conn(
+            registry_session,
             provider="nonexistent",
             token_expires_at=datetime.now(timezone.utc) - timedelta(hours=1),
         )
         with patch("backend.app.services.provider_sync.PROVIDERS", {}):
-            token = await ensure_fresh_token(conn, session)
+            token = await ensure_fresh_token(conn, registry_session)
         assert token == "access-tok"
 
-    async def test_strava_token_expiring_within_30_minutes_is_refreshed(self, session):
-        conn = _mock_conn(
+    async def test_strava_token_expiring_within_30_minutes_is_refreshed(
+        self, registry_session
+    ):
+        conn = await _real_conn(
+            registry_session,
             provider="strava",
             token_expires_at=datetime.now(timezone.utc) + timedelta(minutes=20),
         )
@@ -162,23 +186,29 @@ class TestEnsureFreshToken:
             }
         )
         with patch("backend.app.services.provider_sync.PROVIDERS", {"strava": mock_cls}):
-            token = await ensure_fresh_token(conn, session)
+            token = await ensure_fresh_token(conn, registry_session)
         assert token == "proactive-strava"
 
-    async def test_strava_token_with_over_30_minutes_is_not_refreshed(self, session):
-        conn = _mock_conn(
+    async def test_strava_token_with_over_30_minutes_is_not_refreshed(
+        self, registry_session
+    ):
+        conn = await _real_conn(
+            registry_session,
             provider="strava",
             token_expires_at=datetime.now(timezone.utc) + timedelta(minutes=45),
         )
         mock_cls = MagicMock()
         mock_cls.refresh_access_token = AsyncMock()
         with patch("backend.app.services.provider_sync.PROVIDERS", {"strava": mock_cls}):
-            token = await ensure_fresh_token(conn, session)
+            token = await ensure_fresh_token(conn, registry_session)
         assert token == "access-tok"
         mock_cls.refresh_access_token.assert_not_called()
 
-    async def test_wahoo_token_expiring_within_1_minute_is_refreshed(self, session):
-        conn = _mock_conn(
+    async def test_wahoo_token_expiring_within_1_minute_is_refreshed(
+        self, registry_session
+    ):
+        conn = await _real_conn(
+            registry_session,
             provider="wahoo",
             token_expires_at=datetime.now(timezone.utc) + timedelta(seconds=30),
         )
@@ -191,24 +221,28 @@ class TestEnsureFreshToken:
             }
         )
         with patch("backend.app.services.provider_sync.PROVIDERS", {"wahoo": mock_cls}):
-            token = await ensure_fresh_token(conn, session)
+            token = await ensure_fresh_token(conn, registry_session)
         assert token == "proactive-wahoo"
 
-    async def test_wahoo_token_with_over_1_minute_is_not_refreshed(self, session):
-        conn = _mock_conn(
+    async def test_wahoo_token_with_over_1_minute_is_not_refreshed(
+        self, registry_session
+    ):
+        conn = await _real_conn(
+            registry_session,
             provider="wahoo",
             token_expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
         )
         mock_cls = MagicMock()
         mock_cls.refresh_access_token = AsyncMock()
         with patch("backend.app.services.provider_sync.PROVIDERS", {"wahoo": mock_cls}):
-            token = await ensure_fresh_token(conn, session)
+            token = await ensure_fresh_token(conn, registry_session)
         assert token == "access-tok"
         mock_cls.refresh_access_token.assert_not_called()
 
-    async def test_refresh_failure_is_logged_and_reraised(self, session):
-        conn = _mock_conn(
-            token_expires_at=datetime.now(timezone.utc) - timedelta(hours=1)
+    async def test_refresh_failure_is_logged_and_reraised(self, registry_session):
+        conn = await _real_conn(
+            registry_session,
+            token_expires_at=datetime.now(timezone.utc) - timedelta(hours=1),
         )
         mock_cls = MagicMock()
         mock_cls.refresh_access_token = AsyncMock(side_effect=RuntimeError("provider down"))
@@ -218,11 +252,58 @@ class TestEnsureFreshToken:
             patch("backend.app.services.provider_sync.log") as mock_log,
         ):
             with pytest.raises(RuntimeError, match="provider down"):
-                await ensure_fresh_token(conn, session)
+                await ensure_fresh_token(conn, registry_session)
 
         mock_log.error.assert_called_once()
         call_args = mock_log.error.call_args
         assert "strava" in call_args.args[1]
+
+    async def test_a_failed_refresh_releases_the_claim(self, registry_session):
+        """The next caller must get to try, not wait out the whole TTL."""
+        conn = await _real_conn(
+            registry_session,
+            token_expires_at=datetime.now(timezone.utc) - timedelta(hours=1),
+        )
+        failing = MagicMock()
+        failing.refresh_access_token = AsyncMock(side_effect=RuntimeError("provider down"))
+
+        with patch("backend.app.services.provider_sync.PROVIDERS", {"strava": failing}):
+            with pytest.raises(RuntimeError):
+                await ensure_fresh_token(conn, registry_session)
+
+        await registry_session.refresh(conn)
+        assert conn.refresh_lock_until is None
+
+        # And a second attempt gets as far as the provider rather than waiting.
+        recovering = MagicMock()
+        recovering.refresh_access_token = AsyncMock(
+            return_value={
+                "access_token": "second-try",
+                "refresh_token": "new-refresh",
+                "expires_at": 9999999999,
+            }
+        )
+        with patch("backend.app.services.provider_sync.PROVIDERS", {"strava": recovering}):
+            assert await ensure_fresh_token(conn, registry_session) == "second-try"
+
+    async def test_a_successful_refresh_releases_the_claim(self, registry_session):
+        conn = await _real_conn(
+            registry_session,
+            token_expires_at=datetime.now(timezone.utc) - timedelta(hours=1),
+        )
+        mock_cls = MagicMock()
+        mock_cls.refresh_access_token = AsyncMock(
+            return_value={
+                "access_token": "new-access",
+                "refresh_token": "new-refresh",
+                "expires_at": 9999999999,
+            }
+        )
+        with patch("backend.app.services.provider_sync.PROVIDERS", {"strava": mock_cls}):
+            await ensure_fresh_token(conn, registry_session)
+
+        await registry_session.refresh(conn)
+        assert conn.refresh_lock_until is None
 
 
 # ── sync_provider_activities ───────────────────────────────────────────────────
@@ -941,3 +1022,51 @@ class TestDeduplicationRaceCondition:
             f"for the same workout (expected 1). "
             f"The asyncio lock must guard both the flush and the commit."
         )
+
+
+# ── The in-process lock cache ──────────────────────────────────────────────────
+
+
+class TestActivityLockCache:
+    """The lock dict used to grow forever and was keyed by athlete (issue #50)."""
+
+    def _clear(self):
+        from backend.app.services.provider_sync import _activity_creation_locks
+
+        _activity_creation_locks.clear()
+
+    async def test_the_same_athlete_gets_the_same_lock(self):
+        from backend.app.services.provider_sync import _get_activity_lock
+
+        self._clear()
+        assert _get_activity_lock("u", "a") is _get_activity_lock("u", "a")
+        assert _get_activity_lock("u", "a") is not _get_activity_lock("u", "b")
+
+    async def test_the_cache_is_bounded(self):
+        from backend.app.services.provider_sync import (
+            _MAX_ACTIVITY_LOCKS,
+            _activity_creation_locks,
+            _get_activity_lock,
+        )
+
+        self._clear()
+        for i in range(_MAX_ACTIVITY_LOCKS * 2):
+            _get_activity_lock("u", f"athlete-{i}")
+        assert len(_activity_creation_locks) <= _MAX_ACTIVITY_LOCKS
+
+    async def test_a_held_lock_is_never_evicted(self):
+        """Evicting a held lock would hand one athlete two locks at once."""
+        from backend.app.services.provider_sync import (
+            _MAX_ACTIVITY_LOCKS,
+            _activity_creation_locks,
+            _get_activity_lock,
+        )
+
+        self._clear()
+        held = _get_activity_lock("u", "busy")
+        async with held:
+            for i in range(_MAX_ACTIVITY_LOCKS * 2):
+                _get_activity_lock("u", f"athlete-{i}")
+            assert _activity_creation_locks[("u", "busy")][1] is held
+            assert _get_activity_lock("u", "busy") is held
+        self._clear()

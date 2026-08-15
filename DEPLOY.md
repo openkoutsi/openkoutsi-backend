@@ -355,11 +355,16 @@ single-process by design, and several things depend on that:
 - **Rate limits** (login, password reset, chat, uploads, MCP) are held in memory,
   so N processes give each caller N times the intended allowance. For login and
   password reset that is a weakened brute-force defence, not just a looser quota.
-- The **per-user activity lock** that stops two concurrent syncs creating
-  duplicate activities for one ride is an `asyncio.Lock`, which spans one process.
 
-The container image already does this — its entrypoint execs a single uvicorn
-worker. Give the box more CPU/RAM rather than more processes; see
+Two things that used to be on this list no longer are. **Duplicate activity
+creation** and **OAuth token rotation** are now guarded in the database rather
+than in memory — a lease row and a claimed column respectively — so both hold
+between processes. They are listed here because they were fixed for what they do
+on *one* box: each was a live race between two concurrent syncs inside a single
+process, not a multi-replica hypothetical.
+
+The container image already runs one process — its entrypoint execs a single
+uvicorn worker. Give the box more CPU/RAM rather than more processes; see
 [SCALING.md](https://github.com/openkoutsi/openkoutsi-ops/blob/main/SCALING.md)
 in the ops repository.
 

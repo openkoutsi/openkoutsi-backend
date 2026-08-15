@@ -1351,6 +1351,7 @@ async def test_an_oversized_result_is_refused_rather_than_returned(
     assert "too large" in result.error
 
 
+@pytest.mark.replica_unsafe  # ToolRateLimiter's window is per process
 async def test_external_callers_are_rate_limited_and_the_agent_is_not(
     session, training_data, registry_session, monkeypatch
 ):
@@ -1549,6 +1550,7 @@ async def test_the_api_route_still_backfills(client, auth_headers, session, seed
 # ── Ordering of the checks (review of #86) ───────────────────────────────────
 
 
+@pytest.mark.replica_unsafe  # ToolRateLimiter's window is per process
 async def test_the_rate_limiter_counts_calls_that_cannot_succeed(
     session, training_data, registry_session, monkeypatch
 ):
@@ -1571,6 +1573,7 @@ async def test_the_rate_limiter_counts_calls_that_cannot_succeed(
     assert "Too many tool calls" in outcomes[2]
 
 
+@pytest.mark.replica_unsafe  # ToolRateLimiter's window is per process
 async def test_a_consent_refusal_is_counted_too(
     caller, session, training_data, registry_session, monkeypatch
 ):

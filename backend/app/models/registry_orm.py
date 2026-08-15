@@ -297,6 +297,18 @@ class ProviderConnection(RegistryBase):
         DateTime(timezone=True), nullable=True
     )
     scopes: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Held while one caller is rotating this connection's tokens (issue #50).
+    # The rotation is a read-modify-write spanning a network round trip, and
+    # Wahoo revokes the old refresh token as soon as the new one is issued — so
+    # two callers doing it at once leave one of them holding a dead token and
+    # the connection permanently broken. Claiming this column with a conditional
+    # UPDATE is what makes exactly one of them the rotator; see
+    # ``services.provider_sync.ensure_fresh_token``. NULL (or a time in the past)
+    # means free, so a process that dies mid-rotation releases it by expiry
+    # rather than wedging the connection.
+    refresh_lock_until: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
