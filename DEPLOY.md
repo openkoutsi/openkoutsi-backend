@@ -361,9 +361,12 @@ single-process by design, and several things depend on that:
   defence, not just a looser quota.
 - **The one-import-at-a-time check** (`POST /api/activities/import` refuses a
   second job while one is pending or running) is a query against the per-user
-  database rather than in-process state, so it does hold between processes —
-  but nothing stops a job whose process died from staying `running` forever and
-  blocking new imports. If that happens, the row can be marked `failed` by hand.
+  database rather than in-process state, so it does hold between processes. A
+  job whose process died cannot clear its own status, so the check is a
+  *staleness* question: a row untouched for an hour no longer blocks a new
+  import. A healthy job commits its progress every 25 files, so that bound is
+  far outside anything a live import does — it is crash recovery, not a
+  timeout, and it means a killed import never locks an athlete out permanently.
 
 Two things that used to be on this list no longer are. **Duplicate activity
 creation** and **OAuth token rotation** are now guarded in the database rather

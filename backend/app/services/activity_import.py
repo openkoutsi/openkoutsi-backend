@@ -71,6 +71,29 @@ DUPLICATE_WINDOW = timedelta(minutes=5)
 #: frozen. Every 25 files is fine for both.
 _PROGRESS_EVERY = 25
 
+#: How long a `running` job may go without touching its row before another
+#: import may start anyway.
+#:
+#: The endpoint refuses a second import while one is in flight, which is right
+#: — but a job whose process died cannot clear its own status, and without this
+#: that athlete could never import anything again. A healthy job commits at
+#: least every :data:`_PROGRESS_EVERY` files, and the longest gap between
+#: commits is the single end-of-job recalculation, so an hour is far outside
+#: anything a live job does. Same shape as `stranded_runs.pending_timed_out`:
+#: a crash-recovery bound, not a timeout.
+STALE_JOB_AFTER = timedelta(hours=1)
+
+
+def is_in_flight(job: ImportJob, now: datetime | None = None) -> bool:
+    """Is this job actually still running, as opposed to merely still marked so?"""
+    if job.status not in ("pending", "running"):
+        return False
+    touched = job.updated_at or job.created_at
+    if touched is None:
+        return False
+    now = now or datetime.now(timezone.utc)
+    return (now - _normalise(touched)) <= STALE_JOB_AFTER
+
 # Outcome codes in `ImportJob.results`. Stable strings — the web client maps
 # them to translated text.
 OUTCOME_IMPORTED = "imported"
@@ -308,8 +331,14 @@ async def _finalise(job: ImportJob, session, athlete_id: str, earliest: date | N
         await recompute_achievements_safe(athlete_id, session)
     except Exception:
         # The activities are imported and correct; the derived metrics are not.
-        # Recording that on the job beats failing an import that did land.
+        # Recording that on the job beats failing an import that did land — but
+        # the session has to be rolled back first, or the caller's final commit
+        # raises and the job is left `running` forever, blocking the next one.
         log.exception("Post-import recalculation failed for athlete %s", athlete_id)
+        try:
+            await session.rollback()
+        except Exception:
+            log.exception("Rollback after a failed post-import recalculation failed")
         job.error = "Activities were imported, but recalculating metrics failed"
 
 

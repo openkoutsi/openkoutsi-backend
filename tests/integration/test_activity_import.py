@@ -145,6 +145,37 @@ class TestImportEndpoint:
         assert second.status_code == 409
         assert "already running" in second.json()["detail"]
 
+    async def test_a_dead_job_does_not_block_the_next_import_forever(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        """A process that died mid-import must not lock the athlete out.
+
+        The status column cannot clear itself, so the in-flight check is a
+        staleness question rather than a status one.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        from backend.app.services.activity_import import STALE_JOB_AFTER
+
+        stranded = ImportJob(
+            id="stranded",
+            athlete_id=seeded_athlete.id,
+            status="running",
+            created_at=datetime.now(timezone.utc) - STALE_JOB_AFTER * 2,
+            updated_at=datetime.now(timezone.utc) - STALE_JOB_AFTER * 2,
+        )
+        session.add(stranded)
+        await session.commit()
+
+        response = await post_import(client, auth_headers, [("ride.gpx", RIDE_GPX.read_bytes())])
+        assert response.status_code == 202
+
+        # A job that moved a moment ago still blocks, though.
+        stranded.updated_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        await session.commit()
+        blocked = await post_import(client, auth_headers, [("ride.gpx", RIDE_GPX.read_bytes())])
+        assert blocked.status_code == 409
+
     async def test_job_is_listed_and_fetchable(self, client, auth_headers):
         created = await post_import(client, auth_headers, [("ride.gpx", RIDE_GPX.read_bytes())])
         job_id = created.json()["id"]

@@ -48,7 +48,7 @@ from backend.app.schemas.activities import (
 )
 from backend.app.core.limiter import limiter
 from backend.app.core.scopes import pat_forbidden, pat_scopes
-from backend.app.services.activity_import import run_import_job
+from backend.app.services.activity_import import is_in_flight, run_import_job
 from backend.app.services.fit_processor import process_fit_file, read_fit_start_time
 from backend.app.services.metrics_engine import recalculate_from
 from backend.app.services.pr_detection import detect_pr_badges
@@ -454,14 +454,16 @@ async def import_activities(
     if not files:
         raise HTTPException(status_code=422, detail="No files were uploaded")
 
-    running = await session.execute(
+    unfinished = await session.execute(
         select(ImportJob).where(
             ImportJob.athlete_id == athlete.id,
             ImportJob.status.in_(("pending", "running")),
         )
     )
-    in_flight = running.scalars().first()
-    if in_flight is not None:
+    # `is_in_flight` rather than the status alone: a job whose process died
+    # cannot clear its own status, and without the staleness check that athlete
+    # could never import anything again.
+    if any(is_in_flight(job) for job in unfinished.scalars()):
         raise HTTPException(
             status_code=409,
             detail="An import is already running. Wait for it to finish before starting another.",
