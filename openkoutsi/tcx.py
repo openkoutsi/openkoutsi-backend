@@ -28,6 +28,7 @@ from .xmlsafe import (
     iter_elements,
     local_name,
     read_bytes,
+    root_tag,
     text_float,
 )
 
@@ -52,6 +53,11 @@ _SPORT_ATTR = {
 
 _MAX_SPEED_INTERVAL_S = 60.0
 _MAX_SPEED_MS = 60.0
+
+# An activity name longer than this is a description, or a crafted file
+# trying to write a multi-megabyte string into a column every list endpoint
+# echoes back.
+_MAX_NAME_CHARS = 120
 
 
 class _Point(NamedTuple):
@@ -178,13 +184,13 @@ def _parse(fileish: Fileish) -> _Activity:
     laps: list[_Lap] = []
     sport: str | None = None
     name: str | None = None
-    seen_root = False
+    # From the head of the file rather than by waiting for the root to close:
+    # the root encloses the document, and a wanted element that is open for the
+    # whole parse stops `iter_elements` unlinking anything (see its docstring).
+    is_tcx = (root_tag(data) or "").lower() == "trainingcenterdatabase"
 
     try:
-        for elem in iter_elements(
-            data,
-            frozenset({"TrainingCenterDatabase", "Activity", "Lap", "Trackpoint"}),
-        ):
+        for elem in iter_elements(data, frozenset({"Activity", "Lap", "Trackpoint"})):
             tag = local_name(elem.tag)
             if tag == "Trackpoint":
                 points.append(_read_point(elem))
@@ -198,14 +204,12 @@ def _parse(fileish: Fileish) -> _Activity:
                     # it out. Long notes are a description, not a name.
                     if local_name(child.tag) == "Notes" and name is None:
                         text = (child.text or "").strip()
-                        if text and len(text) <= 120:
+                        if text and len(text) <= _MAX_NAME_CHARS:
                             name = text
-            else:
-                seen_root = True
     except XmlSafetyError as exc:
         raise ActivityParseError(str(exc)) from exc
 
-    if not seen_root and not points:
+    if not is_tcx and not points:
         raise ActivityParseError(
             "File does not look like TCX (no <TrainingCenterDatabase> element)"
         )
@@ -322,11 +326,15 @@ def summarizeWorkout(fileish: Fileish) -> workout.Profile:
         length,
     )
 
+    # Timer time when the laps state it, elapsed otherwise — but both bounded by
+    # the same cap the stream grid uses, so one absurd `TotalTimeSeconds` or one
+    # garbage `<Time>` cannot hand `calculate_load` a duration of centuries. See
+    # the note in `gpx.summarizeWorkout`.
     lap_seconds = sum(lap.duration_s for lap in activity.laps if lap.duration_s)
-    if lap_seconds:
-        duration = int(lap_seconds)
+    if lap_seconds > 0:
+        duration = min(int(lap_seconds), streams.MAX_STREAM_SECONDS)
     else:
-        duration = max(0, int((max(timestamps) - timestamps[0]).total_seconds()))
+        duration = max(0, length - 1)
 
     sport = activity.sport
     if sport is not None:
@@ -348,12 +356,18 @@ def summarizeWorkout(fileish: Fileish) -> workout.Profile:
 
 
 def getStartTime(fileish: Fileish) -> datetime | None:
-    """The first track point's timestamp, or ``None`` if the file cannot be read."""
+    """The first track point's timestamp, or ``None`` if the file cannot be read.
+
+    Stops at the first timestamp rather than parsing the file — see
+    :func:`openkoutsi.gpx.getStartTime` for why that matters to a bulk import.
+    """
     try:
-        for point in _parse(fileish).points:
-            if point.time is not None:
-                return point.time
-    except (ActivityParseError, XmlSafetyError):
+        data = read_bytes(fileish)
+        for elem in iter_elements(data, frozenset({"Time"})):
+            when = _parse_time(elem.text)
+            if when is not None:
+                return when
+    except (ActivityParseError, XmlSafetyError, OSError):
         return None
     return None
 

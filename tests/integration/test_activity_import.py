@@ -176,6 +176,66 @@ class TestImportEndpoint:
         blocked = await post_import(client, auth_headers, [("ride.gpx", RIDE_GPX.read_bytes())])
         assert blocked.status_code == 409
 
+    async def test_the_job_row_exists_before_the_upload_is_staged(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        """The 409 guard is only worth having if it cannot be raced.
+
+        The check and the insert used to be separated by the whole request
+        body — minutes, for a real Strava export over a domestic connection —
+        so two tabs, or a retry after a timeout the server was still working
+        through, both passed the check and both scheduled a job.
+        """
+        from unittest.mock import patch
+
+        seen: list[int] = []
+        real_reap = None
+
+        async def spy(session_, athlete_id, user_id, keep):
+            # Runs after the row is committed and before anything is staged.
+            rows = (
+                await session_.execute(
+                    select(ImportJob).where(ImportJob.athlete_id == athlete_id)
+                )
+            ).scalars().all()
+            seen.append(len(rows))
+            return await real_reap(session_, athlete_id, user_id, keep)
+
+        from backend.app.api import activities as activities_api
+
+        real_reap = activities_api.reap_stale_staging
+        with patch.object(activities_api, "reap_stale_staging", spy):
+            response = await post_import(
+                client, auth_headers, [("ride.gpx", RIDE_GPX.read_bytes())]
+            )
+        assert response.status_code == 202
+        assert seen == [1], "the job row must be visible before staging begins"
+
+    async def test_a_rejected_upload_settles_its_job(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        """A 413 must not leave a `pending` job blocking the next import."""
+        from backend.app.api import activities as activities_api
+
+        original = activities_api._MAX_IMPORT_BYTES
+        activities_api._MAX_IMPORT_BYTES = 128
+        try:
+            response = await post_import(
+                client, auth_headers, [("ride.gpx", RIDE_GPX.read_bytes())]
+            )
+        finally:
+            activities_api._MAX_IMPORT_BYTES = original
+
+        assert response.status_code == 413
+
+        job = (await session.execute(select(ImportJob))).scalar_one()
+        assert job.status == "failed"
+        assert job.error and "limit" in job.error
+
+        # ...and the next import is not blocked by it.
+        again = await post_import(client, auth_headers, [("ride.gpx", RIDE_GPX.read_bytes())])
+        assert again.status_code == 202
+
     async def test_job_is_listed_and_fetchable(self, client, auth_headers):
         created = await post_import(client, auth_headers, [("ride.gpx", RIDE_GPX.read_bytes())])
         job_id = created.json()["id"]
@@ -285,7 +345,10 @@ class TestImportRun:
         archive = make_zip(
             {
                 "good.gpx": RIDE_GPX.read_bytes(),
-                "truncated.gpx": RIDE_GPX.read_bytes()[:4000],
+                # A *different* ride, truncated — a truncated copy of a ride the
+                # archive also holds intact would be collapsed as a duplicate
+                # rather than reported, which is right but not what this checks.
+                "truncated.gpx": shifted_gpx(120)[:4000],
                 "later.tcx": RIDE_TCX.read_bytes().replace(b"T09:", b"T14:"),
             }
         )

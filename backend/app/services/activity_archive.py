@@ -25,6 +25,7 @@ does not bound any of this on its own.
 """
 from __future__ import annotations
 
+import errno
 import gzip
 import logging
 import uuid
@@ -60,11 +61,30 @@ _CHUNK = 256 * 1024
 _IGNORED_PREFIXES = ("__MACOSX/", "._", ".DS_Store")
 
 
-class ArchiveTooLarge(Exception):
+class ArchiveError(Exception):
+    """A condition that ends the whole job rather than one file.
+
+    Everything else here is per-file: a corrupt member, an entry that is not an
+    activity, a name that would escape the directory. Those are results the job
+    records and moves past. These are not — carrying on after them would mean
+    reporting hundreds of individual failures for one cause.
+    """
+
+
+class ArchiveTooLarge(ArchiveError):
     """The archive exceeds a whole-job budget, so the job cannot proceed.
 
     Distinct from a member that is individually too big, which is one file's
     failure and leaves the rest of the import running.
+    """
+
+
+class NoSpaceLeft(ArchiveError):
+    """The disk filled while expanding.
+
+    Per-file this would look like every remaining member being corrupt, and the
+    athlete would get a `completed` job with nine hundred failures and no hint
+    that the cause was the same for all of them.
     """
 
 
@@ -147,18 +167,25 @@ def _write_capped(reader, destination: Path, budget: Budget, name: str) -> None:
     budget is gone.
     """
     written = 0
-    with destination.open("wb") as out:
-        while True:
-            chunk = reader.read(_CHUNK)
-            if not chunk:
-                break
-            written += len(chunk)
-            if written > MAX_MEMBER_BYTES:
-                raise ValueError(
-                    f"File is larger than {MAX_MEMBER_BYTES // (1024 * 1024)} MB"
-                )
-            budget.take_bytes(len(chunk))
-            out.write(chunk)
+    try:
+        with destination.open("wb") as out:
+            while True:
+                chunk = reader.read(_CHUNK)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > MAX_MEMBER_BYTES:
+                    raise ValueError(
+                        f"File is larger than {MAX_MEMBER_BYTES // (1024 * 1024)} MB"
+                    )
+                budget.take_bytes(len(chunk))
+                out.write(chunk)
+    except OSError as exc:
+        if exc.errno == errno.ENOSPC:
+            raise NoSpaceLeft(
+                "Ran out of disk space while unpacking the import"
+            ) from exc
+        raise
 
 
 def _classify(path: Path, name: str) -> ExpandedFile:
@@ -221,7 +248,7 @@ def _expand_zip(
             try:
                 with archive.open(info) as reader:
                     _write_capped(reader, destination, budget, entry_name)
-            except ArchiveTooLarge:
+            except ArchiveError:
                 destination.unlink(missing_ok=True)
                 raise
             except (ValueError, zipfile.BadZipFile, zlib.error, OSError, EOFError) as exc:
@@ -243,7 +270,7 @@ def _expand_gzip(
     try:
         with gzip.open(source, "rb") as reader:
             _write_capped(reader, destination, budget, inner_name)
-    except ArchiveTooLarge:
+    except ArchiveError:
         destination.unlink(missing_ok=True)
         raise
     except (ValueError, OSError, EOFError, zlib.error) as exc:

@@ -31,7 +31,15 @@ from typing import NamedTuple
 
 from . import geo, streams, workout
 from .activity_formats import ActivityParseError
-from .xmlsafe import Fileish, XmlSafetyError, iter_elements, local_name, read_bytes
+from .xmlsafe import (
+    Fileish,
+    XmlSafetyError,
+    iter_elements,
+    local_name,
+    parse_float,
+    read_bytes,
+    root_tag,
+)
 
 __all__ = [
     "ActivityParseError",
@@ -68,6 +76,11 @@ _EXTENSION_CHANNELS = {
 _MAX_SPEED_INTERVAL_S = 60.0
 # 216 km/h. Above this the pair of fixes is wrong, not fast.
 _MAX_SPEED_MS = 60.0
+
+# `<name>` becomes the activity's name, which is a String column echoed back
+# by every endpoint that lists activities. Nothing in XML bounds the length
+# of an element's text, so this does.
+_MAX_NAME_CHARS = 120
 
 
 class _Point(NamedTuple):
@@ -148,11 +161,10 @@ def _read_channels(trkpt) -> dict[str, float]:
     for child in trkpt.iter():
         name = local_name(child.tag).lower()
         channel = _EXTENSION_CHANNELS.get(name)
-        if channel is None or child.text is None:
+        if channel is None:
             continue
-        try:
-            value = float(child.text.strip())
-        except (TypeError, ValueError):
+        value = parse_float(child.text)
+        if value is None:
             continue
         # First writer wins: a file carrying both `<power>` and
         # `<gpxpx:PowerInWatts>` is stating the same number twice, and if it
@@ -186,14 +198,15 @@ def _parse(fileish: Fileish) -> _Track:
     name: str | None = None
     sport_type: str | None = None
     segment = 0
-    seen_gpx_root = False
+    # Read from the head of the file rather than by waiting for the root
+    # element to close: the root closes last and encloses everything, so having
+    # it in `wanted` would keep `iter_elements` from unlinking anything outside
+    # a track for the whole parse.
+    is_gpx = (root_tag(data) or "").lower() == "gpx"
 
     try:
-        for elem in iter_elements(data, frozenset({"gpx", "trk", "trkseg", "trkpt"})):
+        for elem in iter_elements(data, frozenset({"trk", "trkseg", "trkpt"})):
             tag = local_name(elem.tag)
-            if tag == "gpx":
-                seen_gpx_root = True
-                continue
             if tag == "trkseg":
                 # Elements arrive on their *end* event, so a segment closes
                 # after every point inside it: bumping the counter here leaves
@@ -210,9 +223,9 @@ def _parse(fileish: Fileish) -> _Track:
                     if not text:
                         continue
                     if child_tag == "name" and name is None:
-                        name = text
+                        name = text[:_MAX_NAME_CHARS]
                     elif child_tag == "type" and sport_type is None:
-                        sport_type = text
+                        sport_type = text[:_MAX_NAME_CHARS]
                 continue
 
             lat = elem.get("lat")
@@ -225,15 +238,9 @@ def _parse(fileish: Fileish) -> _Track:
                 elif child_tag == "ele":
                     elevation = child.text
 
-            try:
-                latitude = float(lat) if lat is not None else None
-                longitude = float(lon) if lon is not None else None
-            except ValueError:
-                latitude = longitude = None
-            try:
-                altitude = float(elevation) if elevation is not None else None
-            except (TypeError, ValueError):
-                altitude = None
+            latitude = parse_float(lat)
+            longitude = parse_float(lon)
+            altitude = parse_float(elevation)
 
             points.append(
                 _Point(
@@ -248,7 +255,7 @@ def _parse(fileish: Fileish) -> _Track:
     except XmlSafetyError as exc:
         raise ActivityParseError(str(exc)) from exc
 
-    if not seen_gpx_root and not points:
+    if not is_gpx and not points:
         raise ActivityParseError("File does not look like GPX (no <gpx> element)")
     if not points:
         raise ActivityParseError("GPX file contains no track points")
@@ -372,12 +379,18 @@ def summarizeWorkout(fileish: Fileish) -> workout.Profile:
         length,
     )
 
-    first = timestamps[0]
-    last = max(timestamps)
-    duration = max(0, int((last - first).total_seconds()))
+    # Derived from the grid rather than from `max(timestamps)`, so the duration
+    # and the streams are consistent by construction. A single garbage `<time>`
+    # — a head unit with a flat backup battery writing one 2099 stamp — would
+    # otherwise set a duration of centuries beside an 11-sample stream, and
+    # `calculate_load` would turn that into a Load in the billions that
+    # `recalculate_from` then folds into the athlete's whole history.
+    # `second_offsets` already drops out-of-range points and caps the grid at
+    # `MAX_STREAM_SECONDS`; this is the same clamp, not a second one.
+    duration = max(0, length - 1)
 
     return workout.Profile(
-        start_time=first,
+        start_time=timestamps[0],
         duration=duration,
         distance=int(round(distance)),
         elevationGain=int(round(elevation_gain)),
@@ -394,15 +407,22 @@ def summarizeWorkout(fileish: Fileish) -> workout.Profile:
 def getStartTime(fileish: Fileish) -> datetime | None:
     """The first track point's timestamp, or ``None``.
 
-    Used for the duplicate window before an activity row is created, so it
-    tolerates a file it cannot parse rather than raising — the caller learns the
-    file is unusable when it is actually parsed.
+    Stops at the first timestamp rather than parsing the file: a bulk import
+    reads this for *every* file before it can decide which ones are duplicates
+    of each other, and doing a full parse here made that pass cost as much as
+    the import itself — the whole archive decoded twice.
+
+    Used before an activity row exists, so it tolerates a file it cannot read
+    rather than raising; the caller learns the file is unusable when it is
+    actually parsed.
     """
     try:
-        for point in _parse(fileish).points:
-            if point.time is not None:
-                return point.time
-    except (ActivityParseError, XmlSafetyError):
+        data = read_bytes(fileish)
+        for elem in iter_elements(data, frozenset({"time"})):
+            when = _parse_time(elem.text)
+            if when is not None:
+                return when
+    except (ActivityParseError, XmlSafetyError, OSError):
         return None
     return None
 

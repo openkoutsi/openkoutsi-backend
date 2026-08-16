@@ -40,11 +40,18 @@ from sqlalchemy import select
 
 from backend.app.core.config import settings
 from backend.app.core.file_encryption import encrypt_file
+from backend.app.db import leases
 from backend.app.db.user_session import get_user_session_factory
-from backend.app.models.user_orm import Activity, ActivitySource, Athlete, ImportJob
+from backend.app.models.user_orm import (
+    Activity,
+    ActivitySource,
+    Athlete,
+    ImportJob,
+    SyncLease,
+)
 from backend.app.services.achievements import recompute_achievements_safe
 from backend.app.services.activity_archive import (
-    ArchiveTooLarge,
+    ArchiveError,
     ExpandedFile,
     expand_all,
 )
@@ -56,6 +63,11 @@ from backend.app.services.fit_processor import (
 )
 from backend.app.services.metrics_engine import recalculate_from
 from backend.app.services.plan_adherence import catch_up_adherence
+from backend.app.services.provider_sync import (
+    _ACTIVITY_LEASE_TTL,
+    _ACTIVITY_LEASE_WAIT,
+    _get_activity_lock,
+)
 from openkoutsi.activity_formats import ActivityParseError, format_priority
 
 log = logging.getLogger(__name__)
@@ -93,6 +105,7 @@ def is_in_flight(job: ImportJob, now: datetime | None = None) -> bool:
         return False
     now = now or datetime.now(timezone.utc)
     return (now - _normalise(touched)) <= STALE_JOB_AFTER
+
 
 # Outcome codes in `ImportJob.results`. Stable strings — the web client maps
 # them to translated text.
@@ -242,6 +255,10 @@ async def _import_one(
             fmt=fmt,
         )
 
+    # Cheap pre-check, outside the lease. Re-importing an archive is a normal
+    # thing to do, and this is what keeps that from parsing nine hundred files
+    # to discover it already has all of them. The authoritative check is the
+    # one under the lease below.
     if candidate.start_time is not None:
         existing = await _existing_activity(session, athlete.id, candidate.start_time)
         if existing is not None:
@@ -254,7 +271,8 @@ async def _import_one(
             )
 
     # Parsing is synchronous and by far the most expensive step, so it runs off
-    # the event loop; everything after it is database work.
+    # the event loop — and outside the lease, which only has to cover the
+    # database work it exists to serialise.
     try:
         parsed = await asyncio.to_thread(parse_activity_file, str(expanded.path), fmt)
     except ActivityParseError as exc:
@@ -265,36 +283,78 @@ async def _import_one(
             expanded.name, OUTCOME_FAILED, reason=f"Could not read the file: {exc}", fmt=fmt
         )
 
-    stored = _store_original(expanded.path, user_id, fmt)
-    activity = Activity(id=str(uuid.uuid4()), athlete_id=athlete.id, status="pending")
-    session.add(activity)
-    await session.flush()
+    # ── Find-or-create under the same two guards the provider syncs use ──────
+    #
+    # This is the check-then-insert issue #50 wrapped in a lock *and* a lease:
+    # the `asyncio.Lock` settles the common case without touching the database
+    # but speaks only for this event loop, and the `SyncLease` repeats the
+    # exclusion where every writer of this database can see it.
+    #
+    # It matters more here than on the single upload it grew out of. An upload's
+    # window is one request; an import holds this pattern open once per file for
+    # the length of the job, so a Strava webhook landing mid-import is an
+    # ordinary Tuesday rather than a coincidence — and without the guard both
+    # writers see an empty dedup window and each create the same ride.
+    #
+    # `process_activity_file` commits inside the block, which is the invariant
+    # the lease requires: a flush alone would let a caller that takes the lease
+    # next still see an empty window.
+    async with (
+        _get_activity_lock(user_id, athlete.id),
+        leases.hold(
+            session,
+            SyncLease,
+            f"activity-create:{athlete.id}",
+            ttl=_ACTIVITY_LEASE_TTL,
+            wait=_ACTIVITY_LEASE_WAIT,
+        ),
+    ):
+        if candidate.start_time is not None:
+            existing = await _existing_activity(session, athlete.id, candidate.start_time)
+            if existing is not None:
+                # Something else created it between the pre-check and here —
+                # exactly the race this block exists to lose safely.
+                return _result(
+                    expanded.name,
+                    OUTCOME_DUPLICATE,
+                    reason="An activity starting at this time already exists",
+                    activity_id=existing.id,
+                    fmt=fmt,
+                )
 
-    source = ActivitySource(
-        activity_id=activity.id,
-        provider="upload",
-        fit_file_path=str(stored),
-        format=fmt,
-    )
-    session.add(source)
-    await session.flush()
+        stored = _store_original(expanded.path, user_id, fmt)
+        activity = Activity(id=str(uuid.uuid4()), athlete_id=athlete.id, status="pending")
+        session.add(activity)
+        await session.flush()
 
-    try:
-        await process_activity_file(
-            str(stored), athlete, activity, session, fmt=fmt, parsed=parsed
+        source = ActivitySource(
+            activity_id=activity.id,
+            provider="upload",
+            fit_file_path=str(stored),
+            format=fmt,
         )
-    except Exception as exc:  # noqa: BLE001 - as above
-        log.warning("Failed to process imported file %s", expanded.name, exc_info=True)
-        await session.rollback()
-        # A rollback expires every object in the session regardless of
-        # `expire_on_commit=False`, and the athlete is read again on the next
-        # file — refreshing it here keeps that from becoming implicit IO in a
-        # place that cannot await.
-        await session.refresh(athlete)
-        stored.unlink(missing_ok=True)
-        return _result(
-            expanded.name, OUTCOME_FAILED, reason=f"Could not process the file: {exc}", fmt=fmt
-        )
+        session.add(source)
+        await session.flush()
+
+        try:
+            await process_activity_file(
+                str(stored), athlete, activity, session, fmt=fmt, parsed=parsed
+            )
+        except Exception as exc:  # noqa: BLE001 - as above
+            log.warning("Failed to process imported file %s", expanded.name, exc_info=True)
+            await session.rollback()
+            # A rollback expires every object in the session regardless of
+            # `expire_on_commit=False`, and the athlete is read again on the
+            # next file — refreshing it here keeps that from becoming implicit
+            # IO in a place that cannot await.
+            await session.refresh(athlete)
+            stored.unlink(missing_ok=True)
+            return _result(
+                expanded.name,
+                OUTCOME_FAILED,
+                reason=f"Could not process the file: {exc}",
+                fmt=fmt,
+            )
 
     # Read before anything that could expire it: a rollback below would turn
     # this into a lazy load, and a lazy load here is implicit IO in a place that
@@ -358,6 +418,40 @@ async def _finalise(job: ImportJob, session, athlete_id: str, earliest: date | N
         except Exception:
             log.exception("Rollback after a failed post-import recalculation failed")
         job.error = "Activities were imported, but recalculating metrics failed"
+
+
+async def reap_stale_staging(session, athlete_id: str, user_id: str, keep: str) -> None:
+    """Delete staging directories belonging to imports that are no longer running.
+
+    A job's own directory is removed when it ends, whatever the outcome — but
+    only by the task that runs it. If the process dies between the 202 and the
+    task starting, up to the request cap is left on disk with nothing to reap
+    it, and `is_in_flight` recovers the *job* while the bytes stay. Sweeping at
+    the start of the next import is enough: imports are one at a time, so
+    anything here that is neither the new job nor in flight is finished with.
+    """
+    root = settings.user_fit_dir(user_id) / "imports"
+    if not root.is_dir():
+        return
+
+    live = {
+        job.id
+        for job in (
+            await session.execute(
+                select(ImportJob).where(
+                    ImportJob.athlete_id == athlete_id,
+                    ImportJob.status.in_(("pending", "running")),
+                )
+            )
+        ).scalars()
+        if is_in_flight(job)
+    }
+    live.add(keep)
+
+    for directory in root.iterdir():
+        if directory.is_dir() and directory.name not in live:
+            log.info("Removing staging directory left behind by import %s", directory.name)
+            shutil.rmtree(directory, ignore_errors=True)
 
 
 async def run_import_job(

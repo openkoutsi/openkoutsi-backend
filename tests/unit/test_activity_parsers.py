@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from openkoutsi import geo, gpx, tcx
+from openkoutsi import geo, gpx, streams, tcx
 from openkoutsi.activity_formats import (
     ActivityParseError,
     detect_format,
@@ -36,7 +36,12 @@ from openkoutsi.activity_formats import (
 )
 from openkoutsi.fit_processing import resolve_sport_type
 from openkoutsi.training_math import calculate_load
-from openkoutsi.xmlsafe import XmlSafetyError, reject_doctype, root_tag
+from openkoutsi.xmlsafe import (
+    XmlSafetyError,
+    parse_float,
+    reject_doctype,
+    root_tag,
+)
 
 FIXTURES = Path(__file__).parent.parent.parent / "testdata" / "fixtures"
 RIDE_GPX = FIXTURES / "synthetic_ride.gpx"
@@ -406,6 +411,39 @@ class TestXmlSafety:
         profile = gpx.summarizeWorkout(document)
         assert profile.name == "<!DOCTYPE ride"
 
+    @pytest.mark.parametrize(
+        "encoding, label",
+        [("utf-16", "UTF-16"), ("utf-16-le", "UTF-16"), ("utf-16-be", "UTF-16"),
+         ("utf-32", "UTF-32")],
+    )
+    def test_a_wide_encoding_is_refused_rather_than_scanned_through(self, encoding, label):
+        """The prolog scan compares bytes, so it can only speak for ASCII.
+
+        In UTF-16 the markup is ``3C 00 21 00 44 00 …``, so every literal in
+        `reject_doctype` silently fails to match and a document carrying a DTD
+        is reported as having a clean prolog. `root_tag` misses it too, so
+        `detect_format` falls back to the filename and the file is parsed
+        anyway. The guarantee has to be one check with no holes in it, so these
+        are refused instead of scanned through a decoder.
+        """
+        bomb = (
+            '<?xml version="1.0"?>'
+            '<!DOCTYPE gpx [<!ENTITY a "' + "A" * 64 + '">'
+            '<!ENTITY b "' + "&a;" * 10 + '">]>'
+            "<gpx><trk><name>&b;</name></trk></gpx>"
+        ).encode(encoding)
+
+        with pytest.raises(XmlSafetyError, match="ASCII-compatible"):
+            reject_doctype(bomb)
+        with pytest.raises(ActivityParseError, match="ASCII-compatible"):
+            gpx.summarizeWorkout(bomb)
+
+    def test_a_utf8_bom_is_still_fine(self):
+        document = b"\xef\xbb\xbf" + _gpx_document(
+            "<trkseg>" + _trkpt(0, hr=120) + _trkpt(1, hr=121) + "</trkseg>"
+        )
+        assert gpx.summarizeWorkout(document).duration == 1
+
     def test_root_tag_reads_only_the_head(self):
         assert root_tag(RIDE_GPX.read_bytes()) == "gpx"
         assert root_tag(RIDE_TCX.read_bytes()) == "TrainingCenterDatabase"
@@ -510,3 +548,167 @@ class TestGeo:
         assert cumulative[0] == 0.0
         assert cumulative[1] == 0.0
         assert cumulative[2] > 0.0
+
+
+class TestNumbersThatAreNotNumbers:
+    """``float()`` accepts NaN and Infinity; a training file cannot mean them.
+
+    Left alone they reach ``int()`` several layers later as an uncaught
+    ``ValueError``/``OverflowError``, which the import job then shows the
+    athlete as the wording of a Python exception, and which makes
+    ``POST /activities/{id}/reprocess`` a 500.
+    """
+
+    @pytest.mark.parametrize("text", ["NaN", "nan", "inf", "-inf", "Infinity", "+inf"])
+    def test_parse_float_rejects_them(self, text):
+        assert parse_float(text) is None
+
+    def test_parse_float_still_reads_ordinary_numbers(self):
+        assert parse_float("12.5") == 12.5
+        assert parse_float(" -3 ") == -3.0
+        assert parse_float("nonsense") is None
+        assert parse_float(None) is None
+
+    @pytest.mark.parametrize(
+        "total, distance",
+        [("NaN", "100"), ("inf", "100"), ("600", "inf"), ("600", "NaN")],
+    )
+    def test_tcx_survives_them(self, total, distance):
+        document = (
+            '<?xml version="1.0"?><TrainingCenterDatabase><Activities>'
+            '<Activity Sport="Biking"><Lap StartTime="2024-03-02T09:00:00Z">'
+            f"<TotalTimeSeconds>{total}</TotalTimeSeconds>"
+            f"<DistanceMeters>{distance}</DistanceMeters><Track>"
+            f'<Trackpoint><Time>2024-03-02T09:00:00Z</Time>'
+            f"<DistanceMeters>{distance}</DistanceMeters></Trackpoint>"
+            f'<Trackpoint><Time>2024-03-02T09:00:01Z</Time>'
+            f"<DistanceMeters>{distance}</DistanceMeters></Trackpoint>"
+            "</Track></Lap></Activity></Activities></TrainingCenterDatabase>"
+        ).encode()
+
+        profile = tcx.summarizeWorkout(document)
+        assert profile.duration >= 0
+        assert profile.distance >= 0
+
+    def test_a_gpx_sensor_reading_of_nan_is_dropped(self):
+        document = _gpx_document(
+            "<trkseg>"
+            + _trkpt(0, hr=120).replace(
+                "<gpxtpx:hr>120</gpxtpx:hr>", "<gpxtpx:hr>NaN</gpxtpx:hr>"
+            )
+            + _trkpt(1, hr=121)
+            + "</trkseg>"
+        )
+        profile = gpx.summarizeWorkout(document)
+        # A gap, not a NaN masquerading as a reading.
+        assert profile.heartRate == [None, 121.0]
+
+
+class TestDurationIsBounded:
+    """One bad timestamp must not become a duration of centuries.
+
+    The streams are already clamped by `MAX_STREAM_SECONDS`; the duration is
+    derived from the same grid so the two cannot disagree. Without it, a head
+    unit with a flat backup battery writing one 2099 stamp produces a Load in
+    the billions, which `recalculate_from` then folds into the athlete's whole
+    history.
+    """
+
+    def test_a_far_future_timestamp_does_not_stretch_the_duration(self):
+        document = _gpx_document(
+            "<trkseg>"
+            + _trkpt(0, hr=120)
+            + _trkpt(1, hr=121)
+            + '<trkpt lat="61.5" lon="20.5"><time>9999-12-31T23:59:59Z</time></trkpt>'
+            + "</trkseg>"
+        )
+        profile = gpx.summarizeWorkout(document)
+
+        assert profile.duration == 1
+        assert len(profile.heartRate) == 2
+
+        load, _ = calculate_load(profile.duration, None, profile.avgHeartRate, 250, 190)
+        assert load < 1
+
+    def test_a_ride_longer_than_the_cap_is_clamped_not_rejected(self):
+        document = _gpx_document(
+            "<trkseg>"
+            + _trkpt(0, hr=120)
+            + '<trkpt lat="61.5" lon="20.5"><time>2024-03-05T09:00:00Z</time></trkpt>'
+            + "</trkseg>"
+        )
+        profile = gpx.summarizeWorkout(document)
+        assert profile.duration <= streams.MAX_STREAM_SECONDS
+
+    def test_an_absurd_lap_total_is_clamped_too(self):
+        # TCX has a second route to the duration: the laps' own timer time.
+        document = (
+            '<?xml version="1.0"?><TrainingCenterDatabase><Activities>'
+            '<Activity Sport="Biking"><Lap StartTime="2024-03-02T09:00:00Z">'
+            "<TotalTimeSeconds>99999999999</TotalTimeSeconds><Track>"
+            "<Trackpoint><Time>2024-03-02T09:00:00Z</Time></Trackpoint>"
+            "<Trackpoint><Time>2024-03-02T09:00:01Z</Time></Trackpoint>"
+            "</Track></Lap></Activity></Activities></TrainingCenterDatabase>"
+        ).encode()
+        assert tcx.summarizeWorkout(document).duration == streams.MAX_STREAM_SECONDS
+
+
+class TestNameIsBounded:
+    """``<name>`` becomes a String column every list endpoint echoes back."""
+
+    def test_a_huge_track_name_is_truncated(self):
+        document = _gpx_document(
+            "<trkseg>" + _trkpt(0, hr=120) + _trkpt(1, hr=121) + "</trkseg>",
+            track_extra=f"<name>{'x' * 100_000}</name>",
+        )
+        name = gpx.summarizeWorkout(document).name
+        assert name is not None and len(name) <= 120
+
+    def test_a_huge_tcx_note_is_not_used_as_a_name(self):
+        document = (
+            '<?xml version="1.0"?><TrainingCenterDatabase><Activities>'
+            '<Activity Sport="Biking"><Lap StartTime="2024-03-02T09:00:00Z">'
+            "<TotalTimeSeconds>1</TotalTimeSeconds><Track>"
+            "<Trackpoint><Time>2024-03-02T09:00:00Z</Time></Trackpoint>"
+            "<Trackpoint><Time>2024-03-02T09:00:01Z</Time></Trackpoint>"
+            "</Track></Lap>"
+            f"<Notes>{'x' * 100_000}</Notes>"
+            "</Activity></Activities></TrainingCenterDatabase>"
+        ).encode()
+        assert tcx.summarizeWorkout(document).name is None
+
+
+class TestBoundedParseCost:
+    """Two claims the parsers make about their own cost, kept honest."""
+
+    def test_unwanted_elements_do_not_accumulate(self):
+        import resource
+
+        body = "<wpt><name>x</name></wpt>" * 200_000
+        document = f'<?xml version="1.0"?><gpx>{body}</gpx>'.encode()
+
+        before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        with pytest.raises(ActivityParseError):
+            gpx.summarizeWorkout(document)
+        after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+        # Holding every unwanted element cost roughly 8x the file; the bound is
+        # generous so this checks the shape rather than a number.
+        assert (after - before) / 1024 < len(document) / 1e6
+
+    def test_start_time_does_not_parse_the_whole_file(self):
+        import time
+
+        def timed(fn, arg, reps=5):
+            fn(arg)
+            started = time.perf_counter()
+            for _ in range(reps):
+                fn(arg)
+            return time.perf_counter() - started
+
+        for module, path in ((gpx, RIDE_GPX), (tcx, RIDE_TCX)):
+            cheap = timed(module.getStartTime, str(path))
+            full = timed(module.summarizeWorkout, str(path))
+            # A bulk import reads the start time of every file before it can
+            # deduplicate, so a full parse here doubles the job.
+            assert cheap < full / 3, f"{module.__name__}.getStartTime is not cheap"

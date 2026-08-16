@@ -48,7 +48,11 @@ from backend.app.schemas.activities import (
 )
 from backend.app.core.limiter import limiter
 from backend.app.core.scopes import pat_forbidden, pat_scopes
-from backend.app.services.activity_import import is_in_flight, run_import_job
+from backend.app.services.activity_import import (
+    is_in_flight,
+    reap_stale_staging,
+    run_import_job,
+)
 from backend.app.services.fit_processor import process_fit_file, read_fit_start_time
 from backend.app.services.metrics_engine import recalculate_from
 from backend.app.services.pr_detection import detect_pr_badges
@@ -469,12 +473,26 @@ async def import_activities(
             detail="An import is already running. Wait for it to finish before starting another.",
         )
 
+    # Committed *before* the request body is staged, so the check above is not
+    # separated from the row it depends on by an upload that takes minutes. With
+    # the insert last, two tabs — or a retry after a timeout the server is still
+    # working through — both pass the check and both schedule a job, which is
+    # exactly what this endpoint refuses to do. The `pending` status already
+    # means "no files walked yet", so a row that exists during the upload fits
+    # the model rather than bending it.
     job = ImportJob(
         id=str(uuid.uuid4()),
         athlete_id=athlete.id,
         status="pending",
         source_name=_import_source_name(files),
     )
+    session.add(job)
+    await session.commit()
+    await session.refresh(job)
+
+    # Anything left by an import whose process died is finished with; imports
+    # run one at a time, so this is the natural moment to sweep it up.
+    await reap_stale_staging(session, athlete.id, ctx.user_id, keep=job.id)
 
     work_dir = settings.user_fit_dir(ctx.user_id) / "imports" / job.id
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -500,13 +518,17 @@ async def import_activities(
                         )
                     out.write(chunk)
             uploads.append((part_path, upload.filename or f"upload-{index}"))
-    except Exception:
+    except Exception as exc:
+        # The job row is already visible, so failing the upload has to settle it
+        # — otherwise a 413 leaves an athlete with a `pending` job that never
+        # runs and blocks the next import until it goes stale. It also gives
+        # them something to look at, which "413 and nothing" did not.
         shutil.rmtree(work_dir, ignore_errors=True)
+        job.status = "failed"
+        job.error = exc.detail if isinstance(exc, HTTPException) else "Upload failed"
+        job.completed_at = datetime.now(timezone.utc)
+        await session.commit()
         raise
-
-    session.add(job)
-    await session.commit()
-    await session.refresh(job)
 
     background_tasks.add_task(
         run_import_job, job.id, athlete.id, ctx.user_id, uploads, work_dir,

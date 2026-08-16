@@ -404,6 +404,8 @@ server {
     # 1 MB and rejects anything larger with a 413 *before* it reaches the API,
     # so without this the endpoint's own limit never gets a say.
     client_max_body_size 512m;
+    # Lower it if you want a smaller ceiling; the API's own 500 MB cap is the
+    # upper bound, not a floor.
     # A 900-file import is minutes of parsing, but it happens in the background:
     # the request itself only stages the upload and returns a job id, so the
     # default proxy timeouts are fine.
@@ -413,6 +415,26 @@ server {
 ```
 
 The frontend has its own `server {}` block — see the openkoutsi-web repository.
+
+### Sizing the data volume for imports
+
+An import stages its upload under `users/{id}/uploads/imports/{job_id}/`, expands
+the archive beside it, and removes the whole directory when the job ends —
+whatever the outcome. A directory left behind by a process that died is swept up
+when that athlete next starts an import.
+
+The limits are **per job**, and one job is one athlete: an import may expand to
+at most 4 GB across at most 20 000 files, with each file capped at 50 MB
+(`backend/app/services/activity_archive.py`). There is no *global* bound, so on
+a shared instance the worst case is that ceiling times the number of athletes
+importing at once — one import at a time per athlete is enforced, several
+athletes at once is not. On a single-user deployment this is not worth thinking
+about; on a shared one, size the volume for a few concurrent imports rather than
+for one, or lower `MAX_TOTAL_BYTES`.
+
+Running out of disk mid-expansion fails the job with "Ran out of disk space
+while unpacking the import" rather than reporting every remaining file as
+individually corrupt.
 
 ### Exposing (or not exposing) the MCP endpoint
 
