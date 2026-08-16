@@ -184,6 +184,7 @@ def _parse(fileish: Fileish) -> _Activity:
     laps: list[_Lap] = []
     sport: str | None = None
     name: str | None = None
+    seen_activity = False
     # From the head of the file rather than by waiting for the root to close:
     # the root encloses the document, and a wanted element that is open for the
     # whole parse stops `iter_elements` unlinking anything (see its docstring).
@@ -197,6 +198,7 @@ def _parse(fileish: Fileish) -> _Activity:
             elif tag == "Lap":
                 laps.append(_read_lap(elem))
             elif tag == "Activity":
+                seen_activity = True
                 if sport is None:
                     sport = (elem.get("Sport") or "").strip() or None
                 for child in elem:
@@ -215,6 +217,21 @@ def _parse(fileish: Fileish) -> _Activity:
         )
     if not points:
         raise ActivityParseError("TCX file contains no track points")
+    if not seen_activity:
+        # A *course* — a planned route Garmin Connect exports as `.tcx` — has
+        # `Courses/Course/Track/Trackpoint`, which matches `Trackpoint` on local
+        # name exactly as an activity's does. Without this it parses as a ride
+        # nobody rode: no Load (a course carries no HR or power, so
+        # `calculate_load` declines), but a phantom row with a distance, a
+        # duration and a derived speed stream — enough to reach the distance
+        # bests and produce a PR from a ride that never happened.
+        #
+        # The GPX parser already refuses both of its equivalents (a `<rte>`
+        # route, and a track with no timestamps), so this is closing an
+        # asymmetry rather than setting a new policy.
+        raise ActivityParseError(
+            "TCX file contains only a course — it is a planned route, not a recorded activity"
+        )
 
     return _Activity(points=points, laps=laps, sport=sport, name=name)
 

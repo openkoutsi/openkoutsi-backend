@@ -367,6 +367,52 @@ class TestBrokenFiles:
             tcx.summarizeWorkout(payload)
         assert expected in str(exc.value).lower()
 
+    def test_a_tcx_course_is_not_an_activity(self):
+        """Garmin Connect exports a *planned route* as `.tcx`.
+
+        `Courses/Course/Track/Trackpoint` matches `Trackpoint` on local name
+        exactly as an activity's does, so without a guard a course parses as a
+        ride nobody rode — no Load (a course has no HR or power), but a phantom
+        row with a distance and a duration, and a derived speed stream that can
+        reach the distance bests and produce a PR from a ride that never
+        happened. It is also exactly the sort of file that ends up in a folder
+        someone drags into a bulk import.
+        """
+        course = (
+            '<?xml version="1.0"?><TrainingCenterDatabase><Courses><Course>'
+            "<Name>Sunday Loop</Name>"
+            "<Lap><TotalTimeSeconds>1800</TotalTimeSeconds>"
+            "<DistanceMeters>5000</DistanceMeters></Lap><Track>"
+            "<Trackpoint><Time>2024-03-02T09:00:00Z</Time>"
+            "<Position><LatitudeDegrees>61.5</LatitudeDegrees>"
+            "<LongitudeDegrees>20.5</LongitudeDegrees></Position>"
+            "<DistanceMeters>0</DistanceMeters></Trackpoint>"
+            "<Trackpoint><Time>2024-03-02T09:30:00Z</Time>"
+            "<Position><LatitudeDegrees>61.55</LatitudeDegrees>"
+            "<LongitudeDegrees>20.5</LongitudeDegrees></Position>"
+            "<DistanceMeters>5000</DistanceMeters></Trackpoint>"
+            "</Track></Course></Courses></TrainingCenterDatabase>"
+        ).encode()
+
+        with pytest.raises(ActivityParseError, match="course"):
+            tcx.summarizeWorkout(course)
+
+    def test_every_format_refuses_a_planned_route(self):
+        """The same policy in all three shapes a route arrives in."""
+        route_gpx = (
+            '<?xml version="1.0"?><gpx><rte>'
+            '<rtept lat="61.5" lon="20.5"><ele>10</ele></rtept></rte></gpx>'
+        )
+        untimed_gpx = _gpx_document(
+            '<trkseg><trkpt lat="61.5" lon="20.5"><ele>10</ele></trkpt></trkseg>'
+        )
+        for document, parser in (
+            (route_gpx.encode(), gpx),
+            (untimed_gpx, gpx),
+        ):
+            with pytest.raises(ActivityParseError):
+                parser.summarizeWorkout(document)
+
     def test_a_truncated_file_fails_cleanly(self):
         whole = RIDE_GPX.read_bytes()
         with pytest.raises(ActivityParseError, match="[Mm]alformed"):
