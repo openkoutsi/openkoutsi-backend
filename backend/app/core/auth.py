@@ -91,7 +91,22 @@ async def verify_password_async(plain: str, hashed: str) -> bool:
     return await asyncio.to_thread(verify_password, plain, hashed)
 
 
-def create_access_token(user_id: str, roles: list[str]) -> str:
+# ── Session invalidation (issue #102, F-04) ─────────────────────────────────
+#
+# Session JWTs are stateless: `sub`, `exp`, `type` and nothing the server could
+# later contradict. `User.token_version` is the counter that gives them one.
+# Every token is stamped with the version current when it was minted, every
+# request compares that stamp against the row, and raising the row's value ends
+# every session the account has open at once.
+#
+# `token_version` is keyword-only and required at both mint sites on purpose:
+# defaulting it would let a call site quietly issue a token stamped 0 for a user
+# whose version has moved on, and the failure — one user unable to stay signed
+# in after a reset — is exactly the kind that surfaces in production rather than
+# in review.
+
+
+def create_access_token(user_id: str, roles: list[str], *, token_version: int) -> str:
     expire = datetime.now(timezone.utc) + timedelta(
         minutes=settings.access_token_expire_minutes
     )
@@ -101,21 +116,54 @@ def create_access_token(user_id: str, roles: list[str]) -> str:
             "roles": roles,
             "exp": expire,
             "type": "access",
+            "ver": token_version,
         },
         settings.secret_key,
         algorithm="HS256",
     )
 
 
-def create_refresh_token(user_id: str) -> str:
+def create_refresh_token(user_id: str, *, token_version: int) -> str:
     expire = datetime.now(timezone.utc) + timedelta(
         days=settings.refresh_token_expire_days
     )
     return jwt.encode(
-        {"sub": user_id, "exp": expire, "type": "refresh"},
+        {"sub": user_id, "exp": expire, "type": "refresh", "ver": token_version},
         settings.secret_key,
         algorithm="HS256",
     )
+
+
+def claimed_token_version(payload: dict) -> int:
+    """The ``ver`` claim of a decoded session token.
+
+    An absent claim reads as 0, which is where every existing user starts: a
+    token minted before the column existed stays valid until it expires, so the
+    upgrade does not sign the instance out. Only this instance's key signs these
+    tokens, so "absent" can only mean "issued before the upgrade" — a caller
+    cannot choose it. Anything present but not an integer is not a token this
+    server minted; -1 never equals a real version, so it fails closed.
+    """
+    raw = payload.get("ver", 0)
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        return -1
+    return raw
+
+
+def token_version_matches(payload: dict, user) -> bool:
+    """Whether a decoded token was minted for the account's current generation."""
+    return claimed_token_version(payload) == (user.token_version or 0)
+
+
+def invalidate_sessions(user) -> int:
+    """End every session this account has open, and return the new version.
+
+    The caller still has to commit. Used on password reset and on an explicit
+    "sign out everywhere"; deleting the account removes the row outright, so it
+    needs nothing here.
+    """
+    user.token_version = (user.token_version or 0) + 1
+    return user.token_version
 
 
 def decode_token(token: str) -> dict:
@@ -300,7 +348,10 @@ async def validate_session_token(
     """Identity from a session JWT, with the registry row as the authority.
 
     Roles are re-read from the registry rather than trusted from the token
-    claim, so a role change takes effect without waiting for token expiry.
+    claim, so a role change takes effect without waiting for token expiry. The
+    same applies to ``token_version``: a token whose generation the row has
+    moved past is refused here rather than at its own expiry, which is what
+    makes a password reset end the sessions it was prompted by (F-04).
     """
     from backend.app.models.registry_orm import User
 
@@ -318,6 +369,8 @@ async def validate_session_token(
     )
     user = result.scalar_one_or_none()
     if user is None:
+        raise credentials_exception
+    if not token_version_matches(payload, user):
         raise credentials_exception
     return UserContext(user_id=user_id, roles=_roles_of(user))
 

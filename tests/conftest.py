@@ -269,5 +269,5 @@ async def client(app, session, registry_session, seeded_athlete):
 @pytest.fixture
 def auth_headers() -> dict:
     """Bearer token headers for the seeded test athlete (no real auth needed)."""
-    token = create_access_token(_TEST_USER_ID, _TEST_ROLES)
+    token = create_access_token(_TEST_USER_ID, _TEST_ROLES, token_version=0)
     return {"Authorization": f"Bearer {token}"}

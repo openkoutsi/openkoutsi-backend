@@ -2,7 +2,9 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.app.core.encryption import EncryptedString
@@ -37,6 +39,17 @@ class User(RegistryBase):
     roles: Mapped[str] = mapped_column(String, nullable=False, default='["user"]')
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Generation counter for this user's session tokens (issue #102, F-04).
+    # Stamped into every access and refresh JWT as ``ver`` and compared on each
+    # request, so raising it ends every session the account has open. Session
+    # JWTs are otherwise unrevocable: they carry only ``sub``, ``exp`` and
+    # ``type``, and nothing on this row could contradict one — a password reset
+    # revoked the account's personal access tokens and left the sessions the
+    # attacker was already holding untouched, refresh cookie included.
+    token_version: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
 
     # Data-processing consent (absorbed from the former DataConsent table).
     consented_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

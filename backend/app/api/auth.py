@@ -18,6 +18,8 @@ from backend.app.core.auth import (
     decode_token,
     get_current_user,
     hash_password_async,
+    invalidate_sessions,
+    token_version_matches,
     verify_password_async,
 )
 from backend.app.core.config import settings
@@ -155,8 +157,10 @@ async def login(
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     roles = _roles_of(user)
-    _set_refresh_cookie(response, create_refresh_token(user.id))
-    return TokenResponse(access_token=create_access_token(user.id, roles))
+    _set_refresh_cookie(response, create_refresh_token(user.id, token_version=user.token_version))
+    return TokenResponse(
+        access_token=create_access_token(user.id, roles, token_version=user.token_version)
+    )
 
 
 @router.post("/register", response_model=TokenResponse, status_code=201,
@@ -220,8 +224,10 @@ async def register(
         },
     )
 
-    _set_refresh_cookie(response, create_refresh_token(user.id))
-    return TokenResponse(access_token=create_access_token(user.id, roles))
+    _set_refresh_cookie(response, create_refresh_token(user.id, token_version=user.token_version))
+    return TokenResponse(
+        access_token=create_access_token(user.id, roles, token_version=user.token_version)
+    )
 
 
 @router.post("/refresh", response_model=TokenResponse,
@@ -249,14 +255,54 @@ async def refresh(
     user = result.scalar_one_or_none()
     if user is None:
         raise HTTPException(status_code=401, detail="Invalid credentials")
+    # The refresh cookie is the long-lived half — 30 days by default, and it
+    # mints fresh access tokens the whole time. Checking the generation here is
+    # what actually ends a session; refusing only the access token would buy an
+    # hour and hand the holder a new one (F-04).
+    if not token_version_matches(payload, user):
+        raise HTTPException(status_code=401, detail="Invalid credentials")
 
     roles = _roles_of(user)
-    _set_refresh_cookie(response, create_refresh_token(user.id))
-    return TokenResponse(access_token=create_access_token(user.id, roles))
+    _set_refresh_cookie(response, create_refresh_token(user.id, token_version=user.token_version))
+    return TokenResponse(
+        access_token=create_access_token(user.id, roles, token_version=user.token_version)
+    )
 
 
 @router.post("/logout", status_code=204, operation_id="logout", summary="Log out")
 async def logout(response: Response):
+    # Clears this browser's cookie and nothing else. A session JWT carries no
+    # per-session identity, so there is no way to retire one token without
+    # retiring them all — which is what /logout-all is for. Ending a single
+    # stolen session without disturbing the others would need a session id per
+    # token and somewhere to record it.
+    _clear_refresh_cookie(response)
+
+
+@router.post("/logout-all", status_code=204,
+             operation_id="logoutAll", summary="Sign out of every device")
+async def logout_all(
+    response: Response,
+    ctx: UserContext = Depends(get_current_user),
+    session: AsyncSession = Depends(get_registry_session),
+):
+    """End every session this account has open, including the calling one.
+
+    The counterpart to a password reset for someone who is still signed in and
+    wants their other sessions gone — a shared computer they forgot to sign out
+    of, a stolen phone — without changing their password to get it. Every
+    access token and refresh cookie the account holds stops working
+    immediately; the caller signs in again like anyone else.
+    """
+    result = await session.execute(
+        select(User).where(User.id == ctx.user_id, User.deleted_at.is_(None))
+    )
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    invalidate_sessions(user)
+    await session.commit()
     _clear_refresh_cookie(response)
 
 
@@ -335,6 +381,11 @@ async def reset_password(
     # applies to the credentials this account handed out just as much as to the
     # password itself, so every live personal access token goes with it (#46).
     await revoke_all_for_user(session, user.id, now)
+    # And to the sessions, for the same reason. Without this the reset changed
+    # the password while the holder of a stolen access token kept using it, and
+    # their refresh cookie kept minting replacements for another 30 days —
+    # every token control green, the account still theirs (#102, F-04).
+    invalidate_sessions(user)
     await session.commit()
 
 
@@ -469,8 +520,10 @@ async def verify_email(
     await session.commit()
 
     roles = _roles_of(user)
-    _set_refresh_cookie(response, create_refresh_token(user.id))
-    return TokenResponse(access_token=create_access_token(user.id, roles))
+    _set_refresh_cookie(response, create_refresh_token(user.id, token_version=user.token_version))
+    return TokenResponse(
+        access_token=create_access_token(user.id, roles, token_version=user.token_version)
+    )
 
 
 @router.post("/request-password-reset", response_model=MessageResponse,

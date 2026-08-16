@@ -150,6 +150,29 @@
         }
       }
     },
+    "/api/auth/logout-all": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Sign out of every device",
+        "description": "End every session this account has open, including the calling one.\n\nThe counterpart to a password reset for someone who is still signed in and\nwants their other sessions gone \u2014 a shared computer they forgot to sign out\nof, a stolen phone \u2014 without changing their password to get it. Every\naccess token and refresh cookie the account holds stops working\nimmediately; the caller signs in again like anyone else.\n\n**Not available to personal access tokens.**",
+        "operationId": "logoutAll",
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "x-personal-access-token": {
+          "allowed": false
+        }
+      }
+    },
     "/api/auth/account": {
       "delete": {
         "tags": [
