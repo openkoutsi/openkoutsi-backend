@@ -418,10 +418,20 @@ def getStartTime(fileish: Fileish) -> datetime | None:
     """
     try:
         data = read_bytes(fileish)
-        for elem in iter_elements(data, frozenset({"time"})):
-            when = _parse_time(elem.text)
-            if when is not None:
-                return when
+        # Anchored to a track point rather than to the first `<time>` anywhere.
+        # GPX 1.1 defines `<metadata><time>` as the file's *creation* date, and
+        # it sits before `<trk>` — so matching the bare tag returned the moment
+        # the file was written rather than the moment the ride started. Whether
+        # those agree is exporter-dependent, and where they disagree by more
+        # than the duplicate window it is the deduplication that breaks, not
+        # the activity: re-imports stop skipping, and a ride held as both FIT
+        # and GPX stops collapsing. Quietly, with no error anywhere.
+        for point in iter_elements(data, frozenset({"trkpt"})):
+            for child in point:
+                if local_name(child.tag) == "time":
+                    when = _parse_time(child.text)
+                    if when is not None:
+                        return when
     except (ActivityParseError, XmlSafetyError, OSError):
         return None
     return None

@@ -363,10 +363,16 @@ def getStartTime(fileish: Fileish) -> datetime | None:
     """
     try:
         data = read_bytes(fileish)
-        for elem in iter_elements(data, frozenset({"Time"})):
-            when = _parse_time(elem.text)
-            if when is not None:
-                return when
+        # Anchored to `<Trackpoint>` for the same reason GPX is: `<Time>` is a
+        # track point's in the activity schema, but a `<Courses>` section in the
+        # same file has its own, and matching the bare tag would make which one
+        # wins a question about document order.
+        for point in iter_elements(data, frozenset({"Trackpoint"})):
+            for child in point:
+                if local_name(child.tag) == "Time":
+                    when = _parse_time(child.text)
+                    if when is not None:
+                        return when
     except (ActivityParseError, XmlSafetyError, OSError):
         return None
     return None

@@ -412,11 +412,13 @@ class TestXmlSafety:
         assert profile.name == "<!DOCTYPE ride"
 
     @pytest.mark.parametrize(
-        "encoding, label",
-        [("utf-16", "UTF-16"), ("utf-16-le", "UTF-16"), ("utf-16-be", "UTF-16"),
-         ("utf-32", "UTF-32")],
+        "encoding",
+        ["utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-le", "utf-32-be"],
     )
-    def test_a_wide_encoding_is_refused_rather_than_scanned_through(self, encoding, label):
+    @pytest.mark.parametrize("declaration", ['<?xml version="1.0"?>', ""])
+    def test_a_wide_encoding_is_refused_rather_than_scanned_through(
+        self, encoding, declaration
+    ):
         """The prolog scan compares bytes, so it can only speak for ASCII.
 
         In UTF-16 the markup is ``3C 00 21 00 44 00 …``, so every literal in
@@ -425,10 +427,15 @@ class TestXmlSafety:
         `detect_format` falls back to the filename and the file is parsed
         anyway. The guarantee has to be one check with no holes in it, so these
         are refused instead of scanned through a decoder.
+
+        Parametrised **without** the XML declaration as well as with it: the
+        declaration is optional, a document may open straight into
+        ``<!DOCTYPE``, and a first cut of this guard recognised the BOM-less
+        forms by their ``<?`` — which left exactly that shape unscanned.
         """
         bomb = (
-            '<?xml version="1.0"?>'
-            '<!DOCTYPE gpx [<!ENTITY a "' + "A" * 64 + '">'
+            declaration
+            + '<!DOCTYPE gpx [<!ENTITY a "' + "A" * 64 + '">'
             '<!ENTITY b "' + "&a;" * 10 + '">]>'
             "<gpx><trk><name>&b;</name></trk></gpx>"
         ).encode(encoding)
@@ -695,6 +702,37 @@ class TestBoundedParseCost:
         # Holding every unwanted element cost roughly 8x the file; the bound is
         # generous so this checks the shape rather than a number.
         assert (after - before) / 1024 < len(document) / 1e6
+
+    def test_start_time_is_the_first_track_point_not_the_files_creation_date(self):
+        """GPX 1.1 puts the file's creation date in ``<metadata><time>``.
+
+        It comes before ``<trk>``, so a parser that stops at the first ``<time>``
+        anywhere returns the moment the file was written rather than the moment
+        the ride started. The activity row would still be right — it comes from
+        the full parse — but deduplication runs entirely on *this* function, so
+        a disagreement wider than the duplicate window silently stops
+        re-imports skipping and stops a ride held as both FIT and GPX
+        collapsing. No error anywhere; just duplicates.
+        """
+        document = (
+            '<?xml version="1.0"?><gpx>'
+            "<metadata><time>2020-01-01T00:00:00Z</time></metadata>"
+            "<trk><trkseg>"
+            + _trkpt(0)
+            + _trkpt(1)
+            + "</trkseg></trk></gpx>"
+        ).encode()
+
+        assert gpx.getStartTime(document) == gpx.summarizeWorkout(document).start_time
+        assert gpx.getStartTime(document) == datetime(
+            2024, 3, 2, 9, 0, tzinfo=timezone.utc
+        )
+
+    def test_start_time_agrees_with_a_full_parse_on_every_fixture(self):
+        for module, path in ((gpx, RIDE_GPX), (tcx, RIDE_TCX), (gpx, HR_ONLY_GPX)):
+            assert module.getStartTime(str(path)) == module.summarizeWorkout(
+                str(path)
+            ).start_time
 
     def test_start_time_does_not_parse_the_whole_file(self):
         import time

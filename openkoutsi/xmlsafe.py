@@ -73,13 +73,23 @@ def read_bytes(fileish: Fileish) -> bytes:
 # requires a conforming processor to support UTF-16, but no device or exporter
 # in the wild writes a UTF-16 GPX or TCX, and accepting one would mean carrying
 # an encoding matrix through the one check that must not have holes in it.
+# Encodings this module cannot scan, in the order they must be tested — the
+# wider forms first, since a UTF-32 document also matches the UTF-16 pattern.
+#
+# The BOM-less entries key on the first ``<`` rather than on ``<?``: an XML
+# declaration is *optional*, so a document may open with ``<!DOCTYPE`` and
+# nothing else, and matching only ``<?`` left exactly that shape unscanned. What
+# is not optional is that the first markup character is ``<``, so a NUL
+# immediately either side of it is conclusive whatever follows.
 _UNSCANNABLE_PREFIXES: tuple[tuple[bytes, str], ...] = (
     (b"\xff\xfe\x00\x00", "UTF-32 (little-endian)"),
     (b"\x00\x00\xfe\xff", "UTF-32 (big-endian)"),
+    (b"\x3c\x00\x00\x00", "UTF-32 (little-endian)"),
+    (b"\x00\x00\x00\x3c", "UTF-32 (big-endian)"),
     (b"\xff\xfe", "UTF-16 (little-endian)"),
     (b"\xfe\xff", "UTF-16 (big-endian)"),
-    (b"\x3c\x00\x3f\x00", "UTF-16 (little-endian)"),
-    (b"\x00\x3c\x00\x3f", "UTF-16 (big-endian)"),
+    (b"\x3c\x00", "UTF-16 (little-endian)"),
+    (b"\x00\x3c", "UTF-16 (big-endian)"),
     (b"\x4c\x6f\xa7\x94", "EBCDIC"),
 )
 
