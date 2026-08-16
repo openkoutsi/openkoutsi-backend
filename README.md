@@ -99,7 +99,7 @@ services stay focused on what is actually different between them:
 | Reading an activity file, whatever its format | `openkoutsi/activity_formats.py` (registry) + `gpx.py` / `tcx.py` / `fit.py` |
 | Unpacking a zip or gzip from a stranger, safely | `services/activity_archive.py` |
 | Working through a bulk import and reporting on each file | `services/activity_import.py` |
-| Serialising a write section across processes, not just across tasks | `db/leases.py` (`hold`) |
+| Serialising a write section across processes, not just across tasks | `db/leases.py` (`hold`) — taken by all three activity writers: provider sync, single upload, and bulk import |
 | What an AI coach may ask for, and what it gets back | `mcp/registry.py` (declarations) + `mcp/dispatch.py` (every check) |
 
 ## Stack

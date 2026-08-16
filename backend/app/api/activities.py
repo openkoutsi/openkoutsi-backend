@@ -17,6 +17,7 @@ from backend.app.core.auth import get_current_user
 from backend.app.core.config import settings
 from backend.app.core.deps import get_ctx_session_athlete
 from backend.app.core.file_encryption import decrypt_file, encrypt_file
+from backend.app.db import leases
 from backend.app.db.registry import get_registry_session
 from backend.app.db.user_session import get_user_session_factory
 from backend.app.models.user_orm import (
@@ -28,6 +29,7 @@ from backend.app.models.user_orm import (
     ActivityStream,
     Athlete,
     ImportJob,
+    SyncLease,
 )
 from backend.app.schemas.imports import (
     ImportJobListResponse,
@@ -61,8 +63,11 @@ from backend.app.services.stranded_runs import (
     settle_activity_analysis_if_timed_out,
 )
 from backend.app.services.provider_sync import (
+    _ACTIVITY_LEASE_TTL,
+    _ACTIVITY_LEASE_WAIT,
     _add_distance_bests,
     _add_power_bests,
+    _get_activity_lock,
     _source_priority,
     rebuild_intervals,
 )
@@ -368,55 +373,95 @@ async def upload_activity(
         raise HTTPException(status_code=400, detail="File is not a valid FIT file")
 
     fit_start = read_fit_start_time(str(file_path))
-    if fit_start is not None:
-        dupe_result = await session.execute(
-            select(Activity).where(
-                Activity.athlete_id == athlete.id,
-                Activity.start_time >= fit_start - _DUPLICATE_WINDOW,
-                Activity.start_time <= fit_start + _DUPLICATE_WINDOW,
-            )
-        )
-        duplicate = dupe_result.scalar_one_or_none()
-        if duplicate is not None:
-            already_uploaded = any(s.provider == "upload" for s in duplicate.sources)
-            if already_uploaded:
-                file_path.unlink(missing_ok=True)
-                raise HTTPException(
-                    status_code=409,
-                    detail="An activity starting at this time already exists.",
+
+    # ── Find-or-create under the same two guards every other writer uses ─────
+    #
+    # The ±5-minute duplicate check and the insert that depends on it are the
+    # section issue #50 wrapped in an `asyncio.Lock` *and* a `SyncLease`: the
+    # lock settles the common case without touching the database but speaks only
+    # for this event loop, and the lease repeats the exclusion where every
+    # writer of this database can see it.
+    #
+    # This path went without them for as long as it was the only interactive
+    # writer. It is not: a Wahoo webhook or a Strava backfill landing while an
+    # athlete uploads the same ride would have both writers see an empty window
+    # and each create an activity. The window here is one request rather than
+    # the tens of minutes a bulk import holds it open, which is why this was the
+    # last of the three to be closed rather than the first.
+    #
+    # Both branches below commit inside the block, which is the invariant the
+    # lease requires: a flush alone would let the next holder still see an empty
+    # window.
+    attached_to: Optional[Activity] = None
+    activity: Optional[Activity] = None
+
+    async with (
+        _get_activity_lock(ctx.user_id, athlete.id),
+        leases.hold(
+            session,
+            SyncLease,
+            f"activity-create:{athlete.id}",
+            ttl=_ACTIVITY_LEASE_TTL,
+            wait=_ACTIVITY_LEASE_WAIT,
+        ),
+    ):
+        if fit_start is not None:
+            dupe_result = await session.execute(
+                select(Activity).where(
+                    Activity.athlete_id == athlete.id,
+                    Activity.start_time >= fit_start - _DUPLICATE_WINDOW,
+                    Activity.start_time <= fit_start + _DUPLICATE_WINDOW,
                 )
-            # Existing activity from a sync source — attach this FIT and reprocess intervals.
+            )
+            duplicate = dupe_result.scalars().first()
+            if duplicate is not None:
+                already_uploaded = any(s.provider == "upload" for s in duplicate.sources)
+                if already_uploaded:
+                    file_path.unlink(missing_ok=True)
+                    raise HTTPException(
+                        status_code=409,
+                        detail="An activity starting at this time already exists.",
+                    )
+                # Existing activity from a sync source — attach this FIT and
+                # reprocess intervals.
+                upload_src = ActivitySource(
+                    activity_id=duplicate.id,
+                    provider="upload",
+                    fit_file_path=str(file_path),
+                    format="fit",
+                )
+                session.add(upload_src)
+                await session.commit()
+                attached_to = duplicate
+
+        if attached_to is None:
+            activity = Activity(
+                id=str(uuid.uuid4()),
+                athlete_id=athlete.id,
+                status="pending",
+            )
+            session.add(activity)
+            await session.flush()
+
             upload_src = ActivitySource(
-                activity_id=duplicate.id,
+                activity_id=activity.id,
                 provider="upload",
                 fit_file_path=str(file_path),
                 format="fit",
             )
             session.add(upload_src)
             await session.commit()
-            background_tasks.add_task(
-                _bg_attach_fit_and_reprocess,
-                str(file_path), duplicate.id, ctx.user_id, ctx.user_id,
-            )
-            return ActivityResponse.model_validate(duplicate)
+            await session.refresh(activity)
 
-    activity = Activity(
-        id=str(uuid.uuid4()),
-        athlete_id=athlete.id,
-        status="pending",
-    )
-    session.add(activity)
-    await session.flush()
-
-    upload_src = ActivitySource(
-        activity_id=activity.id,
-        provider="upload",
-        fit_file_path=str(file_path),
-        format="fit",
-    )
-    session.add(upload_src)
-    await session.commit()
-    await session.refresh(activity)
+    # Scheduled outside the block: the work these do is the processing, not the
+    # find-or-create, and holding the lease across it would serialise an upload
+    # against every sync for the length of a FIT parse.
+    if attached_to is not None:
+        background_tasks.add_task(
+            _bg_attach_fit_and_reprocess,
+            str(file_path), attached_to.id, ctx.user_id, ctx.user_id,
+        )
+        return ActivityResponse.model_validate(attached_to)
 
     background_tasks.add_task(
         _bg_process_and_recalculate,
