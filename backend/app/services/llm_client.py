@@ -32,7 +32,7 @@ from typing import Any, Literal
 import httpx
 
 from ..core.config import settings
-from ..core.ssrf import check_url_safe
+from ..core.ssrf import check_url_safe, guarded_async_client
 from ..models.registry_orm import InstanceSettings
 from ..models.user_orm import Athlete
 
@@ -586,7 +586,7 @@ async def call_llm(
 
     url = f"{base_url.rstrip('/')}/chat/completions"
     check_url_safe(url)
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with guarded_async_client(timeout=120.0) as client:
         resp = await client.post(url, headers=headers, json=payload)
         await raise_for_llm_status(resp, url)
 

@@ -106,6 +106,11 @@ class TestLlmTestConnection:
         assert data["ok"] is False
         assert data["http_status"] == 500
         assert "500" in data["error"]
+        # The admin probe tests the *instance's* saved URL, not one supplied in
+        # the request, so the upstream body is theirs to read — it is what
+        # explains a provider's 400. The BYOK probe withholds it (F-02); see
+        # test_llm_my_connection.py::TestUpstreamBodyNotEchoed.
+        assert "boom" in data["error"]
 
     async def test_connection_refused_surfaced(self, client, auth_headers):
         await _configure_llm(client, auth_headers)

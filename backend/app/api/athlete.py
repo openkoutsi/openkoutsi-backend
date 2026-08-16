@@ -100,7 +100,8 @@ def _validate_llm_base_url(raw: str) -> str:
 
     Fails fast in the UI (instead of at the first LLM call): strips whitespace,
     caps the length, requires an ``http(s)://`` scheme, enforces the allow-list,
-    and runs the SSRF guard (which resolves DNS and blocks metadata ranges).
+    and runs the SSRF guard (which resolves DNS and blocks metadata, loopback
+    and private ranges).
     """
     url = raw.strip()
     if len(url) > _MAX_LLM_URL_LEN:
@@ -246,8 +247,8 @@ async def update_athlete(
         # `llm_base_url` would make the user's own browser session ship their
         # training data to a host of the token holder's choosing on the next
         # analysis — every PAT control still green, because the token itself
-        # never calls an LLM route. `check_url_safe` only blocks link-local
-        # metadata ranges, so any publicly resolvable host would pass.
+        # never calls an LLM route. `check_url_safe` blocks internal ranges,
+        # not hosts, so any publicly resolvable host of theirs would pass.
         if ctx.is_pat and _LLM_SETTING_KEYS & new_settings.keys():
             raise HTTPException(
                 status_code=403,

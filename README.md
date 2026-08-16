@@ -187,6 +187,11 @@ EUROMAIL_WEBHOOK_SECRET=             # secret for verifying inbound EuroMail web
 # empty = users may bring any URL (subject to SSRF guards).
 LLM_ALLOWED_SERVERS=
 
+# Set to true if your LLM runs on localhost (Ollama) or the LAN. The SSRF guard
+# refuses base URLs resolving into loopback/private/CGNAT ranges by default;
+# cloud metadata ranges stay blocked regardless.
+LLM_ALLOW_PRIVATE_NETWORKS=false
+
 # Optional: path to the dedicated LLM-usage database (per-call token accounting
 # for instance-paid calls). Empty = <DATA_DIR>/llm_usage.db.
 LLM_USAGE_DB=
@@ -243,6 +248,15 @@ instance key can never be sent to a user-chosen server. The API key is
 Fernet-encrypted per-user at rest and never returned to the browser. When
 `LLM_ALLOWED_SERVERS` is set, BYOK URLs are restricted to that allow-list (at
 save time and at use time); the SSRF guard always applies.
+
+The SSRF guard resolves the hostname, refuses the request if *any* returned
+address is in a blocked range, and connects to the address it vetted rather than
+re-resolving the name (which a short-TTL record could answer differently the
+second time). Cloud metadata, link-local and multicast ranges are always
+refused. Loopback and private ranges are refused too unless
+`LLM_ALLOW_PRIVATE_NETWORKS=true` — set that when the model is self-hosted on
+localhost or the LAN. A failing upstream's response body is echoed back only on
+the admin test, since the BYOK test's URL comes from the caller.
 
 The connection tests — *Test connection* (admin, instance presets) and *Test
 connection* on the user BYOK card (`POST /api/llm/test-my-connection`) — send a
