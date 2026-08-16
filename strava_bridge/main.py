@@ -6,7 +6,7 @@ them to the main openkoutsi app for polling.
 
 Endpoints:
   GET  /webhook          — Strava hub challenge verification
-  POST /webhook          — Receive Strava event (optionally HMAC-validated)
+  POST /webhook          — Receive Strava event (HMAC-validated, required)
   GET  /events/pending   — Return unclaimed events (Bearer auth)
   POST /events/{id}/claim — Mark an event as claimed (Bearer auth)
 """
@@ -15,6 +15,7 @@ import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -40,6 +41,8 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+log = logging.getLogger(__name__)
 
 
 # ── Database ──────────────────────────────────────────────────────────────
@@ -93,6 +96,12 @@ async def _cleanup_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if not settings.strava_client_secret:
+        log.warning(
+            "STRAVA_CLIENT_SECRET is not set — webhook events cannot be "
+            "authenticated, so POST /webhook will reject every request with "
+            "403. Set it to the same value as the main app to receive events."
+        )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     task = asyncio.create_task(_cleanup_loop())
@@ -118,20 +127,28 @@ def _require_bearer(request: Request) -> None:
 
 def _verify_hmac_256(body: bytes, signature_header: str | None) -> bool:
     """
-    Validate X-Hub-Signature-256. Returns True if valid or if validation is
-    not applicable (header missing, or client_secret not configured).
+    Validate X-Hub-Signature-256, failing closed.
+
+    Returns True only when the secret is configured, the header is present,
+    and it matches the HMAC of the body. Every other case is False: this
+    endpoint is on a public HTTPS URL (Strava requires one), so an absent
+    header is an unauthenticated caller who simply chose not to send one,
+    not a quirk to accommodate. An unconfigured secret means no request can
+    be authenticated at all, so none is accepted.
     """
-    if not signature_header:
-        return True  # Strava doesn't always send this header — accept anyway
-    if not settings.strava_client_secret:
-        return True  # Not configured — skip
+    if not settings.strava_client_secret or not signature_header:
+        return False
     expected = (
         "sha256="
         + hmac.new(
             settings.strava_client_secret.encode(), body, hashlib.sha256
         ).hexdigest()
     )
-    return hmac.compare_digest(expected, signature_header)
+    # Compare as bytes: compare_digest rejects a str holding non-ASCII, and the
+    # header is attacker-supplied, so a str comparison here is a 500 generator.
+    return hmac.compare_digest(
+        expected.encode("ascii"), signature_header.encode("utf-8", errors="replace")
+    )
 
 
 # ── Webhook endpoints ─────────────────────────────────────────────────────
@@ -159,6 +176,11 @@ async def hub_challenge(request: Request):
 async def receive_webhook(request: Request):
     """Receive a Strava webhook event and store it in the queue."""
     body = await request.body()
+
+    # Reported separately from a bad signature so an operator who never set the
+    # secret sees that, rather than a signature error they can't explain.
+    if not settings.strava_client_secret:
+        raise HTTPException(status_code=403, detail="Strava webhooks not configured")
 
     sig = request.headers.get("x-hub-signature-256")
     if not _verify_hmac_256(body, sig):

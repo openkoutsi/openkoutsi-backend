@@ -448,6 +448,16 @@ BRIDGE_SECRET=<same random string as BRIDGE_SECRET in main .env>   # python -c "
 DATABASE_PATH=bridge.db
 ```
 
+`STRAVA_CLIENT_SECRET` is **required**, and must be the same value the Strava
+app uses — the bridge verifies every webhook's `X-Hub-Signature-256` against it
+and rejects the request with `401` when the header is missing or wrong. The
+bridge sits on a public HTTPS URL, so this signature is the only thing
+separating Strava from anyone else who finds the endpoint.
+
+If the secret is unset the bridge cannot authenticate anything, so it fails
+closed: `POST /webhook` answers `403` to every request and a warning is logged
+at startup. A bridge that returns `403` to Strava is missing this secret.
+
 ### Run
 
 ```bash
