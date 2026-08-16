@@ -100,6 +100,7 @@ services stay focused on what is actually different between them:
 | Unpacking a zip or gzip from a stranger, safely | `services/activity_archive.py` |
 | Working through a bulk import and reporting on each file | `services/activity_import.py` |
 | Serialising a write section across processes, not just across tasks | `db/leases.py` (`hold`) — taken by all three activity writers: provider sync, single upload, and bulk import |
+| Bringing a user's database into existence | `db/user_session.py` (`init_user_db`) — the only place that creates one. Getting an engine is side-effect-free, so no read path can conjure a directory from an id it was handed |
 | What an AI coach may ask for, and what it gets back | `mcp/registry.py` (declarations) + `mcp/dispatch.py` (every check) |
 
 ## Stack

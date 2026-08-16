@@ -11,8 +11,18 @@ from backend.app.db.base import UserBase, _set_wal_mode
 
 @lru_cache(maxsize=256)
 def _get_user_engine(user_id: str):
+    """Build (and cache) the engine for one user's database.
+
+    Deliberately side-effect-free: it creates no directory and no file, and
+    ``create_async_engine`` connects lazily, so nothing touches the disk until
+    someone opens a session. Creating a user's database is ``init_user_db``'s
+    job. This used to ``mkdir`` the parent, which made a cache miss on any read
+    path enough to bring a directory into existence — an unauthenticated caller
+    passing an unknown id got one directory and three files out of it (issue
+    #102, F-03). Opening a session for a user who has none now fails instead,
+    which is what the callers already treat as "no such user".
+    """
     db_path = Path(settings.user_db_path(user_id))
-    db_path.parent.mkdir(parents=True, exist_ok=True)
     engine = create_async_engine(
         f"sqlite+aiosqlite:///{db_path}",
         echo=False,
@@ -43,11 +53,16 @@ async def init_user_db(user_id: str) -> None:
     Imports every model module so all tables bound to ``UserBase`` (the athlete
     profile, all training data, the message inbox and the Koutsi conversations)
     are created.
+
+    This is the only place a user's directory comes into existence — creating
+    one is an explicit act here rather than a side effect of any code path that
+    happens to ask for an engine.
     """
     import backend.app.models.chat_orm  # noqa: F401
     import backend.app.models.message_orm  # noqa: F401
     import backend.app.models.user_orm  # noqa: F401
 
+    Path(settings.user_db_path(user_id)).parent.mkdir(parents=True, exist_ok=True)
     engine = _get_user_engine(user_id)
     async with engine.begin() as conn:
         await conn.execute(text("PRAGMA journal_mode=WAL"))

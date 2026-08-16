@@ -5384,7 +5384,7 @@
           "public"
         ],
         "summary": "Get a user's avatar (no auth)",
-        "description": "Serve a user's avatar image without requiring authentication.\n\nThe user_id acts as the opaque reference. No sensitive data is exposed \u2014\nonly the image file itself is returned.",
+        "description": "Serve a user's avatar image without requiring authentication.\n\nThe user_id acts as the opaque reference. No sensitive data is exposed \u2014\nonly the image file itself is returned. An id that is not a known user's\nis refused before anything else happens.",
         "operationId": "getPublicUserAvatar",
         "parameters": [
           {
