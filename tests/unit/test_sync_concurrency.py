@@ -4,8 +4,16 @@ These are the two races that are reachable **inside a single process** today, so
 they are bugs on the current one-box deployment rather than replica-safety
 hypotheticals:
 
-* two syncs for one connection rotating the OAuth tokens at the same time, and
-* two syncs importing the same real-world workout at the same time.
+* two syncs for one connection rotating the OAuth tokens at the same time,
+* two syncs importing the same real-world workout at the same time, and
+* a sync and a manual FIT upload racing for the same ride.
+
+The last of those is the same find-or-create as the second, reached through a
+different door: ``upload_activity`` does a ±5-minute window query and then
+inserts, so it needs the same lock and the same lease as the sync path it
+competes with (issue #36's review). The barrier harness below is what turns
+"these two might interleave" into "they certainly do", and it is what makes a
+test of that guard mean anything.
 
 Both are tested against **file-based** SQLite. An in-memory URL gives SQLAlchemy
 a ``StaticPool``, so every session would share one connection and serialise for
@@ -13,6 +21,8 @@ free — the race would not be reproduced, only hidden. ``test_db_concurrency.py
 takes the same approach for the same reason.
 """
 import asyncio
+import contextlib
+import io
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -22,6 +32,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import backend.app.models.registry_orm  # noqa: F401 — populate RegistryBase.metadata
 import backend.app.models.user_orm  # noqa: F401 — populate UserBase.metadata
+from backend.app.db import leases
 from backend.app.db.base import RegistryBase, UserBase, _set_wal_mode
 from backend.app.models.registry_orm import ProviderConnection, User
 from backend.app.models.user_orm import (
@@ -32,9 +43,11 @@ from backend.app.models.user_orm import (
     SyncLease,
 )
 from backend.app.services.provider_sync import ensure_fresh_token, sync_provider_activities
+from openkoutsi.fit import getStartTime
 from backend.app.services.providers.base import NormalizedActivity
 
 _USER_ID = "concurrency-user"
+_TTL = timedelta(seconds=30)
 
 
 def _engine(db_path):
@@ -485,3 +498,149 @@ class TestTheWaiterIsNotTakenDownWithTheWinner:
             ).scalar_one()
         assert stored.access_token == "access-2"
         assert stored.refresh_lock_until is None
+
+
+# ── Upload racing a sync ─────────────────────────────────────────────────────
+
+
+def _fit_bytes() -> bytes:
+    """A real FIT fixture, since `upload_activity` validates the magic bytes."""
+    from pathlib import Path as _Path
+
+    fixtures = _Path(__file__).parent.parent.parent / "testdata" / "fixtures"
+    for candidate in sorted(fixtures.glob("*.fit")):
+        return candidate.read_bytes()
+    pytest.skip("no FIT fixture available")
+
+
+@contextlib.contextmanager
+def _upload_environment(tmp_path):
+    """Globals the upload handler reads, set once for the whole test.
+
+    Both of these are process-wide, so a concurrent test must not have each
+    caller set and restore them: the first to finish would put the limiter back
+    while the second is still inside slowapi's wrapper, which reads
+    ``self.enabled`` again on the way out and raises on a `request` it never
+    bound. That is a bug in the test, but it is the kind that reads as a bug in
+    the code under test, so it is worth naming.
+    """
+    from backend.app.core.config import settings
+    from backend.app.core.limiter import limiter
+
+    enabled, data_dir = limiter.enabled, settings.data_dir
+    limiter.enabled = False
+    settings.data_dir = str(tmp_path)
+    try:
+        yield
+    finally:
+        limiter.enabled = enabled
+        settings.data_dir = data_dir
+
+
+async def _upload(factory, payload: bytes) -> None:
+    """Call the upload endpoint's handler on this caller's own session.
+
+    Must run inside :func:`_upload_environment`.
+    """
+    from fastapi import BackgroundTasks
+    from starlette.datastructures import Headers, UploadFile as StarletteUploadFile
+
+    from backend.app.api.activities import upload_activity
+
+    from backend.app.core.auth import UserContext
+
+    async with factory() as session:
+        athlete = (
+            await session.execute(select(Athlete).where(Athlete.id == "athlete-1"))
+        ).scalar_one()
+        ctx = UserContext(user_id=_USER_ID, roles=["user"])
+
+        upload = StarletteUploadFile(
+            file=io.BytesIO(payload),
+            filename="ride.fit",
+            headers=Headers({"content-type": "application/octet-stream"}),
+        )
+        await upload_activity(
+            request=MagicMock(),
+            background_tasks=BackgroundTasks(),
+            file=upload,
+            ctx_athlete=(ctx, session, athlete),
+        )
+
+
+class TestUploadRacingASync:
+    """The manual upload holds the same guards as the paths it competes with.
+
+    Before issue #36's review this path did the ±5-minute check and the insert
+    holding neither, so a Wahoo webhook or a Strava backfill landing while an
+    athlete uploaded the same ride could have both writers see an empty window
+    and each create an activity.
+
+    These do not take the barrier approach the sync tests above use, and the
+    reason is a property of this path rather than a shortcoming of the test: an
+    activity created by an upload has ``start_time = NULL`` until the background
+    task has parsed the FIT, so a *second* upload's window query cannot see it
+    however the two interleave — that overlap is settled afterwards, by the
+    merge in ``_bg_process_and_recalculate``. What the lease buys is exclusion
+    against the **sync** path, which inserts rows that do carry a start time.
+    So the property worth pinning is that the section is held under the lease at
+    all, which is what these assert directly.
+    """
+
+    _LEASE = "activity-create:athlete-1"
+
+    async def test_the_upload_waits_for_the_activity_create_lease(
+        self, user_db, tmp_path
+    ):
+        payload = _fit_bytes()
+
+        async with user_db() as holder:
+            token = await leases.acquire(
+                holder, SyncLease, self._LEASE, ttl=_TTL, wait=1.0
+            )
+            assert token is not None, "could not set the test up"
+
+            with _upload_environment(tmp_path):
+                upload = asyncio.create_task(_upload(user_db, payload))
+                # Long enough for an unguarded upload to have finished — it does
+                # no IO beyond writing one small file and two inserts.
+                await asyncio.sleep(0.25)
+                assert not upload.done(), (
+                    "the upload created an activity while another writer held "
+                    "the activity-create lease"
+                )
+
+                await leases.release(holder, SyncLease, self._LEASE, token)
+                await asyncio.wait_for(upload, timeout=10)
+
+        activities, sources = await _activity_and_source_counts(user_db)
+        assert (activities, sources) == (1, 1)
+
+    async def test_an_upload_attaches_to_a_synced_ride_rather_than_duplicating_it(
+        self, user_db, tmp_path
+    ):
+        """The outcome the lease protects, with the ordering it can act on."""
+        payload = _fit_bytes()
+        start = getStartTime(io.BytesIO(payload))
+        assert start is not None
+
+        # The sync lands first, so its row — which carries a start time — is
+        # what the upload's window query sees.
+        await _sync_from(user_db, "strava", _norm("s-1", "strava", start))
+        with _upload_environment(tmp_path):
+            await _upload(user_db, payload)
+
+        activities, sources = await _activity_and_source_counts(user_db)
+        assert activities == 1, "the upload and the sync described the same ride"
+        assert sources == 2, "and both are recorded against it"
+
+    async def test_the_lease_is_free_again_after_an_upload(self, user_db, tmp_path):
+        """So the next writer does not wait out the TTL."""
+        with _upload_environment(tmp_path):
+            await _upload(user_db, _fit_bytes())
+
+        async with user_db() as session:
+            token = await leases.acquire(
+                session, SyncLease, self._LEASE, ttl=_TTL, wait=0.5
+            )
+        assert token is not None

@@ -197,7 +197,28 @@ class Activity(UserBase):
 
     @property
     def has_fit_file(self) -> bool:
+        """Is there an original activity file stored for this activity?
+
+        Named for the days when the only answer was a FIT. Since issue #36 the
+        stored original may be a GPX or a TCX, and the flag still means "there
+        is a file behind ``GET /activities/{id}/fit`` to download" —
+        ``original_format`` says which kind it is.
+        """
         return any(s.fit_file_path for s in self.sources)
+
+    @property
+    def original_format(self) -> Optional[str]:
+        """Format of the original file that would be served, or None if there is none."""
+        with_files = [s for s in self.sources if s.fit_file_path]
+        if not with_files:
+            return None
+        # Same ranking the download endpoint uses to choose which source's file
+        # to serve, imported here rather than at module scope because
+        # `provider_sync` imports this module.
+        from backend.app.services.provider_sync import _source_priority
+
+        best = min(with_files, key=lambda s: _source_priority(s.provider, True))
+        return best.file_format
 
 
 class ActivitySource(UserBase):
@@ -217,9 +238,24 @@ class ActivitySource(UserBase):
     external_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     fit_file_path: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     fit_file_encrypted: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Which format the stored original is in: ``fit``, ``gpx`` or ``tcx``
+    # (issue #36). NULL means either there is no file or the row predates bulk
+    # import, in which case it is a FIT — nothing else could have been stored.
+    #
+    # Originals are kept in the format they arrived in rather than converted to
+    # FIT on ingest. Converting would keep `has_fit_file`, the download and
+    # reprocess on one path, but it is lossy and it means the file an athlete
+    # downloads is not the file they uploaded. Everything that reads the
+    # original — the download endpoint, reprocess — dispatches on this instead.
+    format: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     activity: Mapped["Activity"] = relationship("Activity", back_populates="sources", lazy="selectin")
+
+    @property
+    def file_format(self) -> str:
+        """The stored original's format, defaulting to FIT for pre-#36 rows."""
+        return self.format or "fit"
 
 
 class ActivityStream(UserBase):
@@ -559,6 +595,64 @@ class WahooWorkoutUpload(UserBase):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
     )
+
+
+class ImportJob(UserBase):
+    """One bulk import of activity files — an archive, or a pile of them (issue #36).
+
+    Bulk import is a different interaction from the single-file upload, not a
+    louder version of it. A Strava export is thousands of files and tens of
+    minutes of parsing, which is not a request a browser can hold open, so the
+    job is a resource: the endpoint creates one, hands back its id, and the
+    client polls it.
+
+    ``results`` is the part that makes a finished job useful. "847 of 900
+    imported" says nothing an athlete can act on; the per-file list says *which*
+    53 did not and why, so a corrupt export or an unsupported format is a thing
+    they can see rather than a number they have to trust.
+    """
+
+    __tablename__ = "import_jobs"
+    __table_args__ = (
+        Index("ix_import_jobs_athlete_created", "athlete_id", "created_at"),
+    )
+
+    # Status values. A job that raised before finishing is `failed`; a job that
+    # finished with some files rejected is still `completed` — one unreadable
+    # file out of nine hundred is a result, not a failed import.
+    STATUSES = ("pending", "running", "completed", "failed")
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    athlete_id: Mapped[str] = mapped_column(
+        String, ForeignKey("athletes.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String, default="pending", nullable=False)
+    # What the athlete handed over, for a list of past imports that reads like
+    # something they did: "strava_export_12345.zip", or "37 files".
+    source_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Files found once archives were walked. 0 until the walk finishes, which is
+    # why progress is reported as processed/total rather than as a percentage
+    # while the job is still `pending`.
+    total_files: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    imported: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    skipped_duplicate: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    failed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    # [{filename, outcome, reason, activity_id, format}, ...] — one per file,
+    # in the order they were processed.
+    results: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    # Why the *job* died, as opposed to why a file did. Set only for `failed`.
+    error: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    @property
+    def processed(self) -> int:
+        return self.imported + self.skipped_duplicate + self.failed
 
 
 class SyncLease(UserBase, LeaseMixin):

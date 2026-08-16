@@ -138,6 +138,9 @@ SECRET_KEY=<hex-64-chars>          # python -c "import secrets; print(secrets.to
 
 # Optional – defaults shown
 DATA_DIR=data                      # root directory; holds registry.db and users/ (per-user DBs + uploads)
+                                   # bulk imports stage archives under users/{id}/uploads/imports/{job}/
+                                   # and delete them when the job ends, so size that volume for the
+                                   # expanded archive as well as the activity files it leaves behind
 FRONTEND_URL=https://your-domain
 API_URL=https://api.your-domain
 ACCESS_TOKEN_EXPIRE_MINUTES=60
@@ -352,9 +355,18 @@ single-process by design, and several things depend on that:
   false: starting the second settles the first one's **live** runs.
 - **`AGENT_MAX_CONCURRENT_RUNS`** is an in-process counter, so N processes allow
   N times the concurrency you configured against your LLM.
-- **Rate limits** (login, password reset, chat, uploads, MCP) are held in memory,
-  so N processes give each caller N times the intended allowance. For login and
-  password reset that is a weakened brute-force defence, not just a looser quota.
+- **Rate limits** (login, password reset, chat, uploads, bulk import, MCP) are
+  held in memory, so N processes give each caller N times the intended
+  allowance. For login and password reset that is a weakened brute-force
+  defence, not just a looser quota.
+- **The one-import-at-a-time check** (`POST /api/activities/import` refuses a
+  second job while one is pending or running) is a query against the per-user
+  database rather than in-process state, so it does hold between processes. A
+  job whose process died cannot clear its own status, so the check is a
+  *staleness* question: a row untouched for an hour no longer blocks a new
+  import. A healthy job commits its progress every 25 files, so that bound is
+  far outside anything a live import does — it is crash recovery, not a
+  timeout, and it means a killed import never locks an athlete out permanently.
 
 Two things that used to be on this list no longer are. **Duplicate activity
 creation** and **OAuth token rotation** are now guarded in the database rather
@@ -386,11 +398,43 @@ configured below. Nothing in this repository serves frontend assets.
 server {
     listen 443 ssl;
     server_name api.your-domain;
+
+    # Bulk activity import (POST /api/activities/import) accepts up to 500 MB in
+    # one request — a Strava bulk export of a long history. nginx defaults to
+    # 1 MB and rejects anything larger with a 413 *before* it reaches the API,
+    # so without this the endpoint's own limit never gets a say.
+    client_max_body_size 512m;
+    # Lower it if you want a smaller ceiling; the API's own 500 MB cap is the
+    # upper bound, not a floor.
+    # A 900-file import is minutes of parsing, but it happens in the background:
+    # the request itself only stages the upload and returns a job id, so the
+    # default proxy timeouts are fine.
+
     location / { proxy_pass http://127.0.0.1:8000; }
 }
 ```
 
 The frontend has its own `server {}` block — see the openkoutsi-web repository.
+
+### Sizing the data volume for imports
+
+An import stages its upload under `users/{id}/uploads/imports/{job_id}/`, expands
+the archive beside it, and removes the whole directory when the job ends —
+whatever the outcome. A directory left behind by a process that died is swept up
+when that athlete next starts an import.
+
+The limits are **per job**, and one job is one athlete: an import may expand to
+at most 4 GB across at most 20 000 files, with each file capped at 50 MB
+(`backend/app/services/activity_archive.py`). There is no *global* bound, so on
+a shared instance the worst case is that ceiling times the number of athletes
+importing at once — one import at a time per athlete is enforced, several
+athletes at once is not. On a single-user deployment this is not worth thinking
+about; on a shared one, size the volume for a few concurrent imports rather than
+for one, or lower `MAX_TOTAL_BYTES`.
+
+Running out of disk mid-expansion fails the job with "Ran out of disk space
+while unpacking the import" rather than reporting every remaining file as
+individually corrupt.
 
 ### Exposing (or not exposing) the MCP endpoint
 

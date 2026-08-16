@@ -149,7 +149,10 @@ class TestProviderSyncWriterPaths:
                 {"wahoo": MagicMock(return_value=client)},
             ),
             patch("backend.app.services.provider_sync.summarizeWorkout", return_value=profile),
-            patch("backend.app.services.provider_sync.extractIntervals", return_value=[]),
+            # Lap extraction is dispatched through the format registry since
+            # issue #36, so the stub goes on the FIT parser itself rather than
+            # on a name imported into `provider_sync`.
+            patch("openkoutsi.fit.extractIntervals", return_value=[]),
             patch("backend.app.services.provider_sync.encrypt_file"),
         ):
             await sync_provider_activities(

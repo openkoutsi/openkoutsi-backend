@@ -4,8 +4,10 @@ from typing import Optional
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from openkoutsi.fit import summarizeWorkout, getStartTime, extractIntervals
+from openkoutsi.activity_formats import parser_for
+from openkoutsi.fit import getStartTime
 from openkoutsi.categorization import classify_workout
+from openkoutsi.workout import Profile
 from openkoutsi.streams import to_json_stream
 from openkoutsi.fit_processing import (
     resolve_sport_type,
@@ -43,13 +45,63 @@ def read_fit_start_time(path: str) -> Optional[datetime]:
     return getStartTime(path)
 
 
+def read_activity_start_time(path: str, fmt: str = "fit") -> Optional[datetime]:
+    """The start timestamp of an activity file in any supported format.
+
+    Every parser stops at the first timestamped record, so this stays cheap
+    enough to run over every file in a bulk import before deciding which ones
+    are duplicates of each other.
+    """
+    return parser_for(fmt).getStartTime(path)
+
+
+def parse_activity_file(path: str, fmt: str = "fit") -> tuple[Profile, list[dict]]:
+    """Parse a file into its profile and its device-recorded laps.
+
+    Split out from :func:`process_activity_file` because parsing is the
+    expensive, purely synchronous half: a bulk import runs this in a worker
+    thread so that decoding nine hundred files does not block the event loop,
+    then hands the result back to be written. Raises
+    ``openkoutsi.activity_formats.ActivityParseError`` for a file that cannot be
+    read, carrying a reason fit to show an athlete.
+    """
+    parser = parser_for(fmt)
+    return parser.summarizeWorkout(path), parser.extractIntervals(path)
+
+
 async def process_fit_file(
     path: str,
     athlete: Athlete,
     activity: Activity,
     session: AsyncSession,
 ) -> Activity:
-    profile = summarizeWorkout(path)
+    """Populate an activity from a FIT file. See :func:`process_activity_file`."""
+    return await process_activity_file(path, athlete, activity, session)
+
+
+async def process_activity_file(
+    path: str,
+    athlete: Athlete,
+    activity: Activity,
+    session: AsyncSession,
+    *,
+    fmt: str = "fit",
+    parsed: Optional[tuple[Profile, list[dict]]] = None,
+) -> Activity:
+    """Populate an activity — metrics, streams, bests, intervals — from a file.
+
+    Format-agnostic since issue #36: FIT, GPX and TCX all arrive here as a
+    ``Profile``, and everything below this line is the same work regardless of
+    which one it came from. What differs is only what the file *had* — a GPX
+    with no power produces no weighted power, no power bests and no power zone
+    times, and that is a complete import of that file rather than a failure.
+
+    Pass ``parsed`` when the caller has already parsed the file (in a thread,
+    for a bulk import) to avoid doing it twice.
+    """
+    profile, raw_intervals = (
+        parsed if parsed is not None else parse_activity_file(path, fmt)
+    )
 
     wp = weighted_power(profile.power) if profile.power else None
     load, intensity = calculate_load(
@@ -60,7 +112,8 @@ async def process_fit_file(
         athlete.max_hr,
     )
 
-    activity.name = activity.name or "Uploaded Activity"
+    # GPX and TCX carry the ride's own title; FIT almost never does.
+    activity.name = activity.name or profile.name or "Uploaded Activity"
     activity.sport_type = activity.sport_type or resolve_sport_type(profile.sport_type)
     activity.start_time = profile.start_time
     activity.duration_s = profile.duration
@@ -164,7 +217,6 @@ async def process_fit_file(
                 )
             )
 
-    raw_intervals = extractIntervals(path)
     is_auto = len(raw_intervals) <= 1
     if is_auto:
         stream_length = max(

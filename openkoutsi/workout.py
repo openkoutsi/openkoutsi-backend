@@ -31,6 +31,11 @@ class Profile:
     altitude: list[float | None]  # metres at each second
 
     sport_type: str | None  # raw sport string from FIT file, e.g. "running"
+    # The name the file gave the activity, when it carries one. GPX and TCX both
+    # do (Strava writes the ride's title into the track), and using it beats
+    # calling nine hundred imported rides "Uploaded Activity". FIT files rarely
+    # carry one, so this stays None on that path.
+    name: str | None
 
     def __init__(
         self,
@@ -44,6 +49,7 @@ class Profile:
         cadence: list[float | None],
         altitude: list[float | None] | None = None,
         sport_type: str | None = None,
+        name: str | None = None,
     ):
         self.start_time = start_time
         self.duration = duration
@@ -55,6 +61,7 @@ class Profile:
         self.cadence = cadence
         self.altitude = altitude or []
         self.sport_type = sport_type
+        self.name = name
 
         # Averaged over the samples that exist, not over the grid: a strap that
         # dropped for ten minutes should not pull average HR toward zero. This

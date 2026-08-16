@@ -1,4 +1,5 @@
 import asyncio
+import shutil
 import uuid
 from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
@@ -16,6 +17,7 @@ from backend.app.core.auth import get_current_user
 from backend.app.core.config import settings
 from backend.app.core.deps import get_ctx_session_athlete
 from backend.app.core.file_encryption import decrypt_file, encrypt_file
+from backend.app.db import leases
 from backend.app.db.registry import get_registry_session
 from backend.app.db.user_session import get_user_session_factory
 from backend.app.models.user_orm import (
@@ -26,6 +28,13 @@ from backend.app.models.user_orm import (
     ActivitySource,
     ActivityStream,
     Athlete,
+    ImportJob,
+    SyncLease,
+)
+from backend.app.schemas.imports import (
+    ImportJobListResponse,
+    ImportJobResponse,
+    ImportJobSummary,
 )
 from backend.app.schemas.activities import (
     ActivityDetailResponse,
@@ -41,6 +50,11 @@ from backend.app.schemas.activities import (
 )
 from backend.app.core.limiter import limiter
 from backend.app.core.scopes import pat_forbidden, pat_scopes
+from backend.app.services.activity_import import (
+    is_in_flight,
+    reap_stale_staging,
+    run_import_job,
+)
 from backend.app.services.fit_processor import process_fit_file, read_fit_start_time
 from backend.app.services.metrics_engine import recalculate_from
 from backend.app.services.pr_detection import detect_pr_badges
@@ -49,8 +63,11 @@ from backend.app.services.stranded_runs import (
     settle_activity_analysis_if_timed_out,
 )
 from backend.app.services.provider_sync import (
+    _ACTIVITY_LEASE_TTL,
+    _ACTIVITY_LEASE_WAIT,
     _add_distance_bests,
     _add_power_bests,
+    _get_activity_lock,
     _source_priority,
     rebuild_intervals,
 )
@@ -64,11 +81,27 @@ from backend.app.services.plan_adherence import catch_up_adherence
 from backend.app.services.achievements import recompute_achievements_safe
 
 _MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
+# The bulk-import request cap, which is a different question from the
+# single-upload one: this is a whole training history arriving at once. A Strava
+# export of a decade of daily riding is well under this; the archive's
+# *expanded* size is bounded separately in `services.activity_archive`, because
+# a compressed size bounds nothing on its own.
+_MAX_IMPORT_BYTES = 500 * 1024 * 1024  # 500 MB
 _FIT_MAGIC = b".FIT"
 _DUPLICATE_WINDOW = timedelta(minutes=5)
 _VALID_LABELS = {"race", "commute"}
 
 log = logging.getLogger(__name__)
+
+
+def _import_source_name(files: list[UploadFile]) -> str:
+    """A label for what the athlete handed over, for the list of past imports."""
+    names = [f.filename for f in files if f.filename]
+    if len(names) == 1:
+        return names[0]
+    if names:
+        return f"{len(files)} files"
+    return f"{len(files)} uploads"
 
 
 router = APIRouter(
@@ -340,53 +373,95 @@ async def upload_activity(
         raise HTTPException(status_code=400, detail="File is not a valid FIT file")
 
     fit_start = read_fit_start_time(str(file_path))
-    if fit_start is not None:
-        dupe_result = await session.execute(
-            select(Activity).where(
-                Activity.athlete_id == athlete.id,
-                Activity.start_time >= fit_start - _DUPLICATE_WINDOW,
-                Activity.start_time <= fit_start + _DUPLICATE_WINDOW,
-            )
-        )
-        duplicate = dupe_result.scalar_one_or_none()
-        if duplicate is not None:
-            already_uploaded = any(s.provider == "upload" for s in duplicate.sources)
-            if already_uploaded:
-                file_path.unlink(missing_ok=True)
-                raise HTTPException(
-                    status_code=409,
-                    detail="An activity starting at this time already exists.",
+
+    # ── Find-or-create under the same two guards every other writer uses ─────
+    #
+    # The ±5-minute duplicate check and the insert that depends on it are the
+    # section issue #50 wrapped in an `asyncio.Lock` *and* a `SyncLease`: the
+    # lock settles the common case without touching the database but speaks only
+    # for this event loop, and the lease repeats the exclusion where every
+    # writer of this database can see it.
+    #
+    # This path went without them for as long as it was the only interactive
+    # writer. It is not: a Wahoo webhook or a Strava backfill landing while an
+    # athlete uploads the same ride would have both writers see an empty window
+    # and each create an activity. The window here is one request rather than
+    # the tens of minutes a bulk import holds it open, which is why this was the
+    # last of the three to be closed rather than the first.
+    #
+    # Both branches below commit inside the block, which is the invariant the
+    # lease requires: a flush alone would let the next holder still see an empty
+    # window.
+    attached_to: Optional[Activity] = None
+    activity: Optional[Activity] = None
+
+    async with (
+        _get_activity_lock(ctx.user_id, athlete.id),
+        leases.hold(
+            session,
+            SyncLease,
+            f"activity-create:{athlete.id}",
+            ttl=_ACTIVITY_LEASE_TTL,
+            wait=_ACTIVITY_LEASE_WAIT,
+        ),
+    ):
+        if fit_start is not None:
+            dupe_result = await session.execute(
+                select(Activity).where(
+                    Activity.athlete_id == athlete.id,
+                    Activity.start_time >= fit_start - _DUPLICATE_WINDOW,
+                    Activity.start_time <= fit_start + _DUPLICATE_WINDOW,
                 )
-            # Existing activity from a sync source — attach this FIT and reprocess intervals.
+            )
+            duplicate = dupe_result.scalars().first()
+            if duplicate is not None:
+                already_uploaded = any(s.provider == "upload" for s in duplicate.sources)
+                if already_uploaded:
+                    file_path.unlink(missing_ok=True)
+                    raise HTTPException(
+                        status_code=409,
+                        detail="An activity starting at this time already exists.",
+                    )
+                # Existing activity from a sync source — attach this FIT and
+                # reprocess intervals.
+                upload_src = ActivitySource(
+                    activity_id=duplicate.id,
+                    provider="upload",
+                    fit_file_path=str(file_path),
+                    format="fit",
+                )
+                session.add(upload_src)
+                await session.commit()
+                attached_to = duplicate
+
+        if attached_to is None:
+            activity = Activity(
+                id=str(uuid.uuid4()),
+                athlete_id=athlete.id,
+                status="pending",
+            )
+            session.add(activity)
+            await session.flush()
+
             upload_src = ActivitySource(
-                activity_id=duplicate.id,
+                activity_id=activity.id,
                 provider="upload",
                 fit_file_path=str(file_path),
+                format="fit",
             )
             session.add(upload_src)
             await session.commit()
-            background_tasks.add_task(
-                _bg_attach_fit_and_reprocess,
-                str(file_path), duplicate.id, ctx.user_id, ctx.user_id,
-            )
-            return ActivityResponse.model_validate(duplicate)
+            await session.refresh(activity)
 
-    activity = Activity(
-        id=str(uuid.uuid4()),
-        athlete_id=athlete.id,
-        status="pending",
-    )
-    session.add(activity)
-    await session.flush()
-
-    upload_src = ActivitySource(
-        activity_id=activity.id,
-        provider="upload",
-        fit_file_path=str(file_path),
-    )
-    session.add(upload_src)
-    await session.commit()
-    await session.refresh(activity)
+    # Scheduled outside the block: the work these do is the processing, not the
+    # find-or-create, and holding the lease across it would serialise an upload
+    # against every sync for the length of a FIT parse.
+    if attached_to is not None:
+        background_tasks.add_task(
+            _bg_attach_fit_and_reprocess,
+            str(file_path), attached_to.id, ctx.user_id, ctx.user_id,
+        )
+        return ActivityResponse.model_validate(attached_to)
 
     background_tasks.add_task(
         _bg_process_and_recalculate,
@@ -394,6 +469,165 @@ async def upload_activity(
     )
 
     return ActivityResponse.model_validate(activity)
+
+
+@router.post("/import", response_model=ImportJobResponse, status_code=202,
+             operation_id="importActivities",
+             summary="Import many activity files, or an archive of them",
+             dependencies=[Depends(require_consent)])
+@limiter.limit("5/hour")
+async def import_activities(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    files: list[UploadFile] = File(..., description="Activity files, .gz files, or .zip archives"),
+    ctx_athlete=Depends(get_ctx_session_athlete),
+):
+    """Start a bulk import and return the job to poll (issue #36).
+
+    Accepts `.fit`, `.gpx`, `.tcx`, any of those gzipped, and `.zip` archives
+    containing a mix of them — which is exactly the shape of a Strava bulk
+    export. The response is the job, not the activities: an export is thousands
+    of files and tens of minutes of parsing, so the work happens in the
+    background and the client polls `GET /activities/imports/{id}`.
+
+    **On the rate limit.** The single-file upload is limited to 30/hour, which
+    is what makes importing a history one file at a time impossible. The limit
+    here is on *jobs* rather than files, because a job is the unit of work an
+    athlete actually asks for; one job may legitimately carry three thousand
+    files. A second job while one is still running is refused (409) rather than
+    queued — two imports writing to one SQLite database interleave badly, and
+    the athlete has no reason to want it.
+    """
+    ctx, session, athlete = ctx_athlete
+
+    if not files:
+        raise HTTPException(status_code=422, detail="No files were uploaded")
+
+    unfinished = await session.execute(
+        select(ImportJob).where(
+            ImportJob.athlete_id == athlete.id,
+            ImportJob.status.in_(("pending", "running")),
+        )
+    )
+    # `is_in_flight` rather than the status alone: a job whose process died
+    # cannot clear its own status, and without the staleness check that athlete
+    # could never import anything again.
+    if any(is_in_flight(job) for job in unfinished.scalars()):
+        raise HTTPException(
+            status_code=409,
+            detail="An import is already running. Wait for it to finish before starting another.",
+        )
+
+    # Committed *before* the request body is staged, so the check above is not
+    # separated from the row it depends on by an upload that takes minutes. With
+    # the insert last, two tabs — or a retry after a timeout the server is still
+    # working through — both pass the check and both schedule a job, which is
+    # exactly what this endpoint refuses to do. The `pending` status already
+    # means "no files walked yet", so a row that exists during the upload fits
+    # the model rather than bending it.
+    job = ImportJob(
+        id=str(uuid.uuid4()),
+        athlete_id=athlete.id,
+        status="pending",
+        source_name=_import_source_name(files),
+    )
+    session.add(job)
+    await session.commit()
+    await session.refresh(job)
+
+    # Anything left by an import whose process died is finished with; imports
+    # run one at a time, so this is the natural moment to sweep it up.
+    await reap_stale_staging(session, athlete.id, ctx.user_id, keep=job.id)
+
+    work_dir = settings.user_fit_dir(ctx.user_id) / "imports" / job.id
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    uploads: list[tuple[Path, str]] = []
+    written = 0
+    try:
+        for index, upload in enumerate(files):
+            part_path = work_dir / f"part-{index}"
+            with part_path.open("wb") as out:
+                while True:
+                    chunk = await upload.read(65536)
+                    if not chunk:
+                        break
+                    written += len(chunk)
+                    if written > _MAX_IMPORT_BYTES:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=(
+                                f"Upload exceeds the {_MAX_IMPORT_BYTES // (1024 * 1024)} MB "
+                                "limit. Split the archive and import it in parts."
+                            ),
+                        )
+                    out.write(chunk)
+            uploads.append((part_path, upload.filename or f"upload-{index}"))
+    except Exception as exc:
+        # The job row is already visible, so failing the upload has to settle it
+        # — otherwise a 413 leaves an athlete with a `pending` job that never
+        # runs and blocks the next import until it goes stale. It also gives
+        # them something to look at, which "413 and nothing" did not.
+        shutil.rmtree(work_dir, ignore_errors=True)
+        job.status = "failed"
+        job.error = exc.detail if isinstance(exc, HTTPException) else "Upload failed"
+        job.completed_at = datetime.now(timezone.utc)
+        await session.commit()
+        raise
+
+    background_tasks.add_task(
+        run_import_job, job.id, athlete.id, ctx.user_id, uploads, work_dir,
+    )
+    return ImportJobResponse.model_validate(job)
+
+
+@router.get("/imports", response_model=ImportJobListResponse,
+            operation_id="listImports", summary="Recent bulk imports")
+async def list_imports(
+    limit: int = Query(20, ge=1, le=100),
+    ctx_athlete=Depends(get_ctx_session_athlete),
+):
+    """Recent import jobs, newest first, without the per-file detail.
+
+    The detail list can hold thousands of rows, which is worth fetching for the
+    one job being looked at and not for a list of them.
+    """
+    ctx, session, athlete = ctx_athlete
+
+    total_result = await session.execute(
+        select(func.count()).select_from(
+            select(ImportJob).where(ImportJob.athlete_id == athlete.id).subquery()
+        )
+    )
+    result = await session.execute(
+        select(ImportJob)
+        .where(ImportJob.athlete_id == athlete.id)
+        .order_by(ImportJob.created_at.desc())
+        .limit(limit)
+    )
+    return ImportJobListResponse(
+        items=[ImportJobSummary.model_validate(j) for j in result.scalars().all()],
+        total=total_result.scalar_one(),
+    )
+
+
+@router.get("/imports/{import_id}", response_model=ImportJobResponse,
+            operation_id="getImport", summary="Progress and per-file outcome of an import")
+async def get_import(
+    import_id: str,
+    ctx_athlete=Depends(get_ctx_session_athlete),
+):
+    ctx, session, athlete = ctx_athlete
+
+    result = await session.execute(
+        select(ImportJob).where(
+            ImportJob.id == import_id, ImportJob.athlete_id == athlete.id
+        )
+    )
+    job = result.scalar_one_or_none()
+    if job is None:
+        raise HTTPException(status_code=404, detail="Import not found")
+    return ImportJobResponse.model_validate(job)
 
 
 @router.post("", response_model=ActivityResponse, status_code=201,
@@ -699,6 +933,14 @@ async def download_fit_file(
     activity_id: str,
     ctx_athlete=Depends(get_ctx_session_athlete),
 ):
+    """Download the original activity file.
+
+    Still spelled `/fit` — that is the path the web client has always called and
+    the one an athlete's bookmark points at — but since issue #36 the file it
+    serves is whatever was uploaded: a FIT, a GPX or a TCX. The extension of the
+    downloaded file follows the source's stored format, so an imported GPX comes
+    back as a GPX rather than as something that claims to be a FIT and is not.
+    """
     ctx, session, athlete = ctx_athlete
 
     result = await session.execute(
@@ -710,7 +952,7 @@ async def download_fit_file(
 
     fit_sources = [s for s in activity.sources if s.fit_file_path]
     if not fit_sources:
-        raise HTTPException(status_code=404, detail="No FIT file for this activity")
+        raise HTTPException(status_code=404, detail="No activity file for this activity")
 
     best = min(fit_sources, key=lambda s: _source_priority(s.provider, True))
     fit_path = Path(best.fit_file_path).resolve()
@@ -718,13 +960,13 @@ async def download_fit_file(
     if not fit_path.is_relative_to(expected_dir):
         raise HTTPException(status_code=403, detail="Forbidden")
     if not fit_path.exists():
-        raise HTTPException(status_code=404, detail="FIT file not found on disk")
+        raise HTTPException(status_code=404, detail="Activity file not found on disk")
 
     safe_name = "".join(
         c if c.isalnum() or c in " _-" else "_"
         for c in (activity.name or activity.id)
     ).strip()
-    filename = f"{safe_name}.fit"
+    filename = f"{safe_name}.{best.file_format}"
 
     if best.fit_file_encrypted:
         content = decrypt_file(fit_path, ctx.user_id)
@@ -844,11 +1086,16 @@ async def reprocess_activity(
         )
         _add_distance_bests(activity, athlete, session, speed_data)
 
-    # Re-extract intervals from the FIT file, or auto-split when there is none.
+    # Re-extract intervals from the original file, or auto-split when there is
+    # none. Which parser reads the laps depends on the format the original was
+    # stored in (issue #36): a TCX carries the athlete's own splits like a FIT
+    # does, a GPX has no lap concept and always auto-splits.
     fileish = None
+    fmt = "fit"
     fit_sources = [s for s in (activity.sources or []) if s.fit_file_path]
     if fit_sources:
         best = min(fit_sources, key=lambda s: _source_priority(s.provider, True))
+        fmt = best.file_format
         fit_path = Path(best.fit_file_path).resolve()
         expected_dir = settings.user_fit_dir(ctx.user_id).resolve()
         if fit_path.is_relative_to(expected_dir) and fit_path.exists():
@@ -857,7 +1104,7 @@ async def reprocess_activity(
             else:
                 fileish = str(fit_path)
 
-    await rebuild_intervals(activity, session, fileish, stream_map, replace=True)
+    await rebuild_intervals(activity, session, fileish, stream_map, replace=True, fmt=fmt)
 
     # Recalculate workout category
     vi = variability_index(activity.weighted_power, activity.avg_power)
