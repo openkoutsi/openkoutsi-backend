@@ -67,6 +67,26 @@ def _cheap_bcrypt():
         bcrypt.gensalt = original
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _allow_private_llm_hosts():
+    """Let the suite point at localhost as a stand-in for a model server.
+
+    ``LLM_ALLOW_PRIVATE_NETWORKS`` is off in production: a user-supplied base
+    URL that may resolve into the private address space is issue #102's F-02.
+    The LLM fixtures here use ``http://localhost:11434`` the way a self-hosted
+    instance running Ollama does, which is the case the opt-out exists for.
+
+    Tests that assert the *default-deny* behaviour patch the flag themselves
+    (``tests/unit/test_llm_ssrf.py``) rather than depending on this default.
+    """
+    from backend.app.core.config import settings
+
+    original = settings.llm_allow_private_networks
+    settings.llm_allow_private_networks = True
+    yield
+    settings.llm_allow_private_networks = original
+
+
 @pytest.fixture(scope="session")
 def _test_password_hash(_cheap_bcrypt):
     """Hash the shared test password once for the whole session and reuse it."""

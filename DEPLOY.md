@@ -176,6 +176,15 @@ EUROMAIL_WEBHOOK_SECRET=           # verifies inbound EuroMail webhooks (used by
 # blank to allow any URL (SSRF guards still apply).
 LLM_ALLOWED_SERVERS=               # e.g. http://localhost:11434/v1,https://api.openai.com/v1
 
+# Required for a SELF-HOSTED model. The LLM base URL is user-supplied, so URLs
+# resolving to loopback (127.x, ::1), RFC 1918 / ULA / CGNAT ranges or 0.0.0.0/8
+# are refused by default — otherwise any user can point the backend at whatever
+# else runs on this host or its network and read the reply. Set this to true if
+# your model runs on localhost (Ollama) or on the LAN. Cloud metadata ranges
+# (169.254.x, fe80::/10) stay blocked either way. Requests refused by this
+# return 403 naming this variable.
+LLM_ALLOW_PRIVATE_NETWORKS=false
+
 # Optional: how many agentic Koutsi runs may be in flight at once in this
 # process. An agent loop is 3–5 completions instead of one, so a handful of
 # concurrent runs against a local model that serialises requests becomes a queue

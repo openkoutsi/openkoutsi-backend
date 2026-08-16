@@ -43,7 +43,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..core.ssrf import check_url_safe
+from ..core.ssrf import check_url_safe, guarded_async_client
 from ..db.registry import _RegistrySessionLocal
 from ..db.user_session import get_user_session_factory
 from ..models.registry_orm import InstanceSettings
@@ -219,7 +219,7 @@ async def stream_completion_events(
             base["stream_options"] = {"include_usage": True}
         return apply_body_extras(base, cfg.extra_body)
 
-    async with httpx.AsyncClient(timeout=_STREAM_TIMEOUT) as client:
+    async with guarded_async_client(timeout=_STREAM_TIMEOUT) as client:
         # Ask for a trailing usage chunk; retry once without it if the upstream
         # rejects stream_options (Ollama-family tolerance). A provider refusing
         # `tools` fails both attempts and surfaces through raise_for_llm_status

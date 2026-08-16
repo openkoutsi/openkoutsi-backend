@@ -36,15 +36,25 @@ be used as a proxy to reach internal services.  The connection probes below —
 and every outbound call made by the feature services — apply these defences:
 
 1. Only ``http://`` and ``https://`` schemes are accepted.
-2. The hostname is resolved to an IP address before the request is made.  If
-   the resolved address is link-local (169.254.0.0/16, fe80::/10) — the range
-   used by cloud-provider metadata services — the request is rejected.
-   Loopback (127.x / ::1) and private RFC-1918 / RFC-4193 ranges are allowed
-   so that Ollama running on localhost or a LAN machine works normally.
+2. The hostname is resolved before the request is made, and **every** address
+   the resolver returns is checked — not just the first, or a name answering
+   with both a public and a loopback address would be judged on whichever came
+   back first.  Link-local, metadata and multicast ranges are always refused.
+   Loopback and private RFC-1918 / RFC-4193 / CGNAT ranges are refused too
+   unless ``LLM_ALLOW_PRIVATE_NETWORKS=true``, which is the switch a
+   self-hoster running Ollama on localhost or a LAN box turns on.  That switch
+   does not re-open the metadata ranges.
 3. HTTP redirects are disabled so a redirect cannot bounce the server from a
-   safe public host to an internal address.
-4. The connection is made to the pre-resolved IP, not by passing the hostname
-   to httpx again, to prevent trivial DNS rebinding.
+   safe public host to an internal address.  A redirect that was followed would
+   re-enter the guard anyway.
+4. The connection is made to the pre-resolved IP rather than handing the
+   hostname back to httpx, which would resolve it a second time and let a
+   short-TTL record answer differently — see ``core/ssrf.py``.  The Host header
+   and TLS certificate verification still use the original hostname.
+5. A failing upstream's response body is echoed back only on the admin probe,
+   where the URL comes from saved instance config.  On the BYOK probe the
+   caller chooses the URL, so echoing the body would turn the endpoint into a
+   read primitive for anything the backend can reach.  It is logged instead.
 
 Note: a single layer of DNS-based SSRF protection is not proof against all
 DNS-rebinding attacks.  If your deployment is multi-tenant and users are not
@@ -54,6 +64,7 @@ only) via an out-of-band policy.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Optional
 
 import httpx
@@ -66,7 +77,7 @@ from backend.app.core.config import settings
 from backend.app.core.deps import get_ctx_and_session
 from backend.app.core.file_encryption import decrypt_secret
 from backend.app.core.limiter import limiter
-from backend.app.core.ssrf import check_url_safe
+from backend.app.core.ssrf import check_url_safe, guarded_async_client
 from backend.app.core.scopes import pat_forbidden
 from backend.app.db.registry import get_registry_session
 from backend.app.models.registry_orm import InstanceSettings
@@ -89,6 +100,8 @@ async def _load_instance_settings(registry_session: AsyncSession) -> InstanceSet
     return result.scalar_one_or_none()
 
 
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/llm", tags=["llm"], dependencies=[pat_forbidden()])
 
@@ -224,12 +237,20 @@ async def _probe_llm_endpoint(
     *,
     extra_headers: dict[str, str] | None = None,
     extra_body: dict[str, Any] | None = None,
+    include_response_body: bool = False,
 ) -> LlmTestResponse:
     """Send a minimal chat completion and report whether the model replied.
 
     Shared by the admin (instance) and user (BYOK) test endpoints. Applies the
     SSRF guard, any extra headers and the selected model's body params, and maps
     connection/HTTP failures to a friendly :class:`LlmTestResponse`.
+
+    ``include_response_body`` echoes a snippet of a failing upstream response
+    back to the caller. Only the admin path sets it: there the URL comes from
+    saved instance config, so the body says something about a server the admin
+    already chose. On the BYOK path the caller supplies the URL, which would
+    make the echo a read primitive for anything the backend can reach. The
+    body is logged either way, so nothing is lost to an operator.
     """
     if not base_url:
         return LlmTestResponse(ok=False, error="No LLM base URL configured. Save a base URL first.")
@@ -258,7 +279,7 @@ async def _probe_llm_endpoint(
     )
 
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
+        async with guarded_async_client(timeout=httpx.Timeout(30.0, connect=5.0)) as client:
             resp = await client.post(chat_url, headers=headers, json=payload, follow_redirects=False)
     except httpx.ConnectError as exc:
         return LlmTestResponse(ok=False, base_url=base_url, model_configured=model, prompt_sent=_TEST_PROMPT, error=f"Connection refused: {exc}")
@@ -273,10 +294,15 @@ async def _probe_llm_endpoint(
             http_status=resp.status_code, error="Authentication failed — check your API key",
         )
     if resp.status_code != 200:
-        snippet = resp.text[:200] if resp.text else ""
+        snippet = (resp.text or "")[:200]
+        log.warning(
+            "LLM connection test to %s failed: HTTP %s — %s",
+            base_url, resp.status_code, snippet,
+        )
+        detail = f": {snippet}" if include_response_body and snippet else ""
         return LlmTestResponse(
             ok=False, base_url=base_url, model_configured=model, prompt_sent=_TEST_PROMPT,
-            http_status=resp.status_code, error=f"HTTP {resp.status_code}: {snippet}",
+            http_status=resp.status_code, error=f"HTTP {resp.status_code}{detail}",
         )
 
     try:
@@ -329,6 +355,7 @@ async def test_llm_connection(
     return await _probe_llm_endpoint(
         cfg.base_url, cfg.model, cfg.api_key,
         extra_headers=cfg.extra_headers, extra_body=cfg.extra_body,
+        include_response_body=True,
     )
 
 

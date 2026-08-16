@@ -52,6 +52,14 @@ class Settings(BaseSettings):
     # Example: "http://localhost:11434/v1,https://api.openai.com/v1"
     llm_allowed_servers: str = ""
 
+    # Allow LLM base URLs that resolve to loopback, RFC 1918, ULA or CGNAT
+    # addresses. Off by default: the base URL is user-supplied, so leaving the
+    # private address space reachable makes it a probe against whatever else
+    # runs on this host and its network. Turn it on for a self-hosted model
+    # (Ollama on localhost, a model server on the LAN) — it does not re-open
+    # the cloud metadata ranges, which stay blocked either way.
+    llm_allow_private_networks: bool = False
+
     @property
     def llm_allowed_servers_list(self) -> list[str]:
         if not self.llm_allowed_servers:

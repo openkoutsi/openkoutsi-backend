@@ -164,3 +164,41 @@ class TestTestMyConnection:
                 )
         assert resp.status_code == 200
         assert resp.json()["ok"] is True
+
+
+class TestUpstreamBodyNotEchoed:
+    """F-02: this endpoint must not report what it read.
+
+    The caller supplies ``base_url``, so echoing a failing upstream's body back
+    turns any authenticated non-admin into a reader of whatever the backend can
+    reach. The status code still comes back — enough to tell "wrong model" from
+    "wrong key" — and the body goes to the log instead.
+    """
+
+    async def test_error_body_withheld(self, client, auth_headers):
+        secret = '{"internal": "SECRET-INTERNAL-DATA"}'
+        factory = _mock_httpx_client(status_code=500, text=secret)
+        with patch("httpx.AsyncClient", return_value=factory()):
+            resp = await client.post(
+                "/api/llm/test-my-connection",
+                json={"base_url": "http://127.0.0.1:11434", "model": "m"},
+                headers=auth_headers,
+            )
+        data = resp.json()
+        assert data["ok"] is False
+        assert data["http_status"] == 500
+        assert "SECRET-INTERNAL-DATA" not in data["error"]
+        assert "500" in data["error"]
+
+    async def test_body_logged_for_the_operator(self, client, auth_headers, caplog):
+        """Withheld from the caller, not lost — an operator can still debug."""
+        secret = '{"internal": "SECRET-INTERNAL-DATA"}'
+        factory = _mock_httpx_client(status_code=500, text=secret)
+        with caplog.at_level("WARNING", logger="backend.app.api.llm"):
+            with patch("httpx.AsyncClient", return_value=factory()):
+                await client.post(
+                    "/api/llm/test-my-connection",
+                    json={"base_url": "http://127.0.0.1:11434", "model": "m"},
+                    headers=auth_headers,
+                )
+        assert "SECRET-INTERNAL-DATA" in caplog.text
