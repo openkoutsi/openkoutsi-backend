@@ -6,6 +6,7 @@ the /v1/workouts endpoint; time-series streams are obtained by downloading the
 FIT file for each workout and parsing it with fitdecode.
 """
 
+import asyncio
 import base64
 import io
 import json
@@ -302,7 +303,8 @@ class WahooClient(BaseProviderClient):
         fit_bytes = await self.download_fit_file(access_token, external_id)
         if fit_bytes is None:
             return {}
-        streams = _parse_fit_streams(fit_bytes)
+        # In a thread — `_parse_fit_streams` iterates the whole file (#101 §2.2).
+        streams = await asyncio.to_thread(_parse_fit_streams, fit_bytes)
         _dbg.debug(
             "get_activity_streams workout_id=%s parsed keys=%s lengths=%s",
             external_id,

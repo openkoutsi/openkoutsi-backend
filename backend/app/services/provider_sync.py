@@ -799,7 +799,9 @@ async def _fill_from_source(
         fit_path.write_bytes(fit_bytes)
 
         try:
-            profile = summarizeWorkout(io.BytesIO(fit_bytes))
+            # In a thread: the same whole-file iteration the upload path does,
+            # and a provider backfill runs it once per activity (#101 §2.2).
+            profile = await asyncio.to_thread(summarizeWorkout, io.BytesIO(fit_bytes))
         except Exception:
             log.exception("FIT parsing failed for %s/%s", norm.source, norm.external_id)
             profile = None
@@ -1051,7 +1053,11 @@ async def rebuild_intervals(
         )
         await session.flush()
 
-    raw = parser_for(fmt).extractIntervals(fileish) if fileish is not None else []
+    raw = (
+        await asyncio.to_thread(parser_for(fmt).extractIntervals, fileish)
+        if fileish is not None
+        else []
+    )
     is_auto = len(raw) <= 1
     if is_auto:
         # A stream can outrun the recorded duration; split across the longer of

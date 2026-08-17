@@ -372,7 +372,12 @@ async def upload_activity(
         file_path.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail="File is not a valid FIT file")
 
-    fit_start = read_fit_start_time(str(file_path))
+    # Off the event loop: `getStartTime` stops at the first timestamped record,
+    # so it is far cheaper than a full parse — but "cheap" is not "bounded". A
+    # file whose first record sits behind a long header still costs real time,
+    # and this runs inline in the request handler, where every millisecond is
+    # one every other request in the process waits (issue #101 §2.1, #102 F-05).
+    fit_start = await asyncio.to_thread(read_fit_start_time, str(file_path))
 
     # ── Find-or-create under the same two guards every other writer uses ─────
     #
