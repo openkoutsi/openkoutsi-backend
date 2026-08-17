@@ -163,7 +163,7 @@ class TestAdminEntitlementCrud:
         )
         registry_session.add(plain)
         await registry_session.commit()
-        token = create_access_token("plain-user-1", ["user"])
+        token = create_access_token("plain-user-1", ["user"], token_version=0)
         resp = await client.put(
             f"/api/admin/users/{_TEST_USER_ID}/llm-entitlement",
             json={"status": "active"},

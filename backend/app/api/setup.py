@@ -62,4 +62,6 @@ async def first_run_setup(
         user_session.add(athlete)
         await user_session.commit()
 
-    return TokenResponse(access_token=create_access_token(user.id, roles))
+    return TokenResponse(
+        access_token=create_access_token(user.id, roles, token_version=user.token_version)
+    )

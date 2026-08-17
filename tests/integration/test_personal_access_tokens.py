@@ -123,7 +123,7 @@ def _pat_headers(raw: str) -> dict:
 
 @pytest.fixture
 def session_headers() -> dict:
-    return {"Authorization": f"Bearer {create_access_token(_TEST_USER_ID, _TEST_ROLES)}"}
+    return {"Authorization": f"Bearer {create_access_token(_TEST_USER_ID, _TEST_ROLES, token_version=0)}"}
 
 
 @pytest.fixture
