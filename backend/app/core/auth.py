@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 
 import bcrypt as _bcrypt
 from fastapi import Depends, HTTPException, Request, status
@@ -79,6 +81,26 @@ def verify_password(plain: str, hashed: str) -> bool:
 # The synchronous pair above stays. Tests hash directly (`tests/conftest.py`),
 # and so would any script or migration that is not already in an event loop;
 # these wrappers are for the request path, which is where the blocking matters.
+
+
+@lru_cache(maxsize=1)
+def dummy_password_hash() -> str:
+    """A real bcrypt hash to verify against when no account matched.
+
+    Login used to short-circuit — ``user is None or not verify(...)`` — so an
+    unknown identifier skipped bcrypt entirely and answered in milliseconds
+    while a known one paid the full ~270 ms. That difference is a reliable
+    "does this account exist?" oracle, measured at 66× in issue #102 (F-06),
+    and it undoes the work the rest of this surface does to stay quiet: signup
+    and password-reset both return a fixed acknowledgement precisely so a taken
+    address cannot be detected.
+
+    Hashing a value nobody can supply means the comparison always fails, so
+    this can be verified against safely. Computed on first use rather than at
+    import so it costs nothing at startup and picks up whatever bcrypt cost is
+    configured; cached so it is one hash per process, not one per request.
+    """
+    return hash_password(secrets.token_urlsafe(32))
 
 
 async def hash_password_async(plain: str) -> str:

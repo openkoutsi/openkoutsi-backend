@@ -16,6 +16,7 @@ from backend.app.core.auth import (
     create_access_token,
     create_refresh_token,
     decode_token,
+    dummy_password_hash,
     get_current_user,
     hash_password_async,
     invalidate_sessions,
@@ -153,7 +154,17 @@ async def login(
             )
         )
         user = result.scalar_one_or_none()
-    if user is None or not await verify_password_async(body.password, user.password_hash):
+
+    # Verify unconditionally, against a fixed dummy hash when nothing matched.
+    # Short-circuiting on `user is None` let an unknown identifier skip bcrypt
+    # and answer 66× faster than a known one, which is a reliable account
+    # oracle and undoes what signup and password-reset go out of their way to
+    # hide (#102, F-06). The dummy hashes a value nobody can supply, so the
+    # comparison always fails — `user is None` is still checked below, so a
+    # freak match could not authenticate nobody.
+    password_hash = user.password_hash if user is not None else dummy_password_hash()
+    password_ok = await verify_password_async(body.password, password_hash)
+    if user is None or not password_ok:
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
     roles = _roles_of(user)
