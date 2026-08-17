@@ -3,6 +3,8 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from backend.app.schemas.auth import _validate_password_strength
+
 
 # ── First-run setup ────────────────────────────────────────────────────────
 
@@ -16,16 +18,14 @@ class SetupRequest(BaseModel):
     admin_password: str
     admin_display_name: Optional[str] = None
 
+    # Shares the rules with every other password field rather than restating
+    # them. The copy that used to live here had drifted out of step by omission
+    # — it never gained the maximum length, so the setup wizard answered a long
+    # passphrase with a 500 (issue #102, F-07).
     @field_validator("admin_password")
     @classmethod
     def password_strength(cls, v: str) -> str:
-        if len(v) < 12:
-            raise ValueError("Password must be at least 12 characters")
-        if not any(c.isupper() for c in v):
-            raise ValueError("Password must contain at least one uppercase letter")
-        if not any(c.isdigit() for c in v):
-            raise ValueError("Password must contain at least one digit")
-        return v
+        return _validate_password_strength(v)
 
 
 # ── Users (instance admin) ─────────────────────────────────────────────────

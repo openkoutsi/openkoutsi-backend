@@ -3,7 +3,35 @@ from typing import Optional
 from pydantic import BaseModel, EmailStr, field_validator
 
 
+# bcrypt hashes at most 72 bytes and, since 5.0, raises rather than silently
+# truncating. Nothing caught that, so a longer password was an unhandled 500:
+# on login an unauthenticated one, and on signup a server error in place of an
+# explanation for anyone whose passphrase ran long (issue #102, F-07).
+#
+# The limit is on the UTF-8 *encoding*, not the character count — 72 emoji are
+# 288 bytes — so this is checked in bytes, which is also the unit bcrypt's own
+# error speaks in.
+_MAX_PASSWORD_BYTES = 72
+
+
+def _validate_password_length(v: str) -> str:
+    """The one rule that applies to every password field, set or supplied.
+
+    Checked when *verifying* a password too, not only when setting one: bcrypt
+    raises on length before it hashes, so an over-long value fails the same way
+    whether or not the account exists — but it fails with a 500 unless it is
+    turned away here first.
+    """
+    if len(v.encode("utf-8")) > _MAX_PASSWORD_BYTES:
+        raise ValueError(
+            f"Password must be at most {_MAX_PASSWORD_BYTES} bytes "
+            "(accented and non-Latin characters count as more than one)"
+        )
+    return v
+
+
 def _validate_password_strength(v: str) -> str:
+    _validate_password_length(v)
     if len(v) < 12:
         raise ValueError("Password must be at least 12 characters")
     if not any(c.isupper() for c in v):
@@ -52,6 +80,15 @@ class LoginRequest(BaseModel):
     username: str
     password: str
 
+    # Length only — the strength rules belong to *setting* a password. Applying
+    # them here would turn a wrong-password attempt into a lecture about
+    # uppercase letters, and would lock out any account whose password predates
+    # the current policy.
+    @field_validator("password")
+    @classmethod
+    def password_length(cls, v: str) -> str:
+        return _validate_password_length(v)
+
 
 class TokenResponse(BaseModel):
     access_token: str
@@ -69,6 +106,11 @@ class AdminResetTokenRequest(BaseModel):
 
 class DeleteAccountRequest(BaseModel):
     password: str
+
+    @field_validator("password")
+    @classmethod
+    def password_length(cls, v: str) -> str:
+        return _validate_password_length(v)
 
 
 class ResetPasswordRequest(BaseModel):
