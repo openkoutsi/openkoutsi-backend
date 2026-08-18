@@ -15,6 +15,7 @@ Endpoints:
 
 import asyncio
 import json
+import logging
 import secrets
 import uuid
 from contextlib import asynccontextmanager
@@ -23,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from sqlalchemy import JSON, DateTime, String, delete, select
+from sqlalchemy import JSON, DateTime, String, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -41,6 +42,13 @@ class Settings(BaseSettings):
     database_path: str = "bridge.db"
     wahoo_webhook_token: str = ""
     wahoo_bridge_secret: str = _INSECURE_DEFAULT
+
+    # Ceiling on unclaimed events. The queue had none: every accepted event is
+    # a row kept for seven days, and the main app drains 100 a minute, so a
+    # burst that outpaces the drain grew the database until the disk did
+    # (issue #102, F-11). Roughly 100 minutes of backlog at the drain rate —
+    # far past any real webhook volume, and still bounded.
+    max_queue_events: int = 10000
 
     @model_validator(mode="after")
     def _validate_bridge_secret(self) -> "Settings":
@@ -60,6 +68,8 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+log = logging.getLogger(__name__)
 
 
 # ── Database ──────────────────────────────────────────────────────────────
@@ -122,6 +132,19 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="openkoutsi Wahoo Bridge", lifespan=lifespan)
 
 
+async def _pending_count(session) -> int:
+    """How many events are waiting to be claimed.
+
+    Counts only *unclaimed* rows: claimed ones are already the main app's
+    problem and are swept after seven days, so counting them would let a busy
+    week close the queue to a quiet one.
+    """
+    return await session.scalar(
+        select(func.count())
+        .select_from(WebhookEvent)
+        .where(WebhookEvent.claimed_at.is_(None))
+    ) or 0
+
 # ── Auth helper ───────────────────────────────────────────────────────────
 
 
@@ -179,6 +202,23 @@ async def receive_webhook(request: Request):
         received_at=datetime.now(timezone.utc),
     )
     async with AsyncSessionLocal() as session:
+        pending = await _pending_count(session)
+        if pending >= settings.max_queue_events:
+            # Refuse rather than evict. The events already queued are the ones
+            # the main app is about to process; dropping the oldest to make
+            # room for the newest would lose exactly those. A queue this deep
+            # means the drain has stopped, which is worth an operator's
+            # attention rather than a silent ring buffer.
+            log.warning(
+                "Event queue is full (%d unclaimed, max_queue_events=%d) — "
+                "refusing new events until the main app drains it. Check that "
+                "the poller is running and can reach this bridge.",
+                pending,
+                settings.max_queue_events,
+            )
+            raise HTTPException(
+                status_code=503, detail="Event queue is full; try again later"
+            )
         session.add(event)
         await session.commit()
 
