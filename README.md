@@ -114,7 +114,7 @@ services stay focused on what is actually different between them:
 |---|---|
 | Backend | Python 3.12 · FastAPI · SQLAlchemy 2 (async) · Alembic |
 | Database | SQLite (WAL mode) |
-| Auth | JWT (`python-jose` · `passlib`) |
+| Auth | JWT (`python-jose` · `bcrypt`) |
 | FIT parsing | fitdecode |
 | Stream & fit math | numpy |
 | Package manager | uv (Python) |
