@@ -47,4 +47,14 @@ def principal_key(request: Request) -> str:
     return get_remote_address(request)
 
 
-limiter = Limiter(key_func=principal_key)
+# `key_style="endpoint"` scopes each limit to the *route*, not to the request
+# path. slowapi defaults to "url", which means the substituted path — so on any
+# route with a path parameter, every distinct value got its own bucket and the
+# limit never fired. That silently applied to the admin password-reset mint,
+# both chat write routes, and the public avatar route added for issue #102's
+# F-14, whose whole point is bounding requests for arbitrary user ids.
+#
+# Per-route is what every one of those limits reads as meaning: a cap on how
+# often *this caller* may call *this endpoint*, not how often they may call it
+# with one particular id.
+limiter = Limiter(key_func=principal_key, key_style="endpoint")
