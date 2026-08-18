@@ -6,13 +6,14 @@ import uuid
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.config import settings
+from backend.app.core.limiter import limiter
 from backend.app.db.registry import get_registry_session
 from backend.app.db.user_session import get_user_session_factory
 from backend.app.models.registry_orm import InstanceSettings, User
@@ -20,6 +21,24 @@ from backend.app.models.user_orm import Athlete
 from backend.app.services.email import get_email_provider
 
 router = APIRouter(prefix="/public", tags=["public"])
+
+# Every other credential-accepting router declares a limit; this one — the only
+# unauthenticated router — declared none (issue #102, F-14). The numbers are
+# deliberately generous: F-03 already removed the expensive part of the avatar
+# route (it no longer creates a directory and three files per request), so what
+# is left to bound is ordinary request volume and `instance-info` touching the
+# registry on every call.
+#
+# Note what the key is. `core.limiter` falls back to the remote address for
+# unauthenticated traffic, and uvicorn only honours `X-Forwarded-For` from
+# addresses in `FORWARDED_ALLOW_IPS`, which defaults to 127.0.0.1 — so behind a
+# reverse proxy on a container network, *every* caller looks like the proxy and
+# these become one instance-wide bucket rather than a per-client one. That is
+# why they are set far above any plausible real usage, and why DEPLOY.md now
+# covers both `FORWARDED_ALLOW_IPS` and an nginx `limit_req`: per-IP limiting
+# belongs at the proxy when there is one in front.
+_INSTANCE_INFO_LIMIT = "120/minute"
+_AVATAR_LIMIT = "300/minute"
 
 
 class InstanceInfoResponse(BaseModel):
@@ -40,7 +59,9 @@ class InstanceInfoResponse(BaseModel):
 @router.get("/instance-info", response_model=InstanceInfoResponse,
             operation_id="getPublicInstanceInfo",
             summary="Get public instance info (no auth)")
+@limiter.limit(_INSTANCE_INFO_LIMIT)
 async def get_instance_info(
+    request: Request,
     session: AsyncSession = Depends(get_registry_session),
 ) -> InstanceInfoResponse:
     """Return non-sensitive instance settings readable without authentication.
@@ -80,7 +101,9 @@ def _is_canonical_uuid(user_id: str) -> bool:
 
 @router.get("/users/{user_id}/avatar",
             operation_id="getPublicUserAvatar", summary="Get a user's avatar (no auth)")
+@limiter.limit(_AVATAR_LIMIT)
 async def get_avatar(
+    request: Request,
     user_id: str,
     registry_session: AsyncSession = Depends(get_registry_session),
 ):
@@ -91,8 +114,8 @@ async def get_avatar(
     is refused before anything else happens.
     """
     # The id is resolved against the registry *before* a per-user session is
-    # opened with it. This route takes no credential and no rate limit, and
-    # opening a session used to create the user's directory and database as a
+    # opened with it. This route takes no credential, and opening a session
+    # used to create the user's directory and database as a
     # side effect, so an anonymous caller got a new directory and three files
     # per request and evicted every real user's cached engine on the way past
     # (issue #102, F-03). Engine construction no longer creates anything (see

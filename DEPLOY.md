@@ -159,6 +159,13 @@ ENCRYPTION_KEY=<fernet-key>        # python -c "from cryptography.fernet import 
 # on anything holding real accounts.
 ALLOW_PLAINTEXT_SECRETS=false
 
+# Set when running behind a reverse proxy. uvicorn only honours X-Forwarded-For
+# from addresses listed here (default 127.0.0.1), and on a container network the
+# proxy is not on loopback — so without it every caller looks like the proxy and
+# the API's per-IP rate limits become one instance-wide bucket. Give it the
+# address or CIDR nginx connects from.
+FORWARDED_ALLOW_IPS=
+
 # Strava (see "Strava Bridge" section)
 STRAVA_CLIENT_ID=
 STRAVA_CLIENT_SECRET=
@@ -413,6 +420,13 @@ configured below. Nothing in this repository serves frontend assets.
 ## 3. Reverse Proxy (nginx example)
 
 ```nginx
+# Per-IP bucket for the unauthenticated endpoints. The API rate-limits them
+# itself, but it keys on the address it *sees* — which is this proxy, unless
+# FORWARDED_ALLOW_IPS is set (see below). Doing it here as well means the limit
+# is per client whichever way that is configured, and it costs nginx far less
+# to refuse a flood than it costs the API.
+limit_req_zone $binary_remote_addr zone=okpublic:10m rate=10r/s;
+
 # API
 server {
     listen 443 ssl;
@@ -428,6 +442,23 @@ server {
     # A 900-file import is minutes of parsing, but it happens in the background:
     # the request itself only stages the upload and returns a job id, so the
     # default proxy timeouts are fine.
+
+    # Forward the real client address. Without these the API sees only this
+    # proxy, and its own per-IP limits collapse into one instance-wide bucket
+    # — set FORWARDED_ALLOW_IPS on the backend to the address nginx connects
+    # from (uvicorn trusts 127.0.0.1 and nothing else by default, which is not
+    # the proxy's address when both run as containers).
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Host $host;
+
+    # /api/public takes no credential. burst lets an ordinary page load fetch
+    # several avatars at once; nodelay serves that burst immediately rather
+    # than queueing it.
+    location /api/public/ {
+        limit_req zone=okpublic burst=20 nodelay;
+        proxy_pass http://127.0.0.1:8000;
+    }
 
     location / { proxy_pass http://127.0.0.1:8000; }
 }
