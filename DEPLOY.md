@@ -103,11 +103,14 @@ docker build -t openkoutsi-backend .
 docker build -t openkoutsi-strava-bridge strava_bridge
 docker build -t openkoutsi-wahoo-bridge wahoo_bridge
 
-# Backend needs SECRET_KEY (as a file secret) and a data volume:
-mkdir -p /tmp/ok-secrets && python -c "import secrets;print(secrets.token_hex(32))" > /tmp/ok-secrets/secret_key
+# Backend needs SECRET_KEY and ENCRYPTION_KEY (as file secrets) and a data volume:
+mkdir -p /tmp/ok-secrets
+python -c "import secrets;print(secrets.token_hex(32))" > /tmp/ok-secrets/secret_key
+python -c "from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())" > /tmp/ok-secrets/encryption_key
 docker run --rm -p 8000:8000 \
   -v "$PWD/data:/data" -e DATA_DIR=/data \
   -v /tmp/ok-secrets/secret_key:/run/secrets/secret_key:ro \
+  -v /tmp/ok-secrets/encryption_key:/run/secrets/encryption_key:ro \
   openkoutsi-backend
 curl localhost:8000/api/health   # {"status":"ok"} once migrations finish
 ```
@@ -146,8 +149,15 @@ API_URL=https://api.your-domain
 ACCESS_TOKEN_EXPIRE_MINUTES=60
 REFRESH_TOKEN_EXPIRE_DAYS=30
 
-# Encryption for stored OAuth tokens, FIT files and instance/user LLM API keys (required for AI features)
+# REQUIRED. Encryption for stored OAuth tokens, FIT files and instance/user LLM
+# API keys. The backend refuses to start without it, because an empty key used
+# to mean "store Strava and Wahoo tokens as plaintext" and said nothing.
 ENCRYPTION_KEY=<fernet-key>        # python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+
+# Accept plaintext provider tokens instead of setting a key. For development
+# and throwaway instances only; logs a warning on every start. Do not set this
+# on anything holding real accounts.
+ALLOW_PLAINTEXT_SECRETS=false
 
 # Strava (see "Strava Bridge" section)
 STRAVA_CLIENT_ID=
@@ -620,7 +630,8 @@ The frontend has its own `build-images.yml` in the
 ## Checklist
 
 - [ ] `SECRET_KEY` set to a strong random value
-- [ ] `ENCRYPTION_KEY` set (required for instance/user LLM API key storage and FIT-file encryption; recommended for all prod deployments)
+- [ ] `ENCRYPTION_KEY` set — **required**; the backend refuses to start without it unless `ALLOW_PLAINTEXT_SECRETS=true`, which stores Strava and Wahoo OAuth tokens unencrypted and is not for production
+- [ ] `ALLOW_PLAINTEXT_SECRETS` **not** set (check it was not carried over from a dev `.env`)
 - [ ] `DATA_DIR` points to a persistent directory (survives restarts/upgrades)
 - [ ] `FRONTEND_URL` and `API_URL` point to real domains
 - [ ] TLS termination in place for the API (and the frontend, deployed from openkoutsi-web)
