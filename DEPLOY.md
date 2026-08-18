@@ -512,6 +512,10 @@ BRIDGE_SECRET=<same random string as BRIDGE_SECRET in main .env>   # python -c "
 #   "changeme" placeholder or anything shorter: it sits on a public HTTPS URL,
 #   so an unconfigured one hands its event queue to whoever finds it — and on
 #   this bridge the same value is the hub.verify_token below.
+MAX_QUEUE_EVENTS=10000             # optional; ceiling on unclaimed events. Past it
+                                   # the bridge answers 503 and logs, rather than
+                                   # growing the queue until the disk fills. ~100
+                                   # minutes of backlog at the main app's drain rate.
 DATABASE_PATH=bridge.db
 ```
 
