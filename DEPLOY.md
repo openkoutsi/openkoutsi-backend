@@ -506,12 +506,13 @@ uv sync
 Create `strava_bridge/.env`:
 
 ```env
-STRAVA_CLIENT_SECRET=<same as main app>
 BRIDGE_SECRET=<same random string as BRIDGE_SECRET in main .env>   # python -c "import secrets; print(secrets.token_hex(32))"
 # ^ REQUIRED and at least 32 characters. The bridge refuses to start on the old
 #   "changeme" placeholder or anything shorter: it sits on a public HTTPS URL,
 #   so an unconfigured one hands its event queue to whoever finds it — and on
 #   this bridge the same value is the hub.verify_token below.
+STRAVA_VERIFY_WEBHOOK_SIGNATURE=false  # optional; see "Webhook authentication" below.
+STRAVA_CLIENT_SECRET=              # only used when the line above is true
 MAX_QUEUE_EVENTS=10000             # optional; ceiling on unclaimed events. Past it
                                    # the bridge answers 503 and logs, rather than
                                    # growing the queue until the disk fills. ~100
@@ -519,15 +520,34 @@ MAX_QUEUE_EVENTS=10000             # optional; ceiling on unclaimed events. Past
 DATABASE_PATH=bridge.db
 ```
 
-`STRAVA_CLIENT_SECRET` is **required**, and must be the same value the Strava
-app uses — the bridge verifies every webhook's `X-Hub-Signature-256` against it
-and rejects the request with `401` when the header is missing or wrong. The
-bridge sits on a public HTTPS URL, so this signature is the only thing
-separating Strava from anyone else who finds the endpoint.
+### Webhook authentication
 
-If the secret is unset the bridge cannot authenticate anything, so it fails
-closed: `POST /webhook` answers `403` to every request and a warning is logged
-at startup. A bridge that returns `403` to Strava is missing this secret.
+**`POST /webhook` is unauthenticated.** Strava's webhook documentation covers
+the `hub.challenge` subscription handshake and nothing else: there is no
+documented signing secret, no documented header, and no statement of which
+bytes would be signed. The bridge used to verify an `X-Hub-Signature-256`
+against `STRAVA_CLIENT_SECRET` and fail closed when it was missing — but Strava
+sends no such header, so every real delivery was answered with `401` and
+webhooks did not work at all.
+
+What stands in place of a signature:
+
+- only events with `object_type == "activity"` are queued; everything else is
+  acknowledged and dropped,
+- the main app ignores any event whose `owner_id` is not a connected athlete,
+- for the events it keeps, it re-fetches the activity from Strava's own API, so
+  a forged payload cannot inject data — at worst it asks for a sync that would
+  have happened anyway,
+- `MAX_QUEUE_EVENTS` bounds what a flood of forged events can cost (`503` past
+  the ceiling).
+
+That is thinner than a verified signature, so the check is kept rather than
+deleted. Set `STRAVA_VERIFY_WEBHOOK_SIGNATURE=true` — with `STRAVA_CLIENT_SECRET`
+set to the same value the Strava app uses — to require the header again once
+Strava documents webhook signing and the validation sequence; check that what
+they document matches the implementation before turning it on. With
+verification on and no client secret set, the bridge fails closed: `POST
+/webhook` answers `403` to every request and warns at startup.
 
 ### Run
 
