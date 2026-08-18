@@ -21,6 +21,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, HTTPException, Request, Response
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import JSON, DateTime, String, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -28,6 +29,8 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 # ── Settings ──────────────────────────────────────────────────────────────
+
+_INSECURE_DEFAULT = "changeme"
 
 
 class Settings(BaseSettings):
@@ -37,7 +40,24 @@ class Settings(BaseSettings):
 
     database_path: str = "bridge.db"
     strava_client_secret: str = ""
-    bridge_secret: str = "changeme"
+    bridge_secret: str = _INSECURE_DEFAULT
+
+    @model_validator(mode="after")
+    def _validate_bridge_secret(self) -> "Settings":
+        """Refuse to start on the placeholder, the way the main app does.
+
+        This bridge is on a public HTTPS URL. Left at the default, anyone who
+        finds it can drain the event queue with `Bearer changeme` — and on this
+        bridge the same value is also the `hub.verify_token` that authorises a
+        Strava subscription against it (issue #102, F-10).
+        """
+        if self.bridge_secret == _INSECURE_DEFAULT or len(self.bridge_secret) < 32:
+            raise ValueError(
+                "BRIDGE_SECRET is not set or is too weak. It must match the "
+                "main app's BRIDGE_SECRET. Generate one with: "
+                'python -c "import secrets; print(secrets.token_hex(32))"'
+            )
+        return self
 
 
 settings = Settings()
@@ -119,9 +139,29 @@ app = FastAPI(title="openkoutsi Strava Bridge", lifespan=lifespan)
 # ── Auth helper ───────────────────────────────────────────────────────────
 
 
+def _secret_equals(supplied: str, expected: str) -> bool:
+    """Compare two secrets in constant time.
+
+    `!=` returns as soon as two bytes differ, so how long the comparison takes
+    is a function of how much of the secret the caller guessed right (issue
+    #102, F-09). Remote timing attacks over HTTP are impractical in most
+    conditions, so this is hygiene rather than a hole — but the webhook token
+    below already does it properly, and one of the two being careful is worse
+    than neither, because it reads as a decision.
+
+    Encoded first: compare_digest raises TypeError on a str holding non-ASCII,
+    and `supplied` is whatever the caller sent, so comparing strs would make
+    this a 500 generator instead.
+    """
+    return hmac.compare_digest(
+        supplied.encode("utf-8", errors="replace"),
+        expected.encode("utf-8", errors="replace"),
+    )
+
+
 def _require_bearer(request: Request) -> None:
     auth = request.headers.get("authorization", "")
-    if auth != f"Bearer {settings.bridge_secret}":
+    if not _secret_equals(auth, f"Bearer {settings.bridge_secret}"):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
@@ -166,7 +206,9 @@ async def hub_challenge(request: Request):
     verify_token = params.get("hub.verify_token")
     challenge = params.get("hub.challenge", "")
 
-    if mode == "subscribe" and verify_token == settings.bridge_secret:
+    if mode == "subscribe" and _secret_equals(
+        verify_token or "", settings.bridge_secret
+    ):
         return {"hub.challenge": challenge}
 
     raise HTTPException(status_code=403, detail="Invalid verify_token")

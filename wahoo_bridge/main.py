@@ -21,6 +21,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
 from fastapi import FastAPI, HTTPException, Request, Response
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import JSON, DateTime, String, delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -28,6 +29,8 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 # ── Settings ──────────────────────────────────────────────────────────────
+
+_INSECURE_DEFAULT = "changeme"
 
 
 class Settings(BaseSettings):
@@ -37,7 +40,23 @@ class Settings(BaseSettings):
 
     database_path: str = "bridge.db"
     wahoo_webhook_token: str = ""
-    wahoo_bridge_secret: str = "changeme"
+    wahoo_bridge_secret: str = _INSECURE_DEFAULT
+
+    @model_validator(mode="after")
+    def _validate_bridge_secret(self) -> "Settings":
+        """Refuse to start on the placeholder, the way the main app does.
+
+        This bridge is on a public HTTPS URL. Left at the default, anyone who
+        finds it can drain the event queue with `Bearer changeme` (issue #102,
+        F-10).
+        """
+        if self.wahoo_bridge_secret == _INSECURE_DEFAULT or len(self.wahoo_bridge_secret) < 32:
+            raise ValueError(
+                "WAHOO_BRIDGE_SECRET is not set or is too weak. It must match "
+                "the main app's WAHOO_BRIDGE_SECRET. Generate one with: "
+                'python -c "import secrets; print(secrets.token_hex(32))"'
+            )
+        return self
 
 
 settings = Settings()
@@ -106,9 +125,27 @@ app = FastAPI(title="openkoutsi Wahoo Bridge", lifespan=lifespan)
 # ── Auth helper ───────────────────────────────────────────────────────────
 
 
+def _secret_equals(supplied: str, expected: str) -> bool:
+    """Compare two secrets in constant time.
+
+    `!=` returns as soon as two bytes differ, so how long the comparison takes
+    is a function of how much of the secret the caller guessed right (issue
+    #102, F-09). The webhook token below already used compare_digest; the
+    bearer check did not, which is the inconsistency that made it a finding.
+
+    Encoded first: compare_digest raises TypeError on a str holding non-ASCII,
+    and `supplied` is whatever the caller sent, so comparing strs would make
+    this a 500 generator instead.
+    """
+    return secrets.compare_digest(
+        supplied.encode("utf-8", errors="replace"),
+        expected.encode("utf-8", errors="replace"),
+    )
+
+
 def _require_bearer(request: Request) -> None:
     auth = request.headers.get("authorization", "")
-    if auth != f"Bearer {settings.wahoo_bridge_secret}":
+    if not _secret_equals(auth, f"Bearer {settings.wahoo_bridge_secret}"):
         raise HTTPException(status_code=401, detail="Unauthorized")
 
 
@@ -128,7 +165,7 @@ async def receive_webhook(request: Request):
         raise HTTPException(status_code=403, detail="Wahoo webhooks not configured")
 
     token = str(payload.get("webhook_token", ""))
-    if not secrets.compare_digest(token, settings.wahoo_webhook_token):
+    if not _secret_equals(token, settings.wahoo_webhook_token):
         raise HTTPException(status_code=403, detail="Invalid webhook token")
 
     if payload.get("event_type") != "workout_summary":
