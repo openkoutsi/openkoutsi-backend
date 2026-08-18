@@ -12,9 +12,9 @@ dependencies = [
     "alembic",
     "aiosqlite",
     "python-jose[cryptography]",
-    "passlib[bcrypt]",
+    "bcrypt>=5",
     "python-multipart",
-    "httpx",
+    "httpx>=0.27",
     "pydantic-settings",
     "email-validator",
     "slowapi",
@@ -28,14 +28,12 @@ dependencies = [
 dev = [
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
-    "httpx>=0.27",
     "pytest-cov>=6.0",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-filterwarnings = ["ignore::DeprecationWarning:passlib"]
 # `replica_unsafe` marks a test whose subject holds state in *this process* —
 # an in-memory counter, a module-global dict, a `lifespan` task with no leader
 # election — so the test is only true while exactly one process runs. These are
