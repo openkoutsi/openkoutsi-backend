@@ -6,13 +6,15 @@ The bridge uses a fresh in-memory SQLite database per test.
 
 Scenarios covered:
   1. Happy path: webhook → bridge → poller → process_webhook_event called
-  2. Invalid HMAC signature rejected
-  3. Missing HMAC signature rejected (F-01: the check used to fail open)
-  4. Unconfigured client secret rejects everything (fail closed)
-  5. Non-activity events not queued
-  6. Hub challenge verification
-  7. Backend offline: events accumulate, then all processed when poller runs
-  8. Claimed events not reprocessed on subsequent poll
+  2. Signature checking off by default — unsigned events are accepted, because
+     Strava does not document webhook signing and sends no signature
+  3. Signature checking on (STRAVA_VERIFY_WEBHOOK_SIGNATURE=true) still rejects
+     a missing, empty, wrong, or replayed signature, and fails closed with no
+     secret configured (F-01: the check used to fail open)
+  4. Non-activity events not queued
+  5. Hub challenge verification
+  6. Backend offline: events accumulate, then all processed when poller runs
+  7. Claimed events not reprocessed on subsequent poll
 """
 import hashlib
 import hmac as hmac_mod
@@ -89,6 +91,9 @@ def patched_bridge(bridge_db):
     """
     Patch the bridge's module-level engine, session factory, and settings
     to use the in-memory DB and test credentials.
+
+    Signature verification is pinned off, the way it ships — a deployment that
+    turns it on is the exception, and `verifying_bridge` below covers it.
     """
     eng, sessions = bridge_db
     with (
@@ -96,6 +101,7 @@ def patched_bridge(bridge_db):
         patch.object(bridge_module, "AsyncSessionLocal", sessions),
         patch.object(bridge_module.settings, "strava_client_secret", STRAVA_CLIENT_SECRET),
         patch.object(bridge_module.settings, "bridge_secret", BRIDGE_SECRET),
+        patch.object(bridge_module.settings, "strava_verify_webhook_signature", False),
     ):
         yield eng, sessions
 
@@ -103,6 +109,24 @@ def patched_bridge(bridge_db):
 @pytest.fixture
 async def bridge_client(patched_bridge):
     """AsyncClient wired to the (patched) bridge ASGI app."""
+    async with AsyncClient(
+        transport=ASGITransport(app=bridge_app), base_url=BRIDGE_BASE_URL
+    ) as c:
+        yield c
+
+
+@pytest.fixture
+def verifying_bridge(patched_bridge):
+    """The same bridge with STRAVA_VERIFY_WEBHOOK_SIGNATURE turned on."""
+    with patch.object(
+        bridge_module.settings, "strava_verify_webhook_signature", True
+    ):
+        yield patched_bridge
+
+
+@pytest.fixture
+async def verifying_client(verifying_bridge):
+    """AsyncClient wired to a bridge that requires X-Hub-Signature-256."""
     async with AsyncClient(
         transport=ASGITransport(app=bridge_app), base_url=BRIDGE_BASE_URL
     ) as c:
@@ -152,9 +176,8 @@ async def _poll(mock_process: AsyncMock) -> None:
 
 
 class TestBridgeWebhookEndpoint:
-    async def test_valid_activity_event_queued_with_hmac(
-        self, bridge_client, patched_bridge
-    ):
+    async def test_valid_activity_event_queued(self, bridge_client, patched_bridge):
+        """A signed event is still accepted; the header is simply not checked."""
         _, sessions = patched_bridge
 
         resp = await _post_signed(bridge_client, _ACTIVITY_PAYLOAD)
@@ -168,123 +191,6 @@ class TestBridgeWebhookEndpoint:
         assert events[0].strava_event_type == "create"
         assert events[0].strava_owner_id == "12345678"
         assert events[0].claimed_at is None
-
-    async def test_invalid_hmac_rejected(self, bridge_client, patched_bridge):
-        _, sessions = patched_bridge
-
-        resp = await bridge_client.post(
-            "/webhook",
-            json=_ACTIVITY_PAYLOAD,
-            headers={"X-Hub-Signature-256": "sha256=badbadbadbad"},
-        )
-        assert resp.status_code == 401
-
-        async with sessions() as s:
-            result = await s.execute(select(WebhookEvent))
-            events = result.scalars().all()
-        assert events == []
-
-    async def test_missing_hmac_rejected(self, bridge_client, patched_bridge):
-        """
-        F-01: the check used to `return True` when the header was absent, so any
-        unauthenticated caller could queue events simply by omitting it.
-        """
-        _, sessions = patched_bridge
-
-        resp = await bridge_client.post("/webhook", json=_ACTIVITY_PAYLOAD)
-        assert resp.status_code == 401
-
-        async with sessions() as s:
-            result = await s.execute(select(WebhookEvent))
-            events = result.scalars().all()
-        assert events == []
-
-    async def test_empty_hmac_header_rejected(self, bridge_client, patched_bridge):
-        """An empty header is as unauthenticated as an absent one."""
-        _, sessions = patched_bridge
-
-        resp = await bridge_client.post(
-            "/webhook",
-            json=_ACTIVITY_PAYLOAD,
-            headers={"X-Hub-Signature-256": ""},
-        )
-        assert resp.status_code == 401
-
-        async with sessions() as s:
-            result = await s.execute(select(WebhookEvent))
-            events = result.scalars().all()
-        assert events == []
-
-    async def test_non_ascii_hmac_header_rejected(self, bridge_client, patched_bridge):
-        """
-        The header is attacker-supplied. compare_digest raises TypeError on a
-        str holding non-ASCII, which would turn this into a 500 generator.
-
-        Sent as raw bytes because httpx refuses to encode a non-ASCII str
-        header; Starlette decodes it back to a non-ASCII str, which is exactly
-        what a hand-rolled client puts in front of the comparison.
-        """
-        _, sessions = patched_bridge
-
-        resp = await bridge_client.post(
-            "/webhook",
-            json=_ACTIVITY_PAYLOAD,
-            headers={"X-Hub-Signature-256": b"sha256=\xfc\xfc\xfc\xfc"},
-        )
-        assert resp.status_code == 401
-
-        async with sessions() as s:
-            result = await s.execute(select(WebhookEvent))
-            events = result.scalars().all()
-        assert events == []
-
-    async def test_signature_over_different_body_rejected(
-        self, bridge_client, patched_bridge
-    ):
-        """A signature lifted from one request must not authenticate another."""
-        _, sessions = patched_bridge
-
-        signed_body = json.dumps(_ACTIVITY_PAYLOAD).encode()
-        tampered = json.dumps({**_ACTIVITY_PAYLOAD, "aspect_type": "delete"}).encode()
-
-        resp = await bridge_client.post(
-            "/webhook",
-            content=tampered,
-            headers={
-                "Content-Type": "application/json",
-                "X-Hub-Signature-256": _make_signature(
-                    signed_body, STRAVA_CLIENT_SECRET
-                ),
-            },
-        )
-        assert resp.status_code == 401
-
-        async with sessions() as s:
-            result = await s.execute(select(WebhookEvent))
-            events = result.scalars().all()
-        assert events == []
-
-    async def test_unconfigured_secret_rejects_signed_and_unsigned(
-        self, bridge_client, patched_bridge
-    ):
-        """
-        With no client secret there is nothing to authenticate against, so the
-        bridge fails closed rather than accepting everything. Matches the Wahoo
-        bridge, which refuses outright when its token is unconfigured.
-        """
-        _, sessions = patched_bridge
-
-        with patch.object(bridge_module.settings, "strava_client_secret", ""):
-            unsigned = await bridge_client.post("/webhook", json=_ACTIVITY_PAYLOAD)
-            assert unsigned.status_code == 403
-
-            signed = await _post_signed(bridge_client, _ACTIVITY_PAYLOAD)
-            assert signed.status_code == 403
-
-        async with sessions() as s:
-            result = await s.execute(select(WebhookEvent))
-            events = result.scalars().all()
-        assert events == []
 
     async def test_non_activity_event_not_queued(self, bridge_client, patched_bridge):
         _, sessions = patched_bridge
@@ -322,6 +228,240 @@ class TestBridgeWebhookEndpoint:
             },
         )
         assert resp.status_code == 403
+
+
+class TestWebhookAuthenticationDisabled:
+    """
+    The signature check ships off, so `POST /webhook` is unauthenticated.
+
+    Strava documents the `hub.challenge` subscription handshake and nothing
+    else — no signing secret, no header, no statement of which bytes are
+    signed. Verifying an `X-Hub-Signature-256` that Strava never sends, with a
+    check that fails closed, answered every real delivery with 401. These tests
+    pin the accepting behaviour so it is not quietly re-tightened; turn it back
+    on through `STRAVA_VERIFY_WEBHOOK_SIGNATURE` once Strava documents the
+    sequence.
+    """
+
+    async def test_unsigned_event_is_queued(self, bridge_client, patched_bridge):
+        """What Strava actually sends today."""
+        _, sessions = patched_bridge
+
+        resp = await bridge_client.post("/webhook", json=_ACTIVITY_PAYLOAD)
+        assert resp.status_code == 200
+
+        async with sessions() as s:
+            result = await s.execute(select(WebhookEvent))
+            events = result.scalars().all()
+
+        assert len(events) == 1
+        assert events[0].strava_event_type == "create"
+        assert events[0].strava_owner_id == "12345678"
+
+    @pytest.mark.parametrize(
+        "header",
+        ["sha256=badbadbadbad", "", "not-even-a-digest"],
+        ids=["wrong", "empty", "malformed"],
+    )
+    async def test_a_bogus_signature_is_ignored_rather_than_rejected(
+        self, bridge_client, patched_bridge, header
+    ):
+        """The header is not read at all, so its contents cannot fail."""
+        _, sessions = patched_bridge
+
+        resp = await bridge_client.post(
+            "/webhook",
+            json=_ACTIVITY_PAYLOAD,
+            headers={"X-Hub-Signature-256": header},
+        )
+        assert resp.status_code == 200
+
+        async with sessions() as s:
+            result = await s.execute(select(WebhookEvent))
+            events = result.scalars().all()
+        assert len(events) == 1
+
+    async def test_non_ascii_signature_header_does_not_error(
+        self, bridge_client, patched_bridge
+    ):
+        """
+        An unread header still must not crash the endpoint: the value is
+        attacker-supplied, and `compare_digest` raises `TypeError` on a `str`
+        holding non-ASCII. Sent as raw bytes because httpx refuses to encode a
+        non-ASCII str header; Starlette decodes it back to the non-ASCII str a
+        hand-rolled client would put in front of the comparison.
+        """
+        resp = await bridge_client.post(
+            "/webhook",
+            json=_ACTIVITY_PAYLOAD,
+            headers={"X-Hub-Signature-256": b"sha256=\xfc\xfc\xfc\xfc"},
+        )
+        assert resp.status_code == 200
+
+    async def test_unconfigured_client_secret_still_accepts(
+        self, bridge_client, patched_bridge
+    ):
+        """
+        With verification off the secret is unused, so a bridge deployed
+        without `STRAVA_CLIENT_SECRET` receives events instead of answering
+        403 to all of them.
+        """
+        _, sessions = patched_bridge
+
+        with patch.object(bridge_module.settings, "strava_client_secret", ""):
+            resp = await bridge_client.post("/webhook", json=_ACTIVITY_PAYLOAD)
+        assert resp.status_code == 200
+
+        async with sessions() as s:
+            result = await s.execute(select(WebhookEvent))
+            events = result.scalars().all()
+        assert len(events) == 1
+
+    def test_verification_is_off_in_the_shipped_defaults(self):
+        """Not just in the fixture — the setting itself defaults to off."""
+        settings = bridge_module.Settings(bridge_secret="b" * 32)
+        assert settings.strava_verify_webhook_signature is False
+
+
+class TestWebhookSignatureOptIn:
+    """
+    `STRAVA_VERIFY_WEBHOOK_SIGNATURE=true` restores the fail-closed check.
+
+    Kept exercised so the code is still working the day Strava documents
+    webhook signing and this becomes the default again.
+    """
+
+    async def test_valid_signature_accepted(self, verifying_client, verifying_bridge):
+        _, sessions = verifying_bridge
+
+        resp = await _post_signed(verifying_client, _ACTIVITY_PAYLOAD)
+        assert resp.status_code == 200
+
+        async with sessions() as s:
+            result = await s.execute(select(WebhookEvent))
+            events = result.scalars().all()
+        assert len(events) == 1
+
+    async def test_invalid_hmac_rejected(self, verifying_client, verifying_bridge):
+        _, sessions = verifying_bridge
+
+        resp = await verifying_client.post(
+            "/webhook",
+            json=_ACTIVITY_PAYLOAD,
+            headers={"X-Hub-Signature-256": "sha256=badbadbadbad"},
+        )
+        assert resp.status_code == 401
+
+        async with sessions() as s:
+            result = await s.execute(select(WebhookEvent))
+            events = result.scalars().all()
+        assert events == []
+
+    async def test_missing_hmac_rejected(self, verifying_client, verifying_bridge):
+        """
+        F-01: the check used to `return True` when the header was absent, so any
+        unauthenticated caller could queue events simply by omitting it. Opting
+        in must mean the check is real, not decorative.
+        """
+        _, sessions = verifying_bridge
+
+        resp = await verifying_client.post("/webhook", json=_ACTIVITY_PAYLOAD)
+        assert resp.status_code == 401
+
+        async with sessions() as s:
+            result = await s.execute(select(WebhookEvent))
+            events = result.scalars().all()
+        assert events == []
+
+    async def test_empty_hmac_header_rejected(self, verifying_client, verifying_bridge):
+        """An empty header is as unauthenticated as an absent one."""
+        _, sessions = verifying_bridge
+
+        resp = await verifying_client.post(
+            "/webhook",
+            json=_ACTIVITY_PAYLOAD,
+            headers={"X-Hub-Signature-256": ""},
+        )
+        assert resp.status_code == 401
+
+        async with sessions() as s:
+            result = await s.execute(select(WebhookEvent))
+            events = result.scalars().all()
+        assert events == []
+
+    async def test_non_ascii_hmac_header_rejected(
+        self, verifying_client, verifying_bridge
+    ):
+        """
+        The header is attacker-supplied. compare_digest raises TypeError on a
+        str holding non-ASCII, which would turn this into a 500 generator.
+
+        Sent as raw bytes because httpx refuses to encode a non-ASCII str
+        header; Starlette decodes it back to a non-ASCII str, which is exactly
+        what a hand-rolled client puts in front of the comparison.
+        """
+        _, sessions = verifying_bridge
+
+        resp = await verifying_client.post(
+            "/webhook",
+            json=_ACTIVITY_PAYLOAD,
+            headers={"X-Hub-Signature-256": b"sha256=\xfc\xfc\xfc\xfc"},
+        )
+        assert resp.status_code == 401
+
+        async with sessions() as s:
+            result = await s.execute(select(WebhookEvent))
+            events = result.scalars().all()
+        assert events == []
+
+    async def test_signature_over_different_body_rejected(
+        self, verifying_client, verifying_bridge
+    ):
+        """A signature lifted from one request must not authenticate another."""
+        _, sessions = verifying_bridge
+
+        signed_body = json.dumps(_ACTIVITY_PAYLOAD).encode()
+        tampered = json.dumps({**_ACTIVITY_PAYLOAD, "aspect_type": "delete"}).encode()
+
+        resp = await verifying_client.post(
+            "/webhook",
+            content=tampered,
+            headers={
+                "Content-Type": "application/json",
+                "X-Hub-Signature-256": _make_signature(
+                    signed_body, STRAVA_CLIENT_SECRET
+                ),
+            },
+        )
+        assert resp.status_code == 401
+
+        async with sessions() as s:
+            result = await s.execute(select(WebhookEvent))
+            events = result.scalars().all()
+        assert events == []
+
+    async def test_unconfigured_secret_rejects_signed_and_unsigned(
+        self, verifying_client, verifying_bridge
+    ):
+        """
+        Having opted in to verification with no client secret to verify
+        against, there is nothing to authenticate requests with, so the bridge
+        fails closed rather than accepting everything. Matches the Wahoo
+        bridge, which refuses outright when its token is unconfigured.
+        """
+        _, sessions = verifying_bridge
+
+        with patch.object(bridge_module.settings, "strava_client_secret", ""):
+            unsigned = await verifying_client.post("/webhook", json=_ACTIVITY_PAYLOAD)
+            assert unsigned.status_code == 403
+
+            signed = await _post_signed(verifying_client, _ACTIVITY_PAYLOAD)
+            assert signed.status_code == 403
+
+        async with sessions() as s:
+            result = await s.execute(select(WebhookEvent))
+            events = result.scalars().all()
+        assert events == []
 
 
 @pytest.mark.replica_unsafe  # assumes a single poller, claiming after it processes

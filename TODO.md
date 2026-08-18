@@ -49,10 +49,13 @@ BRIDGE_SECRET=some-long-random-string
 
 The bridge reads its own settings from `strava_bridge/.env` (or environment):
 ```
-STRAVA_CLIENT_SECRET=same_as_above
 BRIDGE_SECRET=same_as_above
 DATABASE_PATH=bridge.db
 ```
+
+The bridge does not need `STRAVA_CLIENT_SECRET`: `POST /webhook` is
+unauthenticated, because Strava documents no webhook signing. See "Webhook
+authentication" in `DEPLOY.md`.
 
 ---
 
@@ -79,6 +82,6 @@ Keep it for future reference (to delete/update the subscription).
 | Key | Where set | Description |
 |-----|-----------|-------------|
 | `STRAVA_CLIENT_ID` | main app `.env` | From Strava app settings |
-| `STRAVA_CLIENT_SECRET` | main app `.env` + bridge `.env` | From Strava app settings |
+| `STRAVA_CLIENT_SECRET` | main app `.env` | From Strava app settings. Also needed in the bridge `.env` only if `STRAVA_VERIFY_WEBHOOK_SIGNATURE=true` |
 | `BRIDGE_URL` | main app `.env` | Public URL of the bridge service |
 | `BRIDGE_SECRET` | main app `.env` + bridge `.env` | Shared secret you choose |

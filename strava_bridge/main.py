@@ -6,7 +6,7 @@ them to the main openkoutsi app for polling.
 
 Endpoints:
   GET  /webhook          — Strava hub challenge verification
-  POST /webhook          — Receive Strava event (HMAC-validated, required)
+  POST /webhook          — Receive Strava event (signature check off by default)
   GET  /events/pending   — Return unclaimed events (Bearer auth)
   POST /events/{id}/claim — Mark an event as claimed (Bearer auth)
 """
@@ -41,6 +41,21 @@ class Settings(BaseSettings):
     database_path: str = "bridge.db"
     strava_client_secret: str = ""
     bridge_secret: str = _INSECURE_DEFAULT
+
+    # Off until Strava supports webhook signatures officially. Strava documents
+    # the hub.challenge subscription handshake and nothing else: no signing
+    # secret, no header name, and no statement of which bytes are signed. An
+    # `X-Hub-Signature-256` verified against the client secret is a guess at an
+    # undocumented feature, and a guess that fails closed rejects the real
+    # events too — Strava sends no such header today, so every delivery was
+    # answered with 401 and webhooks did not work at all.
+    #
+    # The verification is kept below rather than deleted. Set
+    # STRAVA_VERIFY_WEBHOOK_SIGNATURE=true to require the header again once
+    # Strava documents the header, the secret, and the exact validation
+    # sequence — and check that what they document is what is implemented here
+    # before trusting it.
+    strava_verify_webhook_signature: bool = False
 
     # Ceiling on unclaimed events. The queue had none: every accepted event is
     # a row kept for seven days, and the main app drains 100 a minute, so a
@@ -123,11 +138,19 @@ async def _cleanup_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    if not settings.strava_client_secret:
+    if not settings.strava_verify_webhook_signature:
+        log.info(
+            "Strava webhook signature verification is off — POST /webhook "
+            "accepts unsigned events, because Strava does not document "
+            "webhook signing and sends no signature. Set "
+            "STRAVA_VERIFY_WEBHOOK_SIGNATURE=true once it does."
+        )
+    elif not settings.strava_client_secret:
         log.warning(
-            "STRAVA_CLIENT_SECRET is not set — webhook events cannot be "
-            "authenticated, so POST /webhook will reject every request with "
-            "403. Set it to the same value as the main app to receive events."
+            "STRAVA_VERIFY_WEBHOOK_SIGNATURE is on but STRAVA_CLIENT_SECRET is "
+            "not set — webhook events cannot be authenticated, so POST /webhook "
+            "will reject every request with 403. Set the secret to the same "
+            "value as the main app, or turn verification off."
         )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
@@ -189,6 +212,10 @@ def _verify_hmac_256(body: bytes, signature_header: str | None) -> bool:
     """
     Validate X-Hub-Signature-256, failing closed.
 
+    Only reached when STRAVA_VERIFY_WEBHOOK_SIGNATURE is on, which is not the
+    default: Strava documents no webhook signing, so requiring a signature it
+    never sends rejects every real event. See the setting for why.
+
     Returns True only when the secret is configured, the header is present,
     and it matches the HMAC of the body. Every other case is False: this
     endpoint is on a public HTTPS URL (Strava requires one), so an absent
@@ -236,17 +263,32 @@ async def hub_challenge(request: Request):
 
 @app.post("/webhook", status_code=200)
 async def receive_webhook(request: Request):
-    """Receive a Strava webhook event and store it in the queue."""
+    """
+    Receive a Strava webhook event and store it in the queue.
+
+    Unauthenticated by default, because Strava does not sign its webhooks and
+    does not document a way to authenticate them. What is left standing in
+    place of a signature: only `object_type == "activity"` events are queued;
+    the main app drops any event whose `owner_id` is not a connected athlete;
+    and for the ones it keeps it re-fetches the activity from Strava's own API,
+    so a forged payload cannot inject data, only ask for a sync of the real
+    thing. `max_queue_events` bounds what a flood can cost. That is thinner
+    than a verified signature and is the reason the check is kept rather than
+    deleted — see STRAVA_VERIFY_WEBHOOK_SIGNATURE.
+    """
     body = await request.body()
 
-    # Reported separately from a bad signature so an operator who never set the
-    # secret sees that, rather than a signature error they can't explain.
-    if not settings.strava_client_secret:
-        raise HTTPException(status_code=403, detail="Strava webhooks not configured")
+    if settings.strava_verify_webhook_signature:
+        # Reported separately from a bad signature so an operator who never set
+        # the secret sees that, rather than a signature error they can't explain.
+        if not settings.strava_client_secret:
+            raise HTTPException(
+                status_code=403, detail="Strava webhooks not configured"
+            )
 
-    sig = request.headers.get("x-hub-signature-256")
-    if not _verify_hmac_256(body, sig):
-        raise HTTPException(status_code=401, detail="Invalid signature")
+        sig = request.headers.get("x-hub-signature-256")
+        if not _verify_hmac_256(body, sig):
+            raise HTTPException(status_code=401, detail="Invalid signature")
 
     try:
         payload = json.loads(body)
