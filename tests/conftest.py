@@ -24,6 +24,14 @@ from unittest.mock import patch
 # `setdefault` so a caller can still override either one.
 os.environ.setdefault("ENCRYPTION_KEY", "0xQFqFc2TsglXsh-2Nn0DAclf8Gn6VgGJm1gpMJ53cw=")
 
+# The two bridges are separate services with their own Settings, built at import
+# time, and both now refuse the "changeme" placeholder (issue #102, F-10). The
+# bridge test modules import those apps, so the secrets have to exist before
+# collection reaches them. Length matters — the validators enforce a 32-character
+# floor, the same bar the main app's SECRET_KEY uses.
+os.environ.setdefault("BRIDGE_SECRET", "ci-test-strava-bridge-secret-not-for-production")
+os.environ.setdefault("WAHOO_BRIDGE_SECRET", "ci-test-wahoo-bridge-secret-not-for-production")
+
 import pytest
 from fastapi import HTTPException, Request
 from httpx import ASGITransport, AsyncClient

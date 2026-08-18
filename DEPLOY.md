@@ -508,6 +508,10 @@ Create `strava_bridge/.env`:
 ```env
 STRAVA_CLIENT_SECRET=<same as main app>
 BRIDGE_SECRET=<same random string as BRIDGE_SECRET in main .env>   # python -c "import secrets; print(secrets.token_hex(32))"
+# ^ REQUIRED and at least 32 characters. The bridge refuses to start on the old
+#   "changeme" placeholder or anything shorter: it sits on a public HTTPS URL,
+#   so an unconfigured one hands its event queue to whoever finds it — and on
+#   this bridge the same value is the hub.verify_token below.
 DATABASE_PATH=bridge.db
 ```
 
@@ -558,6 +562,7 @@ Create `wahoo_bridge/.env`:
 
 ```env
 WAHOO_BRIDGE_SECRET=<same random string as WAHOO_BRIDGE_SECRET in main .env>   # python -c "import secrets; print(secrets.token_hex(32))"
+# ^ REQUIRED and at least 32 characters; the bridge refuses to start otherwise.
 WAHOO_WEBHOOK_TOKEN=<token you define in the Wahoo developer portal>           # python -c "import secrets; print(secrets.token_hex(32))"
 DATABASE_PATH=bridge.db
 ```
@@ -632,6 +637,7 @@ The frontend has its own `build-images.yml` in the
 - [ ] `SECRET_KEY` set to a strong random value
 - [ ] `ENCRYPTION_KEY` set — **required**; the backend refuses to start without it unless `ALLOW_PLAINTEXT_SECRETS=true`, which stores Strava and Wahoo OAuth tokens unencrypted and is not for production
 - [ ] `ALLOW_PLAINTEXT_SECRETS` **not** set (check it was not carried over from a dev `.env`)
+- [ ] `BRIDGE_SECRET` and `WAHOO_BRIDGE_SECRET` are real random values of at least 32 characters, identical on the main app and on their bridge — each bridge now refuses to start on the old `changeme` placeholder
 - [ ] `DATA_DIR` points to a persistent directory (survives restarts/upgrades)
 - [ ] `FRONTEND_URL` and `API_URL` point to real domains
 - [ ] TLS termination in place for the API (and the frontend, deployed from openkoutsi-web)

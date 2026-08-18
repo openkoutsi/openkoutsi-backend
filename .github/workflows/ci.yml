@@ -39,6 +39,9 @@ jobs:
           # field encryption. A throwaway Fernet key, so CI runs the encrypted
           # column path rather than the plaintext fallback.
           ENCRYPTION_KEY: "0xQFqFc2TsglXsh-2Nn0DAclf8Gn6VgGJm1gpMJ53cw="
+          # Required since #102 F-10 — the bridges no longer start on "changeme".
+          BRIDGE_SECRET: "ci-test-strava-bridge-secret-not-for-production"
+          WAHOO_BRIDGE_SECRET: "ci-test-wahoo-bridge-secret-not-for-production"
 
       - name: Upload coverage
         uses: actions/upload-artifact@v4
