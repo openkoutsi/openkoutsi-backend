@@ -35,6 +35,10 @@ jobs:
         run: uv run pytest tests/ --cov=backend --cov-report=xml --cov-report=term-missing -v
         env:
           SECRET_KEY: "ci-test-secret-key-not-used-in-production-aaaaaaaaaaaaa"
+          # Required since #102 F-08 — an empty key no longer silently disables
+          # field encryption. A throwaway Fernet key, so CI runs the encrypted
+          # column path rather than the plaintext fallback.
+          ENCRYPTION_KEY: "0xQFqFc2TsglXsh-2Nn0DAclf8Gn6VgGJm1gpMJ53cw="
 
       - name: Upload coverage
         uses: actions/upload-artifact@v4

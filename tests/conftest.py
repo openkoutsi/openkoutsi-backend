@@ -11,9 +11,18 @@ routes hit the in-memory DBs. A seeded Athlete row is created automatically.
 Background tasks are suppressed via mock so they never touch real storage.
 Rate limiting is disabled so tests are not throttled.
 """
+import os
 import sys
 from pathlib import Path
 from unittest.mock import patch
+
+# Set before anything imports `backend.app.core.config`, which builds its
+# Settings singleton at import time and now refuses an empty ENCRYPTION_KEY
+# (issue #102, F-08). A real Fernet key rather than ALLOW_PLAINTEXT_SECRETS so
+# the suite exercises the encrypted column path — encrypt on write, decrypt on
+# read — which nothing covered while the empty key quietly disabled it.
+# `setdefault` so a caller can still override either one.
+os.environ.setdefault("ENCRYPTION_KEY", "0xQFqFc2TsglXsh-2Nn0DAclf8Gn6VgGJm1gpMJ53cw=")
 
 import pytest
 from fastapi import HTTPException, Request

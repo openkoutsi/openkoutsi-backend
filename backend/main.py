@@ -25,6 +25,18 @@ async def lifespan(app: FastAPI):
     from backend.app.services.pat_expiry import pat_expiry_sweeper
     from backend.app.services.stranded_runs import settle_stranded_runs
 
+    if not settings.encryption_key:
+        # Reachable only via ALLOW_PLAINTEXT_SECRETS — the settings validator
+        # refuses to construct otherwise. Said once per start, at WARNING, so
+        # the state is visible in the log of a running instance and not only in
+        # whatever the operator remembers configuring (issue #102, F-08).
+        log.warning(
+            "ALLOW_PLAINTEXT_SECRETS is set and ENCRYPTION_KEY is not: Strava "
+            "and Wahoo OAuth tokens are being stored UNENCRYPTED in the "
+            "registry database. Anyone who can read that file can use them. "
+            "Set ENCRYPTION_KEY to encrypt them."
+        )
+
     await init_registry_db()
     await init_usage_db()
 

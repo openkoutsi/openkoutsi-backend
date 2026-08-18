@@ -129,8 +129,44 @@ class Settings(BaseSettings):
 
     # Field-level encryption key for sensitive DB columns (Fernet/base64-urlsafe, 32 bytes).
     # Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
-    # Leave empty in development to disable encryption (tokens stored as plaintext).
+    # Required unless `allow_plaintext_secrets` is set — see the validator below.
     encryption_key: str = ""
+
+    # Run without ENCRYPTION_KEY, storing provider OAuth tokens in the registry
+    # database as plaintext. An explicit, logged choice rather than the default:
+    # an empty key used to disable encryption silently, so an instance that
+    # never set one looked exactly like an instance that had (issue #102, F-08).
+    # Development and throwaway instances are what this is for.
+    allow_plaintext_secrets: bool = False
+
+    @model_validator(mode="after")
+    def _validate_encryption_key(self) -> "Settings":
+        if not self.encryption_key:
+            if self.allow_plaintext_secrets:
+                return self
+            raise ValueError(
+                "ENCRYPTION_KEY is not set, so Strava and Wahoo OAuth tokens "
+                "would be stored as plaintext in the registry database. "
+                "Generate one with: python -c \"from cryptography.fernet import "
+                "Fernet; print(Fernet.generate_key().decode())\" — or set "
+                "ALLOW_PLAINTEXT_SECRETS=true to accept plaintext deliberately."
+            )
+
+        # A key that Fernet cannot load is worse than no key: nothing complains
+        # until the first token is written, and then every provider connection
+        # fails at runtime. Same reasoning as SECRET_KEY above — an instance
+        # that cannot do the job should not come up claiming it can.
+        from cryptography.fernet import Fernet
+
+        try:
+            Fernet(self.encryption_key.encode())
+        except Exception as exc:
+            raise ValueError(
+                f"ENCRYPTION_KEY is not a valid Fernet key ({exc}). Generate one "
+                'with: python -c "from cryptography.fernet import Fernet; '
+                'print(Fernet.generate_key().decode())"'
+            )
+        return self
 
     # ── Email (transactional + inbound) ───────────────────────────────────────
     # Everything provider-specific lives behind the shared email module
