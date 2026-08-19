@@ -670,3 +670,177 @@ class SyncLease(UserBase, LeaseMixin):
     """
 
     __tablename__ = "sync_leases"
+
+
+class Bike(UserBase):
+    """A bike, described only as much as the pacing physics needs (issue #55).
+
+    Tyre width selects a rolling-resistance coefficient and riding position an
+    aerodynamic drag area (both tables live in ``openkoutsi.course``). A row
+    per bike rather than fields on the athlete because the inputs change per
+    event — the gravel bike for one course, the TT bike for another — and a
+    course keeps a reference to the bike it was solved for.
+    """
+
+    __tablename__ = "bikes"
+
+    RIDING_POSITIONS = ("tops", "hoods", "drops", "aero")
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    athlete_id: Mapped[str] = mapped_column(
+        String, ForeignKey("athletes.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    tyre_width_mm: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    riding_position: Mapped[str] = mapped_column(String, default="hoods", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )
+
+
+class Course(UserBase):
+    """An uploaded course and everything derived from it (issue #55).
+
+    The sanctioned persistence of route data, per the Stage 0 decision in
+    issue #54: the raw GPX sits encrypted on disk under an *opaque storage
+    key* (a bare filename resolved against the user's upload directory at read
+    time — never an absolute path, see issue #51), the thinned track lives in
+    ``course_tracks``, and this row carries only coordinate-free metadata,
+    inputs, the chart profile and the pacing outcome.
+
+    The ``plan_*`` columns copy ``Goal.guidance*`` exactly — streamed coach
+    prose, a status, and a timestamp for pending-timeout recovery — so the
+    same stranded-run settlement applies at boot.
+    """
+
+    __tablename__ = "courses"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    athlete_id: Mapped[str] = mapped_column(
+        String, ForeignKey("athletes.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    # SET NULL, not CASCADE: deleting a goal or a bike must never destroy a
+    # course. Re-analysis simply requires picking a bike again.
+    goal_id: Mapped[Optional[str]] = mapped_column(
+        String, ForeignKey("goals.id", ondelete="SET NULL"), nullable=True
+    )
+    bike_id: Mapped[Optional[str]] = mapped_column(
+        String, ForeignKey("bikes.id", ondelete="SET NULL"), nullable=True
+    )
+
+    # Opaque storage key for the encrypted original — a bare filename, never a
+    # path. Resolution and containment live in services/course_analysis.py.
+    gpx_file_key: Mapped[str] = mapped_column(String, nullable=False)
+    gpx_file_encrypted: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    # `ready` | `error`. Processing is synchronous, so `pending` is never
+    # persisted; `error` exists for re-analysis failures.
+    status: Mapped[str] = mapped_column(String, default="ready", nullable=False)
+    error: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    # Athlete-facing inputs.
+    target_time_s: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    start_time: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # The rider numbers the last analysis was solved from, snapshotted for
+    # reproducibility — profile edits change future analyses, not this one.
+    ftp_w_used: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    weight_kg_used: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    # Coordinate-free route metadata.
+    distance_m: Mapped[float] = mapped_column(Float, nullable=False)
+    elevation_gain_m: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    elevation_loss_m: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    min_elevation_m: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    max_elevation_m: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # ≤400 × [distance_m, elevation_m, gradient] — the chart payload.
+    profile: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+
+    # Pacing outcome. An infeasible target is a result, not an error: feasible
+    # False with a refusal_reason and the required intensity on record.
+    predicted_time_s: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    intensity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    required_intensity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    feasible: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    refusal_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    # The written plan — Goal.guidance*'s shape, renamed.
+    plan: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    plan_mood: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    plan_status: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    plan_updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )
+
+    segments: Mapped[list["CourseSegment"]] = relationship(
+        "CourseSegment",
+        back_populates="course",
+        cascade="all, delete-orphan",
+        order_by="CourseSegment.segment_index",
+        lazy="selectin",
+    )
+    track: Mapped[Optional["CourseTrack"]] = relationship(
+        "CourseTrack", back_populates="course", cascade="all, delete-orphan", uselist=False
+    )
+
+
+class CourseTrack(UserBase):
+    """The thinned track of a course — the one table that holds coordinates.
+
+    One row per course, the points as a JSON series (the ``ActivityStream``
+    pattern) rather than a row per point: ``[[lat, lon, elevation_m,
+    distance_m], …]`` at ~8 m spacing. Loaded only by re-analysis (and by the
+    Stage 2 surface work when it lands) — never serialized into an API
+    response, an MCP result, or an LLM prompt. Deliberately its own table so
+    that reading a course, listing courses and building the plan prompt touch
+    rows with nothing location-shaped in them.
+    """
+
+    __tablename__ = "course_tracks"
+
+    course_id: Mapped[str] = mapped_column(
+        String, ForeignKey("courses.id", ondelete="CASCADE"), primary_key=True
+    )
+    points: Mapped[list] = mapped_column(JSON, nullable=False)
+
+    course: Mapped["Course"] = relationship("Course", back_populates="track")
+
+
+class CourseSegment(UserBase):
+    """One gradient segment of an analysed course (issue #55).
+
+    The ``ActivityInterval`` of a course: a numbered, ordered child row with
+    the physics outputs for the course's last analysis. Replaced wholesale on
+    re-analysis.
+    """
+
+    __tablename__ = "course_segments"
+    __table_args__ = (UniqueConstraint("course_id", "segment_index"),)
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    course_id: Mapped[str] = mapped_column(
+        String, ForeignKey("courses.id", ondelete="CASCADE"), nullable=False
+    )
+    segment_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    start_distance_m: Mapped[float] = mapped_column(Float, nullable=False)
+    end_distance_m: Mapped[float] = mapped_column(Float, nullable=False)
+    length_m: Mapped[float] = mapped_column(Float, nullable=False)
+    avg_gradient: Mapped[float] = mapped_column(Float, nullable=False)
+    elevation_change_m: Mapped[float] = mapped_column(Float, nullable=False)
+    segment_type: Mapped[str] = mapped_column(String, nullable=False)
+    power_w: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    speed_ms: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    duration_s: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    start_offset_s: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    speed_capped: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    course: Mapped["Course"] = relationship("Course", back_populates="segments")

@@ -558,6 +558,8 @@ class TestExportAthlete:
             "inbox.json",
             "chat.json",
             "weight_log.json",
+            "bikes.json",
+            "courses.json",
         } <= names
 
     async def test_export_profile_carries_every_documented_field(

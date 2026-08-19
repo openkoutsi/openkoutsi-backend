@@ -71,6 +71,21 @@ is the property that makes importing a mixed archive trustworthy.
 Their coordinates trace a line through open water in the Gulf of Bothnia, so —
 unlike a real ride — they identify nobody.
 
+## Synthetic course fixtures
+
+Courses for the course-recon tests (issue #55) — routes to be *ridden*, not
+rides that happened, so neither file carries a single `<time>` element. Same
+generator, same open-water coordinates:
+
+| File | Elevation | Notes |
+| --- | --- | --- |
+| `synthetic_course.gpx` | ✓ | 15 km due north at 10 m spacing: 4 km flat, a 2 km climb at 7%, a 1.5 km descent at 6%, then a 7.5 km false flat at 0.5% |
+| `synthetic_course_no_ele.gpx` | – | the same track with no `<ele>` at all — must be rejected with a reason, not analysed |
+
+The profile's structure is the point: segmentation tests need boundaries to
+find, and the no-coordinates invariant tests grep LLM prompts and API
+responses for these exact coordinate values.
+
 ## Adding a real ride
 
 Real device files usually contain GPS traces that reveal where you live or

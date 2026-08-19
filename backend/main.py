@@ -149,6 +149,8 @@ def create_app() -> FastAPI:
     from backend.app.api.achievements import router as achievements_router
     from backend.app.api.chat import router as chat_router
     from backend.app.api.tokens import router as tokens_router
+    from backend.app.api.bikes import router as bikes_router
+    from backend.app.api.courses import router as courses_router
     from backend.app.mcp.server import create_mcp_router
 
     app = FastAPI(title="openkoutsi API", version="2.0.0", lifespan=lifespan)
@@ -187,6 +189,8 @@ def create_app() -> FastAPI:
     app.include_router(achievements_router, prefix="/api")
     app.include_router(chat_router, prefix="/api")
     app.include_router(tokens_router, prefix="/api")
+    app.include_router(bikes_router, prefix="/api")
+    app.include_router(courses_router, prefix="/api")
 
     # Resolve every route's personal-access-token policy once, here, rather
     # than per request — see `core.scopes` for why this is static.

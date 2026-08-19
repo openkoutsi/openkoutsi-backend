@@ -33,6 +33,8 @@ from backend.app.models.user_orm import (
     AchievementUnlock,
     Activity,
     Athlete,
+    Bike,
+    Course,
     DailyMetric,
     Goal,
     TrainingPlan,
@@ -648,6 +650,37 @@ async def _export_goals(athlete: Athlete, session: AsyncSession) -> list[dict]:
     )
 
 
+async def _export_bikes(athlete: Athlete, session: AsyncSession) -> list[dict]:
+    return await _export_rows(
+        session,
+        select(Bike).where(Bike.athlete_id == athlete.id).order_by(Bike.created_at),
+        exclude=("athlete_id",),
+    )
+
+
+async def _export_courses(athlete: Athlete, session: AsyncSession) -> list[dict]:
+    """Courses with their nested segment tables (issue #55).
+
+    ``gpx_file_key`` is server-side plumbing and stays out; the file itself is
+    delivered decrypted as ``courses/{id}.gpx``, which also carries the
+    coordinates — the rows here are the coordinate-free derived data.
+    """
+    return await _export_rows(
+        session,
+        select(Course)
+        .where(Course.athlete_id == athlete.id)
+        .options(selectinload(Course.segments))
+        .order_by(Course.created_at),
+        exclude=("athlete_id", "gpx_file_key", "gpx_file_encrypted"),
+        extra=lambda c: {
+            "profile": c.profile or [],
+            "segments": [
+                _dump(s, exclude=("course_id",)) for s in c.segments
+            ],
+        },
+    )
+
+
 def _export_planned_workout(w) -> dict:
     return _dump(
         w,
@@ -847,6 +880,8 @@ async def export_athlete(
         "chat.json": await _export_chat(session),
         "weight_log.json": await _export_weight_log(athlete, session),
         "achievements.json": await _export_achievements(athlete, session),
+        "bikes.json": await _export_bikes(athlete, session),
+        "courses.json": await _export_courses(athlete, session),
         "personal_access_tokens.json": await _export_personal_access_tokens(
             ctx.user_id, registry_session
         ),
@@ -869,6 +904,25 @@ async def export_athlete(
                     else:
                         zf.write(fit_path, f"fit_files/{a.id}.fit")
                     break
+        # The uploaded course originals, decrypted — the one place the export
+        # hands coordinates back, because they are the user's own file.
+        from backend.app.services.course_analysis import resolve_course_blob
+
+        courses = (
+            await session.execute(select(Course).where(Course.athlete_id == athlete.id))
+        ).scalars().all()
+        for course in courses:
+            try:
+                blob = resolve_course_blob(course.gpx_file_key, ctx.user_id)
+            except ValueError:
+                continue
+            if blob.exists():
+                if course.gpx_file_encrypted:
+                    zf.writestr(
+                        f"courses/{course.id}.gpx", decrypt_file(blob, ctx.user_id)
+                    )
+                else:
+                    zf.write(blob, f"courses/{course.id}.gpx")
     buf.seek(0)
 
     return StreamingResponse(

@@ -113,13 +113,18 @@ class Route:
     (gradients, climbs, matching one ride's course against another's), and it is
     meant to be computed, used, and thrown away inside a single request.
 
-    It must not be written to the database. openkoutsi's stated position is that
-    it stores no location data, ``ActivityStream`` has no channel for it, and the
+    It must not be written to the database, with one deliberately-decided
+    exception. openkoutsi's stated position is that it stores no location data
+    from *activities*: ``ActivityStream`` has no channel for it, and the
     ingestion path deliberately goes through :func:`summarizeWorkout`, which
-    cannot return one of these. If a future feature needs route data to outlive a
-    request, that is a product decision about the privacy promise — and a
-    migration, a consent question and a retention rule — not something to reach
-    for because this type happens to be available.
+    cannot return one of these. The exception is a **course** the athlete
+    uploads on purpose for pacing analysis — issue #54 decided that courses
+    are stored (their thinned track in the athlete's own database, the raw GPX
+    encrypted on disk, both covered by the GDPR export and delete), which is
+    what the course tables in the backend persist. Anything beyond that path
+    remains a product decision about the privacy promise — a migration, a
+    consent question and a retention rule — not something to reach for because
+    this type happens to be available.
     """
 
     points: list[RoutePoint] = field(default_factory=list)
@@ -456,8 +461,9 @@ def extract_route(fileish: Fileish) -> Route:
 
     Intended for the route-analysis work (gradient profiles, climb detection,
     comparing two rides over the same course), which computes from the geometry
-    and keeps the conclusions. See :class:`Route` for why the geometry itself
-    must not be persisted.
+    and keeps the conclusions — and for course ingest (:mod:`openkoutsi.course`),
+    the one path sanctioned to persist what this returns. See :class:`Route`
+    for the boundary.
     """
     track = _parse(fileish)
     points = track.points

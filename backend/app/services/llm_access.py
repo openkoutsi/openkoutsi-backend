@@ -51,7 +51,7 @@ PAT_LLM_FORBIDDEN = "llm_not_available_to_tokens"
 # carry it and `GET /api/admin/llm-usage/summary` groups by this column.
 Feature = Literal[
     "chat", "plan_generate", "workout_generate", "activity_analysis",
-    "training_status", "goal_guidance",
+    "training_status", "goal_guidance", "course_plan",
 ]
 
 
