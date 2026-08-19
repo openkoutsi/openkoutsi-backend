@@ -98,7 +98,7 @@ async def _seed_course(client, auth_headers, session, seeded_athlete) -> str:
     return resp.json()["id"]
 
 
-async def _run_plan_bg(session, course_id: str, athlete_id: str, requests_out=None):
+async def _run_plan_bg(session, course_id: str, athlete_id: str, requests_out=None, run_id=None):
     """Drive the real background task with the LLM transport mocked."""
     from backend.app.services import llm_course_plan as svc
 
@@ -113,7 +113,9 @@ async def _run_plan_bg(session, course_id: str, athlete_id: str, requests_out=No
         patch("httpx.AsyncClient",
               return_value=_mock_httpx_stream(_PLAN_SSE, requests_out)),
     ):
-        await svc.generate_course_plan_bg(athlete_id, course_id, _TEST_USER_ID)
+        await svc.generate_course_plan_bg(
+            athlete_id, course_id, _TEST_USER_ID, None, run_id
+        )
 
 
 class TestCoursePlan:
@@ -276,6 +278,71 @@ class TestCoursePlan:
         assert settled == 1
         await session.refresh(course)
         assert course.plan_status == "error"
+
+    async def test_reanalysis_discards_a_plan_that_is_still_streaming(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        """The plan task runs on its own session and commits *after* the
+        request that cleared the plan, so clearing the columns alone does not
+        stop it — it would put prose describing the old segment table straight
+        back, ending on `done` with splits keyed to distances that no longer
+        exist. The run token is what makes the clear stick."""
+        from backend.app.services import course_analysis
+        from openkoutsi.course import RiderParams
+
+        course_id = await _seed_course(client, auth_headers, session, seeded_athlete)
+
+        # A plan run is in flight, holding its token.
+        with patch(
+            "backend.app.services.llm_course_plan.generate_course_plan_bg",
+            new_callable=AsyncMock,
+        ):
+            await client.post(
+                f"/api/courses/{course_id}/plan", json={}, headers=auth_headers
+            )
+        course = (
+            await session.execute(select(Course).where(Course.id == course_id))
+        ).scalar_one()
+        run_id = course.plan_run_id
+        assert run_id, "the trigger must stamp a run token"
+
+        # Re-analysis lands while that run is still going.
+        resp = await client.post(
+            f"/api/courses/{course_id}/reanalyze", json={}, headers=auth_headers
+        )
+        assert resp.status_code == 200
+        await session.refresh(course)
+        assert course.plan_run_id is None
+
+        # Now the in-flight run finishes and writes its prose.
+        await _run_plan_bg(session, course_id, seeded_athlete.id, run_id=run_id)
+
+        await session.refresh(course)
+        assert course.plan_status is None, "a superseded run resurrected its plan"
+        assert course.plan is None
+        assert course.plan_mood is None
+
+    async def test_a_current_run_still_writes_its_plan(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        """The guard must not cost the ordinary case its result."""
+        course_id = await _seed_course(client, auth_headers, session, seeded_athlete)
+        with patch(
+            "backend.app.services.llm_course_plan.generate_course_plan_bg",
+            new_callable=AsyncMock,
+        ):
+            await client.post(
+                f"/api/courses/{course_id}/plan", json={}, headers=auth_headers
+            )
+        course = (
+            await session.execute(select(Course).where(Course.id == course_id))
+        ).scalar_one()
+
+        await _run_plan_bg(session, course_id, seeded_athlete.id, run_id=course.plan_run_id)
+
+        await session.refresh(course)
+        assert course.plan_status == "done"
+        assert course.plan.startswith("Ride the opening kilometres")
 
     async def test_a_plan_for_a_broken_course_is_a_409(
         self, client, auth_headers, session, seeded_athlete

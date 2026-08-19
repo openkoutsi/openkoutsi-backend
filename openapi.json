@@ -8937,7 +8937,9 @@
           "name": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "maxLength": 200,
+                "minLength": 1
               },
               {
                 "type": "null"

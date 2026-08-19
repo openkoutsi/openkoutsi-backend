@@ -114,7 +114,11 @@ async def create_course(
     request: Request,
     file: UploadFile = File(...),
     bike_id: str = Form(...),
-    name: str | None = Form(None),
+    # Bounded like every other name in the tree (BikeCreate 100, activities
+    # and workouts 200). It lands in every course response and verbatim in
+    # the LLM prompt; the parsed fallback is already capped in the parser,
+    # so this caller-supplied field was the only open-ended one.
+    name: str | None = Form(None, min_length=1, max_length=200),
     goal_id: str | None = Form(None),
     target_time_s: int | None = Form(None),
     start_time: datetime | None = Form(None),
@@ -145,23 +149,35 @@ async def create_course(
     course_id = str(uuid.uuid4())
     key = course_analysis.store_course_blob(gpx_bytes, ctx.user_id, course_id)
 
-    course = Course(
-        id=course_id,
-        athlete_id=athlete.id,
-        name=name or parsed.name or "Course",
-        goal_id=goal_id,
-        bike_id=bike.id,
-        gpx_file_key=key,
-        gpx_file_encrypted=True,
-        target_time_s=target_time_s,
-        start_time=start_time,
-        distance_m=parsed.analysis.total_distance_m,
-    )
-    session.add(course)
-    await session.flush()
-    await course_analysis.persist_analysis(course, parsed.analysis, session, rider=rider)
-    await course_analysis.store_track(course, parsed.track, session)
-    await session.commit()
+    # From here the blob exists but nothing references it yet. Both delete and
+    # the GDPR export iterate Course rows, so a blob whose row never lands is
+    # unreachable by either — and this feature's contract is that deleting a
+    # course removes the rows *and* the file. Anything that fails before the
+    # commit takes the file with it.
+    try:
+        course = Course(
+            id=course_id,
+            athlete_id=athlete.id,
+            name=name or parsed.name or "Course",
+            goal_id=goal_id,
+            bike_id=bike.id,
+            gpx_file_key=key,
+            # True by construction, not by luck: `store_course_blob` either
+            # returns with the file encrypted or raises having removed it.
+            gpx_file_encrypted=True,
+            target_time_s=target_time_s,
+            start_time=start_time,
+            distance_m=parsed.analysis.total_distance_m,
+        )
+        session.add(course)
+        await session.flush()
+        await course_analysis.persist_analysis(course, parsed.analysis, session, rider=rider)
+        await course_analysis.store_track(course, parsed.track, session)
+        await session.commit()
+    except Exception:
+        await session.rollback()
+        course_analysis.delete_blob_by_key(key, ctx.user_id)
+        raise
     return await _detail(course_id, session)
 
 
@@ -323,14 +339,19 @@ async def trigger_course_plan(
     if course.plan_status == "pending":
         return {"status": "pending"}
 
+    # The token this run owns its columns by. Re-analysis (or a settle) clears
+    # it, and the generator then discards its own writes rather than putting a
+    # plan for the old segment table back on the row.
+    run_id = str(uuid.uuid4())
     course.plan_status = "pending"
     course.plan = None
     course.plan_mood = None
+    course.plan_run_id = run_id
     course.plan_updated_at = datetime.now(timezone.utc)
     await session.commit()
 
     from backend.app.services.llm_course_plan import generate_course_plan_bg
     asyncio.create_task(
-        generate_course_plan_bg(athlete.id, course.id, ctx.user_id, body.locale)
+        generate_course_plan_bg(athlete.id, course.id, ctx.user_id, body.locale, run_id)
     )
     return {"status": "pending"}

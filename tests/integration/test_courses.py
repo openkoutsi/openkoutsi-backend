@@ -14,6 +14,7 @@ The properties that matter, in the order the issue states them:
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select
@@ -339,6 +340,64 @@ class TestCourseLifecycle:
         assert cleared.status_code == 200
         assert cleared.json()["target_time_s"] is None
         assert cleared.json()["feasible"] is True
+
+
+class TestBlobLifecycle:
+    """A stored route that no row points at is unreachable by design: both
+    per-course delete and the GDPR export iterate `Course` rows, and nothing
+    sweeps the uploads directory. So a failure part-way through the upload
+    must not leave one behind — least of all an unencrypted one."""
+
+    async def test_a_failed_encryption_leaves_no_plaintext_behind(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        from backend.app.services import course_analysis
+
+        uploads = settings.user_fit_dir(_TEST_USER_ID)
+        uploads.mkdir(parents=True, exist_ok=True)
+        before = set(uploads.iterdir())
+
+        # encrypt_file is *designed* to raise hard on a missing or rotated key.
+        with patch.object(
+            course_analysis, "encrypt_file", side_effect=RuntimeError("no key")
+        ):
+            with pytest.raises(RuntimeError):
+                course_analysis.store_course_blob(
+                    COURSE_GPX.read_bytes(), _TEST_USER_ID, "boom"
+                )
+
+        assert set(uploads.iterdir()) == before
+
+    async def test_a_failed_commit_leaves_no_orphan_blob(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        await _seed_rider(session, seeded_athlete)
+        bike = await _create_bike(client, auth_headers)
+
+        uploads = settings.user_fit_dir(_TEST_USER_ID)
+        uploads.mkdir(parents=True, exist_ok=True)
+        before = set(uploads.iterdir())
+
+        from backend.app.services import course_analysis
+
+        with patch.object(
+            course_analysis, "store_track", side_effect=RuntimeError("db went away")
+        ):
+            with pytest.raises(RuntimeError):
+                await _upload_course(client, auth_headers, bike["id"])
+
+        assert set(uploads.iterdir()) == before
+        assert (await session.execute(select(Course))).scalars().all() == []
+
+    async def test_an_over_long_name_is_refused(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        await _seed_rider(session, seeded_athlete)
+        bike = await _create_bike(client, auth_headers)
+        resp = await _upload_course(
+            client, auth_headers, bike["id"], name="x" * 201
+        )
+        assert resp.status_code == 422
 
 
 class TestCourseExport:

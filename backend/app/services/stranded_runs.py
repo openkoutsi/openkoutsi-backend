@@ -109,6 +109,9 @@ def settle_course_plan(course, now: Optional[datetime] = None) -> bool:
     if course.plan_status != "pending":
         return False
     course.plan_status = "error"
+    # Retire the run token as well: a run declared dead must not be able to
+    # come back and overwrite the settled state if it was merely slow.
+    course.plan_run_id = None
     course.plan_updated_at = now or datetime.now(timezone.utc)
     return True
 

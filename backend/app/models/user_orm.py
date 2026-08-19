@@ -772,6 +772,12 @@ class Course(UserBase):
     plan: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     plan_mood: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     plan_status: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Identifies the plan run that owns these columns. The generator runs on
+    # its own session and commits after the request that started it, so
+    # "clear the plan" cannot be expressed by nulling the columns alone — an
+    # in-flight run would simply write them back. Re-analysis clears this
+    # token, and a run whose token no longer matches has its writes discarded.
+    plan_run_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     plan_updated_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

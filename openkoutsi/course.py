@@ -61,6 +61,15 @@ BIKE_AND_KIT_MASS_KG = 10.0
 # smoothing ever runs.
 THIN_SPACING_M = 8.0
 
+# Ceiling on the thinned point count, whatever the spacing implies. At 8 m
+# this is ~320 km, which covers any course anyone rides in a day; beyond it the
+# spacing widens so an absurdly long upload degrades in resolution rather than
+# in size. The stored track is one JSON row that re-analysis re-materialises in
+# full, so an unbounded point count is an unbounded row — a 3000 km GPX
+# produced a 14 MB one. Segmentation is unaffected in practice: the widened
+# spacing stays far below the 200 m minimum segment.
+MAX_THINNED_POINTS = 40_000
+
 # Elevation is smoothed over this many metres of track before any gradient is
 # computed. DEM and barometric elevation are noisy at the 1–3 m level; over an
 # 8 m step that is tens of percent of instantaneous gradient, which a 60 m
@@ -320,30 +329,42 @@ def thin_track(route: Route, spacing_m: float = THIN_SPACING_M) -> CourseTrack:
 
     Distance accumulates by haversine with the same :data:`geo.MAX_STEP_M`
     glitch rule the activity path uses. The first and last points are always
-    kept. Points missing elevation are filled by linear interpolation over
+    kept, and the spacing widens if ``spacing_m`` would produce more than
+    :data:`MAX_THINNED_POINTS` of them. Points missing elevation are filled by linear interpolation over
     distance between their nearest elevated neighbours (ends take the nearest
     known value); a route with no elevation at all keeps ``None`` throughout
     and is rejected later by :func:`course_profile` with a reason code.
     """
-    kept: list[TrackPoint] = []
+    # Measure first, so the spacing can be widened before anything is kept.
+    # Deliberately re-derived here rather than read off ``Route.distance_m``:
+    # only the parser populates that, and a cap that quietly does nothing for
+    # a caller who built the route another way is not a cap.
+    cumulative: list[float] = []
     total = 0.0
     prev: tuple[float, float] | None = None
-    last_kept_at = -math.inf
-    final_index = len(route.points) - 1
-
-    for index, point in enumerate(route.points):
+    for point in route.points:
         if prev is not None:
             step = geo.haversine_m(prev[0], prev[1], point.latitude, point.longitude)
             if step <= geo.MAX_STEP_M:
                 total += step
         prev = (point.latitude, point.longitude)
+        cumulative.append(total)
 
+    if total > 0:
+        spacing_m = max(spacing_m, total / MAX_THINNED_POINTS)
+
+    kept: list[TrackPoint] = []
+    last_kept_at = -math.inf
+    final_index = len(route.points) - 1
+
+    for index, point in enumerate(route.points):
+        travelled = cumulative[index]
         # Positional, not `is`: a route may repeat the same point object (a
         # closed loop written with its start coordinate again), and identity
         # would then call an early point the last one.
         is_last = index == final_index
-        if total - last_kept_at >= spacing_m or not kept or is_last:
-            if kept and total - kept[-1].distance_m < 0.5:
+        if travelled - last_kept_at >= spacing_m or not kept or is_last:
+            if kept and travelled - kept[-1].distance_m < 0.5:
                 # Too close to the previous kept point to bound a meaningful
                 # gradient interval; keep whichever came later.
                 kept.pop()
@@ -351,11 +372,11 @@ def thin_track(route: Route, spacing_m: float = THIN_SPACING_M) -> CourseTrack:
                 TrackPoint(
                     latitude=point.latitude,
                     longitude=point.longitude,
-                    distance_m=total,
+                    distance_m=travelled,
                     elevation_m=point.elevation_m,
                 )
             )
-            last_kept_at = total
+            last_kept_at = travelled
 
     return CourseTrack(points=_interpolate_missing_elevation(kept))
 
@@ -479,23 +500,45 @@ def segment_by_gradient(profile: CourseProfile) -> list[Segment]:
         length = seg[1] - seg[0]
         return seg[2] / length if length > 0 else 0.0
 
-    changed = True
-    while changed and len(raw) > 1:
-        changed = False
-        for i, seg in enumerate(raw):
-            if seg[1] - seg[0] >= MIN_SEGMENT_LENGTH_M:
-                continue
-            neighbours = []
-            if i > 0:
-                neighbours.append(i - 1)
-            if i < len(raw) - 1:
-                neighbours.append(i + 1)
-            target = min(neighbours, key=lambda j: abs(_grad(raw[j]) - _grad(seg)))
-            lo, hi = min(i, target), max(i, target)
-            raw[lo] = [raw[lo][0], raw[hi][1], raw[lo][2] + raw[hi][2]]
-            del raw[hi]
-            changed = True
-            break
+    # Dissolve over a linked list, resuming at the merged segment rather than
+    # restarting the scan. Restarting from zero after every merge — and
+    # deleting from the middle of a list — makes this quadratic in the raw
+    # segment count, which is worst exactly on the rolling terrain the dissolve
+    # exists for: a 400 km course spent ~100 s here. Resuming is equivalent
+    # because everything before the merge point was already checked in this
+    # same traversal and the merge does not change it.
+    n = len(raw)
+    prev = list(range(-1, n - 1))
+    nxt = list(range(1, n + 1))
+    if nxt:
+        nxt[-1] = -1
+    dead = [False] * n
+
+    i = 0 if n else -1
+    while i != -1:
+        seg = raw[i]
+        if seg[1] - seg[0] >= MIN_SEGMENT_LENGTH_M:
+            i = nxt[i]
+            continue
+        p, q = prev[i], nxt[i]
+        if p == -1 and q == -1:
+            break  # the only segment left: nothing to dissolve into
+        if p == -1:
+            target = q
+        elif q == -1:
+            target = p
+        else:
+            # Ties go to the lower index, as `min` over [i-1, i+1] did.
+            target = p if abs(_grad(raw[p]) - _grad(seg)) <= abs(_grad(raw[q]) - _grad(seg)) else q
+        lo, hi = (p, i) if target == p else (i, q)
+        raw[lo] = [raw[lo][0], raw[hi][1], raw[lo][2] + raw[hi][2]]
+        dead[hi] = True
+        nxt[lo] = nxt[hi]
+        if nxt[hi] != -1:
+            prev[nxt[hi]] = lo
+        i = lo
+
+    raw = [raw[k] for k in range(n) if not dead[k]]
 
     segments: list[Segment] = []
     for index, seg in enumerate(raw):

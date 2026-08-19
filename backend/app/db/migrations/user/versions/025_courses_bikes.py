@@ -93,6 +93,7 @@ def upgrade() -> None:
             sa.Column("plan", sa.Text(), nullable=True),
             sa.Column("plan_mood", sa.String(), nullable=True),
             sa.Column("plan_status", sa.String(), nullable=True),
+            sa.Column("plan_run_id", sa.String(), nullable=True),
             sa.Column("plan_updated_at", sa.DateTime(timezone=True), nullable=True),
             sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
             sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),

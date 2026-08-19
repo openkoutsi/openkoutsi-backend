@@ -115,7 +115,16 @@ def store_course_blob(gpx_bytes: bytes, user_id: str, course_id: str) -> str:
     storage_dir.mkdir(parents=True, exist_ok=True)
     path = storage_dir / key
     path.write_bytes(gpx_bytes)
-    encrypt_file(path, user_id)
+    try:
+        encrypt_file(path, user_id)
+    except Exception:
+        # The file is on disk as plaintext GPX until `encrypt_file` returns, and
+        # it is *designed* to raise hard on a missing or rotated ENCRYPTION_KEY.
+        # Leaving it would strand a readable track that no row points at — so
+        # invisible to per-course delete and to the GDPR export, both of which
+        # iterate Course rows. Take it with us.
+        path.unlink(missing_ok=True)
+        raise
     return key
 
 
@@ -139,12 +148,17 @@ def read_course_blob(course: Course, user_id: str) -> bytes:
     return path.read_bytes()
 
 
-def delete_course_blob(course: Course, user_id: str) -> None:
+def delete_blob_by_key(key: str, user_id: str) -> None:
+    """Remove one stored blob by key. Safe to call for a file that is not there."""
     try:
-        resolve_course_blob(course.gpx_file_key, user_id).unlink(missing_ok=True)
+        resolve_course_blob(key, user_id).unlink(missing_ok=True)
     except ValueError:
         # A key that fails containment names nothing we should touch.
         pass
+
+
+def delete_course_blob(course: Course, user_id: str) -> None:
+    delete_blob_by_key(course.gpx_file_key, user_id)
 
 
 # ── persistence ───────────────────────────────────────────────────────────────
@@ -161,7 +175,8 @@ async def persist_analysis(
 
     Segments are replaced wholesale (they are derived state, like intervals),
     and any written plan is cleared: prose reasoned over the old segment table
-    is stale by definition.
+    is stale by definition. Clearing includes ``plan_run_id``, which is what
+    makes the clear stick against a run that is still streaming.
     """
     course.status = "ready"
     course.error = None
@@ -187,6 +202,11 @@ async def persist_analysis(
     course.plan_mood = None
     course.plan_status = None
     course.plan_updated_at = None
+    # Clearing the token is what actually stops an in-flight run: the generator
+    # holds its own session and commits after this one, so nulling the prose
+    # alone would let it write the stale plan straight back onto the new
+    # segment table. See `llm_course_plan.generate_course_plan_bg`.
+    course.plan_run_id = None
 
     await session.execute(
         delete(CourseSegment).where(CourseSegment.course_id == course.id)

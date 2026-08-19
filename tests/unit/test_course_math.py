@@ -126,6 +126,30 @@ class TestThinning:
         assert track.points[-1].latitude == pytest.approx(_ORIGIN_LAT)
         assert track.points[-1].distance_m == pytest.approx(1000, rel=0.02)
 
+    def test_the_point_count_is_bounded_however_long_the_course(self):
+        """An unbounded point count is an unbounded stored track: the thinned
+        series is one JSON row that every re-analysis re-materialises."""
+        # 1000 km at 10 m spacing would be 100k points at the 8 m target.
+        route = _route(10.0, 100_001, lambda d: 100.0)
+        track = course.thin_track(route)
+        assert len(track.points) <= course.MAX_THINNED_POINTS
+        # Still the whole course, just sampled more coarsely.
+        assert track.total_distance_m == pytest.approx(1_000_000, rel=0.01)
+        gaps = [
+            b.distance_m - a.distance_m
+            for a, b in zip(track.points, track.points[1:-1])
+        ]
+        assert all(g >= course.THIN_SPACING_M for g in gaps)
+
+    def test_an_ordinary_course_is_not_coarsened(self):
+        route = _route(1.0, 20_001, lambda d: 100.0)  # 20 km
+        track = course.thin_track(route)
+        gaps = [
+            b.distance_m - a.distance_m
+            for a, b in zip(track.points, track.points[1:-1])
+        ]
+        assert all(course.THIN_SPACING_M <= g < 2 * course.THIN_SPACING_M for g in gaps)
+
     def test_missing_elevations_are_interpolated_between_known_neighbours(self):
         def ele(d):
             return None if 300 <= d <= 500 else 0.10 * d
@@ -249,6 +273,38 @@ class TestSegmentation:
         assert all(
             s.length_m >= course.MIN_SEGMENT_LENGTH_M for s in segments
         ) or len(segments) == 1
+
+    def test_dissolving_a_very_long_course_stays_tractable(self):
+        """The dissolve used to restart its scan from zero after every merge,
+        and to delete from the middle of a list — quadratic in the raw segment
+        count, and worst on exactly the rolling terrain the dissolve exists
+        for. A 3000 km course spent ~10 s here; it now takes well under one.
+
+        An absolute budget rather than a ratio: a ratio between two timed runs
+        is noise-sensitive on a shared CI box, while the gap being defended
+        here is more than an order of magnitude.
+        """
+        import time
+
+        pts, d = [], 0.0
+        while d <= 3_000_000:  # 3000 km at ~9 m, the shape that exposed this
+            pts.append(
+                course.ProfilePoint(
+                    distance_m=d,
+                    elevation_m=100.0 + 6.0 * math.sin(2 * math.pi * d / 300.0),
+                    gradient=0.0,
+                )
+            )
+            d += 9.0
+        profile = course.CourseProfile(points=pts, total_distance_m=pts[-1].distance_m)
+
+        started = time.perf_counter()
+        segments = course.segment_by_gradient(profile)
+        elapsed = time.perf_counter() - started
+
+        assert segments
+        # Quadratic measured ~10 s here and grows from there; linear is <1 s.
+        assert elapsed < 6.0, f"segmentation took {elapsed:.1f}s — quadratic again?"
 
     def test_several_climbs_stay_separate(self):
         def grad(d):

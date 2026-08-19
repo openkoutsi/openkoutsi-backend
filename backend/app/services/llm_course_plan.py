@@ -17,10 +17,11 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from typing import AsyncIterator, Sequence
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from openkoutsi import course as course_math
 
@@ -32,6 +33,11 @@ from .llm_training_status_analyzer import _decorate, _local_now, _MOOD_RULE
 from .stranded_runs import settle_course_plan
 
 log = logging.getLogger(__name__)
+
+# How often the stream checks that it still owns the row. Matches the
+# 500 ms commit cadence in `stream_into_db`, so it is one extra indexed
+# read per commit rather than one per chunk.
+_GUARD_INTERVAL_S = 0.5
 
 _MOOD_RE = re.compile(r"^MOOD:\s?(cheer|knowing|neutral|stern)\s*$", re.IGNORECASE)
 _FALLBACK_MOOD = "knowing"
@@ -236,14 +242,38 @@ def _stream_course_plan(
     )
 
 
+async def _run_is_current(session, course_id: str, run_id: str | None) -> bool:
+    """Does the row still belong to this plan run?
+
+    A fresh SELECT rather than the loaded instance's attribute: the point is to
+    see what *another* session committed while this one was streaming.
+    """
+    if run_id is None:
+        return True  # a caller that predates run tokens keeps the old behaviour
+    current = (
+        await session.execute(select(Course.plan_run_id).where(Course.id == course_id))
+    ).scalar_one_or_none()
+    return current == run_id
+
+
 async def generate_course_plan_bg(
     athlete_id: str,
     course_id: str,
     user_id: str,
     locale: str | None = None,
+    run_id: str | None = None,
 ) -> None:
     """Background task: stream the written plan into ``courses.plan`` every
-    500 ms, parse the leading MOOD tag, settle to 'done'/'error'."""
+    500 ms, parse the leading MOOD tag, settle to 'done'/'error'.
+
+    This runs on **its own session** and commits after the request that started
+    it, so it can outlive the state it was started for: re-analysing a course
+    mid-stream clears the plan columns, and without a guard the next progress
+    commit would put prose describing the *old* segment table straight back —
+    ending on ``done`` with power targets keyed to distances that no longer
+    exist. ``run_id`` is the guard: the trigger stamps it, re-analysis clears
+    it, and a run whose token no longer matches discards its own writes.
+    """
 
     async def _clear_pending(recovery_session) -> None:
         result = await recovery_session.execute(
@@ -297,13 +327,33 @@ async def generate_course_plan_bg(
                 course.plan_status = "error"
                 course.plan_updated_at = datetime.now(timezone.utc)
 
-            await stream_into_db(
-                session,
-                lambda usage_out: _stream_course_plan(
+            async def _guarded(usage_out: dict):
+                """The plan stream, stopped early once this run is superseded.
+
+                Checked on roughly the flush cadence rather than per chunk: one
+                cheap indexed read per commit, which is what bounds how long a
+                superseded run keeps spending tokens. The reconciliation below
+                is what makes the guarantee — this only stops the waste.
+                """
+                last_check = time.monotonic()
+                async for chunk in _stream_course_plan(
                     athlete, user_id, course, segments,
                     now, locale=resolved_locale, coaching_style=coaching_style,
                     usage_out=usage_out,
-                ),
+                ):
+                    if time.monotonic() - last_check >= _GUARD_INTERVAL_S:
+                        last_check = time.monotonic()
+                        if not await _run_is_current(session, course_id, run_id):
+                            log.info(
+                                "Course plan for course %s superseded mid-stream; stopping",
+                                course_id,
+                            )
+                            return
+                    yield chunk
+
+            await stream_into_db(
+                session,
+                _guarded,
                 on_progress=_set_prose,
                 on_done=_finish,
                 on_error=_fail,
@@ -311,3 +361,21 @@ async def generate_course_plan_bg(
                 feature="course_plan",
                 label=f"Course plan for course {course_id}",
             )
+
+            # The guarantee. `stream_into_db` has committed by now, whichever
+            # way it ended, so a run that lost its claim has to take its own
+            # writes back out — the callbacks cannot do it themselves, being
+            # synchronous and unable to read another session's commit.
+            if not await _run_is_current(session, course_id, run_id):
+                await session.execute(
+                    update(Course)
+                    .where(Course.id == course_id)
+                    .values(
+                        plan=None, plan_mood=None, plan_status=None,
+                        plan_updated_at=None,
+                    )
+                )
+                await session.commit()
+                log.info(
+                    "Discarded a superseded course plan for course %s", course_id
+                )
