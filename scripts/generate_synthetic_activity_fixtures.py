@@ -179,6 +179,18 @@ def _course_elevation(metres: float) -> float:
     return 70.0 + 0.005 * (metres - 7500)      # 7.5 km false flat at 0.5%
 
 
+# The same course as a *route planner* exports it rather than as a GPS records
+# it: point spacing varies by an order of magnitude — a point every 10 m through
+# the turns, one every 500 m along the straights — because a planner emits the
+# geometry it needs to draw the line, not a sample rate. Sparse stretches are
+# what collapsed the chart payload into repeated distances, so the fixture keeps
+# a gap far wider than the 400-point grid it is resampled onto.
+_COURSE_DENSE_SPACING_M = 10.0
+_COURSE_SPARSE_SPACING_M = 500.0
+_COURSE_DENSE_RUN_M = 500.0    # every turn is this long …
+_COURSE_TURN_INTERVAL_M = 1500.0  # … and they come this often
+
+
 def _course_gpx(*, with_elevation: bool = True) -> str:
     head = (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -203,6 +215,31 @@ def _course_gpx(*, with_elevation: bool = True) -> str:
     return head + "".join(body) + "    </trkseg>\n  </trk>\n</gpx>\n"
 
 
+def _course_gpx_sparse() -> str:
+    """The course fixture with a route planner's uneven point spacing."""
+    head = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<gpx creator="openkoutsi synthetic fixtures" version="1.1"\n'
+        '     xmlns="http://www.topografix.com/GPX/1/1">\n'
+        "  <trk>\n"
+        f"    <name>{escape('Sparse Synthetic Course')}</name>\n"
+        "    <type>cycling</type>\n"
+        "    <trkseg>\n"
+    )
+    body = []
+    metres = 0.0
+    while metres <= _COURSE_LENGTH_M:
+        lat = _ORIGIN_LAT + metres / _M_PER_DEG_LAT  # due north
+        body.append(
+            f'      <trkpt lat="{lat:.7f}" lon="{_ORIGIN_LON:.7f}">\n'
+            f"        <ele>{_course_elevation(metres):.1f}</ele>\n"
+            "      </trkpt>\n"
+        )
+        in_turn = (metres % _COURSE_TURN_INTERVAL_M) < _COURSE_DENSE_RUN_M
+        metres += _COURSE_DENSE_SPACING_M if in_turn else _COURSE_SPARSE_SPACING_M
+    return head + "".join(body) + "    </trkseg>\n  </trk>\n</gpx>\n"
+
+
 def main() -> None:
     FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -213,6 +250,7 @@ def main() -> None:
         ("synthetic_ride.tcx", _tcx()),
         ("synthetic_course.gpx", _course_gpx()),
         ("synthetic_course_no_ele.gpx", _course_gpx(with_elevation=False)),
+        ("synthetic_course_sparse.gpx", _course_gpx_sparse()),
     ):
         path = FIXTURES_DIR / name
         path.write_text(text, encoding="utf-8")

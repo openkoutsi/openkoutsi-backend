@@ -13,6 +13,7 @@ The properties that matter, in the order the issue states them:
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from unittest.mock import patch
 
@@ -28,11 +29,20 @@ _TEST_USER_ID = "test-user-00000000"
 FIXTURES = Path(__file__).parent.parent.parent / "testdata" / "fixtures"
 COURSE_GPX = FIXTURES / "synthetic_course.gpx"
 COURSE_NO_ELE_GPX = FIXTURES / "synthetic_course_no_ele.gpx"
+COURSE_SPARSE_GPX = FIXTURES / "synthetic_course_sparse.gpx"
 
 # The fixture's geography, restated from the generator: due north from open
 # water. These exact strings must never appear in an API response.
 FIXTURE_LAT_PREFIX = "61.5"
 FIXTURE_LON = "20.5"
+
+# A coordinate leaks as a *number*, not as a fragment of one: a longitude that
+# escaped would serialise as `20.5`, while `5820.52974497276` is a distance in
+# metres that happens to read the same in the middle. The chart profile carries
+# 400 such distances at full float precision, so a bare substring scan collides
+# with one sooner or later — matching whole number tokens keeps the check strict
+# without depending on that luck.
+_LON_TOKEN = re.compile(rf"(?<![\d.]){re.escape(FIXTURE_LON)}0*(?![\d])")
 
 
 async def _seed_rider(session, seeded_athlete):
@@ -109,8 +119,25 @@ class TestCourseUpload:
             await client.get(f"/api/courses/{course_id}/plan", headers=auth_headers),
         ):
             text = resp.text.lower()
-            for forbidden in ("latitude", "longitude", '"lat"', '"lon"', "track", FIXTURE_LON):
+            for forbidden in ("latitude", "longitude", '"lat"', '"lon"', "track"):
                 assert forbidden not in text, f"{forbidden!r} leaked into {resp.request.url}"
+            assert not _LON_TOKEN.search(text), f"a coordinate leaked into {resp.request.url}"
+
+        # The chart profile is the one series in these responses that carries a
+        # per-point payload, so its shape is asserted rather than assumed: three
+        # numbers per point, never the four a stored track point has.
+        profile = created.json()["profile"]
+        assert profile
+        for point in profile:
+            assert len(point) == 3
+            assert all(isinstance(v, (int, float)) for v in point)
+
+    def test_the_coordinate_guard_catches_a_coordinate(self):
+        """The guard above is only worth having if it still fails on a leak."""
+        for leaked in ('{"lon":20.5}', 'lon="20.5000000"', "[61.5,20.5]", " 20.5,"):
+            assert _LON_TOKEN.search(leaked), leaked
+        for innocent in ("5820.52974497276", "120.5", "20.51", '"distance_m":1420.5123'):
+            assert not _LON_TOKEN.search(innocent), innocent
 
     async def test_the_gpx_is_encrypted_at_rest_and_round_trips(
         self, client, auth_headers, session, seeded_athlete
@@ -168,6 +195,27 @@ class TestCourseUpload:
         # The athlete still gets the course: a segment table with no splits.
         assert len(data["segments"]) >= 3
         assert all(s["power_w"] is None for s in data["segments"])
+
+    async def test_a_planner_gpx_still_gets_an_evenly_spaced_profile(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        # A route planner's export, not a recording: 10 m spacing through the
+        # turns and 500 m along the straights. The chart sizes every mark from
+        # the smallest gap in the payload, so a repeated distance draws an
+        # empty plot — axes and all — rather than a profile.
+        await _seed_rider(session, seeded_athlete)
+        bike = await _create_bike(client, auth_headers)
+        resp = await _upload_course(
+            client, auth_headers, bike["id"], path=COURSE_SPARSE_GPX
+        )
+        assert resp.status_code == 201, resp.text
+        profile = resp.json()["profile"]
+        assert profile and len(profile) <= 400
+
+        gaps = [b[0] - a[0] for a, b in zip(profile, profile[1:])]
+        assert min(gaps) > 0
+        assert max(gaps) == pytest.approx(min(gaps), rel=1e-9)
+        assert profile[-1][0] == pytest.approx(15_000, rel=0.01)
 
     async def test_a_file_without_elevation_is_rejected_with_a_reason(
         self, client, auth_headers, session, seeded_athlete
