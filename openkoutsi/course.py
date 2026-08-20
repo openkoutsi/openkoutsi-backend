@@ -831,21 +831,60 @@ def key_climbs(plans: Sequence[SegmentPlan]) -> list[ClimbFeature]:
 CHART_PROFILE_MAX_POINTS = 400
 
 
-def _downsample_profile(points: Sequence[ProfilePoint]) -> list[ProfilePoint]:
-    if len(points) <= CHART_PROFILE_MAX_POINTS:
+def _resample_profile(points: Sequence[ProfilePoint]) -> list[ProfilePoint]:
+    """The chart payload: at most :data:`CHART_PROFILE_MAX_POINTS` samples on an
+    **evenly spaced** distance grid, elevation and gradient interpolated.
+
+    Even spacing is a contract, not a detail. A profile chart draws one mark per
+    point and sizes every mark from the *smallest* gap in the series, so an
+    unevenly sampled payload draws a hairline comb — and a payload with two
+    samples at the same distance sizes every mark to zero and draws nothing at
+    all. Both are what the athlete sees: an empty chart with correct axes.
+
+    Snapping each grid target to the last source point at or below it (what this
+    did before) produces exactly that. It is safe only while the source is dense
+    everywhere: a GPX from a route planner is not — long straights carry a point
+    per kilometre while junctions carry one every few metres — so wherever the
+    track was sparser than the grid, consecutive targets snapped to the *same*
+    point and the payload carried repeated distances.
+
+    Interpolating between the two bracketing samples instead is both uniform and
+    honest: between two real samples the chart draws a straight line either way,
+    so the reconstruction is the one the athlete would have seen, on a grid the
+    chart can actually mark. The grid never carries more samples than the source
+    did — a sparse course stays a sparse course, at its own resolution — and its
+    ends are the source's own first and last points, exactly.
+    """
+    n = min(CHART_PROFILE_MAX_POINTS, len(points))
+    if n < 2:
         return list(points)
-    total = points[-1].distance_m - points[0].distance_m
+    start = points[0].distance_m
+    total = points[-1].distance_m - start
     if total <= 0:
-        return list(points[: CHART_PROFILE_MAX_POINTS])
+        # No distance to spread a grid over (a stationary or single-place
+        # track). Nothing to resample onto; hand back what there is.
+        return list(points[:n])
+
     out: list[ProfilePoint] = []
+    # `j` walks forward with the targets — the grid is monotonic, so the search
+    # for each bracketing pair resumes where the last one ended.
     j = 0
-    for i in range(CHART_PROFILE_MAX_POINTS):
-        target = points[0].distance_m + total * i / (CHART_PROFILE_MAX_POINTS - 1)
-        while j + 1 < len(points) and points[j + 1].distance_m <= target:
+    last = len(points) - 1
+    for i in range(n):
+        target = start + total * i / (n - 1)
+        while j + 1 < last and points[j + 1].distance_m <= target:
             j += 1
-        out.append(points[j])
-    if out[-1] is not points[-1]:
-        out[-1] = points[-1]
+        low, high = points[j], points[j + 1]
+        span = high.distance_m - low.distance_m
+        frac = (target - low.distance_m) / span if span > 0 else 0.0
+        frac = min(max(frac, 0.0), 1.0)
+        out.append(
+            ProfilePoint(
+                distance_m=target,
+                elevation_m=low.elevation_m + frac * (high.elevation_m - low.elevation_m),
+                gradient=low.gradient + frac * (high.gradient - low.gradient),
+            )
+        )
     return out
 
 
@@ -877,7 +916,7 @@ def analyze_course(
         elevation_loss_m=loss,
         min_elevation_m=min(elevations),
         max_elevation_m=max(elevations),
-        profile=_downsample_profile(profile.points),
+        profile=_resample_profile(profile.points),
         segments=segments,
         pacing=pacing,
     )

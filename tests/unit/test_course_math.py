@@ -223,6 +223,127 @@ class TestProfile:
         assert reason == "course_too_short"
 
 
+class TestChartProfile:
+    """The chart payload: evenly spaced samples, at most the cap, ends exact.
+
+    Even spacing is the property the chart depends on, not a nicety. A profile
+    chart draws one mark per point and sizes every mark from the *smallest* gap
+    in the series, so a payload that repeats a distance sizes them all to zero
+    and draws nothing: correct axes, correct selection highlight, empty plot.
+    Snapping each grid target to the last source point at or below it did
+    exactly that on any track sparser than the grid — which a route planner's
+    export is, along every straight it draws with two points.
+    """
+
+    def _uneven(self) -> list[course.ProfilePoint]:
+        """A planner's spacing: 10 m through the turns, 500 m on the straights."""
+        points: list[course.ProfilePoint] = []
+        d = 0.0
+        while d <= 15_000.0:
+            points.append(
+                course.ProfilePoint(
+                    distance_m=d, elevation_m=100.0 + 0.05 * d, gradient=0.05
+                )
+            )
+            d += 10.0 if (d % 1500.0) < 500.0 else 500.0
+        return points
+
+    def _gaps(self, points) -> list[float]:
+        return [b.distance_m - a.distance_m for a, b in zip(points, points[1:])]
+
+    def test_a_sparse_track_never_repeats_a_distance(self):
+        source = self._uneven()
+        assert len(source) > course.CHART_PROFILE_MAX_POINTS  # the case that broke
+        out = course._resample_profile(source)
+
+        assert len(out) == course.CHART_PROFILE_MAX_POINTS
+        assert min(self._gaps(out)) > 0  # a repeat is a chart that draws nothing
+
+    def test_the_grid_is_even(self):
+        out = course._resample_profile(self._uneven())
+        gaps = self._gaps(out)
+        assert max(gaps) == pytest.approx(min(gaps), rel=1e-9)
+
+    def test_the_ends_are_the_sources_own_ends(self):
+        source = self._uneven()
+        out = course._resample_profile(source)
+        for sampled, original in ((out[0], source[0]), (out[-1], source[-1])):
+            assert sampled.distance_m == pytest.approx(original.distance_m)
+            assert sampled.elevation_m == pytest.approx(original.elevation_m)
+
+    def test_a_grid_point_between_samples_is_the_line_between_them(self):
+        # 200 m of nothing between two samples: the chart draws a straight line
+        # across it either way, so the resampled points sit on that line.
+        source = [
+            course.ProfilePoint(distance_m=0.0, elevation_m=100.0, gradient=0.0),
+            course.ProfilePoint(distance_m=200.0, elevation_m=120.0, gradient=0.10),
+            course.ProfilePoint(distance_m=400.0, elevation_m=120.0, gradient=0.0),
+        ]
+        out = course._resample_profile(source)
+        assert len(out) == 3  # never more samples than the source had
+        assert out[1].distance_m == pytest.approx(200.0)
+        assert out[1].elevation_m == pytest.approx(120.0)
+
+    def test_a_dense_track_keeps_its_shape(self):
+        # 15 km at 8 m spacing: the grid is coarser than the source, so every
+        # sample is an interpolation between neighbours a few metres apart.
+        source = [
+            course.ProfilePoint(distance_m=d * 8.0, elevation_m=100.0 + 0.04 * d * 8.0, gradient=0.04)
+            for d in range(1876)
+        ]
+        out = course._resample_profile(source)
+        assert len(out) == course.CHART_PROFILE_MAX_POINTS
+        for p in out:
+            assert p.elevation_m == pytest.approx(100.0 + 0.04 * p.distance_m, abs=0.01)
+            assert p.gradient == pytest.approx(0.04)
+
+    def test_a_short_series_is_not_padded_with_invented_samples(self):
+        source = [
+            course.ProfilePoint(distance_m=i * 100.0, elevation_m=100.0, gradient=0.0)
+            for i in range(20)
+        ]
+        assert len(course._resample_profile(source)) == 20
+
+    @pytest.mark.parametrize(
+        "source",
+        [
+            [],
+            [course.ProfilePoint(distance_m=0.0, elevation_m=10.0, gradient=0.0)],
+            # A track that never moves: no distance to lay a grid over.
+            [
+                course.ProfilePoint(distance_m=5.0, elevation_m=10.0, gradient=0.0),
+                course.ProfilePoint(distance_m=5.0, elevation_m=11.0, gradient=0.0),
+            ],
+        ],
+    )
+    def test_degenerate_series_are_handed_back_rather_than_divided_by_zero(self, source):
+        assert course._resample_profile(source) == source
+
+    def test_the_analysis_payload_is_even_for_a_planner_style_route(self):
+        # End to end from a GPX-shaped route: uneven spacing in, even out.
+        def ele(d):
+            return 100.0 + (0.06 * (d - 4000) if 4000 <= d < 6000 else 0.0)
+
+        points = []
+        d = 0.0
+        while d <= 15_000.0:
+            points.append(
+                RoutePoint(
+                    latitude=_ORIGIN_LAT + d / _M_PER_DEG_LAT,
+                    longitude=_ORIGIN_LON,
+                    elevation_m=ele(min(d, 6000.0)),
+                )
+            )
+            d += 10.0 if (d % 1500.0) < 500.0 else 500.0
+
+        profile, reason = course.course_profile(course.thin_track(Route(points=points)))
+        assert reason is None
+        analysis = course.analyze_course(profile, RIDER, BIKE)
+        gaps = self._gaps(analysis.profile)
+        assert min(gaps) > 0
+        assert max(gaps) == pytest.approx(min(gaps), rel=1e-9)
+
+
 class TestSegmentation:
     def test_flat_climb_flat_becomes_three_segments(self):
         def grad(d):
