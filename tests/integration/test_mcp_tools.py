@@ -1656,3 +1656,75 @@ async def test_like_wildcards_in_a_name_search_are_literal(
         session=session, athlete=training_data, registry_session=registry_session,
     )
     assert none_match.data["total"] == 0
+
+
+# ── The route/LLM wall (issue #55) ───────────────────────────────────────────
+#
+# Stage 0 (#54) made storing a course expected; route data *leaving* is still
+# not. Cross-user isolation comes free from the per-user database, but keeping
+# coordinates off the MCP surface is a rule that has to be enforced and tested
+# on purpose. Stage 1 deliberately registers no course tool at all, so the
+# wall has two halves: nothing on the surface talks about courses, and nothing
+# on the surface can emit a stored coordinate even with a course in the DB.
+
+
+def test_no_tool_exposes_courses_or_routes():
+    """No registered tool may name or describe course/route data — Stage 1
+    puts nothing course-shaped on the MCP surface at all."""
+    import re
+
+    for t in all_tools():
+        surface = " ".join([t.name, t.title, t.description]).lower()
+        for forbidden in ("course", "route", "gpx"):
+            assert not re.search(rf"\b{forbidden}s?\b", surface), (
+                f"tool {t.name} mentions {forbidden!r}"
+            )
+
+
+async def test_no_tool_leaks_a_stored_course(
+    caller, session, training_data, registry_session
+):
+    """With a course (and its coordinate-bearing track) in the database, every
+    tool's output stays free of the track's coordinates and of course
+    vocabulary. The coordinates are the synthetic course fixture's: a line due
+    north from (61.5, 20.5)."""
+    from backend.app.models.user_orm import Course, CourseSegment, CourseTrack
+
+    course = Course(
+        id="course-mcp",
+        athlete_id=training_data.id,
+        name="Secret loop",
+        gpx_file_key="course-course-mcp.gpx",
+        distance_m=15_000.0,
+        elevation_gain_m=180.0,
+    )
+    session.add(course)
+    session.add(
+        CourseTrack(
+            course_id="course-mcp",
+            points=[[61.5 + i * 0.001, 20.5, 25.0, i * 111.32] for i in range(60)],
+        )
+    )
+    session.add(
+        CourseSegment(
+            course_id="course-mcp",
+            segment_index=0,
+            start_distance_m=0.0,
+            end_distance_m=15_000.0,
+            length_m=15_000.0,
+            avg_gradient=0.01,
+            elevation_change_m=150.0,
+            segment_type="flat",
+        )
+    )
+    await session.commit()
+
+    for t in all_tools():
+        args = {"activity_id": "act-endurance"} if t.name == "get_activity_detail" else {}
+        result = await run(
+            t.name, args, caller=caller, session=session,
+            athlete=training_data, registry_session=registry_session,
+        )
+        text = result.text().lower()
+        for forbidden in ("61.5", "20.5", "latitude", "longitude", "secret loop", "course-mcp"):
+            assert forbidden not in text, f"{forbidden!r} leaked from tool {t.name}"

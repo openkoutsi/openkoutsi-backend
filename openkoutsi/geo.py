@@ -119,6 +119,52 @@ def _smoothed(values: Sequence[float], window: int) -> list[float]:
     return out
 
 
+def smoothed_by_distance(
+    values: Sequence[float],
+    distances_m: Sequence[float],
+    window_m: float,
+) -> list[float]:
+    """Centred moving average over a *distance* window rather than a sample count.
+
+    :func:`_smoothed` averages a fixed number of samples, which is right for a
+    1 Hz activity stream where samples are evenly spaced in time. A course has
+    no clock: its points are spaced by metres, and unevenly, so "fifteen
+    samples" means 100 m on one stretch and 2 km on another. Here the window is
+    ``window_m`` metres of track centred on each point — every value whose
+    distance lies within ``window_m / 2`` of the point's own contributes.
+
+    ``distances_m`` must be non-decreasing (a running distance along the track,
+    as :func:`cumulative_distance_m` produces) and the same length as
+    ``values``. Like :func:`_smoothed`, the window shrinks at the ends of the
+    series, and a window that never spans more than one point returns the
+    input unchanged.
+    """
+    n = len(values)
+    if n != len(distances_m):
+        raise ValueError("values and distances_m must be the same length")
+    if n < 3 or window_m <= 0.0:
+        return list(values)
+
+    prefix = [0.0]
+    for value in values:
+        prefix.append(prefix[-1] + value)
+
+    half = window_m / 2.0
+    out: list[float] = []
+    lo = 0
+    hi = 0
+    for i in range(n):
+        centre = distances_m[i]
+        while distances_m[lo] < centre - half:
+            lo += 1
+        if hi < i:
+            hi = i
+        while hi + 1 < n and distances_m[hi + 1] <= centre + half:
+            hi += 1
+        out.append((prefix[hi + 1] - prefix[lo]) / (hi + 1 - lo))
+    return out
+
+
 def elevation_gain_m(
     altitudes: Iterable[float | None],
     *,

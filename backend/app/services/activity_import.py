@@ -52,6 +52,7 @@ from backend.app.models.user_orm import (
 from backend.app.services.achievements import recompute_achievements_safe
 from backend.app.services.activity_archive import (
     ArchiveError,
+    ArchiveTooLarge,
     ExpandedFile,
     expand_all,
 )

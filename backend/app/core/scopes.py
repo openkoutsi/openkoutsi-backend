@@ -80,6 +80,10 @@ SCOPES: dict[str, str] = {
     "achievements:write": "Mark achievements as seen.",
     "integrations:read": "Read connected provider integrations.",
     "integrations:write": "Connect, sync and disconnect provider integrations.",
+    "bikes:read": "Read bikes.",
+    "bikes:write": "Create, edit and delete bikes.",
+    "courses:read": "Read courses, their segment tables and pacing plans.",
+    "courses:write": "Upload, re-analyse and delete courses.",
 }
 
 #: Scopes that grant more than their name suggests and are presented apart from

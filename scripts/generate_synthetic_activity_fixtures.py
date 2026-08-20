@@ -158,6 +158,51 @@ def _tcx() -> str:
     )
 
 
+# ── the course fixture (issue #55) ───────────────────────────────────────────
+#
+# A *course* is a route to be ridden, not a ride that happened: no <time>
+# elements at all, ~10 m point spacing, and an elevation profile with real
+# structure — flat, a distinct climb, a descent, flat again — so segmentation
+# tests have boundaries to find. Distances and elevations are stated here so
+# tests can assert against the generator's numbers rather than the parser's.
+_COURSE_LENGTH_M = 15_000.0
+_COURSE_SPACING_M = 10.0
+
+
+def _course_elevation(metres: float) -> float:
+    if metres < 4000:
+        return 20.0
+    if metres < 6000:
+        return 20.0 + 0.07 * (metres - 4000)   # 2 km climb at 7% → +140 m
+    if metres < 7500:
+        return 160.0 - 0.06 * (metres - 6000)  # 1.5 km descent at 6% → −90 m
+    return 70.0 + 0.005 * (metres - 7500)      # 7.5 km false flat at 0.5%
+
+
+def _course_gpx(*, with_elevation: bool = True) -> str:
+    head = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<gpx creator="openkoutsi synthetic fixtures" version="1.1"\n'
+        '     xmlns="http://www.topografix.com/GPX/1/1">\n'
+        "  <trk>\n"
+        f"    <name>{escape('Synthetic Course')}</name>\n"
+        "    <type>cycling</type>\n"
+        "    <trkseg>\n"
+    )
+    body = []
+    metres = 0.0
+    while metres <= _COURSE_LENGTH_M:
+        lat = _ORIGIN_LAT + metres / _M_PER_DEG_LAT  # due north
+        ele = f"        <ele>{_course_elevation(metres):.1f}</ele>\n" if with_elevation else ""
+        body.append(
+            f'      <trkpt lat="{lat:.7f}" lon="{_ORIGIN_LON:.7f}">\n'
+            + ele
+            + "      </trkpt>\n"
+        )
+        metres += _COURSE_SPACING_M
+    return head + "".join(body) + "    </trkseg>\n  </trk>\n</gpx>\n"
+
+
 def main() -> None:
     FIXTURES_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -166,6 +211,8 @@ def main() -> None:
         ("synthetic_ride.gpx", _gpx(with_power=True)),
         ("synthetic_hr_only.gpx", _gpx(with_power=False, with_cadence=False)),
         ("synthetic_ride.tcx", _tcx()),
+        ("synthetic_course.gpx", _course_gpx()),
+        ("synthetic_course_no_ele.gpx", _course_gpx(with_elevation=False)),
     ):
         path = FIXTURES_DIR / name
         path.write_text(text, encoding="utf-8")

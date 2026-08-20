@@ -105,6 +105,17 @@ def settle_goal_guidance(goal, now: Optional[datetime] = None) -> bool:
     return True
 
 
+def settle_course_plan(course, now: Optional[datetime] = None) -> bool:
+    if course.plan_status != "pending":
+        return False
+    course.plan_status = "error"
+    # Retire the run token as well: a run declared dead must not be able to
+    # come back and overwrite the settled state if it was merely slow.
+    course.plan_run_id = None
+    course.plan_updated_at = now or datetime.now(timezone.utc)
+    return True
+
+
 def settle_activity_analysis(activity, now: Optional[datetime] = None) -> bool:
     if activity.analysis_status != "pending":
         return False
@@ -153,7 +164,7 @@ def user_ids_with_a_database() -> list[str]:
 async def settle_stranded_user_runs(user_id: str, now: Optional[datetime] = None) -> int:
     """Settle every ``pending`` row in one user's database. Returns how many."""
     from backend.app.db.user_session import get_user_session_factory
-    from backend.app.models.user_orm import Activity, Athlete, Goal
+    from backend.app.models.user_orm import Activity, Athlete, Course, Goal
 
     now = now or datetime.now(timezone.utc)
     settled = 0
@@ -187,6 +198,14 @@ async def settle_stranded_user_runs(user_id: str, now: Optional[datetime] = None
         ).scalars().all()
         for activity in activities:
             settled += settle_activity_analysis(activity, now)
+
+        courses = (
+            await session.execute(
+                select(Course).where(Course.plan_status == "pending")
+            )
+        ).scalars().all()
+        for course in courses:
+            settled += settle_course_plan(course, now)
 
         if settled:
             await session.commit()
