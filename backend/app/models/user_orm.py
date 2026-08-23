@@ -740,8 +740,13 @@ class Course(UserBase):
     status: Mapped[str] = mapped_column(String, default="ready", nullable=False)
     error: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
-    # Athlete-facing inputs.
+    # Athlete-facing inputs. The two targets are alternatives — a course is
+    # paced to a finish time or to a number of watts, never to both — so the
+    # API clears one when the other is set and refuses a request carrying both.
     target_time_s: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # The *average* power asked of the whole ride, not a per-segment target:
+    # the effort model still spends on the climbs and eases on the descents.
+    target_power_w: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     start_time: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

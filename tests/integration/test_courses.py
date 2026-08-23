@@ -351,6 +351,30 @@ class TestCourseLifecycle:
         await session.refresh(course)
         assert course.plan is None and course.plan_mood is None
 
+    async def test_reanalysis_answers_with_the_new_segment_table(self, client, auth_headers, session, seeded_athlete):
+        # The sessions run with `expire_on_commit=False`, so the re-select that
+        # builds the response finds the course already in the identity map. Its
+        # eagerly loaded segments are the ones from *before* the re-analysis
+        # unless the query says otherwise — which put the new summary numbers
+        # over the old splits in the reply, and made the change look like it
+        # had not happened until the page refetched.
+        await _seed_rider(session, seeded_athlete)
+        bike = await _create_bike(client, auth_headers)
+        created = (await _upload_course(client, auth_headers, bike["id"])).json()
+        before = [s["power_w"] for s in created["segments"]]
+
+        resp = await client.post(
+            f"/api/courses/{created['id']}/reanalyze",
+            json={"target_power_w": 300},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        after = [s["power_w"] for s in resp.json()["segments"]]
+        assert after != before
+        # And the reply matches what a fresh read of the course says.
+        fetched = await client.get(f"/api/courses/{created['id']}", headers=auth_headers)
+        assert [s["power_w"] for s in fetched.json()["segments"]] == after
+
     async def test_reanalysis_without_a_bike_is_a_409(
         self, client, auth_headers, session, seeded_athlete
     ):
@@ -388,6 +412,137 @@ class TestCourseLifecycle:
         assert cleared.status_code == 200
         assert cleared.json()["target_time_s"] is None
         assert cleared.json()["feasible"] is True
+
+
+class TestTargetAdjustment:
+    """Issue #61 — a course is paced to a finish time *or* to an average power,
+    and either can be set, swapped or cleared after the upload without sending
+    the GPX again."""
+
+    async def _course(self, client, auth_headers, **form):
+        bike = await _create_bike(client, auth_headers)
+        resp = await _upload_course(client, auth_headers, bike["id"], **form)
+        assert resp.status_code == 201, resp.text
+        return resp.json()
+
+    def _avg_power_w(self, segments) -> float:
+        rows = [s for s in segments if s["duration_s"]]
+        total = sum(s["duration_s"] for s in rows)
+        return sum(s["power_w"] * s["duration_s"] for s in rows) / total
+
+    async def test_a_course_can_be_uploaded_with_a_power_target(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        await _seed_rider(session, seeded_athlete)
+        data = await self._course(client, auth_headers, target_power_w=200)
+        assert data["target_power_w"] == 200
+        assert data["target_time_s"] is None
+        assert data["feasible"] is True
+        assert self._avg_power_w(data["segments"]) == pytest.approx(200.0, rel=0.02)
+
+    async def test_naming_both_targets_at_once_is_refused(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        await _seed_rider(session, seeded_athlete)
+        bike = await _create_bike(client, auth_headers)
+        resp = await _upload_course(
+            client, auth_headers, bike["id"], target_time_s=3600, target_power_w=200
+        )
+        assert resp.status_code == 422
+        assert resp.json()["detail"]["code"] == "conflicting_targets"
+
+    async def test_switching_from_a_time_target_to_a_power_target(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        await _seed_rider(session, seeded_athlete)
+        created = await self._course(client, auth_headers, target_time_s=3600)
+        assert created["target_time_s"] == 3600
+
+        resp = await client.post(
+            f"/api/courses/{created['id']}/reanalyze",
+            json={"target_power_w": 180},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        # Setting one target clears the other — they are alternatives, and a
+        # course carrying both would have no defined answer.
+        assert data["target_power_w"] == 180
+        assert data["target_time_s"] is None
+        assert self._avg_power_w(data["segments"]) == pytest.approx(180.0, rel=0.02)
+        assert data["predicted_time_s"] != created["predicted_time_s"]
+
+    async def test_switching_back_to_a_time_target(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        await _seed_rider(session, seeded_athlete)
+        created = await self._course(client, auth_headers, target_power_w=200)
+
+        resp = await client.post(
+            f"/api/courses/{created['id']}/reanalyze",
+            json={"target_time_s": 2700},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["target_time_s"] == 2700
+        assert data["target_power_w"] is None
+        assert data["predicted_time_s"] == pytest.approx(2700, rel=0.02)
+
+    async def test_a_power_target_can_be_cleared(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        await _seed_rider(session, seeded_athlete)
+        created = await self._course(client, auth_headers, target_power_w=200)
+
+        resp = await client.post(
+            f"/api/courses/{created['id']}/reanalyze",
+            json={"target_power_w": None},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["target_power_w"] is None
+        assert data["target_time_s"] is None
+        assert data["feasible"] is True
+
+    async def test_reanalysis_naming_both_targets_is_refused(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        await _seed_rider(session, seeded_athlete)
+        created = await self._course(client, auth_headers)
+
+        resp = await client.post(
+            f"/api/courses/{created['id']}/reanalyze",
+            json={"target_time_s": 3600, "target_power_w": 200},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 422
+        assert resp.json()["detail"]["code"] == "conflicting_targets"
+
+    async def test_an_unsustainable_power_target_keeps_its_splits(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        # The contrast with an impossible *time*, which returns a bare segment
+        # table: an unsustainable power still describes a ride in full, and the
+        # splits are what show how long the athlete would be holding it.
+        await _seed_rider(session, seeded_athlete)
+        data = await self._course(client, auth_headers, target_power_w=300)
+        assert data["feasible"] is False
+        assert data["refusal_reason"] == "exceeds_sustainable_power"
+        assert all(s["power_w"] is not None for s in data["segments"])
+        assert self._avg_power_w(data["segments"]) == pytest.approx(300.0, rel=0.02)
+
+    async def test_a_non_positive_target_is_rejected(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        await _seed_rider(session, seeded_athlete)
+        created = await self._course(client, auth_headers)
+        for body in ({"target_power_w": 0}, {"target_time_s": -1}):
+            resp = await client.post(
+                f"/api/courses/{created['id']}/reanalyze", json=body, headers=auth_headers
+            )
+            assert resp.status_code == 422, resp.text
 
 
 class TestBlobLifecycle:

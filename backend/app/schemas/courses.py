@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, computed_field
+from pydantic import BaseModel, Field, computed_field
 
 
 class CourseSegmentResponse(BaseModel):
@@ -29,7 +29,10 @@ class CourseSummaryResponse(BaseModel):
     status: str
     distance_m: float
     elevation_gain_m: Optional[float] = None
+    # At most one of these is ever set: a course is paced to a finish time or
+    # to an average power, never to both.
     target_time_s: Optional[int] = None
+    target_power_w: Optional[int] = None
     start_time: Optional[datetime] = None
     predicted_time_s: Optional[float] = None
     feasible: Optional[bool] = None
@@ -58,11 +61,18 @@ class CourseDetailResponse(CourseSummaryResponse):
 
 class CourseReanalyzeBody(BaseModel):
     """Partial update for re-analysis. A field left unset keeps the stored
-    value; an explicit null clears it (goal, target time, start time)."""
+    value; an explicit null clears it (goal, target, start time).
+
+    The two targets are alternatives, so setting one to a value clears the
+    other — that is what "switch this course to a power target" means, and
+    making the caller send the null as well would only be a way to get it
+    wrong. Sending both as values is a 422: it has no meaning to guess at.
+    """
 
     bike_id: Optional[str] = None
     goal_id: Optional[str] = None
-    target_time_s: Optional[int] = None
+    target_time_s: Optional[int] = Field(default=None, gt=0)
+    target_power_w: Optional[int] = Field(default=None, gt=0)
     start_time: Optional[datetime] = None
 
 
