@@ -27,6 +27,9 @@ from backend.app.models.user_orm import (
 )
 
 MIGRATION = "backend.app.db.migrations.user.versions.025_courses_bikes"
+# Later migrations that reshape the same tables. The ORM is always at head, so
+# any comparison against it has to be against the whole chain, not just 025.
+LATER_MIGRATIONS = ["backend.app.db.migrations.user.versions.026_course_target_power"]
 
 NEW_TABLES = {"bikes", "courses", "course_tracks", "course_segments"}
 
@@ -46,12 +49,16 @@ def _columns(engine, table: str) -> set[str]:
         return {row[1] for row in conn.execute(text(f'PRAGMA table_info("{table}")'))}
 
 
-def _run(engine, direction: str = "upgrade") -> None:
-    module = importlib.import_module(MIGRATION)
+def _run_module(engine, name: str, direction: str = "upgrade") -> None:
+    module = importlib.import_module(name)
     with engine.begin() as conn:
         operations = Operations(MigrationContext.configure(conn))
         with patch.object(module, "op", operations):
             getattr(module, direction)()
+
+
+def _run(engine, direction: str = "upgrade") -> None:
+    _run_module(engine, MIGRATION, direction)
 
 
 @pytest.fixture
@@ -106,6 +113,8 @@ def test_upgrade_against_a_current_orm_db_is_a_noop(tmp_path):
 def test_migrated_schema_matches_the_orm(legacy):
     """A row shaped by the ORM fits the migrated table, both directions."""
     _run(legacy)
+    for name in LATER_MIGRATIONS:
+        _run_module(legacy, name)
     for model in (Bike, Course, CourseTrack, CourseSegment):
         orm_columns = {c.name for c in model.__table__.columns}
         assert orm_columns == _columns(legacy, model.__tablename__)

@@ -47,6 +47,7 @@ def parse_and_analyze(
     rider: course_math.RiderParams,
     bike: course_math.BikeParams,
     target_time_s: int | None,
+    target_power_w: int | None = None,
 ) -> tuple[ParsedCourse | None, str | None]:
     """Parse a GPX course and run the full analysis. Sync and CPU-bound —
     call through ``asyncio.to_thread``.
@@ -61,7 +62,9 @@ def parse_and_analyze(
     profile, reason = course_math.course_profile(track)
     if profile is None:
         return None, reason
-    analysis = course_math.analyze_course(profile, rider, bike, target_time_s)
+    analysis = course_math.analyze_course(
+        profile, rider, bike, target_time_s, target_power_w
+    )
     return ParsedCourse(track=track, name=route.name, analysis=analysis), None
 
 
@@ -70,8 +73,13 @@ def analyze_stored_track(
     rider: course_math.RiderParams,
     bike: course_math.BikeParams,
     target_time_s: int | None,
+    target_power_w: int | None = None,
 ) -> tuple[course_math.CourseAnalysis | None, str | None]:
     """Re-analysis without re-upload: run on the ``course_tracks`` JSON row.
+
+    This is the path every target change takes — a new target time, a switch
+    to a target power, or clearing both — which is the whole reason the track
+    is stored at all.
 
     Sync and CPU-bound — call through ``asyncio.to_thread``.
     """
@@ -79,7 +87,10 @@ def analyze_stored_track(
     profile, reason = course_math.course_profile(track)
     if profile is None:
         return None, reason
-    return course_math.analyze_course(profile, rider, bike, target_time_s), None
+    return (
+        course_math.analyze_course(profile, rider, bike, target_time_s, target_power_w),
+        None,
+    )
 
 
 def track_points_json(track: course_math.CourseTrack) -> list:

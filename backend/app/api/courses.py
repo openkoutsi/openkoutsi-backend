@@ -55,6 +55,7 @@ _REASON_MESSAGES = {
     "no_elevation_data": "This course has no elevation data, so gradients cannot be derived.",
     "course_too_short": "This course is too short to analyse.",
     "missing_rider_data": "Set your FTP and weight on your profile first — the pacing physics needs both.",
+    "conflicting_targets": "Pace this course to a finish time or to an average power, not to both.",
 }
 
 
@@ -100,8 +101,18 @@ async def _check_owned_goal(goal_id: str, athlete, session: AsyncSession) -> Non
 
 
 async def _detail(course_id: str, session: AsyncSession) -> CourseDetailResponse:
-    # Re-select so the selectin-loaded segments are fresh after a commit.
-    result = await session.execute(select(Course).where(Course.id == course_id))
+    # Re-select so the selectin-loaded segments are fresh after a commit — and
+    # `populate_existing` is what makes that true. These sessions run with
+    # `expire_on_commit=False`, so a plain re-select finds the row already in
+    # the identity map and hands back its *loaded* collection untouched: after
+    # a re-analysis that is the segment table from before the change, deleted
+    # in the database but still hanging off the object. The response would
+    # then carry the new summary numbers over the old splits.
+    result = await session.execute(
+        select(Course)
+        .where(Course.id == course_id)
+        .execution_options(populate_existing=True)
+    )
     course = result.scalar_one()
     return CourseDetailResponse.model_validate(course)
 
@@ -120,11 +131,16 @@ async def create_course(
     # so this caller-supplied field was the only open-ended one.
     name: str | None = Form(None, min_length=1, max_length=200),
     goal_id: str | None = Form(None),
-    target_time_s: int | None = Form(None),
+    # The two targets are alternatives, and the course can be re-pointed at
+    # either one afterwards without re-uploading — see `reanalyze_course`.
+    target_time_s: int | None = Form(None, gt=0),
+    target_power_w: int | None = Form(None, gt=0),
     start_time: datetime | None = Form(None),
     ctx_athlete=Depends(get_ctx_session_athlete),
 ):
     ctx, session, athlete = ctx_athlete
+    if target_time_s is not None and target_power_w is not None:
+        raise _reason_error(422, "conflicting_targets")
     bike = await _get_owned_bike(bike_id, athlete, session)
     if goal_id:
         await _check_owned_goal(goal_id, athlete, session)
@@ -139,7 +155,12 @@ async def create_course(
     )
     try:
         parsed, reason = await asyncio.to_thread(
-            course_analysis.parse_and_analyze, gpx_bytes, rider, bike_params, target_time_s
+            course_analysis.parse_and_analyze,
+            gpx_bytes,
+            rider,
+            bike_params,
+            target_time_s,
+            target_power_w,
         )
     except ActivityParseError as exc:
         raise HTTPException(status_code=400, detail=f"Not a readable GPX file: {exc}")
@@ -166,6 +187,7 @@ async def create_course(
             # returns with the file encrypted or raises having removed it.
             gpx_file_encrypted=True,
             target_time_s=target_time_s,
+            target_power_w=target_power_w,
             start_time=start_time,
             distance_m=parsed.analysis.total_distance_m,
         )
@@ -252,6 +274,20 @@ async def reanalyze_course(
         await _get_owned_bike(updates["bike_id"], athlete, session)
     if "goal_id" in updates and updates["goal_id"]:
         await _check_owned_goal(updates["goal_id"], athlete, session)
+
+    # Re-pointing a course at the other kind of target is one request, not
+    # two: setting a target time clears any target power and vice versa. A
+    # request naming both is refused rather than resolved by precedence —
+    # there is no reading of it that is obviously what the athlete meant.
+    setting_time = updates.get("target_time_s") is not None
+    setting_power = updates.get("target_power_w") is not None
+    if setting_time and setting_power:
+        raise _reason_error(422, "conflicting_targets")
+    if setting_time:
+        updates["target_power_w"] = None
+    elif setting_power:
+        updates["target_time_s"] = None
+
     for field, value in updates.items():
         setattr(course, field, value)
 
@@ -279,6 +315,7 @@ async def reanalyze_course(
         rider,
         bike_params,
         course.target_time_s,
+        course.target_power_w,
     )
     if analysis is None:
         raise _reason_error(422, reason)

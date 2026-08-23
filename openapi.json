@@ -8961,13 +8961,26 @@
           "target_time_s": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "exclusiveMinimum": 0.0
               },
               {
                 "type": "null"
               }
             ],
             "title": "Target Time S"
+          },
+          "target_power_w": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Power W"
           },
           "start_time": {
             "anyOf": [
@@ -9394,6 +9407,17 @@
             ],
             "title": "Target Time S"
           },
+          "target_power_w": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Power W"
+          },
           "start_time": {
             "anyOf": [
               {
@@ -9678,13 +9702,26 @@
           "target_time_s": {
             "anyOf": [
               {
-                "type": "integer"
+                "type": "integer",
+                "exclusiveMinimum": 0.0
               },
               {
                 "type": "null"
               }
             ],
             "title": "Target Time S"
+          },
+          "target_power_w": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "exclusiveMinimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Power W"
           },
           "start_time": {
             "anyOf": [
@@ -9701,7 +9738,7 @@
         },
         "type": "object",
         "title": "CourseReanalyzeBody",
-        "description": "Partial update for re-analysis. A field left unset keeps the stored\nvalue; an explicit null clears it (goal, target time, start time)."
+        "description": "Partial update for re-analysis. A field left unset keeps the stored\nvalue; an explicit null clears it (goal, target, start time).\n\nThe two targets are alternatives, so setting one to a value clears the\nother \u2014 that is what \"switch this course to a power target\" means, and\nmaking the caller send the null as well would only be a way to get it\nwrong. Sending both as values is a 422: it has no meaning to guess at."
       },
       "CourseSegmentResponse": {
         "properties": {
@@ -9856,6 +9893,17 @@
               }
             ],
             "title": "Target Time S"
+          },
+          "target_power_w": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Power W"
           },
           "start_time": {
             "anyOf": [

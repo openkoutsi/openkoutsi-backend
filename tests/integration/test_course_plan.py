@@ -73,7 +73,7 @@ async def _mock_registry_session(instance):
     yield reg
 
 
-async def _seed_course(client, auth_headers, session, seeded_athlete) -> str:
+async def _seed_course(client, auth_headers, session, seeded_athlete, **form) -> str:
     """Upload the fixture course for a BYOK-configured athlete; return its id."""
     seeded_athlete.ftp = 250
     seeded_athlete.weight_kg = 75.0
@@ -91,7 +91,7 @@ async def _seed_course(client, auth_headers, session, seeded_athlete) -> str:
     resp = await client.post(
         "/api/courses",
         headers=auth_headers,
-        data={"bike_id": bike.json()["id"]},
+        data={"bike_id": bike.json()["id"], **{k: str(v) for k, v in form.items()}},
         files={"file": (COURSE_GPX.name, COURSE_GPX.read_bytes(), "application/gpx+xml")},
     )
     assert resp.status_code == 201, resp.text
@@ -220,6 +220,32 @@ class TestCoursePlan:
             m.get("content", "") for req in requests for m in req.get("messages", [])
         )
         assert "still air" in payload
+
+    async def test_the_prompt_names_a_power_target_and_its_splits(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        # Issue #61: a target power the athlete cannot sustain for the whole
+        # ride is flagged in the prompt *and* keeps its splits, so the coach
+        # writes about a real plan rather than about a refusal.
+        course_id = await _seed_course(
+            client, auth_headers, session, seeded_athlete, target_power_w=300
+        )
+        with patch(
+            "backend.app.services.llm_course_plan.generate_course_plan_bg",
+            new_callable=AsyncMock,
+        ):
+            await client.post(
+                f"/api/courses/{course_id}/plan", json={}, headers=auth_headers
+            )
+
+        requests: list = []
+        await _run_plan_bg(session, course_id, seeded_athlete.id, requests)
+        payload = " ".join(
+            m.get("content", "") for req in requests for m in req.get("messages", [])
+        )
+        assert "average of 300 W" in payload
+        assert "above what anyone sustains" in payload
+        assert "Predicted total time" in payload
 
     async def test_gated_instance_denies_without_entitlement(
         self, client, auth_headers, session, seeded_athlete, registry_session

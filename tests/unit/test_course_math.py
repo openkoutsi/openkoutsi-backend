@@ -566,6 +566,92 @@ class TestTargetTimeSolver:
         assert course.max_sustainable_intensity(duration_s) == pytest.approx(expected, abs=0.001)
 
 
+def _avg_power_w(plans) -> float:
+    """The time-weighted average power of a plan — what a head unit shows."""
+    total = sum(p.duration_s for p in plans)
+    return sum(p.power_w * p.duration_s for p in plans) / total
+
+
+class TestTargetPowerSolver:
+    """Issue #61 — the other half of the question: fix the watts, read the time."""
+
+    def test_holds_the_requested_average_power(self):
+        segments = _rolling_segments()
+        solution = course.solve_target_power(segments, RIDER, BIKE, 200.0)
+        assert solution.feasible is True
+        assert _avg_power_w(solution.splits) == pytest.approx(200.0, rel=0.005)
+        assert len(solution.splits) == len(segments)
+
+    def test_agrees_with_the_time_solver(self):
+        # Solve for a time, read the average power it asks for, then ask for
+        # that power back: the two solvers must land on the same ride.
+        segments = _rolling_segments()
+        target = sum(p.duration_s for p in course.predict_splits(segments, RIDER, BIKE, 0.75))
+        by_time = course.solve_target_time(segments, RIDER, BIKE, target)
+        by_power = course.solve_target_power(
+            segments, RIDER, BIKE, _avg_power_w(by_time.splits)
+        )
+        assert by_power.intensity == pytest.approx(by_time.intensity, abs=0.002)
+        assert by_power.predicted_time_s == pytest.approx(by_time.predicted_time_s, rel=0.005)
+
+    def test_the_average_is_not_a_flat_power_everywhere(self):
+        # A target power is an average, not a prescription per segment: the
+        # gradient weighting still spends on the climb and eases on the flat.
+        segments = _rolling_segments()
+        solution = course.solve_target_power(segments, RIDER, BIKE, 200.0)
+        climbs = [p.power_w for p in solution.splits if p.segment.segment_type == "climb"]
+        flats = [p.power_w for p in solution.splits if p.segment.segment_type == "flat"]
+        assert climbs and flats
+        assert min(climbs) > max(flats)
+
+    def test_an_unsustainable_average_keeps_its_splits(self):
+        # The deliberate difference from the time solver: an impossible time
+        # describes no ride, but an unsustainable power describes one in full.
+        def grad(d):
+            return 0.0
+
+        segments = course.segment_by_gradient(_profile(10.0, 160_000.0, grad))
+        solution = course.solve_target_power(segments, RIDER, BIKE, 0.95 * RIDER.ftp_w)
+        assert solution.feasible is False
+        assert solution.refusal_reason == "exceeds_sustainable_power"
+        assert len(solution.splits) == len(segments)
+        assert solution.required_intensity > course.max_sustainable_intensity(
+            solution.predicted_time_s
+        )
+
+    def test_a_soft_pedal_target_clamps_to_the_minimum_intensity(self):
+        segments = _rolling_segments()
+        solution = course.solve_target_power(segments, RIDER, BIKE, 5.0)
+        assert solution.intensity == course.INTENSITY_MIN
+        assert solution.feasible is True
+        # The clamp is visible rather than silent: what the plan asks for is
+        # reported, not the 5 W that were requested.
+        assert solution.required_intensity > 0.02
+
+    def test_a_superhuman_target_clamps_to_the_ceiling_and_is_refused(self):
+        segments = _rolling_segments()
+        solution = course.solve_target_power(segments, RIDER, BIKE, 3.0 * RIDER.ftp_w)
+        assert solution.intensity == course.INTENSITY_MAX
+        assert solution.feasible is False
+        assert solution.refusal_reason == "exceeds_sustainable_power"
+        assert solution.required_intensity < 3.0
+
+    def test_a_descent_heavy_course_still_solves(self):
+        def grad(d):
+            return -0.08 if d < 6000 else 0.02
+
+        segments = course.segment_by_gradient(_profile(10.0, 10000.0, grad))
+        solution = course.solve_target_power(segments, RIDER, BIKE, 180.0)
+        assert solution.predicted_time_s > 0
+        assert _avg_power_w(solution.splits) == pytest.approx(180.0, rel=0.02)
+
+    def test_nothing_to_solve_is_a_reason_code_not_a_crash(self):
+        solution = course.solve_target_power([], RIDER, BIKE, 200.0)
+        assert solution.feasible is False
+        assert solution.splits == []
+        assert solution.predicted_time_s is None
+
+
 class TestAnalyzeCourse:
     def test_a_full_analysis_is_coherent(self):
         def ele(d):
@@ -591,6 +677,28 @@ class TestAnalyzeCourse:
         assert analysis.pacing.splits
         offsets = [p.start_offset_s for p in analysis.pacing.splits]
         assert offsets == sorted(offsets)
+
+    def test_a_power_target_is_solved_for_power(self):
+        profile, reason = course.course_profile(
+            course.thin_track(_route(4.0, 3751, lambda d: 100.0 + 0.01 * d))
+        )
+        assert reason is None
+        analysis = course.analyze_course(profile, RIDER, BIKE, target_power_w=210)
+        assert analysis.pacing.splits
+        assert _avg_power_w(analysis.pacing.splits) == pytest.approx(210.0, rel=0.01)
+
+    def test_a_power_target_wins_when_both_arrive(self):
+        # The API refuses a request carrying both; if one gets here anyway the
+        # power target is the one the model can always honour.
+        profile, reason = course.course_profile(
+            course.thin_track(_route(4.0, 3751, lambda d: 100.0 + 0.01 * d))
+        )
+        assert reason is None
+        analysis = course.analyze_course(
+            profile, RIDER, BIKE, target_time_s=60, target_power_w=210
+        )
+        assert analysis.pacing.feasible is True
+        assert _avg_power_w(analysis.pacing.splits) == pytest.approx(210.0, rel=0.01)
 
     def test_the_default_intensity_backs_off_for_a_long_day(self):
         def grad(d):

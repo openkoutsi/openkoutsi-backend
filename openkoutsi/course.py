@@ -17,6 +17,9 @@ from the athlete's own FTP and weight plus a handful of bike parameters:
 5. :func:`solve_target_time` — the inverse: distribute effort to hit a
    requested finish time, refusing (with a reason code, not a number) targets
    that would take more power than a human sustains.
+6. :func:`solve_target_power` — the other inverse: hold a requested *average*
+   power and report the time it produces. Same effort distribution, the other
+   half of the question an athlete actually asks.
 
 Everything here is pure — no DB, no I/O, plain floats in and out. The physics
 carries a **still-air, dry-pavement assumption**: wind is Stage 3 (#57) and
@@ -672,6 +675,24 @@ def _required_intensity(plans: Sequence[SegmentPlan], ftp_w: float) -> float:
     return sum(plan.power_w * plan.duration_s for plan in plans) / total / ftp_w
 
 
+def _unsolvable() -> PacingSolution:
+    """The answer when there is nothing to solve — no segments, or no FTP.
+
+    Shared by all three solvers so the degenerate case has one shape. The
+    reason code is the "no ride exists here" one; it is not reachable through
+    the API, which refuses a too-short course and a profile without FTP and
+    weight long before a solver is called.
+    """
+    return PacingSolution(
+        feasible=False,
+        refusal_reason="target_faster_than_physics",
+        intensity=None,
+        required_intensity=None,
+        predicted_time_s=None,
+        splits=[],
+    )
+
+
 def solve_target_time(
     segments: Sequence[Segment],
     rider: RiderParams,
@@ -693,14 +714,7 @@ def solve_target_time(
     the minimum intensity and simply finishes early.
     """
     if not segments or rider.ftp_w <= 0:
-        return PacingSolution(
-            feasible=False,
-            refusal_reason="target_faster_than_physics",
-            intensity=None,
-            required_intensity=None,
-            predicted_time_s=None,
-            splits=[],
-        )
+        return _unsolvable()
 
     fastest = predict_splits(segments, rider, bike, INTENSITY_MAX)
     if target_time_s < _total_time_s(fastest):
@@ -748,6 +762,74 @@ def solve_target_time(
     )
 
 
+def solve_target_power(
+    segments: Sequence[Segment],
+    rider: RiderParams,
+    bike: BikeParams,
+    target_power_w: float,
+) -> PacingSolution:
+    """Distribute effort around a requested **average** power.
+
+    The mirror image of :func:`solve_target_time`: the athlete fixes the watts
+    and the model reports the finish time, rather than fixing the time and
+    reporting the watts. What is held to the request is the *time-weighted
+    average* over the whole ride — the number on the head unit at the finish —
+    not the power of any one segment. The gradient weighting still spends on
+    the climbs and backs off on the descents, exactly as it does for a time
+    target; asking for 210 W does not mean 210 W everywhere.
+
+    Average power rises with the intensity k — every segment's power is linear
+    in k while its duration only shrinks — so the same bisection applies.
+    Outside the bracket the request is clamped rather than refused, and
+    ``required_intensity`` always reports what the returned plan actually asks
+    for, so a clamp shows up as a number that differs from the request instead
+    of being silent.
+
+    A power target can never be "faster than physics": it names an effort, and
+    an effort is always rideable — the question is only for how long. So the
+    one refusal it can earn is ``"exceeds_sustainable_power"``, and it is
+    reported **with the splits kept**. That is the deliberate difference from
+    :func:`solve_target_time`, which returns none: an impossible time describes
+    no ride at all, while an unsustainable power describes a ride the model can
+    lay out in full — and the splits are the very thing that shows how long the
+    athlete would be holding it.
+    """
+    if not segments or rider.ftp_w <= 0 or target_power_w <= 0:
+        return _unsolvable()
+
+    def _avg_power(plans: Sequence[SegmentPlan]) -> float:
+        return _required_intensity(plans, rider.ftp_w) * rider.ftp_w
+
+    hardest = predict_splits(segments, rider, bike, INTENSITY_MAX)
+    easiest = predict_splits(segments, rider, bike, INTENSITY_MIN)
+    if target_power_w >= _avg_power(hardest):
+        k, plans = INTENSITY_MAX, hardest
+    elif target_power_w <= _avg_power(easiest):
+        k, plans = INTENSITY_MIN, easiest
+    else:
+        lo, hi = INTENSITY_MIN, INTENSITY_MAX  # avg(lo) < target < avg(hi)
+        for _ in range(40):
+            mid = (lo + hi) / 2.0
+            if _avg_power(predict_splits(segments, rider, bike, mid)) < target_power_w:
+                lo = mid
+            else:
+                hi = mid
+        k = (lo + hi) / 2.0
+        plans = predict_splits(segments, rider, bike, k)
+
+    predicted = _total_time_s(plans)
+    required = _required_intensity(plans, rider.ftp_w)
+    sustainable = required <= max_sustainable_intensity(predicted)
+    return PacingSolution(
+        feasible=sustainable,
+        refusal_reason=None if sustainable else "exceeds_sustainable_power",
+        intensity=k,
+        required_intensity=required,
+        predicted_time_s=predicted,
+        splits=plans,
+    )
+
+
 def default_pacing(
     segments: Sequence[Segment], rider: RiderParams, bike: BikeParams
 ) -> PacingSolution:
@@ -757,14 +839,7 @@ def default_pacing(
     duration says that intensity would not last the distance.
     """
     if not segments or rider.ftp_w <= 0:
-        return PacingSolution(
-            feasible=False,
-            refusal_reason="target_faster_than_physics",
-            intensity=None,
-            required_intensity=None,
-            predicted_time_s=None,
-            splits=[],
-        )
+        return _unsolvable()
     plans = predict_splits(segments, rider, bike, DEFAULT_INTENSITY)
     k = min(
         DEFAULT_INTENSITY,
@@ -893,19 +968,27 @@ def analyze_course(
     rider: RiderParams,
     bike: BikeParams,
     target_time_s: float | None = None,
+    target_power_w: float | None = None,
 ) -> CourseAnalysis:
     """The full analysis of a course profile — coordinate-free by construction.
 
     Takes the profile rather than a track on purpose: the one conversion in
     :func:`course_profile` is where coordinates end, and nothing reachable
     from here can carry one.
+
+    The two targets are alternatives — a ride is paced *to a finish time* or
+    *to a number of watts*, never to both — and the API refuses a request
+    carrying both. Should one arrive anyway, the power target wins: it is the
+    one the model can always honour.
     """
     elevations = [p.elevation_m for p in profile.points]
     gain = geo.elevation_gain_m(elevations, smoothing=1)
     loss = geo.elevation_gain_m(list(reversed(elevations)), smoothing=1)
 
     segments = segment_by_gradient(profile)
-    if target_time_s is not None:
+    if target_power_w is not None:
+        pacing = solve_target_power(segments, rider, bike, target_power_w)
+    elif target_time_s is not None:
         pacing = solve_target_time(segments, rider, bike, target_time_s)
     else:
         pacing = default_pacing(segments, rider, bike)

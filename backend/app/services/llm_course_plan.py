@@ -143,29 +143,60 @@ def _build_course_prompt(
         lines.append(f"  Self-reported experience level: {level}")
 
     lines.append("\nPacing model (still air, dry pavement, bike+kit mass included):")
-    if course.target_time_s:
+    if course.target_power_w:
+        share = (
+            f" ({course.target_power_w / course.ftp_w_used * 100:.0f}% of FTP)"
+            if course.ftp_w_used
+            else ""
+        )
+        lines.append(
+            f"  Requested target: hold an average of {course.target_power_w:.0f} W"
+            f"{share} for the whole ride — the finish time below is what that produces, "
+            "not something the athlete asked for."
+        )
+    elif course.target_time_s:
         lines.append(f"  Requested target time: {_hms(course.target_time_s)}")
     else:
-        lines.append("  Requested target time: (none — a steady sustainable effort)")
+        lines.append("  Requested target: (none — a steady sustainable effort)")
+
     if course.feasible is False:
-        lines.append("  ⚠ The requested target is NOT achievable:")
+        required = f"{course.required_intensity:.2f}" if course.required_intensity else "?"
+        # The ceiling is a function of how long the ride lasts. For a time
+        # target that is the target itself; for a power target it is the time
+        # the requested watts produce.
+        duration_s = (
+            course.target_time_s
+            if course.target_time_s and not course.target_power_w
+            else course.predicted_time_s
+        )
+        sustainable = (
+            f"{course_math.max_sustainable_intensity(duration_s):.2f}" if duration_s else "?"
+        )
         if course.refusal_reason == "target_faster_than_physics":
+            lines.append("  ⚠ The requested target is NOT achievable:")
             lines.append(
                 "    reason: faster than the physics allows at any human power. "
                 f"Fastest modelled ride: {_hms(course.predicted_time_s)}"
             )
-        else:
-            required = f"{course.required_intensity:.2f}" if course.required_intensity else "?"
-            sustainable = (
-                f"{course_math.max_sustainable_intensity(course.target_time_s):.2f}"
-                if course.target_time_s
-                else "?"
+        elif course.target_power_w:
+            lines.append(
+                f"  ⚠ That average power is above what anyone sustains for this long: "
+                f"{required} × FTP against a ceiling of about {sustainable} × FTP for "
+                f"{_hms(course.predicted_time_s)} of riding. The splits below are still "
+                "exactly what was asked for — say plainly that holding them to the finish "
+                "is unlikely, and what to give up first if it starts to come apart."
             )
+        else:
+            lines.append("  ⚠ The requested target is NOT achievable:")
             lines.append(
                 f"    reason: it would take an average intensity of {required} × FTP, "
                 f"against a sustainable ceiling of about {sustainable} × FTP for that duration."
             )
-    else:
+
+    # An impossible finish time leaves no splits to talk about; an
+    # unsustainable *power* leaves a complete plan, warned about above. So the
+    # numbers are stated in every case except the first.
+    if not (course.feasible is False and not course.target_power_w):
         if course.intensity is not None:
             lines.append(f"  Intensity: {course.intensity:.2f} × FTP")
         lines.append(f"  Predicted total time: {_hms(course.predicted_time_s)}")
