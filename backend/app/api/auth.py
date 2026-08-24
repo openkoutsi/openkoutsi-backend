@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
 from jose import JWTError
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -43,6 +43,7 @@ from backend.app.schemas.auth import (
     ChangeEmailRequest,
     ConfirmEmailChangeRequest,
     DeleteAccountRequest,
+    EmailChangeConfirmResponse,
     LoginRequest,
     MessageResponse,
     RegisterRequest,
@@ -58,7 +59,7 @@ from backend.app.services.email import (
     EmailProvider,
     get_email_provider,
     send_email_change_email,
-    send_email_change_notice,
+    send_email_change_authorisation,
     send_password_reset_email,
     send_verification_email,
 )
@@ -671,6 +672,12 @@ async def get_account(
         email=user.email,
         email_verified=user.email_verified_at is not None,
         pending_email=pending.new_email if pending else None,
+        # Which halves are still outstanding. The card has to name the mailbox
+        # it is waiting on, and "no old side required" (a first-time set) has to
+        # look different from "old side required, not done yet".
+        pending_requires_old=bool(pending and pending.requires_old_confirmation),
+        pending_confirmed_new=bool(pending and pending.new_confirmed_at is not None),
+        pending_confirmed_old=bool(pending and pending.old_confirmed_at is not None),
     )
 
 
@@ -737,31 +744,46 @@ async def change_email(
     for token_row in prior.scalars():
         token_row.used_at = now
 
-    raw_token = secrets.token_urlsafe(32)
+    # Two independent secrets. Distinct is the point: one value satisfying both
+    # sides would let whoever reads either mailbox finish alone, and the second
+    # approval would be decoration.
+    raw_new = secrets.token_urlsafe(32)
+    raw_old = secrets.token_urlsafe(32) if old_email is not None else None
     session.add(EmailChangeToken(
         user_id=user.id,
-        token_hash=hashlib.sha256(raw_token.encode()).hexdigest(),
+        new_token_hash=hashlib.sha256(raw_new.encode()).hexdigest(),
+        old_token_hash=(
+            hashlib.sha256(raw_old.encode()).hexdigest() if raw_old else None
+        ),
         new_email=email,
-        expires_at=now + timedelta(hours=1),
+        # 24 hours, not the hour the one-sided flows use: this one needs two
+        # mailboxes reached, and one of them is routinely a work account nobody
+        # opens until morning. The window costs less than the old one did — a
+        # single token no longer completes anything.
+        expires_at=now + timedelta(hours=24),
     ))
     await session.commit()
 
-    confirm_url = f"{settings.frontend_url}/confirm-email-change?token={raw_token}"
+    def _url(raw: str) -> str:
+        return f"{settings.frontend_url}/confirm-email-change?token={raw}"
+
     try:
-        await send_email_change_email(provider, to=email, action_url=confirm_url)
+        await send_email_change_email(provider, to=email, action_url=_url(raw_new))
     except EmailError:
         # The request stands; the user can ask again to resend. Don't leak the
         # delivery failure into the uniform acknowledgement.
         log.exception("Failed to send email-change confirmation")
 
-    if old_email is not None:
-        # The tripwire: whoever owns the mailbox the account is leaving finds out
-        # it is being left. Without this, a password-holder could move the
-        # account silently.
+    if old_email is not None and raw_old is not None:
+        # Not a notice — the authorisation. Without it, holding the password
+        # alone would move the account's password-reset target, and "forgot
+        # password" would then hand the whole account over permanently.
         try:
-            await send_email_change_notice(provider, to=old_email, new_email=email)
+            await send_email_change_authorisation(
+                provider, to=old_email, new_email=email, action_url=_url(raw_old)
+            )
         except EmailError:
-            log.exception("Failed to send email-change notice to the old address")
+            log.exception("Failed to send email-change authorisation to the old address")
 
     await notifications.notify_user(
         user.id, notifications.EMAIL_CHANGE_REQUESTED, {"new_email": email}
@@ -769,7 +791,7 @@ async def change_email(
     return ack
 
 
-@router.post("/confirm-email-change", status_code=204,
+@router.post("/confirm-email-change", response_model=EmailChangeConfirmResponse,
              operation_id="confirmEmailChange", summary="Confirm a new email address")
 @limiter.limit("20/hour")
 async def confirm_email_change(
@@ -777,19 +799,30 @@ async def confirm_email_change(
     body: ConfirmEmailChangeRequest,
     session: AsyncSession = Depends(get_registry_session),
 ):
-    """Consume a change token and move the account onto its new address.
+    """Stamp one side of a pending change, and apply it once both sides are in.
 
-    Unauthenticated by design: the link is opened in the new mailbox, which is
-    routinely a different device from the one that asked. The token *is* the
-    proof — holding it means holding that inbox.
+    Unauthenticated by design: these links are opened in whichever mailbox they
+    were sent to, routinely on a different device from the one that asked. The
+    token *is* the proof — holding it means holding that inbox.
 
-    Sessions are left alone. The request already cost the current password, so
-    confirming grants nothing the password didn't; someone who wants their other
-    devices signed out has ``/logout-all`` for exactly that.
+    A change carries two distinct tokens, one per address, and this endpoint
+    works out which it was handed by matching against both columns. Presenting
+    the same one twice therefore stamps the same side twice and completes
+    nothing: that is what makes the second mailbox a real requirement rather
+    than a notification with a button on it.
+
+    Sessions are left alone. Both mailboxes and the password were needed to get
+    here, so there is no one to evict that isn't the owner; ``/logout-all``
+    remains the control for clearing other devices.
     """
     token_hash = hashlib.sha256(body.token.encode()).hexdigest()
     result = await session.execute(
-        select(EmailChangeToken).where(EmailChangeToken.token_hash == token_hash)
+        select(EmailChangeToken).where(
+            or_(
+                EmailChangeToken.new_token_hash == token_hash,
+                EmailChangeToken.old_token_hash == token_hash,
+            )
+        )
     )
     token_row = result.scalar_one_or_none()
 
@@ -809,7 +842,25 @@ async def confirm_email_change(
     if user is None:
         raise HTTPException(status_code=400, detail="Invalid or expired token")
 
-    # The address was free when the change was asked for; an hour is long enough
+    # Which half of the change did this token authorise? Re-stamping a side
+    # already done is a no-op rather than an error — a double-clicked link, or a
+    # mail client prefetching the URL, shouldn't read as a failure.
+    if token_row.new_token_hash == token_hash:
+        if token_row.new_confirmed_at is None:
+            token_row.new_confirmed_at = now
+    else:
+        if token_row.old_confirmed_at is None:
+            token_row.old_confirmed_at = now
+
+    if not token_row.fully_confirmed:
+        await session.commit()
+        return EmailChangeConfirmResponse(
+            complete=False,
+            awaiting="old" if token_row.old_confirmed_at is None else "new",
+            new_email=token_row.new_email,
+        )
+
+    # The address was free when the change was asked for; a day is long enough
     # for somebody else to have signed up with it since.
     if await _email_taken_by_other(session, token_row.new_email, user.id):
         raise HTTPException(
@@ -834,6 +885,9 @@ async def confirm_email_change(
     await notifications.notify_user(
         user.id, notifications.EMAIL_CHANGE_CONFIRMED, {"new_email": new_email}
     )
+    return EmailChangeConfirmResponse(
+        complete=True, awaiting=None, new_email=new_email
+    )
 
 
 @router.post("/cancel-email-change", status_code=204,
@@ -844,9 +898,9 @@ async def cancel_email_change(
 ):
     """Spend any outstanding change tokens without applying them.
 
-    A mistyped address otherwise sits in the account's face for an hour with no
-    way to clear it, and its link stays live in whichever inbox it reached.
-    Idempotent: cancelling nothing succeeds.
+    A mistyped address otherwise sits in the account's face for a day with no
+    way to clear it, and its links stay live in whichever inboxes they reached.
+    Voids both sides at once. Idempotent: cancelling nothing succeeds.
     """
     now = datetime.now(timezone.utc)
     result = await session.execute(

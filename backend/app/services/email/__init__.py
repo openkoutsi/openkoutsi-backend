@@ -39,8 +39,8 @@ from backend.app.services.email.factory import (
 )
 from backend.app.services.email.lettermint import LettermintProvider
 from backend.app.services.email.messages import (
+    send_email_change_authorisation,
     send_email_change_email,
-    send_email_change_notice,
     send_password_reset_email,
     send_token_expiry_email,
     send_verification_email,
@@ -59,8 +59,8 @@ __all__ = [
     "build_email_provider",
     "get_email_provider",
     "render_transactional_email",
+    "send_email_change_authorisation",
     "send_email_change_email",
-    "send_email_change_notice",
     "send_password_reset_email",
     "send_token_expiry_email",
     "send_verification_email",

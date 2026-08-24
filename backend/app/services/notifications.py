@@ -39,6 +39,7 @@ PAT_REVOKED_BY_ADMIN = "pat_revoked_by_admin"   # an admin withdrew a token
 # and one of them goes to an address that isn't the account's yet.
 EMAIL_CHANGE_REQUESTED = "email_change_requested"  # a change is awaiting confirmation
 EMAIL_CHANGE_CONFIRMED = "email_change_confirmed"  # the new address is now the account's
+EMAIL_CHANGE_BY_ADMIN = "email_change_by_admin"    # an admin set or cleared the address
 
 
 async def notify_user(

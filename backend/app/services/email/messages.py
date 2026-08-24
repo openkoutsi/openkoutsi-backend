@@ -19,7 +19,7 @@ _VERIFY_SUBJECT = "Confirm your email"
 _RESET_SUBJECT = "Reset your password"
 _TOKEN_EXPIRY_SUBJECT = "Your openkoutsi access token"
 _EMAIL_CHANGE_SUBJECT = "Confirm your new email address"
-_EMAIL_CHANGE_NOTICE_SUBJECT = "Your openkoutsi email address is being changed"
+_EMAIL_CHANGE_AUTHORISE_SUBJECT = "Approve the change to your email address"
 
 
 async def send_verification_email(
@@ -56,11 +56,14 @@ async def send_email_change_email(
         title="Confirm your new email address",
         intro=(
             "This address was given as the new email for an openkoutsi account. "
-            "Confirm it to finish the change and start signing in with it."
+            "Confirm it to start signing in with it."
         ),
         action_label="Confirm email",
         action_url=action_url,
-        outro="This link expires in 1 hour and can only be used once.",
+        outro=(
+            "This link expires in 24 hours. The account's current address has to "
+            "approve the change too, so this on its own doesn't complete it."
+        ),
         footer=(
             "If you didn't request this, you can safely ignore this email — "
             "nothing changes until the link is opened."
@@ -71,35 +74,41 @@ async def send_email_change_email(
     )
 
 
-async def send_email_change_notice(
-    provider: EmailProvider, *, to: str, new_email: str
+async def send_email_change_authorisation(
+    provider: EmailProvider, *, to: str, new_email: str, action_url: str
 ) -> str:
-    """Tell the **old** address that a change was requested (issue #62).
+    """Ask the **old** address to approve the move (issue #62).
 
-    Carries no link, on purpose: there is nothing to confirm here, and a link in
-    this message would be the obvious thing to forge. It exists so a change made
-    by somebody who has the password is visible to the person who owns the
-    mailbox, which is the only place a quiet takeover would otherwise show.
+    This message is what authorises the change, not a courtesy heads-up: the new
+    address confirms it too, and neither side alone moves anything. Requiring
+    this one is what stops somebody who has only the password from relocating the
+    account's password-reset target and locking its owner out — reaching this
+    mailbox costs them exactly what taking the account over already costs.
+
+    So it carries a link, where a pure notification deliberately wouldn't. The
+    link is the authorisation; ignoring it is how you refuse.
     """
     html, text = render_transactional_email(
-        title="Your email address is being changed",
+        title="Approve the change to your email address",
         intro=(
-            f"Someone asked to change the email address on your openkoutsi "
-            f"account to {new_email}. The change takes effect only once that "
-            "address is confirmed."
+            f"A request was made to move your openkoutsi account to {new_email}. "
+            "It cannot go ahead unless you approve it here — and the new address "
+            "has to confirm itself as well."
         ),
+        action_label="Approve the change",
+        action_url=action_url,
         outro=(
-            "If this was you, there is nothing to do — open the confirmation "
-            "link we sent to the new address."
+            "This link expires in 24 hours. Until both sides are done, your "
+            "account keeps this address and nothing changes."
         ),
         footer=(
-            "If this wasn't you, change your password now: whoever requested "
-            "this knows it."
+            "If you didn't ask for this, do not open the link — and change your "
+            "password now, because whoever asked knows it."
         ),
     )
     return await provider.send(
         OutboundMessage(
-            to=to, subject=_EMAIL_CHANGE_NOTICE_SUBJECT, html=html, text=text
+            to=to, subject=_EMAIL_CHANGE_AUTHORISE_SUBJECT, html=html, text=text
         )
     )
 

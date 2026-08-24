@@ -35,35 +35,84 @@ un-verifiable.
 
 ### Changing an email address (issue #62)
 
-Users change their own address from **Profile → Email address**; there is no
-admin step, and no instance toggle beyond having email configured at all. The new
-address is confirmed the same way signup confirms the first one:
+Users change their own address from **Profile → Email address**; there is no admin
+step, and no instance toggle beyond having email configured. **Both ends have to
+approve it:**
 
 1. The user submits the new address **and their current password**.
 2. openkoutsi emails a `…/confirm-email-change?token=…` link to the **new**
-   address, and emails the **old** one a notice that a change was requested.
-3. Opening the link moves `users.email` and marks it verified. Nothing changes
-   before that, so an unopened request simply expires after an hour.
+   address, and a second, *different* one to the address being **left**.
+3. The change lands only when both links have been opened. Until then the account
+   keeps its current address, and an unopened request expires after 24 hours.
+
+The old side is not a courtesy — it is the authorisation. This server has no
+authenticated change-password endpoint: passwords are set through reset tokens
+mailed to the account's address, which makes that address the only self-serve
+route back into an account. If one confirmation were enough, anyone who learned a
+password could move the address to their own and then use "forgot password" to
+take the account outright, locking the real owner out of a recovery channel they
+no longer control. Requiring the outgoing mailbox costs an attacker exactly what
+taking the account over already costs them.
 
 The same flow **adds** an address to an invite-created account, which has none.
-That is worth knowing when a user asks why they can't use "Forgot password?":
-until they set an address there is nowhere to send the link.
+There is no old mailbox to approve from, so a first set needs only the new side;
+the admin endpoint below is what makes a malicious one undoable. This is also the
+answer when such a user asks why "Forgot password?" doesn't work for them: until
+they set an address there is nowhere to send the link.
 
-Three things to be able to answer for a user:
+Four things to be able to answer for a user:
 
 - **"I never got the email."** The endpoint answers identically whether the
-  address is free, already on another account, or already their own — deliberately,
-  so a signed-in user can't probe for accounts. An address that belongs to somebody
-  else therefore produces no mail at all. Check the provider logs, then check
-  whether another account holds it.
-- **"I got a notice I didn't ask for."** Someone submitted their password. Tell
-  them to change it — the request cannot be made without it.
+  address is free, already on another account, or already their own —
+  deliberately, so a signed-in user can't probe for accounts. An address that
+  belongs to somebody else therefore produces no mail at all. Check the provider
+  logs, then check whether another account holds it.
+- **"I opened the link and nothing happened."** Almost always only one of the two
+  was opened. The page says which address is still outstanding; the account's
+  **Profile → Email address** card shows the same thing.
+- **"I got an approval request I didn't ask for."** Someone submitted their
+  password. Tell them **not** to open the link and to change their password — the
+  request cannot be made without it.
 - **"It says the address is no longer available."** Another account claimed it
-  between the request and the confirmation. The link is dead; they request again.
+  between the request and the second approval. The links are dead; they request
+  again.
 
-Confirming does **not** sign the user out anywhere. It changes an identifier, not
-a credential, and the request already cost the password — `/logout-all` is still
-the control for clearing other sessions.
+Confirming does not sign the user out anywhere. Both mailboxes and the password
+were needed to get there, so there is nobody to evict who isn't the owner;
+`/logout-all` remains the control for clearing other sessions.
+
+### Recovering an unreachable address
+
+`PATCH /api/admin/users/{user_id}/email` sets or clears the address on an account
+— `{"email": "new@example.com"}` or `{"email": null}`.
+
+Requiring both mailboxes is what makes a self-serve change safe, and it is also
+what strands somebody whose old mailbox is gone: a dead work account, a domain
+that lapsed, or an address taken along with the account. Before this endpoint the
+only remedy was deleting the user and every activity they had.
+
+```bash
+curl -X PATCH https://api.your-domain/api/admin/users/<user-id>/email \
+  -H "Authorization: Bearer <admin-access-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "rescued@example.com"}'
+```
+
+It assumes the account may be in the wrong hands, so it is deliberately blunt:
+
+- every session is invalidated and every personal access token revoked, so
+  whoever is signed in right now is signed out;
+- any change already in flight is voided — it was authorised against the address
+  being replaced;
+- the new address lands **verified**, with no confirmation mail. That is the
+  point when the mailbox being replaced is unreachable, so satisfy yourself the
+  request is genuine before running it.
+
+Clearing an address leaves the account reachable only by username, which is the
+right outcome for a hijacked address: the attacker's mailbox stops being a way
+in, and the user signs in with their username while you sort out a new one. An
+account with neither a username nor an address cannot be signed into at all, so
+the endpoint is only useful for clearing where a username exists.
 
 ## Personal access tokens
 
@@ -269,6 +318,7 @@ uppercase letter and one digit), and is redirected to the login page.
 - Email verification: 20 requests/hour per IP
 - Email-address change request: 10 requests/hour per user
 - Email-change confirmation (token consumption): 20 requests/hour per IP
+- Admin set/clear of a user's email: 20 requests/hour per user
 - Personal access token creation: 20 requests/hour per user
 
 Rate limits are keyed by **principal**: an authenticated request is keyed on the

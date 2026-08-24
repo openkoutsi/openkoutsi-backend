@@ -17,6 +17,7 @@ import re
 import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
+from typing import NamedTuple
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -151,10 +152,17 @@ async def _reload(registry_session, user: User) -> User:
     return result.scalar_one()
 
 
+class _Change(NamedTuple):
+    provider: _FakeProvider
+    new_token: str
+    # None only for a first-time set, where there is no address to approve from.
+    old_token: str | None
+
+
 async def _request_change(
     auth_client, app, user_email: str, new_email: str = _NEW_EMAIL
-) -> tuple[_FakeProvider, str]:
-    """Log in, ask for the change, and return (provider, raw confirmation token)."""
+) -> _Change:
+    """Log in, ask for the change, and collect the token mailed to each side."""
     fake = _use_provider(app)
     access = await _login(auth_client, user_email)
     resp = await auth_client.post(
@@ -163,7 +171,28 @@ async def _request_change(
         headers=_headers(access),
     )
     assert resp.status_code == 202, resp.text
-    return fake, _extract_token(fake.to(new_email)[0])
+    to_old = fake.to(user_email)
+    return _Change(
+        provider=fake,
+        new_token=_extract_token(fake.to(new_email)[0]),
+        old_token=_extract_token(to_old[0]) if to_old else None,
+    )
+
+
+async def _confirm(auth_client, token: str):
+    return await auth_client.post(
+        f"{_PREFIX}/confirm-email-change", json={"token": token}
+    )
+
+
+async def _complete(auth_client, change: _Change):
+    """Open both links. Returns the response that actually finished the change."""
+    resp = await _confirm(auth_client, change.new_token)
+    if change.old_token is None:
+        return resp
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["complete"] is False
+    return await _confirm(auth_client, change.old_token)
 
 
 # ── The happy path ──────────────────────────────────────────────────────────
@@ -172,15 +201,21 @@ async def _request_change(
 class TestChangeEmail:
     async def test_confirm_moves_the_account(self, auth_client, app, registry_session):
         user = await _make_user(registry_session)
-        fake, raw = await _request_change(auth_client, app, _OLD_EMAIL)
+        change = await _request_change(auth_client, app, _OLD_EMAIL)
 
-        # Nothing moves until the link is opened.
+        # Nothing moves until both links are opened.
         assert (await _reload(registry_session, user)).email == _OLD_EMAIL
 
-        resp = await auth_client.post(
-            f"{_PREFIX}/confirm-email-change", json={"token": raw}
-        )
-        assert resp.status_code == 204, resp.text
+        half = await _confirm(auth_client, change.new_token)
+        assert half.status_code == 200, half.text
+        assert half.json() == {
+            "complete": False, "awaiting": "old", "new_email": _NEW_EMAIL
+        }
+        assert (await _reload(registry_session, user)).email == _OLD_EMAIL
+
+        resp = await _confirm(auth_client, change.old_token)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["complete"] is True
 
         moved = await _reload(registry_session, user)
         assert moved.email == _NEW_EMAIL
@@ -195,8 +230,9 @@ class TestChangeEmail:
         self, auth_client, app, registry_session
     ):
         await _make_user(registry_session)
-        _, raw = await _request_change(auth_client, app, _OLD_EMAIL)
-        await auth_client.post(f"{_PREFIX}/confirm-email-change", json={"token": raw})
+        await _complete(
+            auth_client, await _request_change(auth_client, app, _OLD_EMAIL)
+        )
 
         assert (await auth_client.post(
             f"{_PREFIX}/login", json={"username": _NEW_EMAIL, "password": _GOOD_PW}
@@ -207,23 +243,21 @@ class TestChangeEmail:
 
     async def test_address_is_lowercased(self, auth_client, app, registry_session):
         user = await _make_user(registry_session)
-        fake, raw = await _request_change(
+        change = await _request_change(
             auth_client, app, _OLD_EMAIL, new_email="MiXeD@Example.COM"
         )
         # Normalised on the way out, not only on the way into the row.
-        assert fake.to("mixed@example.com")[0].to == "mixed@example.com"
+        assert change.provider.to("mixed@example.com")[0].to == "mixed@example.com"
 
-        await auth_client.post(f"{_PREFIX}/confirm-email-change", json={"token": raw})
+        await _complete(auth_client, change)
         assert (await _reload(registry_session, user)).email == "mixed@example.com"
 
     async def test_confirm_needs_no_session(self, auth_client, app, registry_session):
         """The link is opened in the new mailbox, routinely on another device."""
         await _make_user(registry_session)
-        _, raw = await _request_change(auth_client, app, _OLD_EMAIL)
-        resp = await auth_client.post(
-            f"{_PREFIX}/confirm-email-change", json={"token": raw}
-        )
-        assert resp.status_code == 204, resp.text
+        change = await _request_change(auth_client, app, _OLD_EMAIL)
+        assert (await _confirm(auth_client, change.new_token)).status_code == 200
+        assert (await _confirm(auth_client, change.old_token)).status_code == 200
 
     async def test_sessions_survive_the_change(self, auth_client, app, registry_session):
         """Decided in #62: this is not a credential change, so it signs nobody out."""
@@ -236,8 +270,8 @@ class TestChangeEmail:
             headers=_headers(access),
         )
         assert resp.status_code == 202
-        raw = _extract_token(fake.to(_NEW_EMAIL)[0])
-        await auth_client.post(f"{_PREFIX}/confirm-email-change", json={"token": raw})
+        await _confirm(auth_client, _extract_token(fake.to(_NEW_EMAIL)[0]))
+        await _confirm(auth_client, _extract_token(fake.to(_OLD_EMAIL)[0]))
 
         still_good = await auth_client.get(f"{_PREFIX}/account", headers=_headers(access))
         assert still_good.status_code == 200
@@ -248,16 +282,21 @@ class TestChangeEmail:
 
 
 class TestNotifications:
-    async def test_old_address_gets_a_notice(self, auth_client, app, registry_session):
+    async def test_old_address_gets_its_own_link(
+        self, auth_client, app, registry_session
+    ):
         await _make_user(registry_session)
-        fake, _ = await _request_change(auth_client, app, _OLD_EMAIL)
+        change = await _request_change(auth_client, app, _OLD_EMAIL)
 
-        assert len(fake.to(_NEW_EMAIL)) == 1
-        notices = fake.to(_OLD_EMAIL)
-        assert len(notices) == 1
-        # The notice is the tripwire, not a second way in: no link.
-        assert "token=" not in notices[0].text
-        assert _NEW_EMAIL in notices[0].text
+        assert len(change.provider.to(_NEW_EMAIL)) == 1
+        authorisations = change.provider.to(_OLD_EMAIL)
+        assert len(authorisations) == 1
+        # It carries a link, and names where the account is being moved to.
+        assert "token=" in authorisations[0].text
+        assert _NEW_EMAIL in authorisations[0].text
+        # Two different secrets. One value satisfying both sides would let
+        # whoever reads either mailbox finish alone.
+        assert change.old_token != change.new_token
 
     async def test_first_time_set_notifies_only_the_new_address(
         self, auth_client, app, registry_session
@@ -292,9 +331,10 @@ class TestFirstTimeSet:
             headers=_headers(access),
         )
         raw = _extract_token(fake.to(_NEW_EMAIL)[0])
-        assert (await auth_client.post(
-            f"{_PREFIX}/confirm-email-change", json={"token": raw}
-        )).status_code == 204
+        done = await _confirm(auth_client, raw)
+        assert done.status_code == 200, done.text
+        # No address to approve from, so the new side alone finishes it.
+        assert done.json()["complete"] is True
 
         moved = await _reload(registry_session, user)
         assert moved.email == _NEW_EMAIL
@@ -317,8 +357,7 @@ class TestFirstTimeSet:
             json={"new_email": _NEW_EMAIL, "password": _GOOD_PW},
             headers=_headers(access),
         )
-        raw = _extract_token(fake.to(_NEW_EMAIL)[0])
-        await auth_client.post(f"{_PREFIX}/confirm-email-change", json={"token": raw})
+        await _confirm(auth_client, _extract_token(fake.to(_NEW_EMAIL)[0]))
 
         fake.sent.clear()
         resp = await auth_client.post(
@@ -443,13 +482,11 @@ class TestNoEnumeration:
 class TestTokens:
     async def test_token_is_single_use(self, auth_client, app, registry_session):
         await _make_user(registry_session)
-        _, raw = await _request_change(auth_client, app, _OLD_EMAIL)
-        assert (await auth_client.post(
-            f"{_PREFIX}/confirm-email-change", json={"token": raw}
-        )).status_code == 204
-        assert (await auth_client.post(
-            f"{_PREFIX}/confirm-email-change", json={"token": raw}
-        )).status_code == 400
+        change = await _request_change(auth_client, app, _OLD_EMAIL)
+        assert (await _complete(auth_client, change)).status_code == 200
+        # Both are spent once the change lands.
+        assert (await _confirm(auth_client, change.new_token)).status_code == 400
+        assert (await _confirm(auth_client, change.old_token)).status_code == 400
 
     async def test_unknown_token_is_400(self, auth_client, registry_session):
         resp = await auth_client.post(
@@ -463,7 +500,7 @@ class TestTokens:
         registry_session.add(EmailChangeToken(
             id=str(uuid.uuid4()),
             user_id=user.id,
-            token_hash=hashlib.sha256(raw.encode()).hexdigest(),
+            new_token_hash=hashlib.sha256(raw.encode()).hexdigest(),
             new_email=_NEW_EMAIL,
             expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
         ))
@@ -489,25 +526,23 @@ class TestTokens:
             )
         first = _extract_token(fake.to("first@example.com")[0])
         second = _extract_token(fake.to("second@example.com")[0])
+        # Two authorisations reached the old address; the live one is the newest.
+        old_second = _extract_token(fake.to(_OLD_EMAIL)[1])
 
-        assert (await auth_client.post(
-            f"{_PREFIX}/confirm-email-change", json={"token": first}
-        )).status_code == 400
-        assert (await auth_client.post(
-            f"{_PREFIX}/confirm-email-change", json={"token": second}
-        )).status_code == 204
+        assert (await _confirm(auth_client, first)).status_code == 400
+        assert (await _confirm(auth_client, second)).status_code == 200
+        assert (await _confirm(auth_client, old_second)).status_code == 200
 
     async def test_address_claimed_before_confirmation_is_409(
         self, auth_client, app, registry_session
     ):
         user = await _make_user(registry_session)
-        _, raw = await _request_change(auth_client, app, _OLD_EMAIL)
-        # Somebody else takes the address during the hour the link is live.
+        change = await _request_change(auth_client, app, _OLD_EMAIL)
+        assert (await _confirm(auth_client, change.new_token)).status_code == 200
+        # Somebody else takes the address while the second link is still live.
         await _make_user(registry_session, email=_NEW_EMAIL)
 
-        resp = await auth_client.post(
-            f"{_PREFIX}/confirm-email-change", json={"token": raw}
-        )
+        resp = await _confirm(auth_client, change.old_token)
         assert resp.status_code == 409
         assert (await _reload(registry_session, user)).email == _OLD_EMAIL
 
@@ -529,6 +564,9 @@ class TestAccountAndCancel:
             "email": _OLD_EMAIL,
             "email_verified": True,
             "pending_email": None,
+            "pending_requires_old": False,
+            "pending_confirmed_new": False,
+            "pending_confirmed_old": False,
         }
 
     async def test_account_reports_a_pending_change(
@@ -547,6 +585,11 @@ class TestAccountAndCancel:
         )).json()
         assert body["email"] == _OLD_EMAIL
         assert body["pending_email"] == _NEW_EMAIL
+        # Both mailboxes still outstanding, and the card needs to know the old
+        # one counts at all.
+        assert body["pending_requires_old"] is True
+        assert body["pending_confirmed_new"] is False
+        assert body["pending_confirmed_old"] is False
 
     async def test_expired_pending_change_is_not_reported(
         self, auth_client, app, registry_session
@@ -555,7 +598,7 @@ class TestAccountAndCancel:
         registry_session.add(EmailChangeToken(
             id=str(uuid.uuid4()),
             user_id=user.id,
-            token_hash=hashlib.sha256(b"stale").hexdigest(),
+            new_token_hash=hashlib.sha256(b"stale").hexdigest(),
             new_email=_NEW_EMAIL,
             expires_at=datetime.now(timezone.utc) - timedelta(minutes=1),
         ))
@@ -570,7 +613,7 @@ class TestAccountAndCancel:
         self, auth_client, app, registry_session
     ):
         await _make_user(registry_session)
-        fake, raw = await _request_change(auth_client, app, _OLD_EMAIL)
+        change = await _request_change(auth_client, app, _OLD_EMAIL)
         access = await _login(auth_client, _OLD_EMAIL)
 
         assert (await auth_client.post(
@@ -580,10 +623,9 @@ class TestAccountAndCancel:
             f"{_PREFIX}/account", headers=_headers(access)
         )).json()
         assert body["pending_email"] is None
-        # The link that already reached the inbox is dead too.
-        assert (await auth_client.post(
-            f"{_PREFIX}/confirm-email-change", json={"token": raw}
-        )).status_code == 400
+        # Both links that already reached an inbox are dead.
+        assert (await _confirm(auth_client, change.new_token)).status_code == 400
+        assert (await _confirm(auth_client, change.old_token)).status_code == 400
 
     async def test_cancel_with_nothing_pending_succeeds(
         self, auth_client, app, registry_session
@@ -593,3 +635,124 @@ class TestAccountAndCancel:
         assert (await auth_client.post(
             f"{_PREFIX}/cancel-email-change", headers=_headers(access)
         )).status_code == 204
+
+
+# ── Dual confirmation: the property the whole design rests on ───────────────
+
+
+class TestDualConfirmation:
+    """Why both sides are required.
+
+    Passwords are set through reset tokens mailed to ``users.email``, and there
+    is no authenticated change-password endpoint, so the address *is* the
+    account's recovery channel. A one-sided change would let anyone holding the
+    password move that channel and then take the account permanently. These
+    tests pin the behaviour that stops it.
+    """
+
+    async def test_new_side_alone_does_not_move_the_account(
+        self, auth_client, app, registry_session
+    ):
+        user = await _make_user(registry_session)
+        change = await _request_change(auth_client, app, _OLD_EMAIL)
+
+        resp = await _confirm(auth_client, change.new_token)
+        assert resp.status_code == 200
+        assert resp.json()["complete"] is False
+
+        unmoved = await _reload(registry_session, user)
+        assert unmoved.email == _OLD_EMAIL
+        # And the old address still signs in.
+        assert (await auth_client.post(
+            f"{_PREFIX}/login", json={"username": _OLD_EMAIL, "password": _GOOD_PW}
+        )).status_code == 200
+
+    async def test_old_side_alone_does_not_move_the_account(
+        self, auth_client, app, registry_session
+    ):
+        user = await _make_user(registry_session)
+        change = await _request_change(auth_client, app, _OLD_EMAIL)
+
+        resp = await _confirm(auth_client, change.old_token)
+        assert resp.status_code == 200
+        assert resp.json() == {
+            "complete": False, "awaiting": "new", "new_email": _NEW_EMAIL
+        }
+        assert (await _reload(registry_session, user)).email == _OLD_EMAIL
+
+    async def test_same_token_twice_completes_nothing(
+        self, auth_client, app, registry_session
+    ):
+        """The attack this design exists to stop.
+
+        Someone who reads only the new mailbox holds one secret. Replaying it
+        must not stand in for the approval they cannot reach — otherwise the
+        second confirmation is a notification with a button on it.
+        """
+        user = await _make_user(registry_session)
+        change = await _request_change(auth_client, app, _OLD_EMAIL)
+
+        for _ in range(3):
+            resp = await _confirm(auth_client, change.new_token)
+            assert resp.status_code == 200
+            assert resp.json()["complete"] is False
+            assert resp.json()["awaiting"] == "old"
+
+        assert (await _reload(registry_session, user)).email == _OLD_EMAIL
+
+    async def test_either_order_works(self, auth_client, app, registry_session):
+        user = await _make_user(registry_session)
+        change = await _request_change(auth_client, app, _OLD_EMAIL)
+
+        assert (await _confirm(auth_client, change.old_token)).status_code == 200
+        final = await _confirm(auth_client, change.new_token)
+        assert final.status_code == 200
+        assert final.json()["complete"] is True
+        assert (await _reload(registry_session, user)).email == _NEW_EMAIL
+
+    async def test_account_reports_each_side_as_it_lands(
+        self, auth_client, app, registry_session
+    ):
+        await _make_user(registry_session)
+        change = await _request_change(auth_client, app, _OLD_EMAIL)
+        access = await _login(auth_client, _OLD_EMAIL)
+
+        await _confirm(auth_client, change.new_token)
+        body = (await auth_client.get(
+            f"{_PREFIX}/account", headers=_headers(access)
+        )).json()
+        assert body["pending_confirmed_new"] is True
+        assert body["pending_confirmed_old"] is False
+
+    async def test_first_time_set_needs_no_old_side(
+        self, auth_client, app, registry_session
+    ):
+        await _make_user(registry_session, username="invited", email=None)
+        fake = _use_provider(app)
+        access = await _login(auth_client, "invited")
+        await auth_client.post(
+            f"{_PREFIX}/change-email",
+            json={"new_email": _NEW_EMAIL, "password": _GOOD_PW},
+            headers=_headers(access),
+        )
+        body = (await auth_client.get(
+            f"{_PREFIX}/account", headers=_headers(access)
+        )).json()
+        assert body["pending_requires_old"] is False
+
+    async def test_expiry_covers_the_whole_change(
+        self, auth_client, app, registry_session
+    ):
+        """One side confirmed does not keep the other alive past the deadline."""
+        user = await _make_user(registry_session)
+        change = await _request_change(auth_client, app, _OLD_EMAIL)
+        assert (await _confirm(auth_client, change.new_token)).status_code == 200
+
+        row = (await registry_session.execute(
+            select(EmailChangeToken).where(EmailChangeToken.user_id == user.id)
+        )).scalar_one()
+        row.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+        await registry_session.commit()
+
+        assert (await _confirm(auth_client, change.old_token)).status_code == 400
+        assert (await _reload(registry_session, user)).email == _OLD_EMAIL

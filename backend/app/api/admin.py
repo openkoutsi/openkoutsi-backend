@@ -17,7 +17,7 @@ from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core import audit
-from backend.app.core.auth import UserContext, get_current_user
+from backend.app.core.auth import UserContext, get_current_user, invalidate_sessions
 from backend.app.core.config import settings
 from backend.app.core.file_encryption import encrypt_instance_secret
 from backend.app.core.limiter import limiter
@@ -27,6 +27,7 @@ from backend.app.db.usage import get_usage_session
 from backend.app.db.user_session import delete_user_db
 from backend.app.models.usage_orm import LlmUsage
 from backend.app.models.registry_orm import (
+    EmailChangeToken,
     InstanceSettings,
     Invitation,
     LlmEntitlement,
@@ -48,6 +49,7 @@ from backend.app.schemas.admin import (
     LlmUsageSummaryResponse,
     PasswordResetLinkResponse,
     UserResponse,
+    UserEmailUpdate,
     UserRolesUpdate,
 )
 from backend.app.schemas.tokens import AdminPersonalAccessTokenResponse
@@ -173,6 +175,78 @@ async def update_user_roles(
     user.roles = json.dumps(body.roles)
     await session.commit()
     await session.refresh(user)
+    return _user_response(user)
+
+
+@router.patch("/users/{user_id}/email", response_model=UserResponse,
+              operation_id="updateUserEmail", summary="Set or clear a user's email address")
+@limiter.limit("20/hour")
+async def update_user_email(
+    request: Request,
+    user_id: str,
+    body: UserEmailUpdate,
+    _: UserContext = Depends(require_admin),
+    session: AsyncSession = Depends(get_registry_session),
+):
+    """Set or clear the address on an account, as a recovery action.
+
+    The escape hatch for an address its owner can no longer reach. Users change
+    their own address themselves, and that flow requires approval from both the
+    old mailbox and the new one — which is what stops a password-holder
+    relocating the account's password-reset target. That guarantee is also what
+    leaves somebody whose old mailbox is gone with nowhere to go, and until this
+    existed the only remedy was deleting the account and every activity in it.
+
+    Because it is a recovery action, it assumes the account may be in the wrong
+    hands: it withdraws every session and personal access token, so whoever is
+    signed in right now is signed out, and voids any change already in flight.
+    An admin setting an address is vouching for it, so it lands verified — no
+    confirmation mail, which is the point when the mailbox being replaced is
+    unreachable.
+    """
+    result = await session.execute(
+        select(User).where(User.id == user_id, User.deleted_at.is_(None))
+    )
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    now = datetime.now(timezone.utc)
+    email = str(body.email).lower() if body.email is not None else None
+
+    if email is not None:
+        # Not filtered by deleted_at: uq_users_email covers every row, so an
+        # address held by a soft-deleted account is one this can never hand over.
+        clash = await session.execute(
+            select(User.id).where(User.email == email, User.id != user_id).limit(1)
+        )
+        if clash.scalar_one_or_none() is not None:
+            raise HTTPException(
+                status_code=409, detail="That email address belongs to another account"
+            )
+
+    user.email = email
+    user.email_verified_at = now if email is not None else None
+
+    # A change mid-flight was authorised against the address being replaced, so
+    # it can't be allowed to land on top of this.
+    pending = await session.execute(
+        select(EmailChangeToken).where(
+            EmailChangeToken.user_id == user_id,
+            EmailChangeToken.used_at.is_(None),
+        )
+    )
+    for token_row in pending.scalars():
+        token_row.used_at = now
+
+    invalidate_sessions(user)
+    await pat.revoke_all_for_user(session, user_id, now)
+    await session.commit()
+    await session.refresh(user)
+
+    await notifications.notify_user(
+        user_id, notifications.EMAIL_CHANGE_BY_ADMIN, {"new_email": email}
+    )
     return _user_response(user)
 
 

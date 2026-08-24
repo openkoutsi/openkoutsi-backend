@@ -460,7 +460,7 @@
           "auth"
         ],
         "summary": "Confirm a new email address",
-        "description": "Consume a change token and move the account onto its new address.\n\nUnauthenticated by design: the link is opened in the new mailbox, which is\nroutinely a different device from the one that asked. The token *is* the\nproof \u2014 holding it means holding that inbox.\n\nSessions are left alone. The request already cost the current password, so\nconfirming grants nothing the password didn't; someone who wants their other\ndevices signed out has ``/logout-all`` for exactly that.",
+        "description": "Stamp one side of a pending change, and apply it once both sides are in.\n\nUnauthenticated by design: these links are opened in whichever mailbox they\nwere sent to, routinely on a different device from the one that asked. The\ntoken *is* the proof \u2014 holding it means holding that inbox.\n\nA change carries two distinct tokens, one per address, and this endpoint\nworks out which it was handed by matching against both columns. Presenting\nthe same one twice therefore stamps the same side twice and completes\nnothing: that is what makes the second mailbox a real requirement rather\nthan a notification with a button on it.\n\nSessions are left alone. Both mailboxes and the password were needed to get\nhere, so there is no one to evict that isn't the owner; ``/logout-all``\nremains the control for clearing other devices.",
         "operationId": "confirmEmailChange",
         "requestBody": {
           "content": {
@@ -473,8 +473,15 @@
           "required": true
         },
         "responses": {
-          "204": {
-            "description": "Successful Response"
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmailChangeConfirmResponse"
+                }
+              }
+            }
           },
           "422": {
             "description": "Validation Error",
@@ -495,7 +502,7 @@
           "auth"
         ],
         "summary": "Abandon a pending email change",
-        "description": "Spend any outstanding change tokens without applying them.\n\nA mistyped address otherwise sits in the account's face for an hour with no\nway to clear it, and its link stays live in whichever inbox it reached.\nIdempotent: cancelling nothing succeeds.\n\n**Not available to personal access tokens.**",
+        "description": "Spend any outstanding change tokens without applying them.\n\nA mistyped address otherwise sits in the account's face for a day with no\nway to clear it, and its links stay live in whichever inboxes they reached.\nVoids both sides at once. Idempotent: cancelling nothing succeeds.\n\n**Not available to personal access tokens.**",
         "operationId": "cancelEmailChange",
         "responses": {
           "204": {
@@ -670,6 +677,67 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/UserRolesUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-personal-access-token": {
+          "allowed": false
+        }
+      }
+    },
+    "/api/admin/users/{user_id}/email": {
+      "patch": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Set or clear a user's email address",
+        "description": "Set or clear the address on an account, as a recovery action.\n\nThe escape hatch for an address its owner can no longer reach. Users change\ntheir own address themselves, and that flow requires approval from both the\nold mailbox and the new one \u2014 which is what stops a password-holder\nrelocating the account's password-reset target. That guarantee is also what\nleaves somebody whose old mailbox is gone with nowhere to go, and until this\nexisted the only remedy was deleting the account and every activity in it.\n\nBecause it is a recovery action, it assumes the account may be in the wrong\nhands: it withdraws every session and personal access token, so whoever is\nsigned in right now is signed out, and voids any change already in flight.\nAn admin setting an address is vouching for it, so it lands verified \u2014 no\nconfirmation mail, which is the point when the mailbox being replaced is\nunreachable.\n\n**Not available to personal access tokens.**",
+        "operationId": "updateUserEmail",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "User Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserEmailUpdate"
               }
             }
           }
@@ -7561,6 +7629,21 @@
               }
             ],
             "title": "Pending Email"
+          },
+          "pending_requires_old": {
+            "type": "boolean",
+            "title": "Pending Requires Old",
+            "default": false
+          },
+          "pending_confirmed_new": {
+            "type": "boolean",
+            "title": "Pending Confirmed New",
+            "default": false
+          },
+          "pending_confirmed_old": {
+            "type": "boolean",
+            "title": "Pending Confirmed Old",
+            "default": false
           }
         },
         "type": "object",
@@ -10364,6 +10447,42 @@
         ],
         "title": "EfficiencyPoint",
         "description": "One steady endurance ride in the aerobic efficiency trend (issue #37).\n\nEfficiency factor is weighted power per heartbeat; rising over time at a\nconstant training load is aerobic progress the Fitness/Fatigue model can't\nsee. ``decoupling_pct`` rides along where the activity has one, so the same\nchart can show durability alongside efficiency."
+      },
+      "EmailChangeConfirmResponse": {
+        "properties": {
+          "complete": {
+            "type": "boolean",
+            "title": "Complete"
+          },
+          "awaiting": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Awaiting"
+          },
+          "new_email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "New Email"
+          }
+        },
+        "type": "object",
+        "required": [
+          "complete"
+        ],
+        "title": "EmailChangeConfirmResponse",
+        "description": "The outcome of stamping one side of a pending email change.\n\nA confirmation that lands correctly but leaves the change waiting on the\nother mailbox is a success, not a failure, and the page has to say so \u2014\notherwise the first person through reads \"nothing happened\" and asks again."
       },
       "ExportFormatInfo": {
         "properties": {
@@ -14496,6 +14615,25 @@
           "count"
         ],
         "title": "UnreadCountResponse"
+      },
+      "UserEmailUpdate": {
+        "properties": {
+          "email": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "email"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          }
+        },
+        "type": "object",
+        "title": "UserEmailUpdate",
+        "description": "Admin set/clear of a user's address (issue #62).\n\n``None`` clears it. The escape hatch for an address its owner can no longer\nreach \u2014 a dead mailbox, or one taken along with the account \u2014 for which the\nonly previous remedy was deleting the user and their training data."
       },
       "UserResponse": {
         "properties": {

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 from backend.app.schemas.auth import _validate_password_strength
 
@@ -56,6 +56,16 @@ class UserResponse(BaseModel):
 
 class UserRolesUpdate(BaseModel):
     roles: list[str]
+
+
+class UserEmailUpdate(BaseModel):
+    """Admin set/clear of a user's address (issue #62).
+
+    ``None`` clears it. The escape hatch for an address its owner can no longer
+    reach — a dead mailbox, or one taken along with the account — for which the
+    only previous remedy was deleting the user and their training data.
+    """
+    email: Optional[EmailStr] = None
 
 
 class LlmEntitlementUpdate(BaseModel):

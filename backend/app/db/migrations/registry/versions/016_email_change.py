@@ -1,18 +1,24 @@
-"""Confirmed email-address changes (issue #62).
+"""Email-address changes, authorised from both ends (issue #62).
 
-Adds ``email_change_tokens`` — single-use, hashed, expiring tokens that each
-carry the address they are a claim about (``new_email``). Requesting a change
-writes one and mails a link to the *new* address; confirming it is what moves
-``users.email``, so an unconfirmed request never touches the login identifier.
+Adds ``email_change_tokens``. One row is one pending change and carries **two**
+independent secrets — ``new_token_hash``, mailed to the address being claimed,
+and ``old_token_hash``, mailed to the address being left. ``users.email`` moves
+only once every required side has been stamped, so an unconfirmed request never
+touches the login identifier.
 
-A separate table rather than a ``new_email`` column on
-``email_verification_tokens``: signup marks every unused verification token a
-user holds as spent before issuing a fresh one, and a pending change sharing
-that table would be voided by an unrelated signup retry.
+Both sides are required because this codebase has no authenticated
+change-password endpoint: passwords are set through reset tokens, which are
+mailed to ``users.email``. That makes the address the account's only self-serve
+root of trust. A one-sided change would let anyone holding just the password
+relocate that channel and then take the account permanently via "forgot
+password"; requiring the outgoing mailbox costs an attacker exactly what taking
+the account over already costs, so the feature adds no new leverage.
 
-``new_email`` is deliberately **not** unique. Two accounts may have a pending
-change to the same address simultaneously — nothing is claimed until one of them
-confirms, and the unique index on ``users.email`` turns the loser away then.
+``old_token_hash`` is nullable: an invite-created account has no address yet, so
+a first set has nothing to authorise against and the new side alone completes
+it. ``new_email`` is deliberately **not** unique — two accounts may have a
+pending change to the same address at once, nothing is claimed until one of them
+finishes, and the unique index on ``users.email`` decides it then.
 
 Revision ID: 016_email_change
 Revises: 015_user_token_version
@@ -32,13 +38,21 @@ def upgrade() -> None:
         "email_change_tokens",
         sa.Column("id", sa.String(), primary_key=True),
         sa.Column("user_id", sa.String(), nullable=False),
-        sa.Column("token_hash", sa.String(), nullable=False),
+        sa.Column("new_token_hash", sa.String(), nullable=False),
+        sa.Column("old_token_hash", sa.String(), nullable=True),
         sa.Column("new_email", sa.String(), nullable=False),
+        sa.Column("new_confirmed_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("old_confirmed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("expires_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("used_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
-        sa.UniqueConstraint("token_hash", name="uq_email_change_tokens_token_hash"),
+        sa.UniqueConstraint(
+            "new_token_hash", name="uq_email_change_tokens_new_token_hash"
+        ),
+        sa.UniqueConstraint(
+            "old_token_hash", name="uq_email_change_tokens_old_token_hash"
+        ),
     )
 
 

@@ -52,7 +52,7 @@ def _insert_token(conn, *, token_id: str, user_id: str, token_hash: str,
     conn.execute(
         text(
             "INSERT INTO email_change_tokens "
-            "(id, user_id, token_hash, new_email, expires_at, created_at) VALUES "
+            "(id, user_id, new_token_hash, new_email, expires_at, created_at) VALUES "
             f"('{token_id}', '{user_id}', '{token_hash}', '{new_email}', "
             "'2030-01-01 00:00:00', '2026-01-01 00:00:00')"
         )
@@ -86,18 +86,53 @@ def test_new_email_is_required(migrated):
             conn.execute(
                 text(
                     "INSERT INTO email_change_tokens "
-                    "(id, user_id, token_hash, expires_at, created_at) VALUES "
+                    "(id, user_id, new_token_hash, expires_at, created_at) VALUES "
                     "('t1', 'u1', 'h1', '2030-01-01 00:00:00', '2026-01-01 00:00:00')"
                 )
             )
 
 
-def test_the_token_hash_is_unique(migrated):
+def test_the_new_token_hash_is_unique(migrated):
     with migrated.begin() as conn:
         _insert_token(conn, token_id="t1", user_id="u1", token_hash="same")
     with pytest.raises(IntegrityError):
         with migrated.begin() as conn:
             _insert_token(conn, token_id="t2", user_id="u1", token_hash="same")
+
+
+def test_two_first_time_sets_can_coexist(migrated):
+    """``old_token_hash`` is unique *and* nullable.
+
+    A first-time set leaves it NULL, and more than one account can be doing that
+    at once — SQL treats NULLs as distinct in a unique index, which is the
+    behaviour this relies on. If it ever didn't, the second invited user to add
+    an address would be refused for no reason they could see.
+    """
+    with migrated.begin() as conn:
+        _insert_token(conn, token_id="t1", user_id="u1", token_hash="h1")
+        _insert_token(conn, token_id="t2", user_id="u2", token_hash="h2")
+        rows = conn.exec_driver_sql(
+            "SELECT COUNT(*) FROM email_change_tokens WHERE old_token_hash IS NULL"
+        ).scalar()
+    assert rows == 2
+
+
+def test_the_old_token_hash_is_unique_when_present(migrated):
+    with migrated.begin() as conn:
+        conn.exec_driver_sql(
+            "INSERT INTO email_change_tokens "
+            "(id, user_id, new_token_hash, old_token_hash, new_email, expires_at, created_at) "
+            "VALUES ('t1', 'u1', 'n1', 'shared', 'a@example.com', "
+            "'2026-01-01 00:00:00', '2026-01-01 00:00:00')"
+        )
+    with pytest.raises(IntegrityError):
+        with migrated.begin() as conn:
+            conn.exec_driver_sql(
+                "INSERT INTO email_change_tokens "
+                "(id, user_id, new_token_hash, old_token_hash, new_email, expires_at, created_at) "
+                "VALUES ('t2', 'u2', 'n2', 'shared', 'b@example.com', "
+                "'2026-01-01 00:00:00', '2026-01-01 00:00:00')"
+            )
 
 
 def test_the_same_address_may_be_pending_for_two_users(migrated):

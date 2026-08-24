@@ -146,8 +146,28 @@ class AccountResponse(BaseModel):
     username: Optional[str] = None
     email: Optional[str] = None
     email_verified: bool = False
-    # Set while a change is awaiting confirmation at that address.
+    # Set while a change is outstanding — the address being moved to.
     pending_email: Optional[str] = None
+    # A change needs approval from the address being *left* as well as the one
+    # being claimed, so the UI has to say which mailbox it is still waiting on.
+    # ``pending_requires_old`` is false only for a first-time set on an account
+    # that had no address, where there is nothing to approve against.
+    pending_requires_old: bool = False
+    pending_confirmed_new: bool = False
+    pending_confirmed_old: bool = False
+
+
+class EmailChangeConfirmResponse(BaseModel):
+    """The outcome of stamping one side of a pending email change.
+
+    A confirmation that lands correctly but leaves the change waiting on the
+    other mailbox is a success, not a failure, and the page has to say so —
+    otherwise the first person through reads "nothing happened" and asks again.
+    """
+    complete: bool
+    # Which side is still outstanding ("old" / "new"); None once complete.
+    awaiting: Optional[str] = None
+    new_email: Optional[str] = None
 
 
 class ResetPasswordRequest(BaseModel):

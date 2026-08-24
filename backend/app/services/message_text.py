@@ -217,9 +217,10 @@ def _render_email_change_requested(data: dict) -> RenderedMessage:
         title="Confirm your new email address",
         body=(
             f"A change of your account's email address to {new_email} is waiting "
-            "to be confirmed. Open the link we sent there within an hour to "
-            "finish it — until then, your current address still signs you in. "
-            "If this wasn't you, change your password: whoever asked knows it."
+            "on two approvals: one at the new address, one at your current one. "
+            "Open both links within 24 hours to finish it — until then, your "
+            "current address still signs you in. If this wasn't you, do not open "
+            "them, and change your password: whoever asked knows it."
         ),
     )
 
@@ -231,6 +232,19 @@ def _render_email_change_confirmed(data: dict) -> RenderedMessage:
         body=(
             f"Your account's email address is now {new_email}. Sign in with it "
             "from here on; password resets and notifications go there too."
+        ),
+    )
+
+
+def _render_email_change_by_admin(data: dict) -> RenderedMessage:
+    new_email = data.get("new_email")
+    where = f"set to {new_email}" if new_email else "removed"
+    return RenderedMessage(
+        title="An administrator changed your email address",
+        body=(
+            f"The email address on your account was {where} by an administrator "
+            "of this server, and every session and access token it had was "
+            "signed out. If you didn't ask for this, contact the administrator."
         ),
     )
 
@@ -257,6 +271,8 @@ def render(type: str, data: dict, locale: str = DEFAULT_LOCALE) -> RenderedMessa
         return _render_email_change_requested(data)
     if type == "email_change_confirmed":
         return _render_email_change_confirmed(data)
+    if type == "email_change_by_admin":
+        return _render_email_change_by_admin(data)
     return RenderedMessage(
         title="Notification",
         body="You have a new notification.",
