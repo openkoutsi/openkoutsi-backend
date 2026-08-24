@@ -33,6 +33,38 @@ If no email provider is configured, self-serve signup stays unavailable even whe
 the toggle is on (the sign-up page hides itself), so accounts can never get stuck
 un-verifiable.
 
+### Changing an email address (issue #62)
+
+Users change their own address from **Profile → Email address**; there is no
+admin step, and no instance toggle beyond having email configured at all. The new
+address is confirmed the same way signup confirms the first one:
+
+1. The user submits the new address **and their current password**.
+2. openkoutsi emails a `…/confirm-email-change?token=…` link to the **new**
+   address, and emails the **old** one a notice that a change was requested.
+3. Opening the link moves `users.email` and marks it verified. Nothing changes
+   before that, so an unopened request simply expires after an hour.
+
+The same flow **adds** an address to an invite-created account, which has none.
+That is worth knowing when a user asks why they can't use "Forgot password?":
+until they set an address there is nowhere to send the link.
+
+Three things to be able to answer for a user:
+
+- **"I never got the email."** The endpoint answers identically whether the
+  address is free, already on another account, or already their own — deliberately,
+  so a signed-in user can't probe for accounts. An address that belongs to somebody
+  else therefore produces no mail at all. Check the provider logs, then check
+  whether another account holds it.
+- **"I got a notice I didn't ask for."** Someone submitted their password. Tell
+  them to change it — the request cannot be made without it.
+- **"It says the address is no longer available."** Another account claimed it
+  between the request and the confirmation. The link is dead; they request again.
+
+Confirming does **not** sign the user out anywhere. It changes an identifier, not
+a credential, and the request already cost the password — `/logout-all` is still
+the control for clearing other sessions.
+
 ## Personal access tokens
 
 Users can issue **personal access tokens** to their own tooling — a backup
@@ -235,6 +267,8 @@ uppercase letter and one digit), and is redirected to the login page.
 - Password reset (token consumption): 10 requests/hour per IP
 - Self-serve signup: 10 requests/hour per IP
 - Email verification: 20 requests/hour per IP
+- Email-address change request: 10 requests/hour per user
+- Email-change confirmation (token consumption): 20 requests/hour per IP
 - Personal access token creation: 20 requests/hour per user
 
 Rate limits are keyed by **principal**: an authenticated request is keyed on the
