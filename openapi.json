@@ -174,6 +174,34 @@
       }
     },
     "/api/auth/account": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Get the current account's identifiers",
+        "description": "The caller's own login identifiers, plus any address awaiting confirmation.\n\nSeparate from ``GET /athlete``, which carries the training profile and no\nlogin identity at all \u2014 there was no endpoint that could tell the web app\nwhich address it is about to let you change.\n\n**Not available to personal access tokens.**",
+        "operationId": "getAccount",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "x-personal-access-token": {
+          "allowed": false
+        }
+      },
       "delete": {
         "tags": [
           "auth"
@@ -373,6 +401,114 @@
               }
             }
           }
+        }
+      }
+    },
+    "/api/auth/change-email": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Change the account's email address",
+        "description": "Email a confirmation link to a new address; nothing moves until it is opened.\n\nAlso the way an invite-created account *gains* an address \u2014 those have\n``email = NULL``, which locks them out of self-serve password reset and\nlogin-by-email entirely. Setting one is the same operation as changing one,\nconfirmed the same way.\n\nRequires the current password: a session on its own must not be able to\nrelocate the login identifier and the password-reset target, or a borrowed\nbrowser becomes a permanent account takeover.\n\nReturns the same acknowledgement whatever happens \u2014 success, an address\nanother account already holds, the caller's own current address \u2014 so this\ncan't be used to ask whether somebody has an account here (#102, F-06).\n\n**Not available to personal access tokens.**",
+        "operationId": "changeEmail",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangeEmailRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/backend__app__schemas__auth__MessageResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "x-personal-access-token": {
+          "allowed": false
+        }
+      }
+    },
+    "/api/auth/confirm-email-change": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Confirm a new email address",
+        "description": "Consume a change token and move the account onto its new address.\n\nUnauthenticated by design: the link is opened in the new mailbox, which is\nroutinely a different device from the one that asked. The token *is* the\nproof \u2014 holding it means holding that inbox.\n\nSessions are left alone. The request already cost the current password, so\nconfirming grants nothing the password didn't; someone who wants their other\ndevices signed out has ``/logout-all`` for exactly that.",
+        "operationId": "confirmEmailChange",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmEmailChangeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/cancel-email-change": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Abandon a pending email change",
+        "description": "Spend any outstanding change tokens without applying them.\n\nA mistyped address otherwise sits in the account's face for an hour with no\nway to clear it, and its link stays live in whichever inbox it reached.\nIdempotent: cancelling nothing succeeds.\n\n**Not available to personal access tokens.**",
+        "operationId": "cancelEmailChange",
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "x-personal-access-token": {
+          "allowed": false
         }
       }
     },
@@ -7386,6 +7522,51 @@
         ],
         "title": "AbsoluteSpec"
       },
+      "AccountResponse": {
+        "properties": {
+          "username": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Username"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "email_verified": {
+            "type": "boolean",
+            "title": "Email Verified",
+            "default": false
+          },
+          "pending_email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pending Email"
+          }
+        },
+        "type": "object",
+        "title": "AccountResponse",
+        "description": "The caller's own account identifiers.\n\nNothing else exposed this: ``AthleteResponse`` carries the training profile\nand no login identity at all, so the web app had no way to show the address\nit is about to let you change."
+      },
       "AchievementDefinition": {
         "properties": {
           "id": {
@@ -9048,6 +9229,26 @@
         ],
         "title": "Body_upload_activity_api_activities_upload_post"
       },
+      "ChangeEmailRequest": {
+        "properties": {
+          "new_email": {
+            "type": "string",
+            "format": "email",
+            "title": "New Email"
+          },
+          "password": {
+            "type": "string",
+            "title": "Password"
+          }
+        },
+        "type": "object",
+        "required": [
+          "new_email",
+          "password"
+        ],
+        "title": "ChangeEmailRequest",
+        "description": "Ask for the account's email address to be changed (or set) \u2014 issue #62.\n\nThe current password is required for the same reason ``DeleteAccountRequest``\nrequires it: a session alone must not be enough to move the login identifier\nand the password-reset target somewhere the holder controls."
+      },
       "ChatAvailability": {
         "properties": {
           "enabled": {
@@ -9314,6 +9515,19 @@
         ],
         "title": "ChatTurnBody",
         "description": "One question from the athlete.\n\n``message`` is the *only* thing the client sends. Everything the model\nactually receives \u2014 the system prompt, the scope policy, the replayed\nhistory \u2014 is built server-side in ``services.llm_chat``, which is the whole\ndifference between this and the ``/api/llm/chat`` proxy issue #45 removed."
+      },
+      "ConfirmEmailChangeRequest": {
+        "properties": {
+          "token": {
+            "type": "string",
+            "title": "Token"
+          }
+        },
+        "type": "object",
+        "required": [
+          "token"
+        ],
+        "title": "ConfirmEmailChangeRequest"
       },
       "ConsentRequest": {
         "properties": {

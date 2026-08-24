@@ -29,6 +29,7 @@ from backend.app.core.scopes import pat_forbidden
 from backend.app.db.registry import get_registry_session
 from backend.app.db.user_session import delete_user_db, get_user_session_factory, init_user_db
 from backend.app.models.registry_orm import (
+    EmailChangeToken,
     EmailVerificationToken,
     InstanceSettings,
     Invitation,
@@ -38,6 +39,9 @@ from backend.app.models.registry_orm import (
 )
 from backend.app.models.user_orm import Athlete
 from backend.app.schemas.auth import (
+    AccountResponse,
+    ChangeEmailRequest,
+    ConfirmEmailChangeRequest,
     DeleteAccountRequest,
     LoginRequest,
     MessageResponse,
@@ -53,6 +57,8 @@ from backend.app.services.email import (
     EmailError,
     EmailProvider,
     get_email_provider,
+    send_email_change_email,
+    send_email_change_notice,
     send_password_reset_email,
     send_verification_email,
 )
@@ -590,3 +596,265 @@ async def request_password_reset(
     except EmailError:
         log.exception("Failed to send password-reset email")
     return ack
+
+
+# ── Changing (or setting) the account's email address (issue #62) ────────────
+
+_CHANGE_EMAIL_ACK = (
+    "If that address can be used, check its inbox to confirm the change."
+)
+
+
+async def _live_email_change(
+    session: AsyncSession, user_id: str, now: datetime
+) -> EmailChangeToken | None:
+    """The caller's outstanding change request, if one is still openable.
+
+    Unused and unexpired — an expired row is not a pending change, it is
+    litter, and reporting it would leave the account looking stuck at an
+    address it never moved to.
+    """
+    result = await session.execute(
+        select(EmailChangeToken).where(
+            EmailChangeToken.user_id == user_id,
+            EmailChangeToken.used_at.is_(None),
+        ).order_by(EmailChangeToken.created_at.desc())
+    )
+    for row in result.scalars():
+        expires_at = row.expires_at
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at > now:
+            return row
+    return None
+
+
+async def _email_taken_by_other(
+    session: AsyncSession, email: str, user_id: str
+) -> bool:
+    """Whether some *other* account already holds this address.
+
+    Deliberately not filtered by ``deleted_at``: the unique index on
+    ``users.email`` covers every row, so an address held by a soft-deleted
+    account is one this flow can never actually hand over. Treating it as free
+    would mean mailing a confirmation link that is guaranteed to fail at the
+    end.
+    """
+    result = await session.execute(
+        select(User.id).where(User.email == email, User.id != user_id).limit(1)
+    )
+    return result.scalar_one_or_none() is not None
+
+
+@router.get("/account", response_model=AccountResponse,
+            operation_id="getAccount", summary="Get the current account's identifiers")
+async def get_account(
+    ctx: UserContext = Depends(get_current_user),
+    session: AsyncSession = Depends(get_registry_session),
+):
+    """The caller's own login identifiers, plus any address awaiting confirmation.
+
+    Separate from ``GET /athlete``, which carries the training profile and no
+    login identity at all — there was no endpoint that could tell the web app
+    which address it is about to let you change.
+    """
+    result = await session.execute(
+        select(User).where(User.id == ctx.user_id, User.deleted_at.is_(None))
+    )
+    user = result.scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    pending = await _live_email_change(session, user.id, datetime.now(timezone.utc))
+    return AccountResponse(
+        username=user.username,
+        email=user.email,
+        email_verified=user.email_verified_at is not None,
+        pending_email=pending.new_email if pending else None,
+    )
+
+
+@router.post("/change-email", response_model=MessageResponse, status_code=202,
+             operation_id="changeEmail", summary="Change the account's email address")
+@limiter.limit("10/hour")
+async def change_email(
+    request: Request,
+    body: ChangeEmailRequest,
+    ctx: UserContext = Depends(get_current_user),
+    provider: EmailProvider = Depends(get_email_provider_dep),
+    session: AsyncSession = Depends(get_registry_session),
+):
+    """Email a confirmation link to a new address; nothing moves until it is opened.
+
+    Also the way an invite-created account *gains* an address — those have
+    ``email = NULL``, which locks them out of self-serve password reset and
+    login-by-email entirely. Setting one is the same operation as changing one,
+    confirmed the same way.
+
+    Requires the current password: a session on its own must not be able to
+    relocate the login identifier and the password-reset target, or a borrowed
+    browser becomes a permanent account takeover.
+
+    Returns the same acknowledgement whatever happens — success, an address
+    another account already holds, the caller's own current address — so this
+    can't be used to ask whether somebody has an account here (#102, F-06).
+    """
+    if not provider.is_configured:
+        # No way to confirm the new address, so no honest way to offer the
+        # change. Mirrors how signup refuses when email is unavailable.
+        raise HTTPException(
+            status_code=404, detail="Changing your email address is not available"
+        )
+
+    result = await session.execute(
+        select(User).where(User.id == ctx.user_id, User.deleted_at.is_(None))
+    )
+    user = result.scalar_one_or_none()
+    if user is None or not await verify_password_async(body.password, user.password_hash):
+        raise HTTPException(status_code=401, detail="Invalid password")
+
+    ack = MessageResponse(detail=_CHANGE_EMAIL_ACK)
+    email = str(body.new_email).lower()
+    now = datetime.now(timezone.utc)
+
+    if email == (user.email or "").lower():
+        # Already theirs. Nothing to do, and saying so would confirm the address
+        # to anyone who has the password but not the mailbox.
+        return ack
+    if await _email_taken_by_other(session, email, user.id):
+        return ack
+
+    old_email = user.email if user.email_verified_at is not None else None
+
+    # One pending change at a time: the newest request wins, as it does for
+    # signup verification and password reset.
+    prior = await session.execute(
+        select(EmailChangeToken).where(
+            EmailChangeToken.user_id == user.id,
+            EmailChangeToken.used_at.is_(None),
+        )
+    )
+    for token_row in prior.scalars():
+        token_row.used_at = now
+
+    raw_token = secrets.token_urlsafe(32)
+    session.add(EmailChangeToken(
+        user_id=user.id,
+        token_hash=hashlib.sha256(raw_token.encode()).hexdigest(),
+        new_email=email,
+        expires_at=now + timedelta(hours=1),
+    ))
+    await session.commit()
+
+    confirm_url = f"{settings.frontend_url}/confirm-email-change?token={raw_token}"
+    try:
+        await send_email_change_email(provider, to=email, action_url=confirm_url)
+    except EmailError:
+        # The request stands; the user can ask again to resend. Don't leak the
+        # delivery failure into the uniform acknowledgement.
+        log.exception("Failed to send email-change confirmation")
+
+    if old_email is not None:
+        # The tripwire: whoever owns the mailbox the account is leaving finds out
+        # it is being left. Without this, a password-holder could move the
+        # account silently.
+        try:
+            await send_email_change_notice(provider, to=old_email, new_email=email)
+        except EmailError:
+            log.exception("Failed to send email-change notice to the old address")
+
+    await notifications.notify_user(
+        user.id, notifications.EMAIL_CHANGE_REQUESTED, {"new_email": email}
+    )
+    return ack
+
+
+@router.post("/confirm-email-change", status_code=204,
+             operation_id="confirmEmailChange", summary="Confirm a new email address")
+@limiter.limit("20/hour")
+async def confirm_email_change(
+    request: Request,
+    body: ConfirmEmailChangeRequest,
+    session: AsyncSession = Depends(get_registry_session),
+):
+    """Consume a change token and move the account onto its new address.
+
+    Unauthenticated by design: the link is opened in the new mailbox, which is
+    routinely a different device from the one that asked. The token *is* the
+    proof — holding it means holding that inbox.
+
+    Sessions are left alone. The request already cost the current password, so
+    confirming grants nothing the password didn't; someone who wants their other
+    devices signed out has ``/logout-all`` for exactly that.
+    """
+    token_hash = hashlib.sha256(body.token.encode()).hexdigest()
+    result = await session.execute(
+        select(EmailChangeToken).where(EmailChangeToken.token_hash == token_hash)
+    )
+    token_row = result.scalar_one_or_none()
+
+    now = datetime.now(timezone.utc)
+    if token_row is None or token_row.used_at is not None:
+        raise HTTPException(status_code=400, detail="Invalid or expired token")
+    expires_at = token_row.expires_at
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    if expires_at <= now:
+        raise HTTPException(status_code=400, detail="Invalid or expired token")
+
+    user_result = await session.execute(
+        select(User).where(User.id == token_row.user_id, User.deleted_at.is_(None))
+    )
+    user = user_result.scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=400, detail="Invalid or expired token")
+
+    # The address was free when the change was asked for; an hour is long enough
+    # for somebody else to have signed up with it since.
+    if await _email_taken_by_other(session, token_row.new_email, user.id):
+        raise HTTPException(
+            status_code=409, detail="That email address is no longer available"
+        )
+
+    new_email = token_row.new_email
+    user.email = new_email
+    user.email_verified_at = now
+    token_row.used_at = now
+    try:
+        await session.commit()
+    except IntegrityError:
+        # Lost a race against a concurrent signup or confirmation for the same
+        # address between the check above and this commit; uq_users_email is
+        # what actually decides it.
+        await session.rollback()
+        raise HTTPException(
+            status_code=409, detail="That email address is no longer available"
+        )
+
+    await notifications.notify_user(
+        user.id, notifications.EMAIL_CHANGE_CONFIRMED, {"new_email": new_email}
+    )
+
+
+@router.post("/cancel-email-change", status_code=204,
+             operation_id="cancelEmailChange", summary="Abandon a pending email change")
+async def cancel_email_change(
+    ctx: UserContext = Depends(get_current_user),
+    session: AsyncSession = Depends(get_registry_session),
+):
+    """Spend any outstanding change tokens without applying them.
+
+    A mistyped address otherwise sits in the account's face for an hour with no
+    way to clear it, and its link stays live in whichever inbox it reached.
+    Idempotent: cancelling nothing succeeds.
+    """
+    now = datetime.now(timezone.utc)
+    result = await session.execute(
+        select(EmailChangeToken).where(
+            EmailChangeToken.user_id == ctx.user_id,
+            EmailChangeToken.used_at.is_(None),
+        )
+    )
+    for token_row in result.scalars():
+        token_row.used_at = now
+    await session.commit()

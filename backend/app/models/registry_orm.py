@@ -61,6 +61,9 @@ class User(RegistryBase):
     verification_tokens: Mapped[list["EmailVerificationToken"]] = relationship(
         "EmailVerificationToken", back_populates="user", cascade="all, delete-orphan"
     )
+    email_change_tokens: Mapped[list["EmailChangeToken"]] = relationship(
+        "EmailChangeToken", back_populates="user", cascade="all, delete-orphan"
+    )
     provider_connections: Mapped[list["ProviderConnection"]] = relationship(
         "ProviderConnection", back_populates="user", cascade="all, delete-orphan"
     )
@@ -99,6 +102,37 @@ class EmailVerificationToken(RegistryBase):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     user: Mapped["User"] = relationship("User", back_populates="verification_tokens")
+
+
+class EmailChangeToken(RegistryBase):
+    """Single-use token confirming a *new* address for an existing account (issue #62).
+
+    Same shape as :class:`EmailVerificationToken` — hashed, single-use, expiring —
+    plus the address the token is a claim about. It is a separate table rather
+    than a ``new_email`` column on that one because :func:`signup` marks *every*
+    unused verification token a user holds as spent before issuing a fresh one; a
+    pending change sharing the table would be silently voided by an unrelated
+    signup retry.
+
+    ``new_email`` carries no unique constraint. Two users may have a pending
+    change to the same address at once — nothing has been claimed until one of
+    them confirms, and the loser is turned away at confirmation time by the
+    unique index on ``users.email``.
+    """
+
+    __tablename__ = "email_change_tokens"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id", ondelete="CASCADE"))
+    token_hash: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    # The address being claimed, stored lowercased. Held here rather than on the
+    # user row so an unconfirmed change never touches the login identifier.
+    new_email: Mapped[str] = mapped_column(String, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    user: Mapped["User"] = relationship("User", back_populates="email_change_tokens")
 
 
 class PersonalAccessToken(RegistryBase):

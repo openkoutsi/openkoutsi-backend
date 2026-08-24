@@ -18,6 +18,8 @@ from backend.app.services.email.rendering import render_transactional_email
 _VERIFY_SUBJECT = "Confirm your email"
 _RESET_SUBJECT = "Reset your password"
 _TOKEN_EXPIRY_SUBJECT = "Your openkoutsi access token"
+_EMAIL_CHANGE_SUBJECT = "Confirm your new email address"
+_EMAIL_CHANGE_NOTICE_SUBJECT = "Your openkoutsi email address is being changed"
 
 
 async def send_verification_email(
@@ -39,6 +41,66 @@ async def send_verification_email(
     )
     return await provider.send(
         OutboundMessage(to=to, subject=_VERIFY_SUBJECT, html=html, text=text)
+    )
+
+
+async def send_email_change_email(
+    provider: EmailProvider, *, to: str, action_url: str
+) -> str:
+    """Render and send the confirm-your-new-address message (issue #62).
+
+    Goes to the **new** address, and confirming it is what actually moves the
+    account: a change nobody can open the inbox for simply expires.
+    """
+    html, text = render_transactional_email(
+        title="Confirm your new email address",
+        intro=(
+            "This address was given as the new email for an openkoutsi account. "
+            "Confirm it to finish the change and start signing in with it."
+        ),
+        action_label="Confirm email",
+        action_url=action_url,
+        outro="This link expires in 1 hour and can only be used once.",
+        footer=(
+            "If you didn't request this, you can safely ignore this email — "
+            "nothing changes until the link is opened."
+        ),
+    )
+    return await provider.send(
+        OutboundMessage(to=to, subject=_EMAIL_CHANGE_SUBJECT, html=html, text=text)
+    )
+
+
+async def send_email_change_notice(
+    provider: EmailProvider, *, to: str, new_email: str
+) -> str:
+    """Tell the **old** address that a change was requested (issue #62).
+
+    Carries no link, on purpose: there is nothing to confirm here, and a link in
+    this message would be the obvious thing to forge. It exists so a change made
+    by somebody who has the password is visible to the person who owns the
+    mailbox, which is the only place a quiet takeover would otherwise show.
+    """
+    html, text = render_transactional_email(
+        title="Your email address is being changed",
+        intro=(
+            f"Someone asked to change the email address on your openkoutsi "
+            f"account to {new_email}. The change takes effect only once that "
+            "address is confirmed."
+        ),
+        outro=(
+            "If this was you, there is nothing to do — open the confirmation "
+            "link we sent to the new address."
+        ),
+        footer=(
+            "If this wasn't you, change your password now: whoever requested "
+            "this knows it."
+        ),
+    )
+    return await provider.send(
+        OutboundMessage(
+            to=to, subject=_EMAIL_CHANGE_NOTICE_SUBJECT, html=html, text=text
+        )
     )
 
 

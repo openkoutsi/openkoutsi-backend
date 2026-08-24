@@ -34,6 +34,11 @@ ACHIEVEMENT_UNLOCKED = "achievement_unlocked"   # one or more achievement tiers 
 PAT_EXPIRING = "pat_expiring"                   # a token expires in 7 days / 1 day
 PAT_EXPIRED = "pat_expired"                     # a token has expired
 PAT_REVOKED_BY_ADMIN = "pat_revoked_by_admin"   # an admin withdrew a token
+# Email-address changes (issue #62). The inbox is the durable record: the two
+# emails this flow sends land in mailboxes the account may be losing access to,
+# and one of them goes to an address that isn't the account's yet.
+EMAIL_CHANGE_REQUESTED = "email_change_requested"  # a change is awaiting confirmation
+EMAIL_CHANGE_CONFIRMED = "email_change_confirmed"  # the new address is now the account's
 
 
 async def notify_user(

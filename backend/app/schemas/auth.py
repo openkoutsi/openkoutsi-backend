@@ -113,6 +113,43 @@ class DeleteAccountRequest(BaseModel):
         return _validate_password_length(v)
 
 
+class ChangeEmailRequest(BaseModel):
+    """Ask for the account's email address to be changed (or set) — issue #62.
+
+    The current password is required for the same reason ``DeleteAccountRequest``
+    requires it: a session alone must not be enough to move the login identifier
+    and the password-reset target somewhere the holder controls.
+    """
+    new_email: EmailStr
+    password: str
+
+    # Length only, as on login and delete-account: this checks a password, it
+    # does not set one, so the strength rules would only lecture an account
+    # whose password predates them.
+    @field_validator("password")
+    @classmethod
+    def password_length(cls, v: str) -> str:
+        return _validate_password_length(v)
+
+
+class ConfirmEmailChangeRequest(BaseModel):
+    token: str
+
+
+class AccountResponse(BaseModel):
+    """The caller's own account identifiers.
+
+    Nothing else exposed this: ``AthleteResponse`` carries the training profile
+    and no login identity at all, so the web app had no way to show the address
+    it is about to let you change.
+    """
+    username: Optional[str] = None
+    email: Optional[str] = None
+    email_verified: bool = False
+    # Set while a change is awaiting confirmation at that address.
+    pending_email: Optional[str] = None
+
+
 class ResetPasswordRequest(BaseModel):
     token: str
     new_password: str

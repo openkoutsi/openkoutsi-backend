@@ -211,6 +211,30 @@ def _render_pat_revoked_by_admin(data: dict) -> RenderedMessage:
     )
 
 
+def _render_email_change_requested(data: dict) -> RenderedMessage:
+    new_email = str(data.get("new_email") or "a new address")
+    return RenderedMessage(
+        title="Confirm your new email address",
+        body=(
+            f"A change of your account's email address to {new_email} is waiting "
+            "to be confirmed. Open the link we sent there within an hour to "
+            "finish it — until then, your current address still signs you in. "
+            "If this wasn't you, change your password: whoever asked knows it."
+        ),
+    )
+
+
+def _render_email_change_confirmed(data: dict) -> RenderedMessage:
+    new_email = str(data.get("new_email") or "a new address")
+    return RenderedMessage(
+        title="Email address changed",
+        body=(
+            f"Your account's email address is now {new_email}. Sign in with it "
+            "from here on; password resets and notifications go there too."
+        ),
+    )
+
+
 def render(type: str, data: dict, locale: str = DEFAULT_LOCALE) -> RenderedMessage:
     """Render an inbox message's title and body.
 
@@ -229,6 +253,10 @@ def render(type: str, data: dict, locale: str = DEFAULT_LOCALE) -> RenderedMessa
         return _render_pat_expired(data)
     if type == "pat_revoked_by_admin":
         return _render_pat_revoked_by_admin(data)
+    if type == "email_change_requested":
+        return _render_email_change_requested(data)
+    if type == "email_change_confirmed":
+        return _render_email_change_confirmed(data)
     return RenderedMessage(
         title="Notification",
         body="You have a new notification.",
