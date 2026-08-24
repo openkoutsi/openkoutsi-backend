@@ -169,6 +169,12 @@ def test_deleting_a_user_takes_their_pending_changes_with_them(migrated):
     assert remaining == 0
 
 
+def test_user_id_is_indexed(migrated):
+    """Spent rows are retained and `GET /auth/account` reads this on every call."""
+    names = {ix["name"] for ix in inspect(migrated).get_indexes("email_change_tokens")}
+    assert "ix_email_change_tokens_user_id" in names
+
+
 def test_downgrade_removes_everything_it_added(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'registry.db'}")
     _seed_pre_016(engine)

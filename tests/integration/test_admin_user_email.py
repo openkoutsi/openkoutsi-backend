@@ -277,3 +277,50 @@ class TestItIsAdminOnly:
             f"{_PREFIX}/users/{victim.id}/email", json={"email": "mine@example.com"}
         )
         assert resp.status_code == 401
+
+
+class TestClearingMustBeDeliberate:
+    """Found in review: ``{}`` and ``{"email": null}`` used to mean the same thing.
+
+    Clearing here is destructive — it drops the login identifier and its
+    verification, ends every session and revokes every token — and it lands on an
+    account whose owner may already be locked out. ``new_email`` is the field the
+    user-facing change endpoint takes, so naming it here is an easy slip, and it
+    used to wipe the address and answer 200 as though it had worked.
+    """
+
+    async def test_an_empty_body_is_422(self, auth_client, registry_session):
+        headers = await _admin_headers(auth_client, registry_session)
+        victim = await _make_user(registry_session, email="keep@example.com")
+
+        resp = await auth_client.patch(
+            f"{_PREFIX}/users/{victim.id}/email", json={}, headers=headers
+        )
+        assert resp.status_code == 422
+        assert (await _reload(registry_session, victim)).email == "keep@example.com"
+
+    async def test_the_wrong_field_name_is_422(self, auth_client, registry_session):
+        headers = await _admin_headers(auth_client, registry_session)
+        victim = await _make_user(registry_session, email="keep@example.com")
+
+        resp = await auth_client.patch(
+            f"{_PREFIX}/users/{victim.id}/email",
+            json={"new_email": "typo@example.com"},
+            headers=headers,
+        )
+        assert resp.status_code == 422
+        kept = await _reload(registry_session, victim)
+        assert kept.email == "keep@example.com"
+        assert kept.email_verified_at is not None
+
+    async def test_an_explicit_null_still_clears(self, auth_client, registry_session):
+        headers = await _admin_headers(auth_client, registry_session)
+        victim = await _make_user(
+            registry_session, email="gone@example.com", username="victim"
+        )
+
+        resp = await auth_client.patch(
+            f"{_PREFIX}/users/{victim.id}/email", json={"email": None}, headers=headers
+        )
+        assert resp.status_code == 200
+        assert (await _reload(registry_session, victim)).email is None

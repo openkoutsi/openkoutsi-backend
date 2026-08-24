@@ -54,7 +54,13 @@ def upgrade() -> None:
             "old_token_hash", name="uq_email_change_tokens_old_token_hash"
         ),
     )
+    # Spent rows are retained, so this table only grows, and the live-change
+    # lookup runs on every ``GET /auth/account``.
+    op.create_index(
+        "ix_email_change_tokens_user_id", "email_change_tokens", ["user_id"]
+    )
 
 
 def downgrade() -> None:
+    op.drop_index("ix_email_change_tokens_user_id", table_name="email_change_tokens")
     op.drop_table("email_change_tokens")

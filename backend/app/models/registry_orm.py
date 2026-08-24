@@ -139,7 +139,13 @@ class EmailChangeToken(RegistryBase):
     __tablename__ = "email_change_tokens"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
-    user_id: Mapped[str] = mapped_column(String, ForeignKey("users.id", ondelete="CASCADE"))
+    # Indexed: spent rows are kept rather than deleted, and the lookup for a
+    # user's live change runs on every ``GET /auth/account`` — an endpoint the
+    # web app polls. ``personal_access_tokens`` indexes its ``user_id`` for the
+    # same reason.
+    user_id: Mapped[str] = mapped_column(
+        String, ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
     # Two distinct secrets, each unique across the table. Distinct is the whole
     # point: if one value satisfied both sides, whoever read one mailbox could
     # complete the change alone and the second confirmation would be decoration.

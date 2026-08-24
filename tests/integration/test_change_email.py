@@ -28,7 +28,11 @@ from backend.app.core.auth import hash_password
 from backend.app.core.encryption import set_user_encryption_context
 from backend.app.db.registry import get_registry_session
 from backend.app.db.user_session import get_user_session_factory, init_user_db
-from backend.app.models.registry_orm import EmailChangeToken, User
+from backend.app.models.registry_orm import (
+    EmailChangeToken,
+    EmailVerificationToken,
+    User,
+)
 from backend.app.models.user_orm import Athlete
 
 _PREFIX = "/api/auth"
@@ -756,3 +760,170 @@ class TestDualConfirmation:
 
         assert (await _confirm(auth_client, change.old_token)).status_code == 400
         assert (await _reload(registry_session, user)).email == _OLD_EMAIL
+
+
+# ── Recovery has to actually recover ────────────────────────────────────────
+
+
+class TestPasswordResetDisarmsAChange:
+    """A reset withdraws in-flight changes as well as credentials (issue #62).
+
+    Found in review. The dual confirmation closes the front door, but leaving a
+    pending change armed reopened it on the way out: an attacker holding the
+    password arms a move and confirms the side they own, and the victim's own
+    recovery — the remedy the authorisation email recommends by name — used to
+    leave the other approval live in their inbox for the rest of the day.
+    """
+
+    async def _reset_password(self, auth_client, app, email: str) -> None:
+        fake = _use_provider(app)
+        resp = await auth_client.post(
+            f"{_PREFIX}/request-password-reset", json={"email": email}
+        )
+        assert resp.status_code == 200, resp.text
+        raw = _extract_token(fake.to(email)[0])
+        done = await auth_client.post(
+            f"{_PREFIX}/reset-password",
+            json={"token": raw, "new_password": "Brandnew12345"},
+        )
+        assert done.status_code == 204, done.text
+
+    async def test_the_old_side_link_is_dead_after_a_reset(
+        self, auth_client, app, registry_session
+    ):
+        user = await _make_user(registry_session)
+        change = await _request_change(auth_client, app, _OLD_EMAIL)
+        # The attacker holds the new mailbox and confirms their half at once.
+        assert (await _confirm(auth_client, change.new_token)).status_code == 200
+
+        # The victim does what the authorisation email told them to.
+        await self._reset_password(auth_client, app, _OLD_EMAIL)
+
+        # The approval sitting in their inbox no longer completes anything.
+        assert (await _confirm(auth_client, change.old_token)).status_code == 400
+        assert (await _reload(registry_session, user)).email == _OLD_EMAIL
+
+    async def test_the_new_side_link_is_dead_too(
+        self, auth_client, app, registry_session
+    ):
+        """Neither half survives, whichever the attacker had already opened."""
+        user = await _make_user(registry_session)
+        change = await _request_change(auth_client, app, _OLD_EMAIL)
+        await self._reset_password(auth_client, app, _OLD_EMAIL)
+
+        assert (await _confirm(auth_client, change.new_token)).status_code == 400
+        assert (await _reload(registry_session, user)).email == _OLD_EMAIL
+
+    async def test_account_stops_reporting_the_change(
+        self, auth_client, app, registry_session
+    ):
+        await _make_user(registry_session)
+        await _request_change(auth_client, app, _OLD_EMAIL)
+        await self._reset_password(auth_client, app, _OLD_EMAIL)
+
+        access = await _login(auth_client, _OLD_EMAIL, "Brandnew12345")
+        body = (await auth_client.get(
+            f"{_PREFIX}/account", headers=_headers(access)
+        )).json()
+        assert body["pending_email"] is None
+
+    async def test_a_reset_with_nothing_pending_still_works(
+        self, auth_client, app, registry_session
+    ):
+        await _make_user(registry_session)
+        await self._reset_password(auth_client, app, _OLD_EMAIL)
+        assert (await auth_client.post(
+            f"{_PREFIX}/login",
+            json={"username": _OLD_EMAIL, "password": "Brandnew12345"},
+        )).status_code == 200
+
+
+# ── An abandoned signup must not squat on an address ────────────────────────
+
+
+class TestAbandonedSignupStubs:
+    """``signup`` reuses a stub that never verified, so a change may claim one too.
+
+    Refusing would make this flow stricter than the one that created the
+    obstruction — permanently, since nothing expires such a row, and invisibly,
+    since the uniform acknowledgement gives the user no reason why no link ever
+    arrives. With self-serve signup on it would also let anyone deny an address
+    to its real owner for good by signing up and walking away.
+    """
+
+    async def _stub(self, registry_session, email: str, *, token_hours: float | None):
+        """An unverified signup row, optionally with a verification token."""
+        stub = User(
+            id=str(uuid.uuid4()),
+            email=email,
+            password_hash=hash_password(_GOOD_PW),
+            roles=json.dumps(["user"]),
+        )
+        registry_session.add(stub)
+        await registry_session.flush()
+        if token_hours is not None:
+            registry_session.add(EmailVerificationToken(
+                id=str(uuid.uuid4()),
+                user_id=stub.id,
+                token_hash=hashlib.sha256(f"v-{email}".encode()).hexdigest(),
+                expires_at=datetime.now(timezone.utc) + timedelta(hours=token_hours),
+            ))
+        await registry_session.commit()
+        return stub
+
+    async def test_a_dead_stub_does_not_block_and_is_reaped(
+        self, auth_client, app, registry_session
+    ):
+        user = await _make_user(registry_session)
+        stub = await self._stub(registry_session, _NEW_EMAIL, token_hours=-1)
+
+        change = await _request_change(auth_client, app, _OLD_EMAIL)
+        # It was not silently swallowed: a link actually went out.
+        assert len(change.provider.to(_NEW_EMAIL)) == 1
+        assert (await _complete(auth_client, change)).status_code == 200
+
+        assert (await _reload(registry_session, user)).email == _NEW_EMAIL
+        gone = (await registry_session.execute(
+            select(User).where(User.id == stub.id)
+        )).scalar_one_or_none()
+        assert gone is None
+
+    async def test_a_stub_with_no_token_at_all_does_not_block(
+        self, auth_client, app, registry_session
+    ):
+        user = await _make_user(registry_session)
+        await self._stub(registry_session, _NEW_EMAIL, token_hours=None)
+        change = await _request_change(auth_client, app, _OLD_EMAIL)
+        assert (await _complete(auth_client, change)).status_code == 200
+        assert (await _reload(registry_session, user)).email == _NEW_EMAIL
+
+    async def test_a_signup_still_in_progress_does_block(
+        self, auth_client, app, registry_session
+    ):
+        """A live token means somebody is mid-signup, not that they walked away."""
+        await _make_user(registry_session)
+        await self._stub(registry_session, _NEW_EMAIL, token_hours=1)
+        fake = _use_provider(app)
+        access = await _login(auth_client, _OLD_EMAIL)
+        resp = await auth_client.post(
+            f"{_PREFIX}/change-email",
+            json={"new_email": _NEW_EMAIL, "password": _GOOD_PW},
+            headers=_headers(access),
+        )
+        assert resp.status_code == 202
+        assert fake.sent == []
+
+    async def test_a_verified_account_still_blocks(
+        self, auth_client, app, registry_session
+    ):
+        await _make_user(registry_session)
+        await _make_user(registry_session, email=_NEW_EMAIL)
+        fake = _use_provider(app)
+        access = await _login(auth_client, _OLD_EMAIL)
+        resp = await auth_client.post(
+            f"{_PREFIX}/change-email",
+            json={"new_email": _NEW_EMAIL, "password": _GOOD_PW},
+            headers=_headers(access),
+        )
+        assert resp.status_code == 202
+        assert fake.sent == []

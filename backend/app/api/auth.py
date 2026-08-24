@@ -5,7 +5,15 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Cookie,
+    Depends,
+    HTTPException,
+    Request,
+    Response,
+)
 from jose import JWTError
 from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
@@ -404,6 +412,30 @@ async def reset_password(
     # their refresh cookie kept minting replacements for another 30 days —
     # every token control green, the account still theirs (#102, F-04).
     invalidate_sessions(user)
+    # And to any change of address already in flight (issue #62). Revoking the
+    # credentials but leaving that armed is not a recovery: an attacker holding
+    # the password can request a move to their own address and confirm the new
+    # side before the victim ever notices, and the old-side approval then sits
+    # live in the victim's inbox for the rest of its 24 hours. The message that
+    # put it there is the one telling them to change their password — and with
+    # no authenticated change-password endpoint, *this* is that flow. So a reset
+    # that spared it would hand the account over on the next curious click, by
+    # way of the very advice meant to prevent it.
+    #
+    # The invariant: recovering an account withdraws every credential it issued
+    # **and** every identity change standing against it.
+    #
+    # Not extended to /logout-all, which costs no credential and means "sign my
+    # other devices out" — silently cancelling a change the user is halfway
+    # through would be a surprise, not a protection.
+    pending_changes = await session.execute(
+        select(EmailChangeToken).where(
+            EmailChangeToken.user_id == user.id,
+            EmailChangeToken.used_at.is_(None),
+        )
+    )
+    for change_row in pending_changes.scalars():
+        change_row.used_at = now
     await session.commit()
 
 
@@ -630,21 +662,65 @@ async def _live_email_change(
     return None
 
 
-async def _email_taken_by_other(
+async def _dead_signup_stub(
+    session: AsyncSession, email: str, user_id: str
+) -> User | None:
+    """Another account holding this address that never finished signing up.
+
+    A self-serve signup writes the user row *before* the address is confirmed,
+    so an abandoned attempt leaves a row squatting on it with
+    ``email_verified_at`` NULL and a verification token that has long expired.
+    :func:`signup` treats such a row as reusable — it resets the password and
+    mails a fresh link — so refusing to let a change claim the same address
+    would make this flow stricter than the one that created the obstruction, and
+    permanently: nothing expires it, and the uniform acknowledgement means the
+    user sees no reason why their link never arrives. With self-serve signup on,
+    that also makes "sign up as someone and never verify" a way to deny them an
+    address for good.
+
+    A row still holding a *live* verification token is a signup in progress, not
+    an abandoned one, and keeps the address.
+    """
+    result = await session.execute(
+        select(User).where(
+            User.email == email,
+            User.id != user_id,
+            User.email_verified_at.is_(None),
+        ).limit(1)
+    )
+    stub = result.scalar_one_or_none()
+    if stub is None:
+        return None
+
+    live = await session.execute(
+        select(EmailVerificationToken.id).where(
+            EmailVerificationToken.user_id == stub.id,
+            EmailVerificationToken.used_at.is_(None),
+            EmailVerificationToken.expires_at > datetime.now(timezone.utc),
+        ).limit(1)
+    )
+    return None if live.scalar_one_or_none() is not None else stub
+
+
+async def _email_unavailable(
     session: AsyncSession, email: str, user_id: str
 ) -> bool:
-    """Whether some *other* account already holds this address.
+    """Whether this address is one the flow could never actually hand over.
 
     Deliberately not filtered by ``deleted_at``: the unique index on
     ``users.email`` covers every row, so an address held by a soft-deleted
-    account is one this flow can never actually hand over. Treating it as free
-    would mean mailing a confirmation link that is guaranteed to fail at the
-    end.
+    account is one this flow can never hand over. Treating it as free would mean
+    mailing links guaranteed to fail at the end.
+
+    The one row that does *not* block is an abandoned signup stub — see
+    :func:`_dead_signup_stub`. Confirmation clears it out of the way.
     """
     result = await session.execute(
         select(User.id).where(User.email == email, User.id != user_id).limit(1)
     )
-    return result.scalar_one_or_none() is not None
+    if result.scalar_one_or_none() is None:
+        return False
+    return await _dead_signup_stub(session, email, user_id) is None
 
 
 @router.get("/account", response_model=AccountResponse,
@@ -687,6 +763,7 @@ async def get_account(
 async def change_email(
     request: Request,
     body: ChangeEmailRequest,
+    background: BackgroundTasks,
     ctx: UserContext = Depends(get_current_user),
     provider: EmailProvider = Depends(get_email_provider_dep),
     session: AsyncSession = Depends(get_registry_session),
@@ -703,8 +780,17 @@ async def change_email(
     browser becomes a permanent account takeover.
 
     Returns the same acknowledgement whatever happens — success, an address
-    another account already holds, the caller's own current address — so this
-    can't be used to ask whether somebody has an account here (#102, F-06).
+    another account already holds, the caller's own current address — so the
+    *content* of the answer says nothing about who has an account here
+    (#102, F-06).
+
+    Delivery is handed to a background task rather than awaited, which keeps a
+    slow or wedged provider from holding the response open and closes most of
+    the timing gap between the branches that send and the branches that don't.
+    What remains is a database commit, not a network round trip. Note this is
+    narrower than uniform: ``signup`` and ``request_password_reset`` have the
+    same shape and are deliberately left alone here rather than widening a
+    security fix into endpoints it wasn't otherwise touching.
     """
     if not provider.is_configured:
         # No way to confirm the new address, so no honest way to offer the
@@ -728,7 +814,7 @@ async def change_email(
         # Already theirs. Nothing to do, and saying so would confirm the address
         # to anyone who has the password but not the mailbox.
         return ack
-    if await _email_taken_by_other(session, email, user.id):
+    if await _email_unavailable(session, email, user.id):
         return ack
 
     old_email = user.email if user.email_verified_at is not None else None
@@ -764,30 +850,45 @@ async def change_email(
     ))
     await session.commit()
 
+    # Bind the id, not the ORM object: the task runs after the response, by
+    # which time this request's session is closed and touching `user` would be
+    # a detached-instance error.
+    user_id = user.id
+
     def _url(raw: str) -> str:
         return f"{settings.frontend_url}/confirm-email-change?token={raw}"
 
-    try:
-        await send_email_change_email(provider, to=email, action_url=_url(raw_new))
-    except EmailError:
-        # The request stands; the user can ask again to resend. Don't leak the
-        # delivery failure into the uniform acknowledgement.
-        log.exception("Failed to send email-change confirmation")
-
-    if old_email is not None and raw_old is not None:
-        # Not a notice — the authorisation. Without it, holding the password
-        # alone would move the account's password-reset target, and "forgot
-        # password" would then hand the whole account over permanently.
+    async def _deliver() -> None:
         try:
-            await send_email_change_authorisation(
-                provider, to=old_email, new_email=email, action_url=_url(raw_old)
-            )
+            await send_email_change_email(provider, to=email, action_url=_url(raw_new))
         except EmailError:
-            log.exception("Failed to send email-change authorisation to the old address")
+            # The request stands; the user can ask again to resend. Don't leak
+            # the delivery failure into the uniform acknowledgement.
+            log.exception("Failed to send email-change confirmation")
 
-    await notifications.notify_user(
-        user.id, notifications.EMAIL_CHANGE_REQUESTED, {"new_email": email}
-    )
+        if old_email is not None and raw_old is not None:
+            # Not a notice — the authorisation. Without it, holding the password
+            # alone would move the account's password-reset target, and "forgot
+            # password" would then hand the whole account over permanently.
+            try:
+                await send_email_change_authorisation(
+                    provider, to=old_email, new_email=email, action_url=_url(raw_old)
+                )
+            except EmailError:
+                log.exception(
+                    "Failed to send email-change authorisation to the old address"
+                )
+
+        try:
+            await notifications.notify_user(
+                user_id, notifications.EMAIL_CHANGE_REQUESTED, {"new_email": email}
+            )
+        except Exception:
+            # Nothing is left to answer to, so a failed inbox write must not
+            # take the request down after the change was already recorded.
+            log.exception("Failed to write the email-change inbox message")
+
+    background.add_task(_deliver)
     return ack
 
 
@@ -862,10 +963,21 @@ async def confirm_email_change(
 
     # The address was free when the change was asked for; a day is long enough
     # for somebody else to have signed up with it since.
-    if await _email_taken_by_other(session, token_row.new_email, user.id):
+    if await _email_unavailable(session, token_row.new_email, user.id):
         raise HTTPException(
             status_code=409, detail="That email address is no longer available"
         )
+
+    # An abandoned signup stub doesn't block the change, but it does hold the
+    # address, and uq_users_email would refuse the assignment below while it
+    # exists. Clearing it is what signup would have done with the same row. Such
+    # a stub has no per-user database and no training data — _create_user_profile
+    # runs at verification, which by definition it never reached — so the row and
+    # its cascaded tokens are the whole of it.
+    stub = await _dead_signup_stub(session, token_row.new_email, user.id)
+    if stub is not None:
+        await session.delete(stub)
+        await session.flush()
 
     new_email = token_row.new_email
     user.email = new_email
@@ -892,7 +1004,9 @@ async def confirm_email_change(
 
 @router.post("/cancel-email-change", status_code=204,
              operation_id="cancelEmailChange", summary="Abandon a pending email change")
+@limiter.limit("20/hour")
 async def cancel_email_change(
+    request: Request,
     ctx: UserContext = Depends(get_current_user),
     session: AsyncSession = Depends(get_registry_session),
 ):

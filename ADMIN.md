@@ -72,14 +72,28 @@ Four things to be able to answer for a user:
   **Profile → Email address** card shows the same thing.
 - **"I got an approval request I didn't ask for."** Someone submitted their
   password. Tell them **not** to open the link and to change their password — the
-  request cannot be made without it.
+  request cannot be made without it. Resetting the password also **cancels the
+  pending change outright**, so the link in their inbox stops working; that is
+  deliberate, because otherwise the recovery would leave the attacker's request
+  armed and one curious click would complete it.
 - **"It says the address is no longer available."** Another account claimed it
   between the request and the second approval. The links are dead; they request
   again.
 
 Confirming does not sign the user out anywhere. Both mailboxes and the password
 were needed to get there, so there is nobody to evict who isn't the owner;
-`/logout-all` remains the control for clearing other sessions.
+`/logout-all` remains the control for clearing other sessions. A **password
+reset**, by contrast, withdraws everything: sessions, personal access tokens, and
+any change of address in flight. Recovering an account is meant to leave nothing
+standing against it.
+
+One address that does *not* block a change is one held by a self-serve signup
+that was started and never verified. Such a row has no owner and nothing expires
+it, so treating it as taken would deny the address to its real owner forever —
+and, with self-signup enabled, would let anyone reserve someone else's address by
+signing up and walking away. Confirming a change clears the stub out of the way.
+A signup still holding a live verification link is a signup in progress and does
+block.
 
 ### Recovering an unreachable address
 

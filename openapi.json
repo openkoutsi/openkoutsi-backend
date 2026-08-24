@@ -410,7 +410,7 @@
           "auth"
         ],
         "summary": "Change the account's email address",
-        "description": "Email a confirmation link to a new address; nothing moves until it is opened.\n\nAlso the way an invite-created account *gains* an address \u2014 those have\n``email = NULL``, which locks them out of self-serve password reset and\nlogin-by-email entirely. Setting one is the same operation as changing one,\nconfirmed the same way.\n\nRequires the current password: a session on its own must not be able to\nrelocate the login identifier and the password-reset target, or a borrowed\nbrowser becomes a permanent account takeover.\n\nReturns the same acknowledgement whatever happens \u2014 success, an address\nanother account already holds, the caller's own current address \u2014 so this\ncan't be used to ask whether somebody has an account here (#102, F-06).\n\n**Not available to personal access tokens.**",
+        "description": "Email a confirmation link to a new address; nothing moves until it is opened.\n\nAlso the way an invite-created account *gains* an address \u2014 those have\n``email = NULL``, which locks them out of self-serve password reset and\nlogin-by-email entirely. Setting one is the same operation as changing one,\nconfirmed the same way.\n\nRequires the current password: a session on its own must not be able to\nrelocate the login identifier and the password-reset target, or a borrowed\nbrowser becomes a permanent account takeover.\n\nReturns the same acknowledgement whatever happens \u2014 success, an address\nanother account already holds, the caller's own current address \u2014 so the\n*content* of the answer says nothing about who has an account here\n(#102, F-06).\n\nDelivery is handed to a background task rather than awaited, which keeps a\nslow or wedged provider from holding the response open and closes most of\nthe timing gap between the branches that send and the branches that don't.\nWhat remains is a database commit, not a network round trip. Note this is\nnarrower than uniform: ``signup`` and ``request_password_reset`` have the\nsame shape and are deliberately left alone here rather than widening a\nsecurity fix into endpoints it wasn't otherwise touching.\n\n**Not available to personal access tokens.**",
         "operationId": "changeEmail",
         "requestBody": {
           "content": {
@@ -14632,8 +14632,11 @@
           }
         },
         "type": "object",
+        "required": [
+          "email"
+        ],
         "title": "UserEmailUpdate",
-        "description": "Admin set/clear of a user's address (issue #62).\n\n``None`` clears it. The escape hatch for an address its owner can no longer\nreach \u2014 a dead mailbox, or one taken along with the account \u2014 for which the\nonly previous remedy was deleting the user and their training data."
+        "description": "Admin set/clear of a user's address (issue #62).\n\n``None`` clears it. The escape hatch for an address its owner can no longer\nreach \u2014 a dead mailbox, or one taken along with the account \u2014 for which the\nonly previous remedy was deleting the user and their training data.\n\nRequired, not defaulted, though it stays nullable: with ``= None`` an empty\nbody and a body naming the field wrongly both read as \"clear it\", and this\nendpoint's clear is destructive \u2014 it drops the login identifier and its\nverification, ends every session and revokes every token, on an account\nwhose owner is quite possibly already locked out. ``new_email`` is the field\nname the user-facing change endpoint uses, so that slip is an easy one to\nmake. Dropping the default turns both into a 422 and leaves the deliberate\n``{\"email\": null}`` working."
       },
       "UserResponse": {
         "properties": {
