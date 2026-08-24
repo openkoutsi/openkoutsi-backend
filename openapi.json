@@ -174,6 +174,34 @@
       }
     },
     "/api/auth/account": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Get the current account's identifiers",
+        "description": "The caller's own login identifiers, plus any address awaiting confirmation.\n\nSeparate from ``GET /athlete``, which carries the training profile and no\nlogin identity at all \u2014 there was no endpoint that could tell the web app\nwhich address it is about to let you change.\n\n**Not available to personal access tokens.**",
+        "operationId": "getAccount",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "x-personal-access-token": {
+          "allowed": false
+        }
+      },
       "delete": {
         "tags": [
           "auth"
@@ -376,6 +404,121 @@
         }
       }
     },
+    "/api/auth/change-email": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Change the account's email address",
+        "description": "Email a confirmation link to a new address; nothing moves until it is opened.\n\nAlso the way an invite-created account *gains* an address \u2014 those have\n``email = NULL``, which locks them out of self-serve password reset and\nlogin-by-email entirely. Setting one is the same operation as changing one,\nconfirmed the same way.\n\nRequires the current password: a session on its own must not be able to\nrelocate the login identifier and the password-reset target, or a borrowed\nbrowser becomes a permanent account takeover.\n\nReturns the same acknowledgement whatever happens \u2014 success, an address\nanother account already holds, the caller's own current address \u2014 so the\n*content* of the answer says nothing about who has an account here\n(#102, F-06).\n\nDelivery is handed to a background task rather than awaited, which keeps a\nslow or wedged provider from holding the response open and closes most of\nthe timing gap between the branches that send and the branches that don't.\nWhat remains is a database commit, not a network round trip. Note this is\nnarrower than uniform: ``signup`` and ``request_password_reset`` have the\nsame shape and are deliberately left alone here rather than widening a\nsecurity fix into endpoints it wasn't otherwise touching.\n\n**Not available to personal access tokens.**",
+        "operationId": "changeEmail",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangeEmailRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/backend__app__schemas__auth__MessageResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "x-personal-access-token": {
+          "allowed": false
+        }
+      }
+    },
+    "/api/auth/confirm-email-change": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Confirm a new email address",
+        "description": "Stamp one side of a pending change, and apply it once both sides are in.\n\nUnauthenticated by design: these links are opened in whichever mailbox they\nwere sent to, routinely on a different device from the one that asked. The\ntoken *is* the proof \u2014 holding it means holding that inbox.\n\nA change carries two distinct tokens, one per address, and this endpoint\nworks out which it was handed by matching against both columns. Presenting\nthe same one twice therefore stamps the same side twice and completes\nnothing: that is what makes the second mailbox a real requirement rather\nthan a notification with a button on it.\n\nSessions are left alone. Both mailboxes and the password were needed to get\nhere, so there is no one to evict that isn't the owner; ``/logout-all``\nremains the control for clearing other devices.",
+        "operationId": "confirmEmailChange",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmEmailChangeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EmailChangeConfirmResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/cancel-email-change": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Abandon a pending email change",
+        "description": "Spend any outstanding change tokens without applying them.\n\nA mistyped address otherwise sits in the account's face for a day with no\nway to clear it, and its links stay live in whichever inboxes they reached.\nVoids both sides at once. Idempotent: cancelling nothing succeeds.\n\n**Not available to personal access tokens.**",
+        "operationId": "cancelEmailChange",
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "x-personal-access-token": {
+          "allowed": false
+        }
+      }
+    },
     "/api/setup/status": {
       "get": {
         "tags": [
@@ -534,6 +677,67 @@
             "application/json": {
               "schema": {
                 "$ref": "#/components/schemas/UserRolesUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-personal-access-token": {
+          "allowed": false
+        }
+      }
+    },
+    "/api/admin/users/{user_id}/email": {
+      "patch": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Set or clear a user's email address",
+        "description": "Set or clear the address on an account, as a recovery action.\n\nThe escape hatch for an address its owner can no longer reach. Users change\ntheir own address themselves, and that flow requires approval from both the\nold mailbox and the new one \u2014 which is what stops a password-holder\nrelocating the account's password-reset target. That guarantee is also what\nleaves somebody whose old mailbox is gone with nowhere to go, and until this\nexisted the only remedy was deleting the account and every activity in it.\n\nBecause it is a recovery action, it assumes the account may be in the wrong\nhands: it withdraws every session and personal access token, so whoever is\nsigned in right now is signed out, and voids any change already in flight.\nAn admin setting an address is vouching for it, so it lands verified \u2014 no\nconfirmation mail, which is the point when the mailbox being replaced is\nunreachable.\n\n**Not available to personal access tokens.**",
+        "operationId": "updateUserEmail",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "user_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "User Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserEmailUpdate"
               }
             }
           }
@@ -7386,6 +7590,66 @@
         ],
         "title": "AbsoluteSpec"
       },
+      "AccountResponse": {
+        "properties": {
+          "username": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Username"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "email_verified": {
+            "type": "boolean",
+            "title": "Email Verified",
+            "default": false
+          },
+          "pending_email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pending Email"
+          },
+          "pending_requires_old": {
+            "type": "boolean",
+            "title": "Pending Requires Old",
+            "default": false
+          },
+          "pending_confirmed_new": {
+            "type": "boolean",
+            "title": "Pending Confirmed New",
+            "default": false
+          },
+          "pending_confirmed_old": {
+            "type": "boolean",
+            "title": "Pending Confirmed Old",
+            "default": false
+          }
+        },
+        "type": "object",
+        "title": "AccountResponse",
+        "description": "The caller's own account identifiers.\n\nNothing else exposed this: ``AthleteResponse`` carries the training profile\nand no login identity at all, so the web app had no way to show the address\nit is about to let you change."
+      },
       "AchievementDefinition": {
         "properties": {
           "id": {
@@ -9048,6 +9312,26 @@
         ],
         "title": "Body_upload_activity_api_activities_upload_post"
       },
+      "ChangeEmailRequest": {
+        "properties": {
+          "new_email": {
+            "type": "string",
+            "format": "email",
+            "title": "New Email"
+          },
+          "password": {
+            "type": "string",
+            "title": "Password"
+          }
+        },
+        "type": "object",
+        "required": [
+          "new_email",
+          "password"
+        ],
+        "title": "ChangeEmailRequest",
+        "description": "Ask for the account's email address to be changed (or set) \u2014 issue #62.\n\nThe current password is required for the same reason ``DeleteAccountRequest``\nrequires it: a session alone must not be enough to move the login identifier\nand the password-reset target somewhere the holder controls."
+      },
       "ChatAvailability": {
         "properties": {
           "enabled": {
@@ -9314,6 +9598,19 @@
         ],
         "title": "ChatTurnBody",
         "description": "One question from the athlete.\n\n``message`` is the *only* thing the client sends. Everything the model\nactually receives \u2014 the system prompt, the scope policy, the replayed\nhistory \u2014 is built server-side in ``services.llm_chat``, which is the whole\ndifference between this and the ``/api/llm/chat`` proxy issue #45 removed."
+      },
+      "ConfirmEmailChangeRequest": {
+        "properties": {
+          "token": {
+            "type": "string",
+            "title": "Token"
+          }
+        },
+        "type": "object",
+        "required": [
+          "token"
+        ],
+        "title": "ConfirmEmailChangeRequest"
       },
       "ConsentRequest": {
         "properties": {
@@ -10150,6 +10447,42 @@
         ],
         "title": "EfficiencyPoint",
         "description": "One steady endurance ride in the aerobic efficiency trend (issue #37).\n\nEfficiency factor is weighted power per heartbeat; rising over time at a\nconstant training load is aerobic progress the Fitness/Fatigue model can't\nsee. ``decoupling_pct`` rides along where the activity has one, so the same\nchart can show durability alongside efficiency."
+      },
+      "EmailChangeConfirmResponse": {
+        "properties": {
+          "complete": {
+            "type": "boolean",
+            "title": "Complete"
+          },
+          "awaiting": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Awaiting"
+          },
+          "new_email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "New Email"
+          }
+        },
+        "type": "object",
+        "required": [
+          "complete"
+        ],
+        "title": "EmailChangeConfirmResponse",
+        "description": "The outcome of stamping one side of a pending email change.\n\nA confirmation that lands correctly but leaves the change waiting on the\nother mailbox is a success, not a failure, and the page has to say so \u2014\notherwise the first person through reads \"nothing happened\" and asks again."
       },
       "ExportFormatInfo": {
         "properties": {
@@ -14282,6 +14615,28 @@
           "count"
         ],
         "title": "UnreadCountResponse"
+      },
+      "UserEmailUpdate": {
+        "properties": {
+          "email": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "email"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          }
+        },
+        "type": "object",
+        "required": [
+          "email"
+        ],
+        "title": "UserEmailUpdate",
+        "description": "Admin set/clear of a user's address (issue #62).\n\n``None`` clears it. The escape hatch for an address its owner can no longer\nreach \u2014 a dead mailbox, or one taken along with the account \u2014 for which the\nonly previous remedy was deleting the user and their training data.\n\nRequired, not defaulted, though it stays nullable: with ``= None`` an empty\nbody and a body naming the field wrongly both read as \"clear it\", and this\nendpoint's clear is destructive \u2014 it drops the login identifier and its\nverification, ends every session and revokes every token, on an account\nwhose owner is quite possibly already locked out. ``new_email`` is the field\nname the user-facing change endpoint uses, so that slip is an easy one to\nmake. Dropping the default turns both into a 422 and leaves the deliberate\n``{\"email\": null}`` working."
       },
       "UserResponse": {
         "properties": {

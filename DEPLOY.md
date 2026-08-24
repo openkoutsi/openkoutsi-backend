@@ -359,7 +359,7 @@ it can be pruned/rotated independently.
 
 On a fresh deployment, navigate to the frontend URL. The setup wizard will appear and guide you through creating the first administrator account. Thereafter, an administrator issues an instance-wide invite from the Admin dashboard and new users register with that invite token.
 
-Optionally, admins can enable **self-serve email signup** (Settings tab, or `allow_self_signup` via `PATCH /api/admin/settings`). It requires a configured email provider (see *Email* above): users register with an email address, verify it via an emailed link, and the account activates. Invites keep working regardless. With email configured, users can also reset their own passwords via the "Forgot password?" page. See [ADMIN.md](ADMIN.md) for the full account and password-reset flows.
+Optionally, admins can enable **self-serve email signup** (Settings tab, or `allow_self_signup` via `PATCH /api/admin/settings`). It requires a configured email provider (see *Email* above): users register with an email address, verify it via an emailed link, and the account activates. Invites keep working regardless. With email configured, users can also reset their own passwords via the "Forgot password?" page, and change the email address on their account (or set one, on an invite-created account that never had one) — that change needs an emailed approval from the *old* address as well as the new one before anything moves, so this too stays unavailable while no provider is configured. An admin can set or clear an address directly (`PATCH /api/admin/users/{id}/email`) for the case where the old mailbox is unreachable. See [ADMIN.md](ADMIN.md) for the full account and password-reset flows.
 
 ### Run
 

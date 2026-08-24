@@ -61,6 +61,9 @@ class User(RegistryBase):
     verification_tokens: Mapped[list["EmailVerificationToken"]] = relationship(
         "EmailVerificationToken", back_populates="user", cascade="all, delete-orphan"
     )
+    email_change_tokens: Mapped[list["EmailChangeToken"]] = relationship(
+        "EmailChangeToken", back_populates="user", cascade="all, delete-orphan"
+    )
     provider_connections: Mapped[list["ProviderConnection"]] = relationship(
         "ProviderConnection", back_populates="user", cascade="all, delete-orphan"
     )
@@ -99,6 +102,83 @@ class EmailVerificationToken(RegistryBase):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     user: Mapped["User"] = relationship("User", back_populates="verification_tokens")
+
+
+class EmailChangeToken(RegistryBase):
+    """A pending change of an account's address, authorised from *both* ends (issue #62).
+
+    One row is one pending change, carrying two independent secrets: one mailed to
+    the address being claimed, one to the address being left. Neither alone moves
+    anything — ``users.email`` changes only once every required side is stamped.
+
+    **Why both.** This codebase has no authenticated change-password endpoint: the
+    only way to set a password on an existing account is a reset token, and those
+    are mailed to ``users.email``. That makes the address the account's sole
+    self-serve root of trust, so a one-sided change would let anyone holding just
+    the password relocate the recovery channel and then lock the owner out via
+    "forgot password" — turning a password leak from recoverable into permanent.
+    Requiring the old mailbox costs an attacker exactly what taking the account
+    over already costs them, so the feature stops being an escalation.
+
+    ``old_token_hash`` is NULL when the account has no address yet (invite-created
+    accounts setting a first one). There is nothing to authorise against in that
+    case, so the new side alone completes it; an admin clearing the address is what
+    makes a malicious first set undoable.
+
+    It is a separate table from :class:`EmailVerificationToken` because
+    :func:`signup` marks *every* unused verification token a user holds as spent
+    before issuing a fresh one; a pending change sharing that table would be
+    silently voided by an unrelated signup retry.
+
+    ``new_email`` carries no unique constraint. Two users may have a pending change
+    to the same address at once — nothing has been claimed until one of them
+    finishes, and the loser is turned away at that point by the unique index on
+    ``users.email``.
+    """
+
+    __tablename__ = "email_change_tokens"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    # Indexed: spent rows are kept rather than deleted, and the lookup for a
+    # user's live change runs on every ``GET /auth/account`` — an endpoint the
+    # web app polls. ``personal_access_tokens`` indexes its ``user_id`` for the
+    # same reason.
+    user_id: Mapped[str] = mapped_column(
+        String, ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    # Two distinct secrets, each unique across the table. Distinct is the whole
+    # point: if one value satisfied both sides, whoever read one mailbox could
+    # complete the change alone and the second confirmation would be decoration.
+    new_token_hash: Mapped[str] = mapped_column(String, unique=True, nullable=False)
+    old_token_hash: Mapped[Optional[str]] = mapped_column(String, unique=True, nullable=True)
+    # The address being claimed, stored lowercased. Held here rather than on the
+    # user row so an unconfirmed change never touches the login identifier.
+    new_email: Mapped[str] = mapped_column(String, nullable=False)
+    new_confirmed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    old_confirmed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    # Set when the change lands, and when it is cancelled or superseded — in every
+    # case meaning "this row can no longer do anything".
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+    user: Mapped["User"] = relationship("User", back_populates="email_change_tokens")
+
+    @property
+    def requires_old_confirmation(self) -> bool:
+        """Whether this change needs the outgoing address to authorise it."""
+        return self.old_token_hash is not None
+
+    @property
+    def fully_confirmed(self) -> bool:
+        """Whether every side this change requires has been stamped."""
+        if self.new_confirmed_at is None:
+            return False
+        return self.old_confirmed_at is not None or not self.requires_old_confirmation
 
 
 class PersonalAccessToken(RegistryBase):
