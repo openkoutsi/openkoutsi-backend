@@ -43,10 +43,14 @@ async def lifespan(app: FastAPI):
     # Nothing that writes a `pending` LLM status survives this process (issue
     # #91): the auto-analyse paths run under `asyncio.create_task` and the
     # explicit triggers under `BackgroundTasks`, so an ordinary redeploy strands
-    # whatever was in flight. A `pending` row at this point is therefore dead by
-    # definition, and settling it here — before the first request is served, so
-    # a live run can't be caught by it — is what stops a redeploy costing an
-    # athlete an analysis they can never re-request.
+    # whatever was in flight. Settling that here — before the first request is
+    # served — is what stops a redeploy costing an athlete an analysis they can
+    # never re-request.
+    #
+    # It settles only the runs whose heartbeat has run down, not every `pending`
+    # row (issue #50). "We just booted, so nothing else is running" is a claim
+    # about the whole deployment, not about this process, and it stops being
+    # true the moment a rolling redeploy overlaps two of them.
     try:
         settled = await settle_stranded_runs()
         if settled:

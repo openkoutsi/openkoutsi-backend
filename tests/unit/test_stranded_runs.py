@@ -145,7 +145,15 @@ class TestSettleOneRow:
 # ── The startup sweep ───────────────────────────────────────────────────────
 
 
-async def _seed(user_id: str, *, athlete_id: str = "ath") -> None:
+async def _seed(
+    user_id: str, *, athlete_id: str = "ath", updated_at: datetime = NOW
+) -> None:
+    """Seed one user's database with three `pending` rows and one finished one.
+
+    ``updated_at`` is the heartbeat every `pending` row carries. It defaults to
+    ``NOW``, which is far enough in the past that the sweep treats these as
+    abandoned — pass a recent timestamp to seed runs that are still alive.
+    """
     await init_user_db(user_id)
     async with get_user_session_factory(user_id)() as session:
         session.add(
@@ -155,7 +163,7 @@ async def _seed(user_id: str, *, athlete_id: str = "ath") -> None:
                 training_status_status="pending",
                 training_status_progress="tool.get_training_status",
                 training_status_date=date(2026, 8, 9),
-                training_status_updated_at=NOW,
+                training_status_updated_at=updated_at,
             )
         )
         session.add(
@@ -164,7 +172,7 @@ async def _seed(user_id: str, *, athlete_id: str = "ath") -> None:
                 athlete_id=athlete_id,
                 title="Ride 200 km",
                 guidance_status="pending",
-                guidance_updated_at=NOW,
+                guidance_updated_at=updated_at,
             )
         )
         session.add_all(
@@ -175,7 +183,7 @@ async def _seed(user_id: str, *, athlete_id: str = "ath") -> None:
                     sport_type="Ride",
                     analysis_status="pending",
                     analysis_progress="thinking",
-                    analysis_updated_at=NOW,
+                    analysis_updated_at=updated_at,
                 ),
                 Activity(
                     id=f"{user_id}-act-done",
@@ -199,10 +207,9 @@ async def _read(user_id: str):
     return athlete, goal, activities
 
 
-@pytest.mark.replica_unsafe  # settles every pending row, whoever owns it
 class TestStartupSweep:
     async def test_it_settles_every_surface_in_every_users_database(self):
-        """A `pending` row at boot is from a process that no longer exists.
+        """A `pending` row whose heartbeat has run down is not coming back.
 
         Nothing that writes one survives a restart: the auto-analyse paths run
         under ``asyncio.create_task``, the explicit triggers under
@@ -210,6 +217,10 @@ class TestStartupSweep:
         and `failure_recovery` cannot help — its ``except Exception`` never sees
         the ``CancelledError`` that kills those tasks, and once the process is
         gone nothing runs at all.
+
+        The seeded rows are stale by a wide margin, which is what puts them in
+        scope for the sweep at all; ``TestTheSweepLeavesALiveRunAlone`` covers
+        the other side.
         """
         await _seed("user-a")
         await _seed("user-b")
@@ -289,10 +300,81 @@ class TestStartupSweep:
         assert athlete.training_status_status == "error"
 
 
+class TestTheSweepLeavesALiveRunAlone:
+    """The property issue #50 names by hand, and the reason it is not academic.
+
+    The sweep used to settle every `pending` row it found, on the premise that a
+    row in that state at boot belonged to a process that was gone. That premise
+    is a claim about the whole deployment rather than about this process, and it
+    stops being true the moment two overlap — which a rolling redeploy behind a
+    proxy does on purpose, with no replicas involved. The booting process would
+    mark the serving process's live runs as errors underneath it.
+
+    A run that is genuinely alive says so: every surface touches its timestamp on
+    each progress commit, roughly twice a second while prose is arriving. So the
+    sweep asks the same question the routers ask on read.
+    """
+
+    async def test_a_beating_heart_survives_the_sweep(self):
+        await _seed("user-live", updated_at=datetime.now(timezone.utc))
+
+        settled = await settle_stranded_runs()
+
+        assert settled == 0, "the sweep settled a run that was still running"
+        athlete, goal, activities = await _read("user-live")
+        assert athlete.training_status_status == "pending"
+        assert goal.guidance_status == "pending"
+        assert activities["user-live-act-stuck"].analysis_status == "pending"
+
+    async def test_progress_is_left_under_a_live_run(self):
+        """Settling clears it, so its survival is what shows nothing was settled."""
+        await _seed("user-live", updated_at=datetime.now(timezone.utc))
+
+        await settle_stranded_runs()
+
+        athlete, _, activities = await _read("user-live")
+        assert athlete.training_status_progress == "tool.get_training_status"
+        assert activities["user-live-act-stuck"].analysis_progress == "thinking"
+
+    async def test_the_boundary_belongs_to_the_run(self):
+        """One second inside the budget is alive; one second past it is not."""
+        now = datetime.now(timezone.utc)
+        await _seed(
+            "user-inside",
+            updated_at=now - timedelta(minutes=PENDING_TIMEOUT_MINUTES) + timedelta(seconds=1),
+        )
+        await _seed(
+            "user-outside",
+            updated_at=now - timedelta(minutes=PENDING_TIMEOUT_MINUTES) - timedelta(seconds=1),
+        )
+
+        settled = await settle_stranded_runs()
+
+        assert settled == 3, "only the run past its budget should have settled"
+        inside, _, _ = await _read("user-inside")
+        outside, _, _ = await _read("user-outside")
+        assert inside.training_status_status == "pending"
+        assert outside.training_status_status == "error"
+
+    async def test_a_row_with_no_heartbeat_at_all_still_settles(self):
+        """Written before the column existed, or a run that never took a step.
+
+        Either way there is no evidence anything is alive, so the old behaviour
+        is the right one — and this is what stops the change from stranding rows
+        that predate it.
+        """
+        await _seed("user-null", updated_at=None)
+
+        settled = await settle_stranded_runs()
+
+        assert settled == 3
+        athlete, _, _ = await _read("user-null")
+        assert athlete.training_status_status == "error"
+
+
 # ── The wiring ──────────────────────────────────────────────────────────────
 
 
-@pytest.mark.replica_unsafe  # a boot is not evidence the other process died
 class TestTheSweepRunsAtStartup:
     async def _lifespan(self, sweep):
         from unittest.mock import AsyncMock, patch

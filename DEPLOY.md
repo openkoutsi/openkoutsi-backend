@@ -374,11 +374,14 @@ single-process by design, and several things depend on that:
   tasks with no leader election. A poller fetches every unclaimed event, processes
   it, and only then claims it, so a second process reprocesses the same events —
   duplicate activity imports, duplicate LLM analyses, duplicate spend.
-- The **stranded-run sweep** settles every `pending` LLM row at startup on the
-  premise that nothing writing one survived the last shutdown (the
+- The **stranded-run sweep** settles `pending` LLM rows at startup (the
   `Settled N LLM run(s) stranded by the last shutdown` behaviour noted under
-  *Migrating existing user databases* above). With two processes that premise is
-  false: starting the second settles the first one's **live** runs.
+  *Migrating existing user databases* above). It no longer settles them all: a
+  row whose heartbeat is still being touched belongs to somebody, so only the
+  ones whose inactivity budget has run down are released. That makes a rolling
+  restart safe — the process starting no longer errors the live runs of the one
+  still serving — but it is a bound, not an identity: a second process that
+  stays up past the budget will still settle runs it does not own.
 - **`AGENT_MAX_CONCURRENT_RUNS`** is an in-process counter, so N processes allow
   N times the concurrency you configured against your LLM.
 - **Rate limits** (login, password reset, chat, uploads, bulk import, MCP) are

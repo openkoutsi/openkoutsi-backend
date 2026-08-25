@@ -204,6 +204,58 @@ class TestTheClockKeepsMovingWhileTheRunStreams:
         assert (await _poll(Goal, GOAL_ID)).guidance_status == "done"
 
 
+class TestARollingRestartDoesNotKillALiveRun:
+    """The failure mode in the terms it actually occurs in (issue #50).
+
+    ``TestTheClockKeepsMovingWhileTheRunStreams`` shows the heartbeat is written.
+    This shows the sweep reads it: a second process booting mid-stream — which is
+    what a rolling redeploy behind a proxy is — runs the same startup sweep, and
+    it must leave the run alone rather than error it underneath the process that
+    is still serving.
+
+    Before the sweep consulted the heartbeat this settled the row to ``error``
+    while the stream was still writing to it, and the stream then finished into a
+    row a reader had already been shown as failed.
+    """
+
+    async def test_the_sweep_leaves_a_streaming_analysis_alone(
+        self, athlete_db, fake_model
+    ):
+        from backend.app.services.llm_activity_analyzer import analyze_activity_bg
+        from backend.app.services.stranded_runs import settle_stranded_runs
+
+        after_each_sweep: list[str] = []
+
+        async def _boot_a_second_process():
+            """Stand in for the replica starting while this run is in flight."""
+            row = await _poll(Activity, ACTIVITY_ID)
+            assert row.analysis_status == "pending", "set-up: the run should be live"
+            await settle_stranded_runs()
+            # Read back through a fresh session: the question is what the sweep
+            # committed, not what this one already had loaded.
+            after_each_sweep.append(
+                (await _poll(Activity, ACTIVITY_ID)).analysis_status
+            )
+            return _utc(row.analysis_updated_at)
+
+        seen = fake_model(ANSWER, watch=_boot_a_second_process)
+        await analyze_activity_bg(ACTIVITY_ID, ATHLETE_ID, USER_ID)
+
+        assert seen, "the stream produced no observable progress"
+        # The athlete and goal rows in the fixture are stale by two hours and are
+        # settled by these sweeps, correctly — this is about the one row that is
+        # being written to.
+        assert after_each_sweep and all(
+            status == "pending" for status in after_each_sweep
+        ), f"a sweep settled a run that was still streaming: {after_each_sweep}"
+
+        row = await _poll(Activity, ACTIVITY_ID)
+        assert row.analysis_status == "done", (
+            "the run finished into a row the sweep had left alone"
+        )
+        assert row.analysis == "".join(ANSWER), "and the whole stream landed in it"
+
+
 class TestAFailedRunStillSettles:
     async def test_the_activity_clock_is_stamped_on_error_too(
         self, athlete_db, fake_model
