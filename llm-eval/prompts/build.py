@@ -35,6 +35,7 @@ from backend.app.services import (  # noqa: E402
 from fixtures.scenarios import (  # noqa: E402
     ACTIVITY_SCENARIOS,
     AGENTIC_SCENARIOS,
+    CHAT_NOW,
     CHAT_SCENARIOS,
     GOAL_SCENARIOS,
     PLAN_SCENARIOS,
@@ -100,9 +101,13 @@ def _chat(scenario: dict) -> dict:
     answer a medical question is a *different* behaviour when the model could
     have gone and looked first. The history carries no tool results: chat stores
     dialogue only (see ``models.chat_orm``), so this is the real shape.
+
+    ``now`` is passed explicitly rather than left to the builder's UTC fallback:
+    the fallback is ``datetime.now()``, and a prompt whose text changes every run
+    is one promptfoo cannot cache and whose score diffs are noise.
     """
     system = chat_svc.build_chat_system_prompt(
-        scenario.get("locale"), scenario.get("coaching_style")
+        scenario.get("locale"), scenario.get("coaching_style"), scenario.get("now", CHAT_NOW)
     )
     messages = [{"role": "system", "content": system}, *scenario["history"]]
     return {

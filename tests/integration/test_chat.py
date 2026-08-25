@@ -35,15 +35,20 @@ _TEST_USER_ID = "test-user-00000000"
 _OTHER_USER_ID = "other-user-11111111"
 
 
-async def _seed_athlete(user_id: str = _TEST_USER_ID, *, agentic: bool = True) -> None:
+async def _seed_athlete(
+    user_id: str = _TEST_USER_ID, *, agentic: bool = True, timezone_name: str | None = None
+) -> None:
     """Put an athlete in the *file-backed* per-user DB the chat routes use."""
     await init_user_db(user_id)
+    app_settings: dict = {"agentic_koutsi": True} if agentic else {}
+    if timezone_name is not None:
+        app_settings["timezone"] = timezone_name
     async with get_user_session_factory(user_id)() as s:
         s.add(
             Athlete(
                 global_user_id=user_id,
                 ftp_tests=[],
-                app_settings={"agentic_koutsi": True} if agentic else {},
+                app_settings=app_settings,
             )
         )
         await s.commit()
@@ -438,6 +443,99 @@ class TestTurnExecution:
         assert answer.progress is None
         # The steps the thread draws: names only, never arguments or results.
         assert answer.tool_names == ["get_training_status"]
+
+    async def test_the_turn_tells_the_model_what_day_it_is(
+        self, client, auth_headers, no_turns, scripted_turn, usage_db
+    ):
+        """"Yesterday's session" has to resolve to a date, and only we know which.
+
+        Chat is the one surface with no backend-written brief to put the date in
+        — the last message is the athlete's own question — so if the system
+        prompt does not carry it, nothing does and the model guesses. Asserted on
+        the wire rather than on the builder because the interesting failure is a
+        turn that stops passing ``now`` while the builder still accepts it.
+
+        Restated on **every** turn, for the same reason the scope policy is: the
+        loop rebuilds the system messages per turn, and a date that survived only
+        to the first one would go missing exactly where the model is reading tool
+        results full of dates.
+        """
+        from tests.unit.test_llm_agent import calls, text
+
+        await _seed_athlete()
+        conversation_id, answer_id = await self._start(
+            client, auth_headers, message="How did today's session go?"
+        )
+
+        provider = scripted_turn.provider(
+            calls((0, "c1", "get_plan_status", "{}")),
+            text("MOOD:knowing\n\nIt is still ahead of you."),
+        )
+        scripted_turn(
+            provider,
+            scripted_turn.dispatch(scripted_turn.tool("get_plan_status", {"today": "rest"})),
+        )
+
+        from backend.app.services.llm_chat import run_chat_turn_bg
+
+        await run_chat_turn_bg(_TEST_USER_ID, conversation_id, answer_id)
+
+        today = datetime.now(timezone.utc).date().isoformat()
+        systems = [
+            "\n".join(m["content"] for m in turn["messages"] if m["role"] == "system")
+            for turn in provider.sent
+        ]
+        assert len(systems) == 2
+        for system in systems:
+            assert today in system
+            assert "in the athlete's own timezone" in system
+
+    async def test_the_date_the_model_is_given_is_the_one_the_tools_reckon_from(
+        self, client, auth_headers, no_turns, scripted_turn, usage_db
+    ):
+        """The two must agree, or every date in a tool result is off by one.
+
+        ``AgentRequest.today`` and the prompt's clock come from one
+        ``local_now`` call, and the athlete's timezone is what makes the
+        difference visible: at nine in the morning in Auckland, the server's own
+        UTC date is still yesterday. An athlete asking about "today" means their
+        Wednesday, and so must ``get_plan_status``.
+        """
+        from backend.app.core.timezones import local_now
+        from tests.unit.test_llm_agent import calls, text
+
+        await _seed_athlete(timezone_name="Pacific/Auckland")
+        conversation_id, answer_id = await self._start(client, auth_headers)
+
+        provider = scripted_turn.provider(
+            calls((0, "c1", "get_plan_status", "{}")),
+            text("MOOD:knowing\n\nOn plan."),
+        )
+        scripted_turn(
+            provider,
+            scripted_turn.dispatch(scripted_turn.tool("get_plan_status", {"today": "rest"})),
+        )
+
+        # Captured *after* the fixture has installed the scripted dispatch, so
+        # this wraps the fake rather than reaching the real tool behind it.
+        seen: list = []
+        scripted = llm_agent.call_tool
+
+        async def record(caller, name, arguments=None, **kwargs):
+            seen.append(kwargs.get("today"))
+            return await scripted(caller, name, arguments, **kwargs)
+
+        from backend.app.services.llm_chat import run_chat_turn_bg
+
+        with patch.object(llm_agent, "call_tool", record):
+            await run_chat_turn_bg(_TEST_USER_ID, conversation_id, answer_id)
+
+        local_today = local_now("Pacific/Auckland").date()
+        assert seen == [local_today]
+        system = "\n".join(
+            m["content"] for m in provider.sent[0]["messages"] if m["role"] == "system"
+        )
+        assert local_today.isoformat() in system
 
     async def test_a_live_turn_carries_the_steps_it_has_already_taken(
         self, client, auth_headers, no_turns, scripted_turn, usage_db

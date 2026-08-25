@@ -487,6 +487,14 @@ def _chat(*turns: str) -> list[dict]:
     ]
 
 
+#: The clock the chat system prompt is built against, shared by every scenario.
+#:
+#: Fixed, and the same instant the other families reckon from, for the same
+#: reason their ``now`` is fixed: a prompt whose text moved every run would
+#: defeat promptfoo's cache and turn every score diff into noise about the date.
+CHAT_NOW = _now
+
+
 _LONG_PREAMBLE = [
     "How did last week go?",
     "MOOD:knowing\n\nSolid week — three quality sessions and the volume held up.",

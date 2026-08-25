@@ -40,6 +40,17 @@ A system prompt is a first line, not a boundary. The layers under it:
   their own local model can make it say anything; we enforce where we own the
   request and the docs say plainly that the rest is theirs to own.
 
+Knowing what day it is
+----------------------
+Every other surface hands the model a brief the backend wrote, and puts the date
+in it. Chat's last message is the athlete's own question, so
+:data:`_CHAT_TIME_CONTEXT` puts the clock in the system prompt instead — "how did
+today's session go?" and "should I move tomorrow's ride?" are ordinary questions
+here, and a model guessing the date answers them about the wrong day. It is the
+athlete's local now, the same instant whose ``date()`` becomes
+``AgentRequest.today``, so the model and its tools cannot disagree about which
+day "today" is.
+
 Storage is dialogue only
 ------------------------
 See :mod:`..models.chat_orm` for why tool calls and results are not persisted.
@@ -168,6 +179,56 @@ results are not in front of you now and may be out of date — look again rather
 than trusting your own earlier summary.\
 """
 
+#: What "today" means, for the one surface where the athlete gets to say it.
+#:
+#: Every other prompt states the date in a brief the backend writes —
+#: ``_build_agentic_user_prompt`` puts it there for exactly this reason. Chat has
+#: no brief: the last user message is the athlete's own question, so the system
+#: prompt is the only place left. Leaving it out is not a neutral omission here.
+#: "How did today's session go?" and "should I move tomorrow's ride?" are
+#: ordinary questions on this surface, and a model guessing the date answers them
+#: about the wrong day — confidently, since nothing in the tool results
+#: contradicts it.
+#:
+#: The neighbouring dates are spelled out rather than left as arithmetic. It is a
+#: few tokens to buy past the one calculation models reliably get wrong, and
+#: "yesterday" is the commonest word in the questions this exists for.
+_CHAT_TIME_CONTEXT = """\
+Right now it is {time} on {weekday} {today} ({tz}), in the athlete's own \
+timezone. Anchor every relative date in their question to that: "today" is \
+{today}, "yesterday" is {yesterday}, "tomorrow" is {tomorrow}, and "this week" \
+is the week containing today. Your tools reckon from this same date, so a date \
+in a tool result means the same day as a date in the question.
+
+The time of day is part of the answer. A session dated today is still ahead of \
+the athlete first thing in the morning and behind them late in the evening, so \
+do not congratulate them on a workout they may not have done yet — check whether \
+it was actually recorded before treating it as done.
+
+Earlier messages in this conversation may have been written on previous days. A \
+"today" in one of them is not today; work from the dates above rather than \
+carrying an older one forward.\
+"""
+
+
+def chat_time_context(now: datetime) -> str:
+    """Render :data:`_CHAT_TIME_CONTEXT` for one turn.
+
+    ``now`` is the athlete's local time, not the server's — the same instant
+    whose ``date()`` becomes ``AgentRequest.today``, which is what keeps the
+    model and its tools from disagreeing about which day it is.
+    """
+    today = now.date()
+    return _CHAT_TIME_CONTEXT.format(
+        time=now.strftime("%H:%M"),
+        weekday=today.strftime("%A"),
+        today=today.isoformat(),
+        yesterday=(today - timedelta(days=1)).isoformat(),
+        tomorrow=(today + timedelta(days=1)).isoformat(),
+        tz=now.strftime("%Z") or "UTC",
+    )
+
+
 #: The format contract, restated on every turn that follows tool results.
 #:
 #: Same four moods and the same leading-line shape as the daily card, so
@@ -193,19 +254,31 @@ def chat_format_rule() -> str:
 
 
 def build_chat_system_prompt(
-    locale: str | None = None, coaching_style: str | None = None
+    locale: str | None = None,
+    coaching_style: str | None = None,
+    now: datetime | None = None,
 ) -> str:
     """The whole server-side system prompt for one chat turn.
 
     Order is deliberate: who Koutsi is, then what is in and out of scope, then
-    how to go and get the facts, then the output contract. The scope policy sits
-    high because it is the part that has to survive twenty turns of history, and
-    :func:`_decorate` appends the athlete's chosen coaching style and language
-    exactly as it does for every other surface — a chat answer should sound like
-    the daily card, and be in the same language.
+    when *now* is, then how to go and get the facts, then the output contract.
+    The scope policy sits high because it is the part that has to survive twenty
+    turns of history; the clock sits directly under it because resolving
+    "yesterday's session" into a date is the first half of deciding what to look
+    up, and :func:`_decorate` appends the athlete's chosen coaching style and
+    language exactly as it does for every other surface — a chat answer should
+    sound like the daily card, and be in the same language.
+
+    ``now`` is the athlete's local time and every production caller passes it.
+    The UTC fallback is for callers with no athlete to hand (the ``llm-eval``
+    harness, tests): a prompt whose date is right but whose zone is the server's
+    is a much smaller error than a prompt with no date at all, which is the bug
+    this argument exists to fix.
     """
     return _decorate(
-        f"{_CHAT_GUIDANCE}\n\n{_SCOPE_POLICY}\n\n{_CHAT_TOOL_GUIDANCE}\n\n{_CHAT_MOOD_RULE}",
+        f"{_CHAT_GUIDANCE}\n\n{_SCOPE_POLICY}\n\n"
+        f"{chat_time_context(now or datetime.now(timezone.utc))}\n\n"
+        f"{_CHAT_TOOL_GUIDANCE}\n\n{_CHAT_MOOD_RULE}",
         locale,
         coaching_style,
     )
@@ -654,7 +727,7 @@ async def run_chat_turn_bg(
                 athlete=athlete,
                 user_id=user_id,
                 system_prompt=build_chat_system_prompt(
-                    resolved_locale, coaching_style
+                    resolved_locale, coaching_style, now
                 ),
                 # Unused on this path: `history` already ends with the question
                 # being answered. Kept non-empty so a future caller that forgets

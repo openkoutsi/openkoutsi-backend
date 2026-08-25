@@ -21,6 +21,7 @@ string-matching, and it is: the point is that dropping the medical band while
 tidying the wording should break a test rather than ship.
 """
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -38,6 +39,7 @@ from backend.app.services.llm_chat import (
     build_chat_system_prompt,
     build_wire_history,
     chat_format_rule,
+    chat_time_context,
     conversation_title,
 )
 
@@ -106,6 +108,90 @@ class TestScopePolicyIsInThePrompt:
         prompt = build_chat_system_prompt("fi", "stern")
         assert "Respond in Finnish." in prompt
         assert "Be strict" in prompt
+
+
+class TestTheClockIsInThePrompt:
+    """Koutsi is told what day it is, because on this surface the athlete says it.
+
+    Every other surface states the date in a brief the backend writes. Chat's
+    last message is the athlete's own question, so without this the model is
+    guessing — and "how did today's session go?" is an ordinary question here,
+    not an edge case.
+    """
+
+    _NOW = datetime(2026, 8, 25, 6, 40, tzinfo=timezone.utc)
+
+    def test_today_is_stated_with_its_weekday_and_the_time(self):
+        prompt = build_chat_system_prompt(now=self._NOW)
+        assert "2026-08-25" in prompt
+        assert "Tuesday" in prompt
+        assert "06:40" in prompt
+
+    def test_yesterday_and_tomorrow_are_spelled_out(self):
+        """Date arithmetic is the calculation models reliably get wrong.
+
+        "Yesterday's session" is the commonest question this exists for, so the
+        answer is given rather than left to be derived.
+        """
+        prompt = build_chat_system_prompt(now=self._NOW)
+        assert "2026-08-24" in prompt
+        assert "2026-08-26" in prompt
+
+    @pytest.mark.parametrize(
+        "now, yesterday, tomorrow",
+        [
+            # Month, leap-year and year boundaries — the three places a model
+            # doing the arithmetic itself goes wrong, and where being wrong
+            # silently points every lookup at the wrong day.
+            (datetime(2026, 3, 1, 9, 0, tzinfo=timezone.utc), "2026-02-28", "2026-03-02"),
+            (datetime(2028, 3, 1, 9, 0, tzinfo=timezone.utc), "2028-02-29", "2028-03-02"),
+            (datetime(2027, 1, 1, 9, 0, tzinfo=timezone.utc), "2026-12-31", "2027-01-02"),
+        ],
+    )
+    def test_the_neighbouring_dates_cross_boundaries_correctly(self, now, yesterday, tomorrow):
+        context = chat_time_context(now)
+        assert yesterday in context
+        assert tomorrow in context
+
+    def test_the_date_is_the_athletes_and_not_the_servers(self):
+        """The whole point of threading ``now`` through rather than calling
+        ``date.today()`` in the builder.
+
+        09:00 in Auckland is the previous calendar day in UTC. An athlete there
+        asking about "today" means their Wednesday, and so must every tool the
+        turn goes on to call — ``AgentRequest.today`` is this same instant's
+        ``date()``, which is what keeps the two in step.
+        """
+        now = datetime(2026, 8, 26, 9, 0, tzinfo=ZoneInfo("Pacific/Auckland"))
+        assert now.astimezone(timezone.utc).date().isoformat() == "2026-08-25"
+
+        prompt = build_chat_system_prompt(now=now)
+        assert "2026-08-26" in prompt
+        assert "NZST" in prompt
+
+    def test_a_naive_clock_still_gets_a_zone_label(self):
+        """``strftime("%Z")`` is empty for a naive datetime, and an empty
+        parenthesis in the prompt would read as a bug rather than as UTC."""
+        assert "(UTC)" in chat_time_context(datetime(2026, 8, 25, 6, 40))
+
+    def test_the_clock_survives_the_style_and_language_decoration(self):
+        prompt = build_chat_system_prompt("fi", "stern", self._NOW)
+        assert "2026-08-25" in prompt
+        assert "Respond in Finnish." in prompt
+
+    def test_a_caller_with_no_athlete_still_gets_a_date(self):
+        """The fallback exists so the omission this fixes cannot come back.
+
+        ``llm-eval`` and any future caller without an athlete to hand get the
+        server's UTC clock rather than no clock — the wrong zone is a far
+        smaller error than a model guessing the date outright.
+        """
+        before = datetime.now(timezone.utc).date()
+        prompt = build_chat_system_prompt()
+        after = datetime.now(timezone.utc).date()
+        assert "in the athlete's own timezone" in prompt
+        # Either side of a midnight the call might have straddled.
+        assert any(d.isoformat() in prompt for d in {before, after})
 
 
 class TestHistoryTrimming:
