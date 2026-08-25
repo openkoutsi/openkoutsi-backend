@@ -13,6 +13,7 @@ import httpx
 from fastapi import APIRouter
 
 from backend.app.core.config import settings
+from backend.app.services.bridge_client import BridgeClient
 from backend.app.services.wahoo_sync import process_wahoo_webhook
 
 log = logging.getLogger(__name__)
@@ -41,31 +42,31 @@ async def wahoo_bridge_poller_once() -> None:
 
 
 async def _poll_bridge_once() -> None:
+    """Claim a batch, process it, ack what succeeded (issue #50).
+
+    The claim carries a deadline, so an event whose consumer dies mid-import
+    becomes deliverable again rather than being silently retired. That is why
+    the ack is conditional on success where the old `claim` call was not: with
+    `attempts` bounding redelivery, a transient failure no longer has to be
+    treated as terminal to avoid a retry loop.
+    """
     async with httpx.AsyncClient(timeout=10.0) as http:
-        try:
-            r = await http.get(
-                f"{settings.wahoo_bridge_url}/events/pending",
-                headers={"Authorization": f"Bearer {settings.wahoo_bridge_secret}"},
-            )
-            r.raise_for_status()
-            events: list[dict] = r.json()
-        except Exception as e:
-            log.warning(f"Could not fetch events from Wahoo bridge: {e}")
-            return
+        client = BridgeClient(http, settings.wahoo_bridge_url, settings.wahoo_bridge_secret)
+        events = await client.claim_batch()
 
         for event in events:
             event_id = event.get("id", "")
+            claim_token = event.get("claim_token")
 
+            # `process_wahoo_webhook` opens its own sessions internally.
             try:
                 await process_wahoo_webhook(event["payload"])
             except Exception:
-                log.exception("Failed to process Wahoo bridge event %s", event_id)
+                log.exception("Failed to process bridge event %s", event_id)
+                # Deliverable again immediately, rather than at the deadline.
+                # A genuinely poisonous event still retires once it has used up
+                # `max_delivery_attempts` on the bridge.
+                await client.nack(event_id, claim_token)
+                continue
 
-            # Claim regardless of processing outcome (avoid infinite retry loops)
-            try:
-                await http.post(
-                    f"{settings.wahoo_bridge_url}/events/{event_id}/claim",
-                    headers={"Authorization": f"Bearer {settings.wahoo_bridge_secret}"},
-                )
-            except Exception:
-                log.warning("Could not claim Wahoo bridge event %s", event_id)
+            await client.ack(event_id, claim_token)

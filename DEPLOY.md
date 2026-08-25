@@ -372,11 +372,10 @@ single-process by design, and several things depend on that:
 
 - The **bridge pollers** and the **token-expiry sweep** now run under a single
   claim on the registry (`registry_leases`, name `background-work`), so only one
-  process runs them at a time and a second stands by. What is *not* yet fixed is
-  the event protocol underneath: a poller fetches every unclaimed event,
-  processes it, and only then claims it, so a crash mid-process still replays —
-  and the replay is only harmless because both sync paths open with a
-  `(provider, external_id)` check.
+  process runs them at a time and a second stands by. The event protocol
+  underneath carries a deadline too: a consumer claims a batch, processes it and
+  acks what succeeded, and an unacked claim becomes deliverable again once it
+  expires. Two processes therefore no longer drain the same events.
 - The **stranded-run sweep** settles `pending` LLM rows at startup (the
   `Settled N LLM run(s) stranded by the last shutdown` behaviour noted under
   *Migrating existing user databases* above). It no longer settles them all: a
@@ -406,6 +405,13 @@ than in memory — a lease row and a claimed column respectively — so both hol
 between processes. They are listed here because they were fixed for what they do
 on *one* box: each was a live race between two concurrent syncs inside a single
 process, not a multi-replica hypothetical.
+
+**Deploying the bridges.** The backend and the two bridges are separate images
+and the deploy recreates only what changed, so a new backend can briefly meet an
+old bridge. It handles that: it probes `POST /events/claim` once per bridge URL
+and falls back to the pre-#50 fetch-then-claim flow on a 404, logging a warning
+naming the bridge. Redeploy the bridges and the warning stops. The fallback can
+be removed a release after both have shipped.
 
 The container image already runs one process — its entrypoint execs a single
 uvicorn worker. Give the box more CPU/RAM rather than more processes; see

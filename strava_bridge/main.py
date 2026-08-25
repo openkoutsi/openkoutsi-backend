@@ -7,8 +7,11 @@ them to the main openkoutsi app for polling.
 Endpoints:
   GET  /webhook          — Strava hub challenge verification
   POST /webhook          — Receive Strava event (signature check off by default)
-  GET  /events/pending   — Return unclaimed events (Bearer auth)
-  POST /events/{id}/claim — Mark an event as claimed (Bearer auth)
+  POST /events/claim     — Claim a batch, with a deadline (Bearer auth)
+  POST /events/{id}/ack  — Terminal success (Bearer auth)
+  POST /events/{id}/nack — Failed; make deliverable again (Bearer auth)
+  GET  /events/pending   — Deprecated: pre-#50 flow, kept for one release
+  POST /events/{id}/claim — Deprecated: pre-#50 terminal claim
 """
 
 import asyncio
@@ -23,7 +26,9 @@ from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, HTTPException, Request, Response
 from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from sqlalchemy import JSON, DateTime, String, delete, func, select
+from sqlalchemy import (
+    JSON, DateTime, Integer, String, delete, func, or_, select, update,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -63,6 +68,19 @@ class Settings(BaseSettings):
     # (issue #102, F-11). Roughly 100 minutes of backlog at the drain rate —
     # far past any real webhook volume, and still bounded.
     max_queue_events: int = 10000
+
+    # How long a consumer's claim on an event survives without an ack. The
+    # consumer processes an event and only then acks it, so a claim that
+    # outlives its holder means the process died mid-import — and the event has
+    # to become visible again rather than being lost. Generously longer than a
+    # drain of 100 events takes, because expiring under a consumer that is
+    # merely slow hands the same event to two of them.
+    claim_visibility_seconds: int = 900
+
+    # After this many delivery attempts an event is retired rather than served
+    # again. Without a bound, an event that always throws is redelivered every
+    # visibility window until the seven-day cleanup reaches it.
+    max_delivery_attempts: int = 5
 
     @model_validator(mode="after")
     def _validate_bridge_secret(self) -> "Settings":
@@ -104,9 +122,23 @@ class WebhookEvent(Base):
     received_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
+    # Terminal. Set when the consumer acks a successfully processed event, or
+    # when it is retired after `max_delivery_attempts`. Kept as the column it
+    # always was so the seven-day cleanup and the queue-depth guard are
+    # unchanged by any of this.
     claimed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # In flight. A consumer holds an event by token until `claim_expires_at`,
+    # and an unacked claim past its deadline makes the event visible again
+    # (issue #50). The token is what stops a consumer whose claim already
+    # lapsed from acking an event somebody else now owns.
+    claim_token: Mapped[str | None] = mapped_column(String, nullable=True)
+    claim_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0,
+                                          server_default="0")
 
 
 engine = create_async_engine(f"sqlite+aiosqlite:///{settings.database_path}")
@@ -119,6 +151,29 @@ async def get_session():
 
 
 # ── Cleanup background task ───────────────────────────────────────────────
+
+
+#: Columns added after the table's first release. `create_all` builds a table
+#: that does not exist; it does **not** add columns to one that does, and these
+#: bridges have no Alembic. Without this, a bridge with an existing `bridge.db`
+#: would start cleanly and then fail every query that names them.
+_CLAIM_COLUMNS = {
+    "claim_token": "VARCHAR",
+    "claim_expires_at": "DATETIME",
+    "attempts": "INTEGER NOT NULL DEFAULT 0",
+}
+
+
+async def _ensure_claim_columns(conn) -> None:
+    """Add the claim columns to a `webhook_events` that predates them."""
+    rows = await conn.exec_driver_sql('PRAGMA table_info("webhook_events")')
+    existing = {row[1] for row in rows.fetchall()}
+    for column, ddl in _CLAIM_COLUMNS.items():
+        if column not in existing:
+            log.info("Adding webhook_events.%s", column)
+            await conn.exec_driver_sql(
+                f'ALTER TABLE webhook_events ADD COLUMN {column} {ddl}'
+            )
 
 
 async def _cleanup_loop() -> None:
@@ -154,6 +209,7 @@ async def lifespan(app: FastAPI):
         )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await _ensure_claim_columns(conn)
     task = asyncio.create_task(_cleanup_loop())
     yield
     task.cancel()
@@ -355,6 +411,141 @@ async def get_pending_events(request: Request):
             }
             for e in events
         ]
+
+
+@app.post("/events/claim")
+async def claim_events(request: Request):
+    """Claim a batch of deliverable events, with a deadline. Auth: Bearer.
+
+    Replaces fetch-then-process-then-claim (issue #50). That order meant a
+    consumer crash mid-import left the event unclaimed and it was served again;
+    claiming *first* would have turned that duplicate into a loss, which is
+    worse — the import is idempotent by `(provider, external_id)`, the analysis
+    it triggers is not.
+
+    So the claim carries a deadline instead. An event is handed out, and if no
+    ack arrives before the deadline it becomes deliverable again. At-least-once
+    with a bound, rather than at-most-once with a hole.
+
+    The UPDATE is conditional on the event still being free, which is what makes
+    two consumers racing safe: the database picks the winner, and each comes
+    away with only the rows carrying its own token.
+    """
+    _require_bearer(request)
+    token = uuid.uuid4().hex
+    now = datetime.now(timezone.utc)
+    deadline = now + timedelta(seconds=settings.claim_visibility_seconds)
+
+    async with AsyncSessionLocal() as session:
+        free = (
+            WebhookEvent.claim_expires_at.is_(None),
+            WebhookEvent.claim_expires_at <= now,
+        )
+        candidates = (
+            await session.execute(
+                select(WebhookEvent.id)
+                .where(
+                    WebhookEvent.claimed_at.is_(None),
+                    or_(*free),
+                    WebhookEvent.attempts < settings.max_delivery_attempts,
+                )
+                .order_by(WebhookEvent.received_at)
+                .limit(100)
+            )
+        ).scalars().all()
+        if not candidates:
+            return []
+
+        await session.execute(
+            update(WebhookEvent)
+            .where(
+                WebhookEvent.id.in_(candidates),
+                WebhookEvent.claimed_at.is_(None),
+                or_(*free),
+            )
+            .values(
+                claim_token=token,
+                claim_expires_at=deadline,
+                attempts=WebhookEvent.attempts + 1,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        await session.commit()
+
+        # Only the rows that actually carry our token — another consumer may
+        # have won some of the candidates between the SELECT and the UPDATE.
+        events = (
+            await session.execute(
+                select(WebhookEvent)
+                .where(WebhookEvent.claim_token == token)
+                .order_by(WebhookEvent.received_at)
+            )
+        ).scalars().all()
+        return [
+            {
+                "id": e.id,
+                "strava_event_type": e.strava_event_type,
+                "strava_owner_id": e.strava_owner_id,
+                "payload": e.payload,
+                "received_at": e.received_at.isoformat(),
+                "claim_token": token,
+                "attempts": e.attempts,
+            }
+            for e in events
+        ]
+
+
+@app.post("/events/{event_id}/ack", status_code=200)
+async def ack_event(event_id: str, request: Request):
+    """Terminal success: this event is done and must never be served again.
+
+    Conditional on the token, so a consumer whose claim already lapsed cannot
+    retire an event another one now owns.
+    """
+    _require_bearer(request)
+    token = request.query_params.get("claim_token")
+    async with AsyncSessionLocal() as session:
+        result = await session.execute(
+            update(WebhookEvent)
+            .where(
+                WebhookEvent.id == event_id,
+                WebhookEvent.claim_token == token,
+            )
+            .values(claimed_at=datetime.now(timezone.utc), claim_expires_at=None)
+            .execution_options(synchronize_session=False)
+        )
+        await session.commit()
+    if result.rowcount != 1:
+        # Not an error worth failing the consumer's loop over: it means the
+        # claim lapsed and somebody else has the event. Saying so is enough.
+        log.warning("Ack for event %s did not match a live claim", event_id)
+        return {"status": "stale"}
+    return {"status": "acked"}
+
+
+@app.post("/events/{event_id}/nack", status_code=200)
+async def nack_event(event_id: str, request: Request):
+    """Known failure: make the event deliverable again now, not at the deadline.
+
+    Turns a transient failure — a token refresh that lost a race, a provider
+    5xx — into a retry seconds later rather than a quarter of an hour. The
+    attempt has already been counted, so a genuinely poisonous event still
+    retires after `max_delivery_attempts`.
+    """
+    _require_bearer(request)
+    token = request.query_params.get("claim_token")
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            update(WebhookEvent)
+            .where(
+                WebhookEvent.id == event_id,
+                WebhookEvent.claim_token == token,
+            )
+            .values(claim_token=None, claim_expires_at=None)
+            .execution_options(synchronize_session=False)
+        )
+        await session.commit()
+    return {"status": "released"}
 
 
 @app.post("/events/{event_id}/claim", status_code=200)
