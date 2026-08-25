@@ -20,9 +20,6 @@ log = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from backend.app.api.strava import strava_bridge_poller
-    from backend.app.api.wahoo import wahoo_bridge_poller
-    from backend.app.services.pat_expiry import pat_expiry_sweeper
     from backend.app.services.stranded_runs import settle_stranded_runs
 
     if not settings.encryption_key:
@@ -58,24 +55,72 @@ async def lifespan(app: FastAPI):
     except Exception:
         log.exception("Could not settle stranded LLM runs")
 
-    # Background work here is periodic asyncio tasks rather than a scheduler
+    # Background work is periodic asyncio tasks rather than a scheduler
     # dependency; the token-expiry sweep (issue #46) joins the bridge pollers on
-    # that pattern, and inherits their single-process assumption.
-    background = [
-        asyncio.create_task(strava_bridge_poller()),
-        asyncio.create_task(wahoo_bridge_poller()),
-        asyncio.create_task(pat_expiry_sweeper()),
-    ]
+    # that pattern. All three now run under one claim on the registry rather
+    # than in whichever process happened to boot (issue #50) — see
+    # `services.leadership` for why the claim is per-cycle rather than a term of
+    # office, and why losing it cancels the cycle in flight.
+    supervisor = asyncio.create_task(_background_work())
 
     yield
 
-    for task in background:
-        task.cancel()
-    for task in background:
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+    supervisor.cancel()
+    try:
+        await supervisor
+    except asyncio.CancelledError:
+        pass
+
+
+async def _background_work() -> None:
+    """Hold the background-work claim, and run everything it covers.
+
+    One claim for all three, re-taken from standby whenever it is lost. Three
+    independent claims would be three elections for one decision, and would let
+    a process be leader for Strava and not for Wahoo.
+    """
+    from backend.app.api.strava import (
+        strava_bridge_poller_configured,
+        strava_bridge_poller_once,
+    )
+    from backend.app.api.wahoo import (
+        wahoo_bridge_poller_configured,
+        wahoo_bridge_poller_once,
+    )
+    from backend.app.services.leadership import hold_background_work, run_until_lost
+    from backend.app.services.pat_expiry import (
+        SWEEP_INTERVAL_SECONDS,
+        pat_expiry_sweep_once,
+    )
+
+    # Asked once, before contending: an instance with no bridge configured
+    # should not take a claim it has nothing to do with.
+    jobs: list[tuple[str, float, object]] = [
+        ("PAT expiry sweep", float(SWEEP_INTERVAL_SECONDS), pat_expiry_sweep_once),
+    ]
+    if strava_bridge_poller_configured():
+        jobs.insert(0, ("Strava bridge poll", 60.0, strava_bridge_poller_once))
+    if wahoo_bridge_poller_configured():
+        jobs.insert(0, ("Wahoo bridge poll", 60.0, wahoo_bridge_poller_once))
+
+    while True:
+        async with hold_background_work() as lost:
+            running = [
+                asyncio.create_task(
+                    run_until_lost(lost, work, interval, label=label)
+                )
+                for label, interval, work in jobs
+            ]
+            try:
+                await asyncio.gather(*running)
+            finally:
+                for task in running:
+                    task.cancel()
+                await asyncio.gather(*running, return_exceptions=True)
+        # The claim was lost rather than the process shutting down: go back to
+        # standby and try to take it again. Shutdown cancels this task, which
+        # unwinds through the context manager and releases.
+        log.info("Background work stood down — waiting to reclaim")
 
 
 class _SecurityHeadersMiddleware(BaseHTTPMiddleware):

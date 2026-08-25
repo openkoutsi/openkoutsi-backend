@@ -370,10 +370,13 @@ uv run uvicorn backend.main:app --host 0.0.0.0 --port 8000
 **Run exactly one process — no `--workers`, no gunicorn.** The backend is
 single-process by design, and several things depend on that:
 
-- The **bridge pollers** and the **token-expiry sweep** are `lifespan` asyncio
-  tasks with no leader election. A poller fetches every unclaimed event, processes
-  it, and only then claims it, so a second process reprocesses the same events —
-  duplicate activity imports, duplicate LLM analyses, duplicate spend.
+- The **bridge pollers** and the **token-expiry sweep** now run under a single
+  claim on the registry (`registry_leases`, name `background-work`), so only one
+  process runs them at a time and a second stands by. What is *not* yet fixed is
+  the event protocol underneath: a poller fetches every unclaimed event,
+  processes it, and only then claims it, so a crash mid-process still replays —
+  and the replay is only harmless because both sync paths open with a
+  `(provider, external_id)` check.
 - The **stranded-run sweep** settles `pending` LLM rows at startup (the
   `Settled N LLM run(s) stranded by the last shutdown` behaviour noted under
   *Migrating existing user databases* above). It no longer settles them all: a

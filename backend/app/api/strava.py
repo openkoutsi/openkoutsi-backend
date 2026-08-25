@@ -25,25 +25,22 @@ router = APIRouter(prefix="/strava", tags=["strava"])
 
 # ── Bridge poller (long-running background task) ───────────────────────────
 
-async def strava_bridge_poller() -> None:
-    """
-    Polls the Strava Bridge every 60 seconds, processes any pending webhook
-    events, and claims them so they aren't reprocessed.
+def strava_bridge_poller_configured() -> bool:
+    """Whether this instance has a Strava bridge to poll at all.
 
-    Silently no-ops if BRIDGE_URL or BRIDGE_SECRET are not configured.
+    Checked before contending for the background-work lease, so an instance with
+    no Strava bridge never takes leadership it has nothing to do with.
     """
     if not settings.bridge_url or not settings.bridge_secret:
         log.info("Strava bridge not configured — poller inactive")
-        return
+        return False
+    log.info("Strava bridge poller armed (polling %s)", settings.bridge_url)
+    return True
 
-    log.info("Strava bridge poller started (polling %s)", settings.bridge_url)
 
-    while True:
-        await asyncio.sleep(60)
-        try:
-            await _poll_bridge_once()
-        except Exception:
-            log.exception("Strava bridge poll failed")
+async def strava_bridge_poller_once() -> None:
+    """One poll. The loop and the leader claim live in ``backend.main``."""
+    await _poll_bridge_once()
 
 
 async def _poll_bridge_once() -> None:

@@ -22,25 +22,22 @@ router = APIRouter(prefix="/wahoo", tags=["wahoo"])
 
 # ── Bridge poller (long-running background task) ───────────────────────────
 
-async def wahoo_bridge_poller() -> None:
-    """
-    Polls the Wahoo Bridge every 60 seconds, processes any pending webhook
-    events, and claims them so they aren't reprocessed.
+def wahoo_bridge_poller_configured() -> bool:
+    """Whether this instance has a Wahoo bridge to poll at all.
 
-    Silently no-ops if WAHOO_BRIDGE_URL or WAHOO_BRIDGE_SECRET are not configured.
+    Checked before contending for the background-work lease, so an instance with
+    no Wahoo bridge never takes leadership it has nothing to do with.
     """
     if not settings.wahoo_bridge_url or not settings.wahoo_bridge_secret:
         log.info("Wahoo bridge not configured — poller inactive")
-        return
+        return False
+    log.info("Wahoo bridge poller armed (polling %s)", settings.wahoo_bridge_url)
+    return True
 
-    log.info("Wahoo bridge poller started (polling %s)", settings.wahoo_bridge_url)
 
-    while True:
-        await asyncio.sleep(60)
-        try:
-            await _poll_bridge_once()
-        except Exception:
-            log.exception("Wahoo bridge poll failed")
+async def wahoo_bridge_poller_once() -> None:
+    """One poll. The loop and the leader claim live in ``backend.main``."""
+    await _poll_bridge_once()
 
 
 async def _poll_bridge_once() -> None:

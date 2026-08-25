@@ -224,19 +224,19 @@ async def run_expiry_sweep(
     return sent
 
 
-async def pat_expiry_sweeper() -> None:
-    """Periodic ``lifespan`` task: run the sweep once a day, forever."""
+async def pat_expiry_sweep_once() -> None:
+    """One sweep. The loop and the leader claim live in ``backend.main``.
+
+    Note the ordering change this brought with it: the sweep used to run
+    immediately on boot and then sleep, so a restart loop could re-send. It now
+    runs on the same schedule as everything else under the claim, and
+    `last_expiry_notice` remains the guard against a duplicate notice either
+    way.
+    """
     from backend.app.db.registry import get_registry_session
 
-    while True:
-        try:
-            async for session in get_registry_session():
-                sent = await run_expiry_sweep(session)
-                if sent:
-                    log.info("Token expiry sweep sent %d notification(s)", sent)
-                break
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            log.exception("Token expiry sweep failed")
-        await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
+    async for session in get_registry_session():
+        sent = await run_expiry_sweep(session)
+        if sent:
+            log.info("Token expiry sweep sent %d notification(s)", sent)
+        break

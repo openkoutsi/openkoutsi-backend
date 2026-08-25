@@ -508,9 +508,10 @@ class TestTheSweepRunsAtStartup:
         with (
             patch("backend.main.init_registry_db", new=AsyncMock()),
             patch("backend.main.init_usage_db", new=AsyncMock()),
-            patch("backend.app.api.strava.strava_bridge_poller", new=AsyncMock()),
-            patch("backend.app.api.wahoo.wahoo_bridge_poller", new=AsyncMock()),
-            patch("backend.app.services.pat_expiry.pat_expiry_sweeper", new=AsyncMock()),
+            # The three pollers now run under one supervisor that contends for a
+            # registry lease (issue #50), so standing that down is one patch
+            # rather than three.
+            patch("backend.main._background_work", new=AsyncMock()),
             patch(
                 "backend.app.services.stranded_runs.settle_stranded_runs", new=sweep
             ),
