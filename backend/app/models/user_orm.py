@@ -62,6 +62,15 @@ class Athlete(UserBase):
     # surfaces share the parser. Cleared the moment the prose starts, so a
     # finished card looks exactly as it did before this existed.
     training_status_progress: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Identifies the run that owns the columns above. The heartbeat says whether
+    # a run is still *alive*; this says whether its writes are still *wanted*.
+    # A `pending` row blocks its own re-trigger, so a read settles one whose
+    # heartbeat has run down — which makes the row re-triggerable, and makes the
+    # race: the previous run's process may be alive and merely slow, and would
+    # otherwise commit its answer over the run the athlete just started. A run
+    # whose token no longer matches discards its own writes instead. Mirrors
+    # `Course.plan_run_id`, which had this first (issue #50).
+    training_status_run_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
@@ -173,6 +182,15 @@ class Activity(UserBase):
     analysis_updated_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Identifies the run that owns the columns above. The heartbeat says whether
+    # a run is still *alive*; this says whether its writes are still *wanted*.
+    # A `pending` row blocks its own re-trigger, so a read settles one whose
+    # heartbeat has run down — which makes the row re-triggerable, and makes the
+    # race: the previous run's process may be alive and merely slow, and would
+    # otherwise commit its answer over the run the athlete just started. A run
+    # whose token no longer matches discards its own writes instead. Mirrors
+    # `Course.plan_run_id`, which had this first (issue #50).
+    analysis_run_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     athlete: Mapped["Athlete"] = relationship("Athlete", back_populates="activities")
@@ -448,6 +466,15 @@ class Goal(UserBase):
     guidance_updated_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # Identifies the run that owns the columns above. The heartbeat says whether
+    # a run is still *alive*; this says whether its writes are still *wanted*.
+    # A `pending` row blocks its own re-trigger, so a read settles one whose
+    # heartbeat has run down — which makes the row re-triggerable, and makes the
+    # race: the previous run's process may be alive and merely slow, and would
+    # otherwise commit its answer over the run the athlete just started. A run
+    # whose token no longer matches discards its own writes instead. Mirrors
+    # `Course.plan_run_id`, which had this first (issue #50).
+    guidance_run_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     athlete: Mapped["Athlete"] = relationship("Athlete", back_populates="goals")
 

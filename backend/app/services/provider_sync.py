@@ -43,6 +43,7 @@ from backend.app.models.user_orm import (
     Athlete,
     SyncLease,
 )
+from backend.app.services.stranded_runs import begin_activity_analysis_run
 from openkoutsi.categorization import classify_workout
 from openkoutsi.fit_processing import (
     resolve_sport_type,
@@ -645,16 +646,15 @@ async def sync_provider_activities(
                 # Issue #9: skip the instance-paid auto analysis for denied users
                 # on a gated instance.
                 if await auto_analysis_allowed(user_id, athlete):
-                    activity.analysis_status = "pending"
-                    activity.analysis_progress = None
-                    activity.analysis_updated_at = datetime.now(timezone.utc)
+                    run_id = begin_activity_analysis_run(activity)
                     await session.commit()
                     # Issue #43: a backlog import is the one path where an agent loop's
                     # 4–6× calls is a real bill and nobody reads the output one by
                     # one, so it always takes the single-shot prompt.
                     asyncio.create_task(
                         analyze_activity_bg(
-                            activity.id, athlete.id, user_id, allow_agentic=False
+                            activity.id, athlete.id, user_id,
+                            allow_agentic=False, run_id=run_id,
                         )
                     )
 

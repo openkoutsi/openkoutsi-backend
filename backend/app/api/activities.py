@@ -57,6 +57,8 @@ from backend.app.services.fit_processor import process_fit_file, read_fit_start_
 from backend.app.services.metrics_engine import recalculate_from
 from backend.app.services.pr_detection import detect_pr_badges
 from backend.app.services.stranded_runs import (
+    begin_activity_analysis_run,
+    begin_training_status_run,
     pending_timed_out,
     settle_activity_analysis_if_timed_out,
 )
@@ -124,29 +126,31 @@ def _has_label_clause(label: str):
     )
 
 
-def _maybe_auto_analyze(activity_id: str, athlete: Athlete, user_id: str) -> bool:
-    app_settings = athlete.app_settings or {}
-    if app_settings.get("auto_analyze"):
-        from backend.app.services.llm_activity_analyzer import analyze_activity_bg
-        asyncio.create_task(analyze_activity_bg(activity_id, athlete.id, user_id))
-        return True
-    return False
+def _maybe_auto_analyze(activity: Activity, athlete: Athlete) -> Optional[str]:
+    """Claim this activity's analysis columns if the athlete opted in.
+
+    Returns the run token, or ``None`` when auto-analysis is off. Like
+    ``_maybe_auto_training_status`` below, this only marks the row — the caller
+    commits and *then* starts the task, so the task cannot write a result before
+    the `pending` state it is answering has been persisted.
+    """
+    if not (athlete.app_settings or {}).get("auto_analyze"):
+        return None
+    return begin_activity_analysis_run(activity)
 
 
-def _maybe_auto_training_status(athlete: Athlete, user_id: str) -> bool:
+def _maybe_auto_training_status(athlete: Athlete) -> Optional[str]:
     """Marks athlete as pending for training status analysis if eligible.
 
-    Returns True if the status was set to pending; caller must commit the
-    session and then call asyncio.create_task(analyze_training_status_bg(...))
-    *after* the commit to avoid a race where the task writes "error" before the
-    pending state is persisted.
+    Returns the run token the caller must hand to
+    ``analyze_training_status_bg``, or ``None`` when it did not claim the row.
+    The caller must commit the session and start the task *after* the commit,
+    to avoid a race where the task writes "error" before the pending state is
+    persisted.
     """
     if (athlete.app_settings or {}).get("auto_training_status") and athlete.training_status_status != "pending":
-        athlete.training_status_status = "pending"
-        athlete.training_status = None
-        athlete.training_status_updated_at = datetime.now(timezone.utc)
-        return True
-    return False
+        return begin_training_status_run(athlete)
+    return None
 
 
 async def _bg_process_and_recalculate(
@@ -264,15 +268,23 @@ async def _bg_process_and_recalculate(
             if not llm_ok and (athlete.app_settings or {}).get("auto_analyze"):
                 log.debug("Auto-analyze skipped for user %s — LLM access denied", global_user_id)
 
-            if llm_ok and _maybe_auto_analyze(target_act.id, athlete, user_id):
-                target_act.analysis_status = "pending"
-                target_act.analysis_updated_at = datetime.now(timezone.utc)
-
-            needs_status = llm_ok and _maybe_auto_training_status(athlete, user_id)
+            analysis_run = _maybe_auto_analyze(target_act, athlete) if llm_ok else None
+            status_run = _maybe_auto_training_status(athlete) if llm_ok else None
             await session.commit()
-            if needs_status:
+            # Both tasks start only after the commit, so neither can settle a
+            # `pending` state that is not yet on disk.
+            if analysis_run is not None:
+                from backend.app.services.llm_activity_analyzer import analyze_activity_bg
+                asyncio.create_task(
+                    analyze_activity_bg(
+                        target_act.id, athlete.id, user_id, run_id=analysis_run
+                    )
+                )
+            if status_run is not None:
                 from backend.app.services.llm_training_status_analyzer import analyze_training_status_bg
-                asyncio.create_task(analyze_training_status_bg(athlete.id, user_id))
+                asyncio.create_task(
+                    analyze_training_status_bg(athlete.id, user_id, run_id=status_run)
+                )
             await find_and_link_workout(session, athlete_id, target_act)
             await recalculate_from(athlete_id, start_date, session)
             await catch_up_adherence(athlete_id, session)
@@ -1272,14 +1284,20 @@ async def trigger_analysis(
     ):
         return {"status": "pending"}
 
-    activity.analysis_status = "pending"
+    # Claiming the row here is what supersedes a previous run: the token it was
+    # holding is gone, so if its process is alive and merely slow it discards
+    # its own writes rather than committing a stale answer over this one.
     activity.analysis = None
-    activity.analysis_progress = None
-    activity.analysis_updated_at = datetime.now(timezone.utc)
+    run_id = begin_activity_analysis_run(activity)
     await session.commit()
 
     background_tasks.add_task(
-        analyze_activity_bg, activity_id, athlete.id, ctx.user_id, body.locale
+        analyze_activity_bg,
+        activity_id,
+        athlete.id,
+        ctx.user_id,
+        body.locale,
+        run_id=run_id,
     )
     return {"status": "pending"}
 

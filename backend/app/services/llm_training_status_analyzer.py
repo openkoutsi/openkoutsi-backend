@@ -16,7 +16,7 @@ import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import AsyncIterator
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from ..core.timezones import local_now
 from ..db.user_session import get_user_session_factory
@@ -38,7 +38,7 @@ from .llm_streaming import (
     stream_chat_completion,
     stream_into_db,
 )
-from .stranded_runs import settle_training_status
+from .stranded_runs import run_is_current, settle_training_status
 
 log = logging.getLogger(__name__)
 
@@ -413,6 +413,7 @@ async def analyze_training_status_bg(
     locale: str | None = None,
     *,
     allow_agentic: bool = True,
+    run_id: str | None = None,
 ) -> None:
     """
     Background task: stream LLM training status → write chunks to DB every 500 ms
@@ -423,6 +424,11 @@ async def analyze_training_status_bg(
     backlog import fires one of these per athlete alongside a task per imported
     activity, and multiplying that by an agent loop's four-to-six calls is a real
     bill on the one path nobody is watching the output of.
+
+    ``run_id`` is the token this run owns ``training_status*`` by (issue #50):
+    a row settled or re-triggered under it clears the token, and this run then
+    discards its own writes rather than committing over its replacement.
+    ``None`` keeps the old behaviour.
     """
 
     async def _clear_pending(recovery_session) -> None:
@@ -614,3 +620,28 @@ async def analyze_training_status_bg(
                 feature="training_status",
                 label=f"Training status analysis for athlete {athlete_id}",
             )
+
+            # The guarantee. `stream_into_db` has committed by now, so a run
+            # that lost its claim takes its own writes back out; the callbacks
+            # cannot, being synchronous and unable to see another session's
+            # commit. `training_status_date` goes too, so the next read
+            # regenerates rather than showing a hole.
+            if not await run_is_current(
+                session, Athlete, athlete_id, Athlete.training_status_run_id, run_id
+            ):
+                await session.execute(
+                    update(Athlete)
+                    .where(Athlete.id == athlete_id)
+                    .values(
+                        training_status=None,
+                        training_status_status=None,
+                        training_status_progress=None,
+                        training_status_date=None,
+                        training_status_updated_at=None,
+                    )
+                )
+                await session.commit()
+                log.info(
+                    "Discarded a superseded training status for athlete %s",
+                    athlete_id,
+                )

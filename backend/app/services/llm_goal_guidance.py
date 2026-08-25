@@ -20,7 +20,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from ..db.user_session import get_user_session_factory
 from ..models.user_orm import Activity, Athlete, DailyMetric, Goal, TrainingPlan
@@ -36,7 +36,7 @@ from .llm_training_status_analyzer import (
     _LOCALE_LANGUAGE,
     _local_now,
 )
-from .stranded_runs import settle_goal_guidance
+from .stranded_runs import run_is_current, settle_goal_guidance
 
 log = logging.getLogger(__name__)
 
@@ -224,10 +224,16 @@ async def generate_goal_guidance_bg(
     goal_id: str,
     user_id: str,
     locale: str | None = None,
+    run_id: str | None = None,
 ) -> None:
     """
     Background task: stream per-goal LLM guidance → write prose to DB every 500 ms
     → parse the leading REALISM verdict → set final guidance_status 'done'/'error'.
+
+    ``run_id`` is the token this run owns ``guidance*`` by (issue #50): a row
+    settled or re-triggered under it clears the token, and this run then
+    discards its own writes rather than committing over its replacement.
+    ``None`` keeps the old behaviour.
     """
 
     async def _clear_pending(recovery_session) -> None:
@@ -331,3 +337,23 @@ async def generate_goal_guidance_bg(
                 feature="goal_guidance",
                 label=f"Goal guidance for goal {goal_id}",
             )
+
+            # The guarantee. `stream_into_db` has committed by now, so a run
+            # that lost its claim takes its own writes back out; the callbacks
+            # cannot, being synchronous and unable to see another session's
+            # commit.
+            if not await run_is_current(
+                session, Goal, goal_id, Goal.guidance_run_id, run_id
+            ):
+                await session.execute(
+                    update(Goal)
+                    .where(Goal.id == goal_id)
+                    .values(
+                        guidance=None,
+                        guidance_verdict=None,
+                        guidance_status=None,
+                        guidance_updated_at=None,
+                    )
+                )
+                await session.commit()
+                log.info("Discarded a superseded guidance for goal %s", goal_id)

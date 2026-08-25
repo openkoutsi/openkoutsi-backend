@@ -28,6 +28,10 @@ from backend.app.services.provider_sync import (
     ensure_fresh_token,
 )
 from backend.app.services.providers.base import NormalizedActivity
+from backend.app.services.stranded_runs import (
+    begin_activity_analysis_run,
+    begin_training_status_run,
+)
 from backend.app.services.providers.strava import StravaProviderClient
 
 log = logging.getLogger(__name__)
@@ -273,20 +277,19 @@ async def _process_event_for_user(
             llm_ok = await auto_analysis_allowed(user_id, athlete)
         if llm_ok and app_cfg.get("auto_analyze"):
             from backend.app.services.llm_activity_analyzer import analyze_activity_bg
-            activity.analysis_status = "pending"
-            activity.analysis_progress = None
-            activity.analysis_updated_at = datetime.now(timezone.utc)
+            run_id = begin_activity_analysis_run(activity)
             await session.commit()
-            asyncio.create_task(analyze_activity_bg(activity.id, athlete.id, user_id))
+            asyncio.create_task(
+                analyze_activity_bg(activity.id, athlete.id, user_id, run_id=run_id)
+            )
 
         if llm_ok and app_cfg.get("auto_training_status") and athlete.training_status_status != "pending":
             from backend.app.services.llm_training_status_analyzer import analyze_training_status_bg
-            athlete.training_status_status = "pending"
-            athlete.training_status = None
-            athlete.training_status_progress = None
-            athlete.training_status_updated_at = datetime.now(timezone.utc)
+            status_run = begin_training_status_run(athlete)
             await session.commit()
-            asyncio.create_task(analyze_training_status_bg(athlete.id, user_id))
+            asyncio.create_task(
+                analyze_training_status_bg(athlete.id, user_id, run_id=status_run)
+            )
 
     elif aspect_type == "delete":
         src_result = await session.execute(

@@ -20,7 +20,11 @@ from backend.app.schemas.goals import (
 )
 from backend.app.schemas.pagination import Page, PageParams, paginate_params
 from backend.app.services.achievements import recompute_achievements_safe
-from backend.app.services.stranded_runs import pending_timed_out, settle_goal_guidance
+from backend.app.services.stranded_runs import (
+    begin_goal_guidance_run,
+    pending_timed_out,
+    settle_goal_guidance,
+)
 
 
 router = APIRouter(
@@ -168,14 +172,13 @@ async def trigger_goal_guidance(
     if goal.guidance_status == "pending":
         return {"status": "pending"}
 
-    goal.guidance_status = "pending"
-    goal.guidance = None
-    goal.guidance_verdict = None
-    goal.guidance_updated_at = datetime.now(timezone.utc)
+    run_id = begin_goal_guidance_run(goal)
     await session.commit()
 
     from backend.app.services.llm_goal_guidance import generate_goal_guidance_bg
     asyncio.create_task(
-        generate_goal_guidance_bg(athlete.id, goal.id, ctx.user_id, body.locale)
+        generate_goal_guidance_bg(
+            athlete.id, goal.id, ctx.user_id, body.locale, run_id=run_id
+        )
     )
     return {"status": "pending"}

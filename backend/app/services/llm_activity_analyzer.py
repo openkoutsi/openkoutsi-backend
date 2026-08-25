@@ -16,7 +16,7 @@ import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, AsyncIterator
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from ..core.timezones import local_now
 from ..db.user_session import get_user_session_factory
@@ -30,7 +30,7 @@ from .llm_agent import (
 )
 from .llm_streaming import failure_recovery, stream_chat_completion, stream_into_db
 from .pr_detection import detect_pr_badges
-from .stranded_runs import settle_activity_analysis
+from .stranded_runs import run_is_current, settle_activity_analysis
 
 from openkoutsi.sport_matching import CYCLING_SPORT_TYPES
 from openkoutsi.training_math import efficiency_factor, variability_index
@@ -411,6 +411,7 @@ async def analyze_activity_bg(
     locale: str | None = None,
     *,
     allow_agentic: bool = True,
+    run_id: str | None = None,
 ) -> None:
     """
     Background task: stream LLM analysis → write chunks to DB every 500 ms
@@ -425,6 +426,11 @@ async def analyze_activity_bg(
     activities at four-to-six calls each is both a real bill and a lot of
     concurrent loops against one local model that serialises requests — on the
     one path where nobody reads the output one analysis at a time.
+
+    ``run_id`` is the token this run owns ``analysis*`` by (issue #50). A row
+    settled by the sweep or re-triggered by the athlete clears it, and this run
+    then takes its own writes back out rather than committing a finished answer
+    over the one that replaced it. ``None`` keeps the old behaviour.
     """
 
     async def _clear_pending(recovery_session) -> None:
@@ -447,7 +453,8 @@ async def analyze_activity_bg(
         user_id, f"Analysis for activity {activity_id}", _clear_pending
     ):
         await _analyze_activity(
-            activity_id, athlete_id, user_id, locale, allow_agentic=allow_agentic
+            activity_id, athlete_id, user_id, locale,
+            allow_agentic=allow_agentic, run_id=run_id,
         )
 
 
@@ -458,6 +465,7 @@ async def _analyze_activity(
     locale: str | None,
     *,
     allow_agentic: bool,
+    run_id: str | None = None,
 ) -> None:
     async with get_user_session_factory(user_id)() as session:
         activity_result = await session.execute(
@@ -569,3 +577,26 @@ async def _analyze_activity(
             feature="activity_analysis",
             label=f"Analysis for activity {activity_id}",
         )
+
+        # `stream_into_db` has committed by now, whichever way it ended, so a
+        # run that lost its claim has to take its own writes back out — the
+        # callbacks cannot, being synchronous and unable to see another
+        # session's commit. Leaves the row as if this run had never run, which
+        # is what lets the run that superseded it own the column.
+        if not await run_is_current(
+            session, Activity, activity_id, Activity.analysis_run_id, run_id
+        ):
+            await session.execute(
+                update(Activity)
+                .where(Activity.id == activity_id)
+                .values(
+                    analysis=None,
+                    analysis_status=None,
+                    analysis_progress=None,
+                    analysis_updated_at=None,
+                )
+            )
+            await session.commit()
+            log.info(
+                "Discarded a superseded analysis for activity %s", activity_id
+            )

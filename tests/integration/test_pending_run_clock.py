@@ -256,6 +256,77 @@ class TestARollingRestartDoesNotKillALiveRun:
         assert row.analysis == "".join(ANSWER), "and the whole stream landed in it"
 
 
+class TestASupersededRunDiscardsItsWrites:
+    """The token's guarantee, at the point it has to hold (issue #50).
+
+    The heartbeat cannot answer this one. A previous run's process can be alive
+    and merely slow, so "is it still running?" says *yes* about a run whose
+    answer nobody wants any more — the athlete re-triggered, or a sweep settled
+    the row and the re-trigger that unblocked came in behind it.
+
+    Without the token the slow run commits its finished answer over the new one.
+    """
+
+    async def test_a_run_whose_row_was_re_triggered_writes_nothing(
+        self, athlete_db, fake_model
+    ):
+        from backend.app.services.llm_activity_analyzer import analyze_activity_bg
+        from backend.app.services.stranded_runs import begin_activity_analysis_run
+
+        # This run claims the row.
+        async with get_user_session_factory(USER_ID)() as session:
+            activity = (
+                await session.execute(select(Activity).where(Activity.id == ACTIVITY_ID))
+            ).scalar_one()
+            mine = begin_activity_analysis_run(activity)
+            await session.commit()
+
+        async def _someone_else_re_triggers():
+            """The athlete asks again while this run is still streaming."""
+            async with get_user_session_factory(USER_ID)() as other:
+                activity = (
+                    await other.execute(
+                        select(Activity).where(Activity.id == ACTIVITY_ID)
+                    )
+                ).scalar_one()
+                begin_activity_analysis_run(activity)
+                await other.commit()
+            return datetime.now(timezone.utc)
+
+        fake_model(ANSWER, watch=_someone_else_re_triggers)
+        await analyze_activity_bg(ACTIVITY_ID, ATHLETE_ID, USER_ID, run_id=mine)
+
+        row = await _poll(Activity, ACTIVITY_ID)
+        assert row.analysis is None, (
+            "a superseded run committed its answer over the run that replaced it"
+        )
+        assert row.analysis_status is None, "and left a status behind it"
+
+    async def test_a_run_that_still_owns_its_row_writes_normally(
+        self, athlete_db, fake_model
+    ):
+        """The other side: holding the token must not cost anything."""
+        from backend.app.services.llm_activity_analyzer import analyze_activity_bg
+        from backend.app.services.stranded_runs import begin_activity_analysis_run
+
+        async with get_user_session_factory(USER_ID)() as session:
+            activity = (
+                await session.execute(select(Activity).where(Activity.id == ACTIVITY_ID))
+            ).scalar_one()
+            mine = begin_activity_analysis_run(activity)
+            await session.commit()
+
+        async def _look_but_change_nothing():
+            return datetime.now(timezone.utc)
+
+        fake_model(ANSWER, watch=_look_but_change_nothing)
+        await analyze_activity_bg(ACTIVITY_ID, ATHLETE_ID, USER_ID, run_id=mine)
+
+        row = await _poll(Activity, ACTIVITY_ID)
+        assert row.analysis_status == "done"
+        assert row.analysis == "".join(ANSWER)
+
+
 class TestAFailedRunStillSettles:
     async def test_the_activity_clock_is_stamped_on_error_too(
         self, athlete_db, fake_model

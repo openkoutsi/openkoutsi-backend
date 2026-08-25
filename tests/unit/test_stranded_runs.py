@@ -24,6 +24,10 @@ from backend.app.db.user_session import get_user_session_factory, init_user_db
 from backend.app.models.user_orm import Activity, Athlete, Goal
 from backend.app.services.stranded_runs import (
     PENDING_TIMEOUT_MINUTES,
+    begin_activity_analysis_run,
+    begin_goal_guidance_run,
+    begin_training_status_run,
+    run_is_current,
     pending_timed_out,
     settle_activity_analysis,
     settle_activity_analysis_if_timed_out,
@@ -370,6 +374,126 @@ class TestTheSweepLeavesALiveRunAlone:
         assert settled == 3
         athlete, _, _ = await _read("user-null")
         assert athlete.training_status_status == "error"
+
+
+class TestRunTokens:
+    """The other half of "is this run still alive?" — is it still *wanted*?
+
+    The heartbeat and the token answer different questions, and the second one
+    only became answerable on three of the four surfaces with issue #50.
+    ``Course.plan_run_id`` had it first.
+
+    The failure it closes is run supersession, and it is reachable on one box: a
+    `pending` row blocks its own re-trigger, so a read settles one whose
+    heartbeat has run down — which is what makes the row re-triggerable, and what
+    makes the race. The previous run's process may be alive and merely slow, and
+    would otherwise commit a finished answer over the run the athlete has just
+    started.
+    """
+
+    async def test_beginning_a_run_claims_the_row_with_a_fresh_token(self):
+        await _seed("user-tok")
+        async with get_user_session_factory("user-tok")() as session:
+            athlete = (await session.execute(select(Athlete))).scalars().one()
+            first = begin_training_status_run(athlete)
+            second = begin_training_status_run(athlete)
+
+        assert first != second, "each run must own the row by its own token"
+        assert athlete.training_status_run_id == second
+
+    async def test_a_settle_retires_the_token(self):
+        """So a run declared dead cannot come back and overwrite the decision."""
+        await _seed("user-tok")
+        async with get_user_session_factory("user-tok")() as session:
+            athlete = (await session.execute(select(Athlete))).scalars().one()
+            run_id = begin_training_status_run(athlete)
+            await session.commit()
+
+            assert settle_training_status(athlete, NOW) is True
+            await session.commit()
+
+            assert athlete.training_status_run_id is None
+            assert not await run_is_current(
+                session, Athlete, athlete.id, Athlete.training_status_run_id, run_id
+            )
+
+    async def test_the_sweep_retires_the_token_too(self):
+        await _seed("user-tok")
+        async with get_user_session_factory("user-tok")() as session:
+            athlete = (await session.execute(select(Athlete))).scalars().one()
+            begin_training_status_run(athlete, NOW)
+            goal = (await session.execute(select(Goal))).scalars().one()
+            begin_goal_guidance_run(goal, NOW)
+            await session.commit()
+
+        assert await settle_stranded_runs() >= 2
+
+        athlete, goal, _ = await _read("user-tok")
+        assert athlete.training_status_run_id is None
+        assert goal.guidance_run_id is None
+
+    async def test_the_holder_of_the_current_token_is_current(self):
+        await _seed("user-tok")
+        async with get_user_session_factory("user-tok")() as session:
+            athlete = (await session.execute(select(Athlete))).scalars().one()
+            run_id = begin_training_status_run(athlete)
+            await session.commit()
+
+            assert await run_is_current(
+                session, Athlete, athlete.id, Athlete.training_status_run_id, run_id
+            )
+
+    async def test_a_superseded_run_is_not_current(self):
+        """The supersession the token exists for, in one place."""
+        await _seed("user-tok")
+        async with get_user_session_factory("user-tok")() as session:
+            athlete = (await session.execute(select(Athlete))).scalars().one()
+            first = begin_training_status_run(athlete)
+            await session.commit()
+
+        # The athlete re-triggers. A *different* session, because the point is
+        # to see what another one committed.
+        async with get_user_session_factory("user-tok")() as other:
+            athlete2 = (await other.execute(select(Athlete))).scalars().one()
+            begin_training_status_run(athlete2)
+            await other.commit()
+
+        async with get_user_session_factory("user-tok")() as session:
+            assert not await run_is_current(
+                session, Athlete, "ath", Athlete.training_status_run_id, first
+            ), "the first run should have lost its claim to the row"
+
+    async def test_a_run_with_no_token_keeps_the_old_behaviour(self):
+        """A run already in flight when the column shipped is not discarded."""
+        await _seed("user-tok")
+        async with get_user_session_factory("user-tok")() as session:
+            assert await run_is_current(
+                session, Athlete, "ath", Athlete.training_status_run_id, None
+            )
+
+    async def test_every_surface_carries_one(self):
+        await _seed("user-tok")
+        async with get_user_session_factory("user-tok")() as session:
+            athlete = (await session.execute(select(Athlete))).scalars().one()
+            goal = (await session.execute(select(Goal))).scalars().one()
+            activity = (
+                await session.execute(
+                    select(Activity).where(Activity.id == "user-tok-act-stuck")
+                )
+            ).scalars().one()
+
+            tokens = {
+                begin_training_status_run(athlete),
+                begin_goal_guidance_run(goal),
+                begin_activity_analysis_run(activity),
+            }
+            await session.commit()
+
+        assert len(tokens) == 3, "tokens must not collide across surfaces"
+        athlete, goal, activities = await _read("user-tok")
+        assert athlete.training_status_run_id is not None
+        assert goal.guidance_run_id is not None
+        assert activities["user-tok-act-stuck"].analysis_run_id is not None
 
 
 # ── The wiring ──────────────────────────────────────────────────────────────
