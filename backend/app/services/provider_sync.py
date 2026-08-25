@@ -21,8 +21,10 @@ import io
 import logging
 import uuid
 from collections import OrderedDict
+from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from typing import AsyncIterator
 
 from sqlalchemy import delete, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -128,6 +130,55 @@ def _get_activity_lock(user_id: str, athlete_id: str) -> asyncio.Lock:
     lock = asyncio.Lock()
     _activity_creation_locks[key] = (loop, lock)
     return lock
+
+
+# ── The activity-create guard ────────────────────────────────────────────────
+
+
+@asynccontextmanager
+async def activity_create_guard(
+    session: AsyncSession, user_id: str, athlete_id: str
+) -> AsyncIterator[None]:
+    """Serialise one athlete's dedup-window query against the create that follows.
+
+    Two providers can deliver the same ride almost simultaneously — a Wahoo
+    webhook and a Strava sync firing within milliseconds — and without this both
+    callers see an empty ±5-minute window and each create the same activity.
+
+    **Two guards, not one** (issue #50). The ``asyncio.Lock`` settles the common
+    case without touching the database, but it only speaks for this event loop;
+    the ``SyncLease`` inside it repeats the same exclusion in a place every
+    writer of this database can see. The lock is the fast path, the lease is the
+    guarantee — defence in depth rather than either one alone.
+
+    **The invariant every caller owes this guard:** the new ``Activity`` row must
+    be *committed* before the block exits. A flush is not sufficient — under
+    SQLite's WAL isolation a caller that takes the lease next still sees an empty
+    window until the write is committed, which is the duplicate this exists to
+    prevent.
+
+    ``leases.hold`` owns the session's transaction boundaries for the duration,
+    so do not carry unrelated uncommitted work across this block. In exchange, a
+    block that raises is rolled back before the lease is released — which is what
+    keeps a failed attach path from publishing its own deletions.
+
+    Known exposure, unchanged by this refactor: the Wahoo and provider-sync
+    attach paths download a FIT inside the block, so a pathologically slow CDN
+    can outlast ``_ACTIVITY_LEASE_TTL`` and hand the same lease to a second
+    caller. Hoisting the prefetch out would reorder the priority decision that
+    depends on it, so it is left as a follow-up rather than fixed here.
+    """
+    async with (
+        _get_activity_lock(user_id, athlete_id),
+        leases.hold(
+            session,
+            SyncLease,
+            f"activity-create:{athlete_id}",
+            ttl=_ACTIVITY_LEASE_TTL,
+            wait=_ACTIVITY_LEASE_WAIT,
+        ),
+    ):
+        yield
 
 
 # ── Priority ──────────────────────────────────────────────────────────────────
@@ -454,33 +505,10 @@ async def sync_provider_activities(
                     )
                 continue
 
-            # ── Find-or-create under a per-athlete lock ───────────────────
-            # The lock serialises the dedup window query + commit so that two
-            # concurrent syncs (e.g. Wahoo webhook + Strava full sync firing
-            # within milliseconds) cannot both see "no existing activity" and
-            # each create a duplicate record.
-            #
-            # Two guards, not one (issue #50). The `asyncio.Lock` settles the
-            # common case without touching the database, but it only speaks for
-            # this event loop — so the `SyncLease` inside it repeats the same
-            # exclusion in a place every writer of this database can see. The
-            # lock is the fast path; the lease is the guarantee.
-            #
-            # Critical invariant: the new Activity row must be COMMITTED before
-            # either is released.  A flush alone is not sufficient — under
-            # READ COMMITTED isolation (and SQLite WAL mode) another session
-            # that acquires the lock after the flush but before the commit will
-            # still see an empty dedup window and create a duplicate.
-            async with (
-                _get_activity_lock(user_id, athlete.id),
-                leases.hold(
-                    session,
-                    SyncLease,
-                    f"activity-create:{athlete.id}",
-                    ttl=_ACTIVITY_LEASE_TTL,
-                    wait=_ACTIVITY_LEASE_WAIT,
-                ),
-            ):
+            # ── Find-or-create under the activity-create guard ────────────
+            # The attach branch below downloads a FIT inside the block, which is
+            # what `_ACTIVITY_LEASE_TTL` is sized for.
+            async with activity_create_guard(session, user_id, athlete.id):
                 # ── Activity within the time window? ──────────────────────
                 if norm.start_time is not None:
                     act_result = await session.execute(

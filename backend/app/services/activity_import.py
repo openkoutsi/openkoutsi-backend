@@ -40,14 +40,12 @@ from sqlalchemy import select
 
 from backend.app.core.config import settings
 from backend.app.core.file_encryption import encrypt_file
-from backend.app.db import leases
 from backend.app.db.user_session import get_user_session_factory
 from backend.app.models.user_orm import (
     Activity,
     ActivitySource,
     Athlete,
     ImportJob,
-    SyncLease,
 )
 from backend.app.services.achievements import recompute_achievements_safe
 from backend.app.services.activity_archive import (
@@ -64,11 +62,7 @@ from backend.app.services.fit_processor import (
 )
 from backend.app.services.metrics_engine import recalculate_from
 from backend.app.services.plan_adherence import catch_up_adherence
-from backend.app.services.provider_sync import (
-    _ACTIVITY_LEASE_TTL,
-    _ACTIVITY_LEASE_WAIT,
-    _get_activity_lock,
-)
+from backend.app.services.provider_sync import activity_create_guard
 from openkoutsi.activity_formats import ActivityParseError, format_priority
 
 log = logging.getLogger(__name__)
@@ -286,30 +280,14 @@ async def _import_one(
 
     # ── Find-or-create under the same two guards the provider syncs use ──────
     #
-    # This is the check-then-insert issue #50 wrapped in a lock *and* a lease:
-    # the `asyncio.Lock` settles the common case without touching the database
-    # but speaks only for this event loop, and the `SyncLease` repeats the
-    # exclusion where every writer of this database can see it.
-    #
     # It matters more here than on the single upload it grew out of. An upload's
-    # window is one request; an import holds this pattern open once per file for
-    # the length of the job, so a Strava webhook landing mid-import is an
-    # ordinary Tuesday rather than a coincidence — and without the guard both
-    # writers see an empty dedup window and each create the same ride.
+    # window is one request; an import holds the guard open once per file for the
+    # length of the job, so a Strava webhook landing mid-import is an ordinary
+    # Tuesday rather than a coincidence.
     #
     # `process_activity_file` commits inside the block, which is the invariant
-    # the lease requires: a flush alone would let a caller that takes the lease
-    # next still see an empty window.
-    async with (
-        _get_activity_lock(user_id, athlete.id),
-        leases.hold(
-            session,
-            SyncLease,
-            f"activity-create:{athlete.id}",
-            ttl=_ACTIVITY_LEASE_TTL,
-            wait=_ACTIVITY_LEASE_WAIT,
-        ),
-    ):
+    # the guard requires.
+    async with activity_create_guard(session, user_id, athlete.id):
         if candidate.start_time is not None:
             existing = await _existing_activity(session, athlete.id, candidate.start_time)
             if existing is not None:

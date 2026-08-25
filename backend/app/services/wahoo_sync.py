@@ -17,7 +17,7 @@ from backend.app.models.registry_orm import ProviderConnection
 from backend.app.models.user_orm import Activity, ActivitySource, Athlete
 from backend.app.services.provider_sync import (
     _DUPLICATE_WINDOW,
-    _get_activity_lock,
+    activity_create_guard,
     _populate_activity,
     _repopulate_activity,
     _winning_priority,
@@ -135,7 +135,13 @@ async def _process_wahoo_for_user(norm, athlete, conn, access_token, user_id, se
         log.debug("Wahoo webhook: activity %s already imported — skipping", norm.external_id)
         return
 
-    async with _get_activity_lock(user_id, athlete.id):
+    # The dedup window and the create/attach that follows it run under the
+    # shared activity-create guard: an in-process lock in front, a
+    # `SyncLease` row behind it (issue #50). This path was previously
+    # guarded by the lock alone, which is a statement about one event
+    # loop offered in place of one about the database — and it is the
+    # path the bridge poller drives, so it races provider sync routinely.
+    async with activity_create_guard(session, user_id, athlete.id):
         # Check for existing Activity at the same time window
         existing_result = await session.execute(
             select(Activity).where(

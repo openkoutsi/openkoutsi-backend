@@ -17,7 +17,6 @@ from backend.app.core.auth import get_current_user
 from backend.app.core.config import settings
 from backend.app.core.deps import get_ctx_session_athlete
 from backend.app.core.file_encryption import decrypt_file, encrypt_file
-from backend.app.db import leases
 from backend.app.db.registry import get_registry_session
 from backend.app.db.user_session import get_user_session_factory
 from backend.app.models.user_orm import (
@@ -29,7 +28,6 @@ from backend.app.models.user_orm import (
     ActivityStream,
     Athlete,
     ImportJob,
-    SyncLease,
 )
 from backend.app.schemas.imports import (
     ImportJobListResponse,
@@ -63,12 +61,10 @@ from backend.app.services.stranded_runs import (
     settle_activity_analysis_if_timed_out,
 )
 from backend.app.services.provider_sync import (
-    _ACTIVITY_LEASE_TTL,
-    _ACTIVITY_LEASE_WAIT,
     _add_distance_bests,
     _add_power_bests,
-    _get_activity_lock,
     _source_priority,
+    activity_create_guard,
     rebuild_intervals,
 )
 from backend.app.services.weight import load_weight_log
@@ -381,35 +377,19 @@ async def upload_activity(
 
     # ── Find-or-create under the same two guards every other writer uses ─────
     #
-    # The ±5-minute duplicate check and the insert that depends on it are the
-    # section issue #50 wrapped in an `asyncio.Lock` *and* a `SyncLease`: the
-    # lock settles the common case without touching the database but speaks only
-    # for this event loop, and the lease repeats the exclusion where every
-    # writer of this database can see it.
-    #
-    # This path went without them for as long as it was the only interactive
+    # This path went without a guard for as long as it was the only interactive
     # writer. It is not: a Wahoo webhook or a Strava backfill landing while an
     # athlete uploads the same ride would have both writers see an empty window
     # and each create an activity. The window here is one request rather than
     # the tens of minutes a bulk import holds it open, which is why this was the
-    # last of the three to be closed rather than the first.
+    # last of the original three to be closed rather than the first.
     #
     # Both branches below commit inside the block, which is the invariant the
-    # lease requires: a flush alone would let the next holder still see an empty
-    # window.
+    # guard requires.
     attached_to: Optional[Activity] = None
     activity: Optional[Activity] = None
 
-    async with (
-        _get_activity_lock(ctx.user_id, athlete.id),
-        leases.hold(
-            session,
-            SyncLease,
-            f"activity-create:{athlete.id}",
-            ttl=_ACTIVITY_LEASE_TTL,
-            wait=_ACTIVITY_LEASE_WAIT,
-        ),
-    ):
+    async with activity_create_guard(session, ctx.user_id, athlete.id):
         if fit_start is not None:
             dupe_result = await session.execute(
                 select(Activity).where(

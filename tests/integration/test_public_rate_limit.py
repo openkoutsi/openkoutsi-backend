@@ -87,6 +87,7 @@ class TestLimitsAreDeclared:
         assert limiter._key_style == "endpoint"
 
 
+@pytest.mark.replica_unsafe  # slowapi's default storage is a dict in this process
 class TestInstanceInfoLimit:
     async def test_normal_use_is_not_limited(self, limited_client):
         """A handful of page loads must not trip it."""
@@ -105,6 +106,7 @@ class TestInstanceInfoLimit:
         assert 429 in statuses, "the endpoint never refused"
 
 
+@pytest.mark.replica_unsafe  # slowapi's default storage is a dict in this process
 class TestAvatarLimit:
     async def test_normal_use_is_not_limited(self, limited_client):
         """Unknown ids still 404 rather than 429 at ordinary volume."""
