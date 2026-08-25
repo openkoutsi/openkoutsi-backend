@@ -10,15 +10,29 @@ this module owns both halves of that inference:
 * :func:`pending_timed_out` — the shared age check the routers apply on read.
   One constant for all three, where there used to be two copies of it and, for
   the activity analysis, no check at all.
-* :func:`settle_stranded_runs` — the startup sweep. A ``pending`` row at boot is
-  by definition from a process that is gone: the auto-analyse paths run under
+* :func:`settle_stranded_runs` — the startup sweep. Nothing that writes a
+  ``pending`` status survives its process: the auto-analyse paths run under
   ``asyncio.create_task`` (cancelled at loop shutdown) and ``trigger_analysis``
   under ``BackgroundTasks`` (waited on only up to uvicorn's graceful-shutdown
-  timeout), so nothing survives a restart. An ordinary redeploy is therefore
-  enough to strand whatever was in flight, and
-  :func:`~backend.app.services.llm_streaming.failure_recovery` cannot help:
-  ``except Exception`` does not catch the ``CancelledError`` that kills those
-  tasks, and nothing runs at all once the process is gone.
+  timeout). An ordinary redeploy is therefore enough to strand whatever was in
+  flight, and :func:`~backend.app.services.llm_streaming.failure_recovery`
+  cannot help: ``except Exception`` does not catch the ``CancelledError`` that
+  kills those tasks, and nothing runs at all once the process is gone.
+
+  The sweep used to settle **every** ``pending`` row it found, on the premise
+  that a row in that state at boot belonged to a process that was gone. That
+  premise holds only while exactly one process exists (issue #50). Behind a
+  proxy a rolling redeploy overlaps two, and the one booting would settle the
+  live runs of the one still serving — the worst regression a naive scale-out
+  would introduce, and reachable today without any replicas at all.
+
+  So the sweep asks the same question the routers ask: has the heartbeat run
+  down? A row still being written to belongs to *somebody*, and this process not
+  knowing who is not evidence that nobody does. The cost is that a run killed by
+  a restart now waits out the remainder of its budget instead of being released
+  at boot — bounded by ``PENDING_TIMEOUT_MINUTES``, and settled by the read that
+  discovers it rather than left stuck, because every surface carries that check
+  on its read path.
 
 The activity analysis is the one where being stranded was terminal rather than
 merely ugly: ``trigger_analysis`` early-returns ``{"status": "pending"}`` for
@@ -162,7 +176,14 @@ def user_ids_with_a_database() -> list[str]:
 
 
 async def settle_stranded_user_runs(user_id: str, now: Optional[datetime] = None) -> int:
-    """Settle every ``pending`` row in one user's database. Returns how many."""
+    """Settle the timed-out ``pending`` rows in one user's database.
+
+    Returns how many. The age check runs in Python rather than in the ``WHERE``
+    clause: SQLite hands these timestamps back naive, which is why
+    :func:`_aware` exists, and a comparison against an aware ``now`` pushed into
+    SQL would not survive that. The row counts here are small enough that it
+    does not matter.
+    """
     from backend.app.db.user_session import get_user_session_factory
     from backend.app.models.user_orm import Activity, Athlete, Course, Goal
 
@@ -175,6 +196,8 @@ async def settle_stranded_user_runs(user_id: str, now: Optional[datetime] = None
             )
         ).scalars().all()
         for athlete in athletes:
+            if not pending_timed_out(athlete.training_status_updated_at, now):
+                continue
             # `training_status_date` is deliberately left alone. The router sets
             # it to today when *it* times a run out, to stop the auto-refresh
             # immediately re-firing a run that just failed; here the run didn't
@@ -189,6 +212,8 @@ async def settle_stranded_user_runs(user_id: str, now: Optional[datetime] = None
             )
         ).scalars().all()
         for goal in goals:
+            if not pending_timed_out(goal.guidance_updated_at, now):
+                continue
             settled += settle_goal_guidance(goal, now)
 
         activities = (
@@ -197,6 +222,8 @@ async def settle_stranded_user_runs(user_id: str, now: Optional[datetime] = None
             )
         ).scalars().all()
         for activity in activities:
+            if not pending_timed_out(activity.analysis_updated_at, now):
+                continue
             settled += settle_activity_analysis(activity, now)
 
         courses = (
@@ -205,6 +232,8 @@ async def settle_stranded_user_runs(user_id: str, now: Optional[datetime] = None
             )
         ).scalars().all()
         for course in courses:
+            if not pending_timed_out(course.plan_updated_at, now):
+                continue
             settled += settle_course_plan(course, now)
 
         if settled:
@@ -214,6 +243,10 @@ async def settle_stranded_user_runs(user_id: str, now: Optional[datetime] = None
 
 async def settle_stranded_runs(now: Optional[datetime] = None) -> int:
     """Settle the ``pending`` rows every user's database was left holding.
+
+    Only the ones whose heartbeat has run down: see the module docstring for why
+    "there is a ``pending`` row and we just booted" is not on its own evidence
+    that the run behind it is dead.
 
     Awaited during ``lifespan`` startup, before the app accepts a request: doing
     it there rather than in a background task means it cannot race a run

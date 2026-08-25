@@ -644,3 +644,182 @@ class TestUploadRacingASync:
                 session, SyncLease, self._LEASE, ttl=_TTL, wait=0.5
             )
         assert token is not None
+
+
+# ── The webhook paths ───────────────────────────────────────────────────────
+
+
+def _strava_raw(start: datetime) -> dict:
+    return {
+        "id": 99,
+        "name": "Morning Ride",
+        "sport_type": "Ride",
+        "start_date": start.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "elapsed_time": 3600,
+        "moving_time": 3600,
+        "distance": 50_000.0,
+        "total_elevation_gain": 500.0,
+        "average_speed": 14.0,
+    }
+
+
+def _http_returning(raw: dict) -> MagicMock:
+    resp = MagicMock()
+    resp.json.return_value = raw
+    resp.raise_for_status = MagicMock()
+    http = AsyncMock()
+    http.get = AsyncMock(return_value=resp)
+    http.__aenter__ = AsyncMock(return_value=http)
+    http.__aexit__ = AsyncMock(return_value=False)
+    return http
+
+
+@contextlib.contextmanager
+def _quiet_downstream(module: str):
+    """Silence everything after the guarded section.
+
+    These tests are about the find-or-create, not about populating what it
+    creates, and the population path wants a provider API and a FIT file.
+    """
+    with (
+        patch(f"backend.app.services.{module}._populate_activity", new_callable=AsyncMock),
+        patch(f"backend.app.services.{module}._repopulate_activity", new_callable=AsyncMock),
+        patch("backend.app.services.metrics_engine.recalculate_from", new_callable=AsyncMock),
+        patch(
+            "backend.app.services.activity_workout_matcher.find_and_link_workout",
+            new_callable=AsyncMock,
+        ),
+        patch("backend.app.services.plan_adherence.catch_up_adherence", new_callable=AsyncMock),
+    ):
+        yield
+
+
+async def _strava_webhook(factory, start: datetime) -> None:
+    """A Strava bridge `create` event, on this caller's own session."""
+    from backend.app.services.strava_sync import _process_event_for_user
+
+    async with factory() as session:
+        athlete = (
+            await session.execute(select(Athlete).where(Athlete.id == "athlete-1"))
+        ).scalar_one()
+        conn = MagicMock(spec=ProviderConnection)
+        conn.user_id = _USER_ID
+        with (
+            _quiet_downstream("strava_sync"),
+            patch("httpx.AsyncClient", return_value=_http_returning(_strava_raw(start))),
+        ):
+            await _process_event_for_user(
+                "create", "99", {"object_id": 99, "object_type": "activity"},
+                athlete, conn, "access-token", _USER_ID, session,
+            )
+
+
+async def _wahoo_webhook(factory, start: datetime) -> None:
+    """A Wahoo workout_summary webhook, on this caller's own session."""
+    from backend.app.services.wahoo_sync import _process_wahoo_for_user
+
+    async with factory() as session:
+        athlete = (
+            await session.execute(select(Athlete).where(Athlete.id == "athlete-1"))
+        ).scalar_one()
+        conn = MagicMock(spec=ProviderConnection)
+        conn.user_id = _USER_ID
+        with (
+            _quiet_downstream("wahoo_sync"),
+            patch(
+                "backend.app.services.wahoo_sync._download_fit_cdn_first",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            await _process_wahoo_for_user(
+                _norm("w-1", "wahoo", start), athlete, conn, "access-token",
+                _USER_ID, session,
+            )
+
+
+class TestWebhookRacingASync:
+    """The two webhook paths hold the same guards as the paths they compete with.
+
+    These are the paths the bridge pollers drive, so racing a provider sync is
+    routine rather than a coincidence: a Strava backfill and a Wahoo webhook for
+    the same ride arrive milliseconds apart by design. Until issue #50's Stage 1
+    they held the ``asyncio.Lock`` alone — a statement about one event loop
+    offered in place of one about the database.
+    """
+
+    _LEASE = "activity-create:athlete-1"
+
+    async def test_a_strava_webhook_racing_a_sync_creates_one_activity(self, user_db):
+        start = datetime(2026, 3, 1, 7, 0, tzinfo=timezone.utc)
+
+        with _both_callers_inside_at_once(2):
+            await asyncio.gather(
+                _strava_webhook(user_db, start),
+                _sync_from(user_db, "wahoo", _norm("w-1", "wahoo", start)),
+            )
+
+        activities, sources = await _activity_and_source_counts(user_db)
+        assert activities == 1, "both callers described the same ride"
+        assert sources == 2, "and both are recorded against it"
+
+    async def test_a_wahoo_webhook_racing_a_sync_creates_one_activity(self, user_db):
+        start = datetime(2026, 3, 1, 7, 0, tzinfo=timezone.utc)
+
+        with _both_callers_inside_at_once(2):
+            await asyncio.gather(
+                _wahoo_webhook(user_db, start),
+                _sync_from(user_db, "strava", _norm("s-1", "strava", start)),
+            )
+
+        activities, sources = await _activity_and_source_counts(user_db)
+        assert activities == 1
+        assert sources == 2
+
+    @pytest.mark.parametrize("webhook", ["strava", "wahoo"])
+    async def test_the_webhook_waits_for_the_activity_create_lease(
+        self, user_db, webhook
+    ):
+        """The lease alone — no in-process lock in the picture.
+
+        Another *process* holding it is exactly what the ``asyncio.Lock`` cannot
+        represent, so holding the lease from a separate session is the only way
+        to ask whether the database-level guard is really there.
+        """
+        start = datetime(2026, 3, 1, 7, 0, tzinfo=timezone.utc)
+        driver = _strava_webhook if webhook == "strava" else _wahoo_webhook
+
+        async with user_db() as holder:
+            token = await leases.acquire(
+                holder, SyncLease, self._LEASE, ttl=_TTL, wait=1.0
+            )
+            assert token is not None, "could not set the test up"
+
+            task = asyncio.create_task(driver(user_db, start))
+            # Comfortably longer than the unguarded path takes: two inserts and
+            # a commit, with every network call patched out.
+            await asyncio.sleep(0.25)
+            assert not task.done(), (
+                f"the {webhook} webhook created an activity while another writer "
+                "held the activity-create lease"
+            )
+
+            await leases.release(holder, SyncLease, self._LEASE, token)
+            await asyncio.wait_for(task, timeout=10)
+
+        activities, _ = await _activity_and_source_counts(user_db)
+        assert activities == 1
+
+    @pytest.mark.parametrize("webhook", ["strava", "wahoo"])
+    async def test_the_lease_is_free_again_afterwards(self, user_db, webhook):
+        """So the next writer does not wait out the TTL."""
+        start = datetime(2026, 3, 1, 7, 0, tzinfo=timezone.utc)
+        driver = _strava_webhook if webhook == "strava" else _wahoo_webhook
+
+        await driver(user_db, start)
+
+        async with user_db() as session:
+            token = await leases.acquire(
+                session, SyncLease, self._LEASE, ttl=_TTL, wait=0.5
+            )
+        assert token is not None

@@ -25,6 +25,19 @@ def _make_event(event_type="create", object_type="activity", owner_id="12345", o
     }
 
 
+@asynccontextmanager
+async def _no_guard(*args, **kwargs):
+    """Stand in for ``activity_create_guard`` on the mock-session tests.
+
+    The guard issues real lease statements, which a session built from
+    ``AsyncMock(side_effect=[...])`` would answer out of the queue these tests
+    set up for the dedup queries. What the guard itself does is pinned against
+    a *file-based* database in ``tests/unit/test_sync_concurrency.py``; these
+    tests are about the event handling inside it.
+    """
+    yield None
+
+
 def _make_conn(user_id="user-1"):
     conn = MagicMock()
     conn.user_id = user_id
@@ -129,6 +142,7 @@ class TestProcessEventCreate:
 
         with (
             patch("backend.app.services.metrics_engine.recalculate_from", new_callable=AsyncMock),
+            patch("backend.app.services.strava_sync.activity_create_guard", _no_guard),
             patch("backend.app.services.strava_sync._populate_activity", new_callable=AsyncMock),
             patch("backend.app.services.strava_sync._repopulate_activity", new_callable=AsyncMock),
             patch("backend.app.services.activity_workout_matcher.find_and_link_workout", new_callable=AsyncMock),
@@ -172,6 +186,7 @@ class TestProcessEventCreate:
 
         with (
             patch("backend.app.services.metrics_engine.recalculate_from", new_callable=AsyncMock),
+            patch("backend.app.services.strava_sync.activity_create_guard", _no_guard),
             patch("backend.app.services.strava_sync._populate_activity", new_callable=AsyncMock),
             patch("backend.app.services.strava_sync._repopulate_activity", new_callable=AsyncMock),
             patch("backend.app.services.activity_workout_matcher.find_and_link_workout", new_callable=AsyncMock) as link,
