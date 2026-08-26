@@ -267,22 +267,34 @@ class TestASupersededRunDiscardsItsWrites:
     Without the token the slow run commits its finished answer over the new one.
     """
 
-    async def test_a_run_whose_row_was_re_triggered_writes_nothing(
+    async def test_a_superseded_run_does_not_touch_the_live_run_that_replaced_it(
         self, athlete_db, fake_model
     ):
+        """Run B is not a token — it is a run, and its state has to survive.
+
+        The earlier version of this test only *stamped* B's token and never ran
+        B, so blanking every column looked correct: there was nothing of B's to
+        destroy. That is precisely the state the bug needed to hide in, and it
+        is why CI passed over it.
+
+        Here B writes a real answer. A then finishes and finds itself superseded.
+        Whatever A does next, B's work must still be on the row.
+        """
         from backend.app.services.llm_activity_analyzer import analyze_activity_bg
         from backend.app.services.stranded_runs import begin_activity_analysis_run
 
-        # This run claims the row.
+        # Run A claims the row.
         async with get_user_session_factory(USER_ID)() as session:
             activity = (
                 await session.execute(select(Activity).where(Activity.id == ACTIVITY_ID))
             ).scalar_one()
-            mine = begin_activity_analysis_run(activity)
+            run_a = begin_activity_analysis_run(activity)
             await session.commit()
 
-        async def _someone_else_re_triggers():
-            """The athlete asks again while this run is still streaming."""
+        b_answer = "MOOD:direct\n\nRun B got there first."
+
+        async def _run_b_takes_over_and_finishes():
+            """The athlete re-triggers, and that run completes before A does."""
             async with get_user_session_factory(USER_ID)() as other:
                 activity = (
                     await other.execute(
@@ -290,15 +302,65 @@ class TestASupersededRunDiscardsItsWrites:
                     )
                 ).scalar_one()
                 begin_activity_analysis_run(activity)
+                # B streams and settles, the way a real second run would.
+                activity.analysis = b_answer
+                activity.analysis_status = "done"
+                activity.analysis_updated_at = datetime.now(timezone.utc)
                 await other.commit()
             return datetime.now(timezone.utc)
 
-        fake_model(ANSWER, watch=_someone_else_re_triggers)
-        await analyze_activity_bg(ACTIVITY_ID, ATHLETE_ID, USER_ID, run_id=mine)
+        fake_model(ANSWER, watch=_run_b_takes_over_and_finishes)
+        await analyze_activity_bg(ACTIVITY_ID, ATHLETE_ID, USER_ID, run_id=run_a)
+
+        row = await _poll(Activity, ACTIVITY_ID)
+        assert row.analysis == b_answer, (
+            "the superseded run destroyed the answer of the run that replaced it"
+        )
+        assert row.analysis_status == "done", (
+            "and nulled the status, which disarms the re-trigger guard and lets "
+            "repeated clicks stack concurrent agentic runs on one row"
+        )
+
+    async def test_a_run_superseded_by_a_settle_does_take_its_writes_back_out(
+        self, athlete_db, fake_model
+    ):
+        """The other reason the check fails, where clearing *is* correct.
+
+        A settle clears the token, so nobody owns the row. A's answer is
+        unwanted and leaving it would show the athlete prose from a run that was
+        already declared dead — so the row goes back to un-analysed, which is
+        also what makes it re-triggerable.
+        """
+        from backend.app.services.llm_activity_analyzer import analyze_activity_bg
+        from backend.app.services.stranded_runs import (
+            begin_activity_analysis_run,
+            settle_activity_analysis,
+        )
+
+        async with get_user_session_factory(USER_ID)() as session:
+            activity = (
+                await session.execute(select(Activity).where(Activity.id == ACTIVITY_ID))
+            ).scalar_one()
+            run_a = begin_activity_analysis_run(activity)
+            await session.commit()
+
+        async def _the_sweep_settles_it():
+            async with get_user_session_factory(USER_ID)() as other:
+                activity = (
+                    await other.execute(
+                        select(Activity).where(Activity.id == ACTIVITY_ID)
+                    )
+                ).scalar_one()
+                settle_activity_analysis(activity)
+                await other.commit()
+            return datetime.now(timezone.utc)
+
+        fake_model(ANSWER, watch=_the_sweep_settles_it)
+        await analyze_activity_bg(ACTIVITY_ID, ATHLETE_ID, USER_ID, run_id=run_a)
 
         row = await _poll(Activity, ACTIVITY_ID)
         assert row.analysis is None, (
-            "a superseded run committed its answer over the run that replaced it"
+            "a run declared dead left its answer on the row"
         )
         assert row.analysis_status is None, "and left a status behind it"
 

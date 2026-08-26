@@ -398,15 +398,31 @@ async def generate_course_plan_bg(
             # writes back out — the callbacks cannot do it themselves, being
             # synchronous and unable to read another session's commit.
             if not await _run_is_current(session, course_id, run_id):
-                await session.execute(
+                # Only when **nobody** owns the row. This surface had run tokens
+                # first and the other three copied this block from it, including
+                # the defect: keyed on the id alone, a slow run that lost its
+                # claim to a *re-trigger* blanked the columns the live run was
+                # writing. When a newer run holds the token the correct action
+                # is none at all — it overwrites every one of these itself.
+                cleared = await session.execute(
                     update(Course)
-                    .where(Course.id == course_id)
+                    .where(
+                        Course.id == course_id,
+                        Course.plan_run_id.is_(None),
+                    )
                     .values(
                         plan=None, plan_mood=None, plan_status=None,
                         plan_updated_at=None,
                     )
                 )
                 await session.commit()
-                log.info(
-                    "Discarded a superseded course plan for course %s", course_id
-                )
+                if cleared.rowcount:
+                    log.info(
+                        "Discarded a superseded course plan for course %s", course_id
+                    )
+                else:
+                    log.info(
+                        "Course plan for course %s was superseded by a live run — "
+                        "leaving that run's columns alone",
+                        course_id,
+                    )

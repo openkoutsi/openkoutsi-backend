@@ -227,11 +227,15 @@ async def run_expiry_sweep(
 async def pat_expiry_sweep_once() -> None:
     """One sweep. The loop and the leader claim live in ``backend.main``.
 
-    Note the ordering change this brought with it: the sweep used to run
-    immediately on boot and then sleep, so a restart loop could re-send. It now
-    runs on the same schedule as everything else under the claim, and
-    `last_expiry_notice` remains the guard against a duplicate notice either
-    way.
+    The ordering is unchanged: ``run_until_lost`` runs the work and *then*
+    waits, exactly as the old ``while True`` loop did, so this still runs once
+    immediately whenever the claim is taken. An earlier version of this
+    docstring claimed otherwise; it was describing a fix that is not here.
+
+    What is new is that losing and regaining the claim is another way to reach
+    that immediate run — and ``_renew_until_lost`` treats any renewal error as
+    loss, so a registry hiccup is enough. `last_expiry_notice` is what bounds
+    the consequence, and it is doing more work than the schedule is.
     """
     from backend.app.db.registry import get_registry_session
 

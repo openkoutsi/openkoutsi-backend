@@ -33,6 +33,7 @@ on the next tick, and the expiry sweep commits its progress per token.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import random
 from contextlib import asynccontextmanager
@@ -174,7 +175,11 @@ async def run_until_lost(
             except asyncio.CancelledError:
                 pass
             log.info("Stopped %s mid-cycle after losing the lease", label)
+        # Awaited, not merely cancelled: an unretrieved cancelled task surfaces
+        # as "Task was destroyed but it is pending" at loop teardown.
         loss.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await loss
         if lost.is_set():
             return
 

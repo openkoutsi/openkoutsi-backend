@@ -27,15 +27,26 @@ have shipped.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Optional
 
 import httpx
 
 log = logging.getLogger(__name__)
 
-#: Set once per bridge URL when the new endpoint answers 404/405, so the probe
-#: costs one request rather than one per poll.
-_LEGACY_BRIDGES: set[str] = set()
+#: When to next probe a bridge that answered 404/405, keyed by base URL.
+#:
+#: A permanent latch would be wrong in exactly the deploy this fallback exists
+#: for. Compose recreates the three images in whatever order it picks, so the
+#: backend can be replaced first, meet the *old* bridge, latch — and then never
+#: notice the bridge being replaced seconds later. It would run the pre-#50
+#: flow, with every failure mode this change fixes silently live again, until
+#: someone restarted it, which on a healthy deployment can be weeks.
+#:
+#: One extra request per bridge every five minutes against a 60-second poll,
+#: and the window closes on its own.
+_LEGACY_UNTIL: dict[str, float] = {}
+_RE_PROBE_AFTER_S = 300.0
 
 
 class BridgeClient:
@@ -53,7 +64,7 @@ class BridgeClient:
         ``None`` and the caller's ack/nack become no-ops, which reproduces the
         old behaviour exactly rather than half of it.
         """
-        if self._base not in _LEGACY_BRIDGES:
+        if _LEGACY_UNTIL.get(self._base, 0.0) <= time.monotonic():
             try:
                 r = await self._http.post(
                     f"{self._base}/events/claim", headers=self._headers
@@ -66,7 +77,7 @@ class BridgeClient:
                     "pre-#50 fetch-then-claim flow until it is redeployed",
                     self._base,
                 )
-                _LEGACY_BRIDGES.add(self._base)
+                _LEGACY_UNTIL[self._base] = time.monotonic() + _RE_PROBE_AFTER_S
             except httpx.HTTPError:
                 log.warning("Could not claim events from bridge at %s", self._base)
                 return []
@@ -108,8 +119,27 @@ class BridgeClient:
 
     async def _post(self, path: str, event_id: str, verb: str) -> None:
         try:
-            await self._http.post(f"{self._base}{path}", headers=self._headers)
+            response = await self._http.post(
+                f"{self._base}{path}", headers=self._headers
+            )
+            # `httpx` raises only for transport failures, so without this a 401
+            # (a secret rotated on one side) or a 500 (bridge disk full, the
+            # column upgrade not applied) reads as success. This is the half of
+            # the protocol that can wedge the queue, and it was the half with no
+            # telemetry: a bridge that has stopped acking presents only as a
+            # queue that mysteriously reprocesses everything every 15 minutes.
+            response.raise_for_status()
         except httpx.HTTPError:
-            # The visibility deadline covers a failed ack: the event comes back
-            # and the consumer's own idempotency check absorbs the replay.
-            log.warning("Could not %s bridge event %s", verb, event_id)
+            # The visibility deadline still covers this: the event comes back
+            # and the consumer's own idempotency check absorbs the replay. What
+            # was missing was any record of *why*.
+            log.warning(
+                "Could not %s bridge event %s", verb, event_id, exc_info=True
+            )
+            return
+
+        if response.json().get("status") == "stale":
+            # A normal outcome — this claim lapsed and somebody else owns the
+            # event. A spike in these is the signal that the visibility window
+            # is too short for the drain.
+            log.info("Bridge reported a stale %s for event %s", verb, event_id)

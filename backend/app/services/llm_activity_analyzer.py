@@ -586,9 +586,21 @@ async def _analyze_activity(
         if not await run_is_current(
             session, Activity, activity_id, Activity.analysis_run_id, run_id
         ):
-            await session.execute(
+            # Only when **nobody** owns the row. There are two reasons the
+            # check above can fail and they want opposite actions: the row
+            # was settled (token cleared) and this run's writes are
+            # unwanted, or the row was *re-triggered* and a live run holds
+            # the token. In the second case that run is writing these very
+            # columns, and clearing them would destroy its work — it
+            # overwrites every one of them itself, so the correct action is
+            # none at all. Making the UPDATE conditional also closes the
+            # window between the check and the write.
+            cleared = await session.execute(
                 update(Activity)
-                .where(Activity.id == activity_id)
+                .where(
+                    Activity.id == activity_id,
+                    Activity.analysis_run_id.is_(None),
+                )
                 .values(
                     analysis=None,
                     analysis_status=None,
@@ -597,6 +609,13 @@ async def _analyze_activity(
                 )
             )
             await session.commit()
-            log.info(
-                "Discarded a superseded analysis for activity %s", activity_id
-            )
+            if cleared.rowcount:
+                log.info(
+                    "Discarded a superseded analysis for activity %s", activity_id
+                )
+            else:
+                log.info(
+                    "Analysis for activity %s was superseded by a live run — "
+                    "leaving that run's columns alone",
+                    activity_id,
+                )

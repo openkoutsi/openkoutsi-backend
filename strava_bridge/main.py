@@ -35,6 +35,12 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 # ── Settings ──────────────────────────────────────────────────────────────
 
+#: Nack backoff. Doubling from two seconds, so `max_delivery_attempts` retries
+#: span roughly half an hour rather than the four minutes that immediate
+#: redelivery at a 60-second poll gave them.
+_NACK_BASE_BACKOFF_S = 2.0
+_NACK_MAX_BACKOFF_S = 900.0
+
 _INSECURE_DEFAULT = "changeme"
 
 
@@ -413,6 +419,21 @@ async def get_pending_events(request: Request):
         ]
 
 
+def _required_claim_token(request: Request) -> str:
+    """The claim token, or a 400 — never ``None``.
+
+    `Column == None` renders as ``IS NULL``, not as a never-matching
+    comparison, so an ack with the parameter omitted would match exactly the
+    events with **no live claim** and retire them — the inverse of the property
+    ack exists to provide, over a broader set of rows than a correct token
+    matches. Rejecting is the only safe reading of a missing token.
+    """
+    token = request.query_params.get("claim_token")
+    if not token:
+        raise HTTPException(status_code=400, detail="claim_token is required")
+    return token
+
+
 @app.post("/events/claim")
 async def claim_events(request: Request):
     """Claim a batch of deliverable events, with a deadline. Auth: Bearer.
@@ -470,6 +491,28 @@ async def claim_events(request: Request):
             )
             .execution_options(synchronize_session=False)
         )
+        # Retire anything that has just spent its last attempt. Dropping out of
+        # the `WHERE` above would retire it too, but silently and without ever
+        # setting `claimed_at` — so it would keep a `max_queue_events` slot for
+        # seven days and be reported to operators as "unclaimed", pointing at a
+        # poller that is in fact working fine. This is the one remaining path
+        # that loses an event, and losing one invisibly is the thing the whole
+        # claim-then-ack design is against.
+        retired = await session.execute(
+            update(WebhookEvent)
+            .where(
+                WebhookEvent.claimed_at.is_(None),
+                WebhookEvent.attempts >= settings.max_delivery_attempts,
+            )
+            .values(claimed_at=now, claim_token=None, claim_expires_at=None)
+            .execution_options(synchronize_session=False)
+        )
+        if retired.rowcount:
+            log.error(
+                "Retired %d event(s) after %d failed delivery attempts",
+                retired.rowcount,
+                settings.max_delivery_attempts,
+            )
         await session.commit()
 
         # Only the rows that actually carry our token — another consumer may
@@ -503,7 +546,7 @@ async def ack_event(event_id: str, request: Request):
     retire an event another one now owns.
     """
     _require_bearer(request)
-    token = request.query_params.get("claim_token")
+    token = _required_claim_token(request)
     async with AsyncSessionLocal() as session:
         result = await session.execute(
             update(WebhookEvent)
@@ -525,27 +568,58 @@ async def ack_event(event_id: str, request: Request):
 
 @app.post("/events/{event_id}/nack", status_code=200)
 async def nack_event(event_id: str, request: Request):
-    """Known failure: make the event deliverable again now, not at the deadline.
+    """Known failure: return the event to the queue, after a backoff.
 
     Turns a transient failure — a token refresh that lost a race, a provider
-    5xx — into a retry seconds later rather than a quarter of an hour. The
-    attempt has already been counted, so a genuinely poisonous event still
-    retires after `max_delivery_attempts`.
+    5xx — into a bounded series of retries rather than a quarter of an hour of
+    silence each time.
+
+    **The backoff is what makes the attempt budget mean anything.** Releasing
+    immediately put the event back on the very next poll, so five attempts at a
+    60-second interval spanned four minutes — and both failures named above
+    routinely outlast that, which landed the common transient failure in the
+    same place as the old claim-regardless behaviour, just four minutes later.
+    Doubling from two seconds spreads the same five attempts across roughly half
+    an hour.
+
+    No new column: `claim_expires_at` in the future with `claim_token` cleared
+    already reads as "not deliverable yet" to the claim query's `free`
+    predicate, which is the same shape a live claim uses.
     """
     _require_bearer(request)
-    token = request.query_params.get("claim_token")
+    token = _required_claim_token(request)
     async with AsyncSessionLocal() as session:
+        # The row is needed for `attempts`; a blind UPDATE cannot compute the
+        # delay from it.
+        event = (
+            await session.execute(
+                select(WebhookEvent).where(
+                    WebhookEvent.id == event_id,
+                    WebhookEvent.claim_token == token,
+                )
+            )
+        ).scalar_one_or_none()
+        if event is None:
+            log.warning("Nack for event %s did not match a live claim", event_id)
+            return {"status": "stale"}
+
+        delay = min(_NACK_BASE_BACKOFF_S * (2 ** max(event.attempts - 1, 0)),
+                    _NACK_MAX_BACKOFF_S)
         await session.execute(
             update(WebhookEvent)
             .where(
                 WebhookEvent.id == event_id,
                 WebhookEvent.claim_token == token,
             )
-            .values(claim_token=None, claim_expires_at=None)
+            .values(
+                claim_token=None,
+                claim_expires_at=datetime.now(timezone.utc)
+                + timedelta(seconds=delay),
+            )
             .execution_options(synchronize_session=False)
         )
         await session.commit()
-    return {"status": "released"}
+    return {"status": "released", "retry_in_s": delay}
 
 
 @app.post("/events/{event_id}/claim", status_code=200)

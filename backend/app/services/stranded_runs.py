@@ -154,6 +154,13 @@ def begin_goal_guidance_run(goal, now: Optional[datetime] = None) -> str:
 def begin_activity_analysis_run(activity, now: Optional[datetime] = None) -> str:
     run_id = uuid.uuid4().hex
     activity.analysis_status = "pending"
+    # Cleared here rather than by the caller, like both siblings above. It used
+    # to live in `trigger_analysis`, which meant the invariant held only for the
+    # callers that remembered it — and a caller that did not (an auto-analyse on
+    # an already-analysed activity, after a re-import or a FIT reprocess) left
+    # `pending` sitting on top of the previous run's prose, which the UI renders
+    # as the live one for as long as the run takes.
+    activity.analysis = None
     activity.analysis_progress = None
     activity.analysis_run_id = run_id
     activity.analysis_updated_at = now or datetime.now(timezone.utc)

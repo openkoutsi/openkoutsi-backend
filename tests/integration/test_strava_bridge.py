@@ -180,6 +180,17 @@ async def _bridge_http():
     )
 
 
+async def _expire_every_claim(sessions) -> None:
+    """What waiting out the visibility window would do, without the waiting."""
+    async with sessions() as s:
+        await s.execute(
+            sa_update(WebhookEvent).values(
+                claim_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1)
+            )
+        )
+        await s.commit()
+
+
 async def _claim_batch() -> list[dict]:
     async with await _bridge_http() as http:
         r = await http.post(
@@ -636,19 +647,34 @@ class TestTheClaimHasADeadline:
 
         assert await _claim_batch() == []
 
-    async def test_a_nacked_event_is_deliverable_immediately(
+    async def test_a_nacked_event_comes_back_after_a_backoff(
         self, bridge_client, patched_bridge
     ):
-        """A transient failure should retry in seconds, not a quarter of an hour."""
+        """A transient failure retries, but not instantly.
+
+        Releasing immediately put the event back on the very next 60-second
+        poll, so five attempts spanned four minutes — shorter than the provider
+        incidents and expired-token cases the nack exists for, which put the
+        common transient failure back where the old claim-regardless behaviour
+        left it. The budget only means something if the retries are spread.
+        """
         _, sessions = patched_bridge
         await _post_signed(bridge_client, _ACTIVITY_PAYLOAD)
 
         claimed = await _claim_batch()
         await _nack(claimed[0]["id"], claimed[0]["claim_token"])
 
-        again = await _claim_batch()
-        assert len(again) == 1
+        assert await _claim_batch() == [], "a nacked event skipped its backoff"
 
+        # The backoff is a future `claim_expires_at` with no token, which the
+        # claim query already reads as "not deliverable yet".
+        async with sessions() as s:
+            event = (await s.execute(select(WebhookEvent))).scalars().one()
+        assert event.claim_token is None
+        assert event.claim_expires_at is not None
+
+        await _expire_every_claim(sessions)
+        assert len(await _claim_batch()) == 1, "it never became deliverable"
     async def test_an_event_retires_after_enough_failed_attempts(
         self, bridge_client, patched_bridge
     ):
@@ -714,6 +740,14 @@ class TestACrashMidProcessIsRetried:
             event = (await s.execute(select(WebhookEvent))).scalars().one()
         assert event.claimed_at is None, "a crashed import was retired as done"
 
+        # The nack applied a backoff, so the next poll is too early — which is
+        # the point: an immediate retry against a provider that is still down
+        # would spend the whole attempt budget in four minutes.
+        too_soon = AsyncMock()
+        await _poll(too_soon)
+        assert too_soon.call_count == 0, "the backoff was skipped"
+
+        await _expire_every_claim(sessions)
         recovering = AsyncMock()
         await _poll(recovering)
         assert recovering.call_count == 1, "the event was never redelivered"

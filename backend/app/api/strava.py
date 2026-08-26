@@ -10,6 +10,7 @@ processes them.
 """
 
 import asyncio
+import contextlib
 import logging
 
 import httpx
@@ -57,19 +58,38 @@ async def _poll_bridge_once() -> None:
         client = BridgeClient(http, settings.bridge_url, settings.bridge_secret)
         events = await client.claim_batch()
 
-        for event in events:
-            event_id = event.get("id", "")
-            claim_token = event.get("claim_token")
+        # The bridge spends an attempt on the whole batch at claim time, but
+        # this loop consumes them one at a time — and each event can be a FIT
+        # download, a parse and an LLM analysis, so a batch is minutes rather
+        # than milliseconds. Two routine events stop it mid-way: a redeploy
+        # cancels the supervisor, and losing the lease cancels the cycle by
+        # design. Without the handler below, every event not yet reached keeps
+        # its spent attempt and sits unavailable for the full visibility
+        # window — so a few deploys during a backlog drain retire its tail.
+        unprocessed = {e.get("id", ""): e.get("claim_token") for e in events}
+        try:
+            for event in events:
+                event_id = event.get("id", "")
+                claim_token = event.get("claim_token")
 
-            # `process_webhook_event` opens its own sessions internally.
-            try:
-                await process_webhook_event(event)
-            except Exception:
-                log.exception("Failed to process bridge event %s", event_id)
-                # Deliverable again immediately, rather than at the deadline.
-                # A genuinely poisonous event still retires once it has used up
-                # `max_delivery_attempts` on the bridge.
-                await client.nack(event_id, claim_token)
-                continue
+                # `process_webhook_event` opens its own sessions internally.
+                try:
+                    await process_webhook_event(event)
+                except Exception:
+                    log.exception("Failed to process bridge event %s", event_id)
+                    # Back to the queue after a backoff, rather than held for
+                    # the deadline. A genuinely poisonous event still retires
+                    # once it has used up `max_delivery_attempts`.
+                    await client.nack(event_id, claim_token)
+                    unprocessed.pop(event_id, None)
+                    continue
 
-            await client.ack(event_id, claim_token)
+                await client.ack(event_id, claim_token)
+                unprocessed.pop(event_id, None)
+        except asyncio.CancelledError:
+            # Hand back what was never attempted, so cancellation costs those
+            # events nothing.
+            for event_id, claim_token in unprocessed.items():
+                with contextlib.suppress(Exception):
+                    await client.nack(event_id, claim_token)
+            raise

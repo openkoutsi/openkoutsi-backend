@@ -629,9 +629,21 @@ async def analyze_training_status_bg(
             if not await run_is_current(
                 session, Athlete, athlete_id, Athlete.training_status_run_id, run_id
             ):
-                await session.execute(
+                # Only when **nobody** owns the row. There are two reasons the
+                # check above can fail and they want opposite actions: the row
+                # was settled (token cleared) and this run's writes are
+                # unwanted, or the row was *re-triggered* and a live run holds
+                # the token. In the second case that run is writing these very
+                # columns, and clearing them would destroy its work — it
+                # overwrites every one of them itself, so the correct action is
+                # none at all. Making the UPDATE conditional also closes the
+                # window between the check and the write.
+                cleared = await session.execute(
                     update(Athlete)
-                    .where(Athlete.id == athlete_id)
+                    .where(
+                        Athlete.id == athlete_id,
+                        Athlete.training_status_run_id.is_(None),
+                    )
                     .values(
                         training_status=None,
                         training_status_status=None,
@@ -641,7 +653,14 @@ async def analyze_training_status_bg(
                     )
                 )
                 await session.commit()
-                log.info(
-                    "Discarded a superseded training status for athlete %s",
-                    athlete_id,
-                )
+                if cleared.rowcount:
+                    log.info(
+                        "Discarded a superseded training status for athlete %s",
+                        athlete_id,
+                    )
+                else:
+                    log.info(
+                        "Training status for athlete %s was superseded by a live "
+                        "run — leaving that run's columns alone",
+                        athlete_id,
+                    )

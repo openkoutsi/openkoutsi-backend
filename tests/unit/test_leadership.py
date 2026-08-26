@@ -12,8 +12,10 @@ anything. `test_sync_concurrency.py` takes the same approach for the same
 reason.
 """
 import asyncio
+import contextlib
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import event, select, update
@@ -211,3 +213,83 @@ class TestRunUntilLost:
         await asyncio.wait_for(task, timeout=5)
 
         assert not finished, "the cycle ran to completion after the claim was lost"
+
+
+class TestTheSupervisorSurvivesARegistryError:
+    """One registry error must not end all background work for the process.
+
+    Before the guard, the path from `hold_background_work()` through
+    `registry_session()` to `leases.acquire` was unprotected — the per-poller
+    `try/except` had moved into `_guarded`, which wraps `work()` only. A pool
+    `TimeoutError` from the 5-connection registry therefore killed the
+    supervisor task outright: both bridge pollers and the expiry sweep stopped
+    until the container restarted, with nothing in the log, because nobody
+    awaits that task until shutdown.
+
+    It is a failure this design makes *more* likely rather than less: the
+    standby and renewal writes are new registry load that did not exist before.
+    """
+
+    async def test_a_failing_acquire_is_retried_rather_than_fatal(
+        self, registry, monkeypatch
+    ):
+        from backend.main import _background_work
+
+        monkeypatch.setattr(leadership, "STANDBY_POLL_S", 0.01)
+
+        calls = {"n": 0}
+        real_acquire = leadership.leases.acquire
+
+        async def _fail_twice_then_work(*args, **kwargs):
+            calls["n"] += 1
+            if calls["n"] <= 2:
+                raise TimeoutError("QueuePool limit reached")
+            return await real_acquire(*args, **kwargs)
+
+        monkeypatch.setattr(leadership.leases, "acquire", _fail_twice_then_work)
+        # No bridges configured, so the only job is the 24 h sweep — it runs
+        # once per claim and then waits, which keeps this test quick.
+        monkeypatch.setattr(
+            "backend.app.services.pat_expiry.pat_expiry_sweep_once",
+            AsyncMock(),
+        )
+
+        task = asyncio.create_task(_background_work())
+        try:
+            # Long enough for two failures, two backoffs, and a success.
+            await asyncio.sleep(0.3)
+            assert not task.done(), (
+                "a registry error killed the supervisor: "
+                f"{task.exception() if task.done() else ''}"
+            )
+            assert calls["n"] > 2, "the supervisor gave up instead of retrying"
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+    async def test_shutdown_does_not_re_raise_a_supervisor_that_already_died(
+        self, registry, monkeypatch
+    ):
+        """`cancel()` on a failed task is a no-op, so the await re-raises.
+
+        Without the handler that surfaced hours-old registry errors out of
+        `lifespan`'s shutdown path as ASGI lifespan errors.
+        """
+        from backend.main import lifespan
+
+        async def _dies_immediately():
+            raise RuntimeError("registry is gone")
+
+        with (
+            patch("backend.main.init_registry_db", new=AsyncMock()),
+            patch("backend.main.init_usage_db", new=AsyncMock()),
+            patch("backend.main._background_work", new=_dies_immediately),
+            patch(
+                "backend.app.services.stranded_runs.settle_stranded_runs",
+                new=AsyncMock(return_value=0),
+            ),
+        ):
+            # Must not raise on the way out.
+            async with lifespan(object()):
+                await asyncio.sleep(0.01)

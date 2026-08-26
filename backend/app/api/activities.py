@@ -1287,7 +1287,6 @@ async def trigger_analysis(
     # Claiming the row here is what supersedes a previous run: the token it was
     # holding is gone, so if its process is alive and merely slow it discards
     # its own writes rather than committing a stale answer over this one.
-    activity.analysis = None
     run_id = begin_activity_analysis_run(activity)
     await session.commit()
 

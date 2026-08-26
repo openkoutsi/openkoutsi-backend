@@ -70,6 +70,12 @@ async def lifespan(app: FastAPI):
         await supervisor
     except asyncio.CancelledError:
         pass
+    except Exception:
+        # `cancel()` on an already-failed task is a no-op, so this is the
+        # original failure resurfacing hours later on the shutdown path. Report
+        # it here rather than letting it out as an ASGI lifespan error — the
+        # loop below is what should have caught it, and this is the backstop.
+        log.exception("Background work supervisor had already failed")
 
 
 async def _background_work() -> None:
@@ -103,23 +109,43 @@ async def _background_work() -> None:
     if wahoo_bridge_poller_configured():
         jobs.insert(0, ("Wahoo bridge poll", 60.0, wahoo_bridge_poller_once))
 
+    from backend.app.services.leadership import STANDBY_POLL_S
+
     while True:
-        async with hold_background_work() as lost:
-            running = [
-                asyncio.create_task(
-                    run_until_lost(lost, work, interval, label=label)
-                )
-                for label, interval, work in jobs
-            ]
-            try:
-                await asyncio.gather(*running)
-            finally:
-                for task in running:
-                    task.cancel()
-                await asyncio.gather(*running, return_exceptions=True)
+        # Everything from taking the claim to driving the jobs is guarded, not
+        # just the work itself. `leadership._guarded` wraps `work()`, but the
+        # path through `registry_session()` to `leases.acquire` is a database
+        # call like any other: a pool `TimeoutError` or an `OperationalError`
+        # there used to kill this task outright, stopping both bridge pollers
+        # and the expiry sweep until the container restarted — silently, since
+        # nothing awaits this task until shutdown.
+        #
+        # That matters more since this change than before it: contention on the
+        # registry is something this design *introduces*, a standby write per
+        # process every ~15 s plus a renewal every 30 s.
+        try:
+            async with hold_background_work() as lost:
+                running = [
+                    asyncio.create_task(
+                        run_until_lost(lost, work, interval, label=label)
+                    )
+                    for label, interval, work in jobs
+                ]
+                try:
+                    await asyncio.gather(*running)
+                finally:
+                    for task in running:
+                        task.cancel()
+                    await asyncio.gather(*running, return_exceptions=True)
+        except asyncio.CancelledError:
+            # Shutdown. Unwinds through the context manager, which releases.
+            raise
+        except Exception:
+            log.exception("Background work supervisor failed — retrying")
+            await asyncio.sleep(STANDBY_POLL_S)
+            continue
         # The claim was lost rather than the process shutting down: go back to
-        # standby and try to take it again. Shutdown cancels this task, which
-        # unwinds through the context manager and releases.
+        # standby and try to take it again.
         log.info("Background work stood down — waiting to reclaim")
 
 
