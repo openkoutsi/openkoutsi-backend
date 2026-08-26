@@ -96,6 +96,22 @@ the per-user migration loop (`backend/scripts/migrate_user_dbs.py`) against the
 mounted data volume before exec'ing uvicorn. No manual migration step is needed
 when rolling out a new image.
 
+**It is fail-closed, and that is the point of doing it here.** The entrypoint
+runs under `set -e` and the migration script exits non-zero if any user's
+database could not be upgraded, so a container whose schema is behind its code
+never starts serving. The check happens once, at the only moment the answer can
+change — which is why this stays in the entrypoint rather than moving to a
+separate init step that would need a runtime guard to rebuild the same
+guarantee.
+
+**The loop is cheap, and stays cheap as users grow.** It runs Alembic in-process
+rather than spawning an interpreter per user, and skips any database whose
+recorded revision already matches head. A deploy that ships no user migration
+therefore costs one small read per user rather than a process start each — the
+difference between roughly 0.9 s and roughly 3 ms per user. Databases created
+after this shipped are stamped at head by `init_user_db`, so a new account is
+skipped on the next deploy instead of replaying the whole migration history.
+
 ### Build/run an image locally
 
 ```bash

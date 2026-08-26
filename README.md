@@ -115,7 +115,7 @@ services stay focused on what is actually different between them:
 | Handing a webhook event to exactly one consumer, without losing it | `services/bridge_client.py` + each bridge's `/events/claim` — a claim with a deadline, acked on success and nacked on failure, so a consumer that dies mid-import gets the event redelivered rather than having it silently retired |
 | Electing which process runs the background pollers | `services/leadership.py` — one claim (`background-work`) on a registry lease, taken per cycle rather than as a term of office, and cancelling the cycle in flight if it is lost |
 | Serialising a write section across processes, not just across tasks | `db/leases.py` (`hold`), reached through `provider_sync.activity_create_guard` — taken by all five activity writers: provider sync, single upload, bulk import, and both webhook paths |
-| Bringing a user's database into existence | `db/user_session.py` (`init_user_db`) — the only place that creates one. Getting an engine is side-effect-free, so no read path can conjure a directory from an id it was handed |
+| Bringing a user's database into existence | `db/user_session.py` (`init_user_db`) — the only place that creates one, and it stamps the new file at the current Alembic head so the next deploy skips it rather than replaying every migration against it. Getting an engine is side-effect-free, so no read path can conjure a directory from an id it was handed |
 | What an AI coach may ask for, and what it gets back | `mcp/registry.py` (declarations) + `mcp/dispatch.py` (every check) |
 
 ## Stack
