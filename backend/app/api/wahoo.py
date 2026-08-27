@@ -7,12 +7,14 @@ task that polls the bridge service for webhook events and processes them.
 """
 
 import asyncio
+import contextlib
 import logging
 
 import httpx
 from fastapi import APIRouter
 
 from backend.app.core.config import settings
+from backend.app.services.bridge_client import BridgeClient
 from backend.app.services.wahoo_sync import process_wahoo_webhook
 
 log = logging.getLogger(__name__)
@@ -22,53 +24,61 @@ router = APIRouter(prefix="/wahoo", tags=["wahoo"])
 
 # ── Bridge poller (long-running background task) ───────────────────────────
 
-async def wahoo_bridge_poller() -> None:
-    """
-    Polls the Wahoo Bridge every 60 seconds, processes any pending webhook
-    events, and claims them so they aren't reprocessed.
+def wahoo_bridge_poller_configured() -> bool:
+    """Whether this instance has a Wahoo bridge to poll at all.
 
-    Silently no-ops if WAHOO_BRIDGE_URL or WAHOO_BRIDGE_SECRET are not configured.
+    Checked before contending for the background-work lease.
     """
     if not settings.wahoo_bridge_url or not settings.wahoo_bridge_secret:
         log.info("Wahoo bridge not configured — poller inactive")
-        return
+        return False
+    log.info("Wahoo bridge poller armed (polling %s)", settings.wahoo_bridge_url)
+    return True
 
-    log.info("Wahoo bridge poller started (polling %s)", settings.wahoo_bridge_url)
 
-    while True:
-        await asyncio.sleep(60)
-        try:
-            await _poll_bridge_once()
-        except Exception:
-            log.exception("Wahoo bridge poll failed")
+async def wahoo_bridge_poller_once() -> None:
+    """One poll. The loop and the leader claim live in ``backend.main``."""
+    await _poll_bridge_once()
 
 
 async def _poll_bridge_once() -> None:
+    """Claim a batch, process it, ack what succeeded (issue #50).
+
+    The claim carries a deadline, so an event whose consumer dies mid-import
+    becomes deliverable again. The ack is conditional on success where the old
+    `claim` call was not, since `attempts` now bounds redelivery.
+    """
     async with httpx.AsyncClient(timeout=10.0) as http:
+        client = BridgeClient(http, settings.wahoo_bridge_url, settings.wahoo_bridge_secret)
+        events = await client.claim_batch()
+
+        # The bridge spends an attempt on the whole batch at claim time, but
+        # this loop consumes them one at a time, and a batch is minutes rather
+        # than milliseconds. A redeploy or a lost lease stops it mid-way, so
+        # without the handler below every event not yet reached keeps its spent
+        # attempt for the full visibility window.
+        unprocessed = {e.get("id", ""): e.get("claim_token") for e in events}
         try:
-            r = await http.get(
-                f"{settings.wahoo_bridge_url}/events/pending",
-                headers={"Authorization": f"Bearer {settings.wahoo_bridge_secret}"},
-            )
-            r.raise_for_status()
-            events: list[dict] = r.json()
-        except Exception as e:
-            log.warning(f"Could not fetch events from Wahoo bridge: {e}")
-            return
+            for event in events:
+                event_id = event.get("id", "")
+                claim_token = event.get("claim_token")
 
-        for event in events:
-            event_id = event.get("id", "")
+                # `process_wahoo_webhook` opens its own sessions internally.
+                try:
+                    await process_wahoo_webhook(event["payload"])
+                except Exception:
+                    log.exception("Failed to process bridge event %s", event_id)
+                    # Back to the queue after a backoff. A poisonous event still
+                    # retires once it has used up `max_delivery_attempts`.
+                    await client.nack(event_id, claim_token)
+                    unprocessed.pop(event_id, None)
+                    continue
 
-            try:
-                await process_wahoo_webhook(event["payload"])
-            except Exception:
-                log.exception("Failed to process Wahoo bridge event %s", event_id)
-
-            # Claim regardless of processing outcome (avoid infinite retry loops)
-            try:
-                await http.post(
-                    f"{settings.wahoo_bridge_url}/events/{event_id}/claim",
-                    headers={"Authorization": f"Bearer {settings.wahoo_bridge_secret}"},
-                )
-            except Exception:
-                log.warning("Could not claim Wahoo bridge event %s", event_id)
+                await client.ack(event_id, claim_token)
+                unprocessed.pop(event_id, None)
+        except asyncio.CancelledError:
+            # Hand back what was never attempted, so cancellation is free.
+            for event_id, claim_token in unprocessed.items():
+                with contextlib.suppress(Exception):
+                    await client.nack(event_id, claim_token)
+            raise

@@ -780,19 +780,41 @@ class TestBoundedParseCost:
                 str(path)
             ).start_time
 
-    def test_start_time_does_not_parse_the_whole_file(self):
-        import time
+    def test_start_time_does_not_parse_the_whole_file(self, monkeypatch):
+        """``getStartTime`` must stop at the first timestamp, not read on.
 
-        def timed(fn, arg, reps=5):
+        A bulk import calls it for *every* file before it can decide which are
+        duplicates, so a full parse here costs the archive twice over.
+
+        Counted in parse events rather than timed. The wall-clock version of
+        this test — ``cheap < full / 3`` over ``perf_counter`` — measured a
+        millisecond of work on a shared runner and failed reproducibly in CI
+        while passing everywhere else, reporting two bare floats and nothing
+        that would explain them. Events are the thing the name actually
+        claims, and they do not depend on what else the machine is doing.
+        """
+        from openkoutsi import xmlsafe
+
+        real_iterparse = xmlsafe.ET.iterparse
+
+        def counting_iterparse(*args, **kwargs):
+            for event in real_iterparse(*args, **kwargs):
+                counted[0] += 1
+                yield event
+
+        monkeypatch.setattr(xmlsafe.ET, "iterparse", counting_iterparse)
+
+        def events(fn, arg) -> int:
+            counted[0] = 0
             fn(arg)
-            started = time.perf_counter()
-            for _ in range(reps):
-                fn(arg)
-            return time.perf_counter() - started
+            return counted[0]
 
+        counted = [0]
         for module, path in ((gpx, RIDE_GPX), (tcx, RIDE_TCX)):
-            cheap = timed(module.getStartTime, str(path))
-            full = timed(module.summarizeWorkout, str(path))
-            # A bulk import reads the start time of every file before it can
-            # deduplicate, so a full parse here doubles the job.
-            assert cheap < full / 3, f"{module.__name__}.getStartTime is not cheap"
+            cheap = events(module.getStartTime, str(path))
+            full = events(module.summarizeWorkout, str(path))
+            assert cheap < full / 3, (
+                f"{module.__name__}.getStartTime parsed {cheap} events where a "
+                f"full parse of {path.name} takes {full} — it is reading on "
+                f"past the first timestamp"
+            )

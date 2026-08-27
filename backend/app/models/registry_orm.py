@@ -9,6 +9,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from backend.app.core.encryption import EncryptedString
 from backend.app.db.base import RegistryBase
+from backend.app.db.leases import LeaseMixin
 
 
 def _uuid() -> str:
@@ -408,3 +409,18 @@ class ProviderConnection(RegistryBase):
     )
 
     user: Mapped["User"] = relationship("User", back_populates="provider_connections")
+
+
+class RegistryLease(RegistryBase, LeaseMixin):
+    """Cross-process mutual exclusion for work belonging to the *instance*.
+
+    ``SyncLease`` lives in a user's database because the writes it guards land
+    there. This cannot: who runs the background pollers is nobody's user-level
+    decision, and a lease only means something to holders seeing the same row.
+    The registry is the one database every process opens.
+
+    One name in use: ``background-work``, taken by
+    :mod:`backend.app.services.leadership`.
+    """
+
+    __tablename__ = "registry_leases"

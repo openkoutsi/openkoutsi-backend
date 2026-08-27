@@ -20,9 +20,6 @@ log = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from backend.app.api.strava import strava_bridge_poller
-    from backend.app.api.wahoo import wahoo_bridge_poller
-    from backend.app.services.pat_expiry import pat_expiry_sweeper
     from backend.app.services.stranded_runs import settle_stranded_runs
 
     if not settings.encryption_key:
@@ -58,24 +55,87 @@ async def lifespan(app: FastAPI):
     except Exception:
         log.exception("Could not settle stranded LLM runs")
 
-    # Background work here is periodic asyncio tasks rather than a scheduler
-    # dependency; the token-expiry sweep (issue #46) joins the bridge pollers on
-    # that pattern, and inherits their single-process assumption.
-    background = [
-        asyncio.create_task(strava_bridge_poller()),
-        asyncio.create_task(wahoo_bridge_poller()),
-        asyncio.create_task(pat_expiry_sweeper()),
-    ]
+    # Periodic asyncio tasks rather than a scheduler dependency. All three run
+    # under one claim on the registry rather than in whichever process booted
+    # (issue #50); see `services.leadership` for why it is per-cycle.
+    supervisor = asyncio.create_task(_background_work())
 
     yield
 
-    for task in background:
-        task.cancel()
-    for task in background:
+    supervisor.cancel()
+    try:
+        await supervisor
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        # `cancel()` on an already-failed task is a no-op, so this is the
+        # original failure resurfacing on the shutdown path. Reported here
+        # rather than escaping as an ASGI lifespan error.
+        log.exception("Background work supervisor had already failed")
+
+
+async def _background_work() -> None:
+    """Hold the background-work claim, and run everything it covers.
+
+    One claim for all three, re-taken from standby whenever it is lost.
+    """
+    from backend.app.api.strava import (
+        strava_bridge_poller_configured,
+        strava_bridge_poller_once,
+    )
+    from backend.app.api.wahoo import (
+        wahoo_bridge_poller_configured,
+        wahoo_bridge_poller_once,
+    )
+    from backend.app.services.leadership import hold_background_work, run_until_lost
+    from backend.app.services.pat_expiry import (
+        SWEEP_INTERVAL_SECONDS,
+        pat_expiry_sweep_once,
+    )
+
+    # Asked before contending: an instance with no bridge configured should not
+    # take a claim it has nothing to do with.
+    jobs: list[tuple[str, float, object]] = [
+        ("PAT expiry sweep", float(SWEEP_INTERVAL_SECONDS), pat_expiry_sweep_once),
+    ]
+    if strava_bridge_poller_configured():
+        jobs.insert(0, ("Strava bridge poll", 60.0, strava_bridge_poller_once))
+    if wahoo_bridge_poller_configured():
+        jobs.insert(0, ("Wahoo bridge poll", 60.0, wahoo_bridge_poller_once))
+
+    from backend.app.services.leadership import STANDBY_POLL_S
+
+    while True:
+        # Guarded from taking the claim through to driving the jobs, not just
+        # around the work: `leadership._guarded` wraps `work()` only, so a pool
+        # `TimeoutError` from `registry_session()` used to kill this task
+        # outright and stop all background work until the container restarted —
+        # silently, since nothing awaits it until shutdown. This design is also
+        # what introduces that registry contention in the first place.
         try:
-            await task
+            async with hold_background_work() as lost:
+                running = [
+                    asyncio.create_task(
+                        run_until_lost(lost, work, interval, label=label)
+                    )
+                    for label, interval, work in jobs
+                ]
+                try:
+                    await asyncio.gather(*running)
+                finally:
+                    for task in running:
+                        task.cancel()
+                    await asyncio.gather(*running, return_exceptions=True)
         except asyncio.CancelledError:
-            pass
+            # Shutdown. Unwinds through the context manager, which releases.
+            raise
+        except Exception:
+            log.exception("Background work supervisor failed — retrying")
+            await asyncio.sleep(STANDBY_POLL_S)
+            continue
+        # The claim was lost rather than the process shutting down: go back to
+        # standby and try to take it again.
+        log.info("Background work stood down — waiting to reclaim")
 
 
 class _SecurityHeadersMiddleware(BaseHTTPMiddleware):

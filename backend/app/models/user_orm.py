@@ -62,6 +62,11 @@ class Athlete(UserBase):
     # surfaces share the parser. Cleared the moment the prose starts, so a
     # finished card looks exactly as it did before this existed.
     training_status_progress: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # The run that owns the columns above: the heartbeat says whether a run is
+    # *alive*, this says whether its writes are still *wanted*. A slow run whose
+    # token no longer matches discards its own writes rather than committing
+    # over the run that replaced it. Mirrors `Course.plan_run_id` (issue #50).
+    training_status_run_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
@@ -173,6 +178,11 @@ class Activity(UserBase):
     analysis_updated_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # The run that owns the columns above: the heartbeat says whether a run is
+    # *alive*, this says whether its writes are still *wanted*. A slow run whose
+    # token no longer matches discards its own writes rather than committing
+    # over the run that replaced it. Mirrors `Course.plan_run_id` (issue #50).
+    analysis_run_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     athlete: Mapped["Athlete"] = relationship("Athlete", back_populates="activities")
@@ -448,6 +458,11 @@ class Goal(UserBase):
     guidance_updated_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # The run that owns the columns above: the heartbeat says whether a run is
+    # *alive*, this says whether its writes are still *wanted*. A slow run whose
+    # token no longer matches discards its own writes rather than committing
+    # over the run that replaced it. Mirrors `Course.plan_run_id` (issue #50).
+    guidance_run_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     athlete: Mapped["Athlete"] = relationship("Athlete", back_populates="goals")
 

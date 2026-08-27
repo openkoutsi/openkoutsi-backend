@@ -151,6 +151,43 @@ async def release(
     await session.commit()
 
 
+async def renew(
+    session: AsyncSession,
+    model: Type[LeaseMixin],
+    name: str,
+    token: str,
+    *,
+    ttl: timedelta,
+) -> bool:
+    """Push a held lease's deadline out. Returns whether we still held it.
+
+    :func:`acquire` cannot do this: it mints a fresh token and its ``WHERE``
+    only matches a row that is free or expired, so a holder calling it would
+    either fail or come back with a *different* token. Renewal is the same
+    conditional-``UPDATE`` idiom pointed at the row we already own.
+
+    **A ``False`` return is the loss signal and is authoritative.** It means the
+    deadline lapsed and somebody else took the lease, or the row is gone — and a
+    caller that keeps working through it is exactly the second writer the lease
+    exists to prevent.
+
+    This is what lets a lease outlive the section it guards without making the
+    deadline long. A holder that dies must free the lease by expiry within
+    something like seconds, and that bound is incompatible with holding it
+    across a cycle measured in hours — unless the deadline is pushed out while
+    the holder is demonstrably alive, which is this.
+    """
+    now = datetime.now(timezone.utc)
+    result = await session.execute(
+        update(model)
+        .where(model.name == name, model.holder == token)
+        .values(expires_at=now + ttl)
+        .execution_options(synchronize_session=False)
+    )
+    await session.commit()
+    return result.rowcount == 1
+
+
 @asynccontextmanager
 async def hold(
     session: AsyncSession,

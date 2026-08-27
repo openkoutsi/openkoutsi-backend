@@ -47,6 +47,7 @@ the budget has run down.
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -93,6 +94,72 @@ def pending_timed_out(
     return (now - updated_at).total_seconds() > PENDING_TIMEOUT_MINUTES * 60
 
 
+# ── Run ownership ───────────────────────────────────────────────────────────
+
+
+async def run_is_current(session, model, pk, token_column, run_id) -> bool:
+    """Does the row still belong to the run holding ``run_id``?
+
+    A fresh ``SELECT``, not the loaded instance: the point is to see what
+    another session committed while this one was streaming.
+
+    ``run_id is None`` keeps the old behaviour, so a run already in flight
+    across the upgrade that added the token is never discarded.
+
+    The complement of :func:`pending_timed_out` — that says whether a run is
+    *alive*, this says whether its writes are still *wanted*.
+    """
+    if run_id is None:
+        return True
+    current = (
+        await session.execute(
+            select(token_column).where(model.id == pk)
+        )
+    ).scalar_one_or_none()
+    return current == run_id
+
+
+# ── Starting one run, per surface ───────────────────────────────────────────
+#
+# The mirror of `settle_*` below: what a row looks like the moment a run claims
+# it. Each mints the token the run owns its columns by and returns it for the
+# caller to pass to the background task. Kept adjacent so the columns one
+# touches cannot drift from the columns the other clears.
+
+
+def begin_training_status_run(athlete, now: Optional[datetime] = None) -> str:
+    run_id = uuid.uuid4().hex
+    athlete.training_status_status = "pending"
+    athlete.training_status = None
+    athlete.training_status_progress = None
+    athlete.training_status_run_id = run_id
+    athlete.training_status_updated_at = now or datetime.now(timezone.utc)
+    return run_id
+
+
+def begin_goal_guidance_run(goal, now: Optional[datetime] = None) -> str:
+    run_id = uuid.uuid4().hex
+    goal.guidance_status = "pending"
+    goal.guidance = None
+    goal.guidance_verdict = None
+    goal.guidance_run_id = run_id
+    goal.guidance_updated_at = now or datetime.now(timezone.utc)
+    return run_id
+
+
+def begin_activity_analysis_run(activity, now: Optional[datetime] = None) -> str:
+    run_id = uuid.uuid4().hex
+    activity.analysis_status = "pending"
+    # Cleared here rather than by the caller, like both siblings above: in
+    # `trigger_analysis` the invariant held only for callers that remembered
+    # it, leaving `pending` on top of the previous run's prose.
+    activity.analysis = None
+    activity.analysis_progress = None
+    activity.analysis_run_id = run_id
+    activity.analysis_updated_at = now or datetime.now(timezone.utc)
+    return run_id
+
+
 # ── Settling one row, per surface ───────────────────────────────────────────
 #
 # Each of these is "what an unfinishable run should look like once we admit it":
@@ -107,6 +174,9 @@ def settle_training_status(athlete, now: Optional[datetime] = None) -> bool:
         return False
     athlete.training_status_status = "error"
     athlete.training_status_progress = None
+    # Retire the run token: a run declared dead must not be able to come back
+    # and overwrite the settled state if it was merely slow.
+    athlete.training_status_run_id = None
     athlete.training_status_updated_at = now or datetime.now(timezone.utc)
     return True
 
@@ -115,6 +185,7 @@ def settle_goal_guidance(goal, now: Optional[datetime] = None) -> bool:
     if goal.guidance_status != "pending":
         return False
     goal.guidance_status = "error"
+    goal.guidance_run_id = None
     goal.guidance_updated_at = now or datetime.now(timezone.utc)
     return True
 
@@ -135,6 +206,7 @@ def settle_activity_analysis(activity, now: Optional[datetime] = None) -> bool:
         return False
     activity.analysis_status = "error"
     activity.analysis_progress = None
+    activity.analysis_run_id = None
     activity.analysis_updated_at = now or datetime.now(timezone.utc)
     return True
 

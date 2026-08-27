@@ -1,3 +1,4 @@
+import logging
 import shutil
 from functools import lru_cache
 from pathlib import Path
@@ -7,6 +8,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 
 from backend.app.core.config import settings
 from backend.app.db.base import UserBase, _set_wal_mode
+
+log = logging.getLogger(__name__)
 
 
 @lru_cache(maxsize=256)
@@ -67,6 +70,53 @@ async def init_user_db(user_id: str) -> None:
     async with engine.begin() as conn:
         await conn.execute(text("PRAGMA journal_mode=WAL"))
         await conn.run_sync(UserBase.metadata.create_all)
+        await conn.run_sync(_stamp_at_head)
+
+
+def _stamp_at_head(connection) -> None:
+    """Record that a freshly created database is at the latest revision.
+
+    ``create_all`` writes no ``alembic_version`` row, so without this a new
+    user's database claims no revision and the next deploy replays every
+    migration against it — harmless, since they are idempotent, but real work
+    for nothing, and it defeats the "skip users at head" check in
+    ``scripts/migrate_user_dbs.py`` (issue #50). ``docker-entrypoint.sh``
+    already does this for a fresh registry database.
+
+    Best-effort: if it fails, the next migration run replays rather than skips.
+    """
+    from alembic.migration import MigrationContext
+
+    try:
+        script_dir = _user_script_directory()
+        head = script_dir.get_current_head()
+        if head is None:
+            return
+        MigrationContext.configure(connection).stamp(script_dir, head)
+    except Exception:
+        log.warning(
+            "Could not stamp a new database for user at head — the next "
+            "migration run will replay instead of skipping",
+            exc_info=True,
+        )
+
+
+@lru_cache(maxsize=1)
+def _user_script_directory():
+    """The per-user migration tree, read once.
+
+    Cached because this is on the path of every new user database rather than
+    once per deploy.
+    """
+    from pathlib import Path as _Path
+
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    repo_root = _Path(__file__).resolve().parents[3]
+    return ScriptDirectory.from_config(
+        Config(str(repo_root / "backend" / "alembic-user.ini"))
+    )
 
 
 async def delete_user_db(user_id: str) -> None:

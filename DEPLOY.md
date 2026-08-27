@@ -96,6 +96,22 @@ the per-user migration loop (`backend/scripts/migrate_user_dbs.py`) against the
 mounted data volume before exec'ing uvicorn. No manual migration step is needed
 when rolling out a new image.
 
+**It is fail-closed, and that is the point of doing it here.** The entrypoint
+runs under `set -e` and the migration script exits non-zero if any user's
+database could not be upgraded, so a container whose schema is behind its code
+never starts serving. The check happens once, at the only moment the answer can
+change — which is why this stays in the entrypoint rather than moving to a
+separate init step that would need a runtime guard to rebuild the same
+guarantee.
+
+**The loop is cheap, and stays cheap as users grow.** It runs Alembic in-process
+rather than spawning an interpreter per user, and skips any database whose
+recorded revision already matches head. A deploy that ships no user migration
+therefore costs one small read per user rather than a process start each — the
+difference between roughly 0.9 s and roughly 3 ms per user. Databases created
+after this shipped are stamped at head by `init_user_db`, so a new account is
+skipped on the next deploy instead of replaying the whole migration history.
+
 ### Build/run an image locally
 
 ```bash
@@ -370,10 +386,12 @@ uv run uvicorn backend.main:app --host 0.0.0.0 --port 8000
 **Run exactly one process — no `--workers`, no gunicorn.** The backend is
 single-process by design, and several things depend on that:
 
-- The **bridge pollers** and the **token-expiry sweep** are `lifespan` asyncio
-  tasks with no leader election. A poller fetches every unclaimed event, processes
-  it, and only then claims it, so a second process reprocesses the same events —
-  duplicate activity imports, duplicate LLM analyses, duplicate spend.
+- The **bridge pollers** and the **token-expiry sweep** now run under a single
+  claim on the registry (`registry_leases`, name `background-work`), so only one
+  process runs them at a time and a second stands by. The event protocol
+  underneath carries a deadline too: a consumer claims a batch, processes it and
+  acks what succeeded, and an unacked claim becomes deliverable again once it
+  expires. Two processes therefore no longer drain the same events.
 - The **stranded-run sweep** settles `pending` LLM rows at startup (the
   `Settled N LLM run(s) stranded by the last shutdown` behaviour noted under
   *Migrating existing user databases* above). It no longer settles them all: a
@@ -403,6 +421,13 @@ than in memory — a lease row and a claimed column respectively — so both hol
 between processes. They are listed here because they were fixed for what they do
 on *one* box: each was a live race between two concurrent syncs inside a single
 process, not a multi-replica hypothetical.
+
+**Deploying the bridges.** The backend and the two bridges are separate images
+and the deploy recreates only what changed, so a new backend can briefly meet an
+old bridge. It handles that: it probes `POST /events/claim` once per bridge URL
+and falls back to the pre-#50 fetch-then-claim flow on a 404, logging a warning
+naming the bridge. Redeploy the bridges and the warning stops. The fallback can
+be removed a release after both have shipped.
 
 The container image already runs one process — its entrypoint execs a single
 uvicorn worker. Give the box more CPU/RAM rather than more processes; see

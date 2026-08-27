@@ -47,7 +47,11 @@ from backend.app.services.pat_expiry import (
     EMAIL_OPT_OUT_SETTING as PAT_EXPIRY_EMAIL_SETTING,
 )
 from backend.app.services.athlete_experience import VALID_EXPERIENCE_LEVELS
-from backend.app.services.stranded_runs import pending_timed_out, settle_training_status
+from backend.app.services.stranded_runs import (
+    begin_training_status_run,
+    pending_timed_out,
+    settle_training_status,
+)
 from openkoutsi.plan_schema import HOURS_BOUNDS
 
 _MAX_AVATAR_BYTES = 5 * 1024 * 1024  # 5 MB
@@ -505,13 +509,12 @@ async def get_training_status(
         ).scalar_one_or_none()
         access = await check_llm_access(ctx, athlete, instance, registry_session)
         if access.allowed:
-            athlete.training_status_status = "pending"
-            athlete.training_status = None
-            athlete.training_status_progress = None
-            athlete.training_status_updated_at = now_utc
+            run_id = begin_training_status_run(athlete, now_utc)
             await session.commit()
             from backend.app.services.llm_training_status_analyzer import analyze_training_status_bg
-            asyncio.create_task(analyze_training_status_bg(athlete.id, ctx.user_id))
+            asyncio.create_task(
+                analyze_training_status_bg(athlete.id, ctx.user_id, run_id=run_id)
+            )
 
     return TrainingStatusResponse(
         status=athlete.training_status_status,
@@ -551,15 +554,15 @@ async def trigger_training_status(
     if athlete.training_status_status == "pending":
         return {"status": "pending"}
 
-    now_utc = datetime.now(timezone.utc)
-    athlete.training_status_status = "pending"
-    athlete.training_status = None
-    athlete.training_status_progress = None
-    athlete.training_status_updated_at = now_utc
+    run_id = begin_training_status_run(athlete, datetime.now(timezone.utc))
     await session.commit()
 
     from backend.app.services.llm_training_status_analyzer import analyze_training_status_bg
-    asyncio.create_task(analyze_training_status_bg(athlete.id, ctx.user_id, body.locale))
+    asyncio.create_task(
+        analyze_training_status_bg(
+            athlete.id, ctx.user_id, body.locale, run_id=run_id
+        )
+    )
     return {"status": "pending"}
 
 

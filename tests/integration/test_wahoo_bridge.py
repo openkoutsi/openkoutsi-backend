@@ -11,6 +11,8 @@ Scenarios covered:
   4. Backend offline: events accumulate, then all processed when poller runs
   5. Claimed events not reprocessed on subsequent poll
 """
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -20,7 +22,7 @@ from httpx import ASGITransport, AsyncClient
 # Captured before any patching so _BridgeAsgiClient can always reach the real class.
 _real_AsyncClient = httpx.AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
-from sqlalchemy import select
+from sqlalchemy import select, update as sa_update
 
 import wahoo_bridge.main as bridge_module
 from wahoo_bridge.main import app as bridge_app, Base as BridgeBase, WebhookEvent
@@ -203,9 +205,8 @@ class TestPollingEndpointAuth:
         assert resp.status_code == 200
 
 
-@pytest.mark.replica_unsafe  # assumes a single poller, claiming after it processes
 class TestPollerHappyPath:
-    async def test_webhook_processed_and_claimed(self, bridge_client, patched_bridge):
+    async def test_webhook_processed_and_acked(self, bridge_client, patched_bridge):
         _, sessions = patched_bridge
         mock_process = AsyncMock()
 
@@ -228,7 +229,6 @@ class TestPollerHappyPath:
         assert event.claimed_at is not None
 
 
-@pytest.mark.replica_unsafe  # assumes a single poller, claiming after it processes
 class TestBackendOfflineRecovery:
     async def test_queued_events_all_processed_when_backend_comes_online(
         self, bridge_client, patched_bridge
@@ -287,3 +287,184 @@ class TestBackendOfflineRecovery:
         # Second poll: event already claimed, nothing new to process
         await _poll(mock_process)
         assert mock_process.call_count == 1  # unchanged
+
+
+# ── The claim protocol (issue #50) ─────────────────────────────────────────
+#
+# The same properties as the Strava bridge, asserted separately rather than
+# shared. The two bridges are deliberately independent services with their own
+# lockfiles and build contexts; what needs guarding is not the duplication but
+# the *drift*, and that belongs in a test rather than in a shared package.
+
+
+async def _bridge_http():
+    return AsyncClient(
+        transport=ASGITransport(app=bridge_app), base_url=BRIDGE_BASE_URL
+    )
+
+
+async def _claim_batch() -> list[dict]:
+    async with await _bridge_http() as http:
+        r = await http.post(
+            "/events/claim", headers={"Authorization": f"Bearer {BRIDGE_SECRET}"}
+        )
+        r.raise_for_status()
+        return r.json()
+
+
+async def _ack(event_id: str, claim_token: str) -> None:
+    async with await _bridge_http() as http:
+        await http.post(
+            f"/events/{event_id}/ack?claim_token={claim_token}",
+            headers={"Authorization": f"Bearer {BRIDGE_SECRET}"},
+        )
+
+
+async def _nack(event_id: str, claim_token: str) -> None:
+    async with await _bridge_http() as http:
+        await http.post(
+            f"/events/{event_id}/nack?claim_token={claim_token}",
+            headers={"Authorization": f"Bearer {BRIDGE_SECRET}"},
+        )
+
+
+async def _expire_every_claim(sessions) -> None:
+    """What waiting out the visibility window would do, without the waiting."""
+    async with sessions() as s:
+        await s.execute(
+            sa_update(WebhookEvent).values(
+                claim_expires_at=datetime.now(timezone.utc) - timedelta(seconds=1)
+            )
+        )
+        await s.commit()
+
+
+class TestTheClaimHasADeadline:
+    async def test_a_claimed_event_is_invisible_to_a_second_consumer(
+        self, bridge_client, patched_bridge
+    ):
+        await bridge_client.post("/webhook", json=_WORKOUT_PAYLOAD)
+
+        assert len(await _claim_batch()) == 1
+        assert await _claim_batch() == [], "two consumers were handed the same event"
+
+    async def test_an_unacked_claim_comes_back_after_its_deadline(
+        self, bridge_client, patched_bridge
+    ):
+        _, sessions = patched_bridge
+        await bridge_client.post("/webhook", json=_WORKOUT_PAYLOAD)
+
+        assert len(await _claim_batch()) == 1
+        await _expire_every_claim(sessions)
+
+        again = await _claim_batch()
+        assert len(again) == 1, "an unacked claim never became deliverable again"
+        assert again[0]["attempts"] == 2
+
+    async def test_an_acked_event_never_comes_back(
+        self, bridge_client, patched_bridge
+    ):
+        _, sessions = patched_bridge
+        await bridge_client.post("/webhook", json=_WORKOUT_PAYLOAD)
+
+        claimed = await _claim_batch()
+        await _ack(claimed[0]["id"], claimed[0]["claim_token"])
+        await _expire_every_claim(sessions)
+
+        assert await _claim_batch() == []
+
+    async def test_a_nacked_event_comes_back_after_a_backoff(
+        self, bridge_client, patched_bridge
+    ):
+        """A transient failure retries, but not instantly.
+
+        Releasing immediately put the event back on the very next 60-second
+        poll, so five attempts spanned four minutes — shorter than the provider
+        incidents and expired-token cases the nack exists for, which put the
+        common transient failure back where the old claim-regardless behaviour
+        left it. The budget only means something if the retries are spread.
+        """
+        _, sessions = patched_bridge
+        await bridge_client.post("/webhook", json=_WORKOUT_PAYLOAD)
+
+        claimed = await _claim_batch()
+        await _nack(claimed[0]["id"], claimed[0]["claim_token"])
+
+        assert await _claim_batch() == [], "a nacked event skipped its backoff"
+
+        # The backoff is a future `claim_expires_at` with no token, which the
+        # claim query already reads as "not deliverable yet".
+        async with sessions() as s:
+            event = (await s.execute(select(WebhookEvent))).scalars().one()
+        assert event.claim_token is None
+        assert event.claim_expires_at is not None
+
+        await _expire_every_claim(sessions)
+        assert len(await _claim_batch()) == 1, "it never became deliverable"
+    async def test_an_event_retires_after_enough_failed_attempts(
+        self, bridge_client, patched_bridge
+    ):
+        await bridge_client.post("/webhook", json=_WORKOUT_PAYLOAD)
+
+        for _ in range(bridge_module.settings.max_delivery_attempts):
+            batch = await _claim_batch()
+            if not batch:
+                break
+            await _nack(batch[0]["id"], batch[0]["claim_token"])
+
+        assert await _claim_batch() == [], "a failing event was served forever"
+
+
+class TestACrashMidProcessIsRetried:
+    async def test_the_event_is_redelivered_and_the_replay_is_harmless(
+        self, bridge_client, patched_bridge
+    ):
+        _, sessions = patched_bridge
+        await bridge_client.post("/webhook", json=_WORKOUT_PAYLOAD)
+
+        crashing = AsyncMock(side_effect=RuntimeError("died mid-import"))
+        await _poll(crashing)
+        assert crashing.call_count == 1
+
+        async with sessions() as s:
+            event = (await s.execute(select(WebhookEvent))).scalars().one()
+        assert event.claimed_at is None, "a crashed import was retired as done"
+
+        # The nack applied a backoff, so the next poll is too early — which is
+        # the point: an immediate retry against a provider that is still down
+        # would spend the whole attempt budget in four minutes.
+        too_soon = AsyncMock()
+        await _poll(too_soon)
+        assert too_soon.call_count == 0, "the backoff was skipped"
+
+        await _expire_every_claim(sessions)
+        recovering = AsyncMock()
+        await _poll(recovering)
+        assert recovering.call_count == 1, "the event was never redelivered"
+
+        async with sessions() as s:
+            event = (await s.execute(select(WebhookEvent))).scalars().one()
+        assert event.claimed_at is not None, "the successful retry was not acked"
+
+
+class TestSchemaUpgrade:
+    async def test_the_claim_columns_are_added_to_an_older_table(self, tmp_path):
+        """`create_all` does not add columns, and this bridge has no Alembic."""
+        engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'old.db'}")
+        async with engine.begin() as conn:
+            await conn.exec_driver_sql(
+                "CREATE TABLE webhook_events ("
+                "  id VARCHAR PRIMARY KEY,"
+                "  wahoo_event_type VARCHAR NOT NULL,"
+                "  wahoo_owner_id VARCHAR NOT NULL,"
+                "  payload JSON NOT NULL,"
+                "  received_at DATETIME NOT NULL,"
+                "  claimed_at DATETIME"
+                ")"
+            )
+            await bridge_module._ensure_claim_columns(conn)
+            rows = await conn.exec_driver_sql('PRAGMA table_info("webhook_events")')
+            columns = {r[1] for r in rows.fetchall()}
+
+        assert {"claim_token", "claim_expires_at", "attempts"} <= columns
+        await engine.dispose()

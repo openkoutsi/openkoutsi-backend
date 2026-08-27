@@ -224,19 +224,19 @@ async def run_expiry_sweep(
     return sent
 
 
-async def pat_expiry_sweeper() -> None:
-    """Periodic ``lifespan`` task: run the sweep once a day, forever."""
+async def pat_expiry_sweep_once() -> None:
+    """One sweep. The loop and the leader claim live in ``backend.main``.
+
+    Ordering is unchanged from the old ``while True`` loop: ``run_until_lost``
+    runs the work and *then* waits, so this still runs once immediately when the
+    claim is taken. New is that regaining a lost claim reaches that immediate
+    run too, and ``_renew_until_lost`` counts any renewal error as loss — so
+    `last_expiry_notice`, not the schedule, is what bounds duplicate notices.
+    """
     from backend.app.db.registry import get_registry_session
 
-    while True:
-        try:
-            async for session in get_registry_session():
-                sent = await run_expiry_sweep(session)
-                if sent:
-                    log.info("Token expiry sweep sent %d notification(s)", sent)
-                break
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            log.exception("Token expiry sweep failed")
-        await asyncio.sleep(SWEEP_INTERVAL_SECONDS)
+    async for session in get_registry_session():
+        sent = await run_expiry_sweep(session)
+        if sent:
+            log.info("Token expiry sweep sent %d notification(s)", sent)
+        break
