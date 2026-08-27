@@ -7,8 +7,6 @@ surface (schema field names) so the regression is caught before it ships.
 """
 import re
 
-from backend.main import create_app
-
 # Field-name tokens that must never appear in the OpenAPI schema again.
 FORBIDDEN_FIELD_NAMES = {
     "tss",
@@ -38,15 +36,15 @@ def _iter_property_names(schema: dict):
             yield prop
 
 
-def test_openapi_has_no_trademarked_field_names():
-    schema = create_app().openapi()
+def test_openapi_has_no_trademarked_field_names(app):
+    schema = app.openapi()
     offenders = {p for p in _iter_property_names(schema) if p in FORBIDDEN_FIELD_NAMES}
     assert not offenders, f"Trademarked field names leaked into the API: {offenders}"
 
 
-def test_openapi_descriptions_have_no_trademarked_phrases():
+def test_openapi_descriptions_have_no_trademarked_phrases(app):
     import json
 
-    text = json.dumps(create_app().openapi())
+    text = json.dumps(app.openapi())
     matches = set(m.lower() for m in _TRADEMARK_PHRASES.findall(text))
     assert not matches, f"Trademarked phrases leaked into the API schema: {matches}"

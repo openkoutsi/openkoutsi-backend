@@ -166,6 +166,23 @@ uv run uvicorn backend.main:app --reload --port 8000
 # Open the frontend (default http://localhost:3000) and complete the setup wizard.
 ```
 
+### Tests
+
+```bash
+uv run python -m pytest tests/
+```
+
+Every test gets its own registry and per-user database, built fresh in memory. The
+`CREATE` statements for both schemas are compiled once per session and replayed per
+test rather than re-derived from the ORM metadata each time — `create_all` spends
+around 65 ms per test compiling DDL that SQLite then executes in under 2 ms, and with
+~1450 tests taking a database that was roughly a quarter of the suite's runtime. The
+statements are read back out of `sqlite_master` after a real `create_all`, so they are
+exactly what SQLAlchemy emits and there is no second description of the schema to
+drift. CI measures coverage with `COVERAGE_CORE=sysmon` (`sys.monitoring`, Python
+3.12+) instead of the default C trace function, which costs a few percent rather than
+the ~75% the tracer adds.
+
 ## Environment variables
 
 Main app (`.env`):

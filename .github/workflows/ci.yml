@@ -42,6 +42,13 @@ jobs:
           # Required since #102 F-10 — the bridges no longer start on "changeme".
           BRIDGE_SECRET: "ci-test-strava-bridge-secret-not-for-production"
           WAHOO_BRIDGE_SECRET: "ci-test-wahoo-bridge-secret-not-for-production"
+          # Measure coverage with sys.monitoring (Python 3.12+) instead of the
+          # default C trace function. Same lines, a fraction of the cost: on a
+          # three-module slice the tracer took the run from 33s to 59s, where
+          # sysmon takes it to 35s. The reported total moves by about a point —
+          # upwards, since sysmon sees a few lines the tracer misses — so this
+          # cannot quietly hide uncovered code.
+          COVERAGE_CORE: sysmon
 
       - name: Upload coverage
         uses: actions/upload-artifact@v4

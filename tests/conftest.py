@@ -11,6 +11,7 @@ routes hit the in-memory DBs. A seeded Athlete row is created automatically.
 Background tasks are suppressed via mock so they never touch real storage.
 Rate limiting is disabled so tests are not throttled.
 """
+import functools
 import os
 import sys
 from pathlib import Path
@@ -42,12 +43,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from backend.app.core.auth import UserContext, create_access_token
 from backend.app.core.deps import get_ctx_and_session
 from backend.app.db.base import RegistryBase, UserBase
-# Imported for their side effect: `UserBase.metadata` is only complete once every
-# model module has been imported, and `create_all` below builds whatever is in it
-# at that moment. Without this the tables present in a test would depend on which
-# fixture happened to import which module first.
+# Imported for their side effect: the two metadata objects are only complete once
+# every model module has been imported, and the schema each test gets is built from
+# whatever is in them at that moment. Without this the tables present in a test would
+# depend on which fixture happened to import which module first.
 import backend.app.models.chat_orm  # noqa: F401,E402
 import backend.app.models.message_orm  # noqa: F401,E402
+import backend.app.models.registry_orm  # noqa: F401,E402
 import backend.app.models.user_orm  # noqa: F401,E402
 from backend.app.db.registry import get_registry_session
 from backend.main import create_app
@@ -146,12 +148,55 @@ async def usage_db(isolate_user_dbs):
 
 # ── DB fixtures ────────────────────────────────────────────────────────────
 
+@functools.lru_cache(maxsize=None)
+def _schema_script(base) -> str:
+    """The CREATE statements ``create_all`` emits for *base*, as one SQL script.
+
+    Every test builds its databases from scratch, and ``metadata.create_all`` is
+    dominated by compiling DDL out of the metadata rather than by running it:
+    ~47 ms for the 26 per-user tables and ~19 ms for the 10 registry ones, of
+    which SQLite spends under 2 ms executing the statements. Multiplied by the
+    ~1450 tests that take a database, that compilation was around a quarter of
+    the suite's runtime.
+
+    So it is done once and the result replayed. The statements are read back out
+    of ``sqlite_master`` *after* ``create_all`` ran, which means they are exactly
+    what SQLAlchemy emitted — there is no second description of the schema here
+    that could drift from the models. Rows with a NULL ``sql`` are SQLite's own
+    implicit indexes, which it recreates from the UNIQUE/PRIMARY KEY clauses.
+    """
+    from sqlalchemy import create_engine
+
+    eng = create_engine("sqlite://")
+    try:
+        with eng.begin() as conn:
+            base.metadata.create_all(conn)
+            statements = conn.exec_driver_sql(
+                "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL"
+            ).scalars().all()
+    finally:
+        eng.dispose()
+    return ";\n".join(statements) + ";"
+
+
+async def _engine_with_schema(base):
+    """A fresh in-memory engine carrying *base*'s schema.
+
+    The schema outlives the connection that created it because SQLAlchemy gives
+    a ``:memory:`` database a ``StaticPool``: closing the connection returns it
+    to the pool rather than dropping the database underneath it.
+    """
+    eng = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with eng.connect() as conn:
+        raw = await conn.get_raw_connection()
+        await raw.driver_connection.executescript(_schema_script(base))
+    return eng
+
+
 @pytest.fixture
 async def registry_engine():
     """Fresh in-memory registry SQLite engine per test."""
-    eng = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with eng.begin() as conn:
-        await conn.run_sync(RegistryBase.metadata.create_all)
+    eng = await _engine_with_schema(RegistryBase)
     yield eng
     await eng.dispose()
 
@@ -159,9 +204,7 @@ async def registry_engine():
 @pytest.fixture
 async def user_engine():
     """Fresh in-memory per-user SQLite engine per test."""
-    eng = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with eng.begin() as conn:
-        await conn.run_sync(UserBase.metadata.create_all)
+    eng = await _engine_with_schema(UserBase)
     yield eng
     await eng.dispose()
 
@@ -224,17 +267,20 @@ async def seeded_athlete(session):
 
 # ── HTTP client with DI overrides ─────────────────────────────────────────
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def app():
-    """Build the FastAPI app once per test module.
+    """Build the FastAPI app once for the whole test session.
 
-    ``create_app()`` is relatively expensive (imports and wires every router),
-    so we construct it once per module rather than once per test. The app is
-    stateless between tests except for ``dependency_overrides``, which the
-    per-test ``client`` fixture sets and clears; tests within a module run
-    sequentially, so there is no cross-test bleed. The lifespan (which starts
-    the poller tasks) is never triggered because ``ASGITransport`` does not run
-    lifespan events.
+    ``create_app()`` is expensive — it wires two dozen routers into 152 routes,
+    and building their Pydantic models costs ~0.3 s. It used to be built once
+    per module, which meant paying that for each of the 56 modules that take a
+    client; once per session is the same thing done once.
+
+    The app is stateless between tests except for ``dependency_overrides``,
+    which the per-test ``client`` fixture sets and clears in a ``finally`` (as
+    does ``test_public_rate_limit``'s own client), so nothing carries over. The
+    lifespan (which starts the poller tasks) is never triggered because
+    ``ASGITransport`` does not run lifespan events.
     """
     return create_app()
 
