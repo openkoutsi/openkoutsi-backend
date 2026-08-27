@@ -33,9 +33,8 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 # ── Settings ──────────────────────────────────────────────────────────────
 
-#: Nack backoff. Doubling from two seconds, so `max_delivery_attempts` retries
-#: span roughly half an hour rather than the four minutes that immediate
-#: redelivery at a 60-second poll gave them.
+#: Nack backoff, doubling from two seconds, so the attempt budget spans about
+#: half an hour rather than the four minutes immediate redelivery gave it.
 _NACK_BASE_BACKOFF_S = 2.0
 _NACK_MAX_BACKOFF_S = 900.0
 
@@ -58,17 +57,12 @@ class Settings(BaseSettings):
     # far past any real webhook volume, and still bounded.
     max_queue_events: int = 10000
 
-    # How long a consumer's claim on an event survives without an ack. The
-    # consumer processes an event and only then acks it, so a claim that
-    # outlives its holder means the process died mid-import — and the event has
-    # to become visible again rather than being lost. Generously longer than a
-    # drain of 100 events takes, because expiring under a consumer that is
-    # merely slow hands the same event to two of them.
+    # How long a claim survives without an ack; a lapsed one means the consumer
+    # died mid-import. Generously longer than a drain of 100 events, because
+    # expiring under a merely slow consumer hands the event to two of them.
     claim_visibility_seconds: int = 900
 
-    # After this many delivery attempts an event is retired rather than served
-    # again. Without a bound, an event that always throws is redelivered every
-    # visibility window until the seven-day cleanup reaches it.
+    # After this many attempts an event is retired rather than served again.
     max_delivery_attempts: int = 5
 
     @model_validator(mode="after")
@@ -110,17 +104,14 @@ class WebhookEvent(Base):
     received_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
-    # Terminal. Set when the consumer acks a successfully processed event, or
-    # when it is retired after `max_delivery_attempts`. Kept as the column it
-    # always was so the seven-day cleanup and the queue-depth guard are
-    # unchanged by any of this.
+    # Terminal: acked, or retired after `max_delivery_attempts`. Unchanged in
+    # meaning, so the cleanup and the queue-depth guard still read it.
     claimed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
-    # In flight. A consumer holds an event by token until `claim_expires_at`,
-    # and an unacked claim past its deadline makes the event visible again
-    # (issue #50). The token is what stops a consumer whose claim already
-    # lapsed from acking an event somebody else now owns.
+    # In flight: held by token until `claim_expires_at`, after which it is
+    # visible again. The token stops a lapsed consumer acking someone else's
+    # event (issue #50).
     claim_token: Mapped[str | None] = mapped_column(String, nullable=True)
     claim_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -136,10 +127,10 @@ AsyncSessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 # ── Cleanup background task ───────────────────────────────────────────────
 
 
-#: Columns added after the table's first release. `create_all` builds a table
-#: that does not exist; it does **not** add columns to one that does, and these
-#: bridges have no Alembic. Without this, a bridge with an existing `bridge.db`
-#: would start cleanly and then fail every query that names them.
+#: Columns added after the table's first release. `create_all` does not add
+#: columns to an existing table and these bridges have no Alembic, so without
+#: this an existing `bridge.db` starts cleanly then fails every query naming
+#: them.
 _CLAIM_COLUMNS = {
     "claim_token": "VARCHAR",
     "claim_expires_at": "DATETIME",
@@ -314,11 +305,9 @@ async def get_pending_events(request: Request):
 def _required_claim_token(request: Request) -> str:
     """The claim token, or a 400 — never ``None``.
 
-    `Column == None` renders as ``IS NULL``, not as a never-matching
-    comparison, so an ack with the parameter omitted would match exactly the
-    events with **no live claim** and retire them — the inverse of the property
-    ack exists to provide, over a broader set of rows than a correct token
-    matches. Rejecting is the only safe reading of a missing token.
+    `Column == None` renders as ``IS NULL``, so an ack with the parameter
+    omitted would match the events with *no* live claim and retire them — the
+    inverse of what ack guarantees.
     """
     token = request.query_params.get("claim_token")
     if not token:
@@ -330,19 +319,12 @@ def _required_claim_token(request: Request) -> str:
 async def claim_events(request: Request):
     """Claim a batch of deliverable events, with a deadline. Auth: Bearer.
 
-    Replaces fetch-then-process-then-claim (issue #50). That order meant a
-    consumer crash mid-import left the event unclaimed and it was served again;
-    claiming *first* would have turned that duplicate into a loss, which is
-    worse — the import is idempotent by `(provider, external_id)`, the analysis
-    it triggers is not.
+    Replaces fetch-then-process-then-claim (issue #50): that order re-served an
+    event whose consumer crashed, and claiming first would have lost it
+    instead. The deadline gives at-least-once with a bound.
 
-    So the claim carries a deadline instead. An event is handed out, and if no
-    ack arrives before the deadline it becomes deliverable again. At-least-once
-    with a bound, rather than at-most-once with a hole.
-
-    The UPDATE is conditional on the event still being free, which is what makes
-    two consumers racing safe: the database picks the winner, and each comes
-    away with only the rows carrying its own token.
+    The UPDATE is conditional on the event still being free, so two consumers
+    racing is safe — each comes away with only the rows carrying its token.
     """
     _require_bearer(request)
     token = uuid.uuid4().hex
@@ -383,13 +365,10 @@ async def claim_events(request: Request):
             )
             .execution_options(synchronize_session=False)
         )
-        # Retire anything that has just spent its last attempt. Dropping out of
-        # the `WHERE` above would retire it too, but silently and without ever
-        # setting `claimed_at` — so it would keep a `max_queue_events` slot for
-        # seven days and be reported to operators as "unclaimed", pointing at a
-        # poller that is in fact working fine. This is the one remaining path
-        # that loses an event, and losing one invisibly is the thing the whole
-        # claim-then-ack design is against.
+        # Retire anything that has spent its last attempt. Dropping out of the
+        # `WHERE` above would retire it silently, leaving `claimed_at` unset —
+        # so it would hold a `max_queue_events` slot for seven days and be
+        # reported to operators as "unclaimed".
         retired = await session.execute(
             update(WebhookEvent)
             .where(
@@ -432,10 +411,10 @@ async def claim_events(request: Request):
 
 @app.post("/events/{event_id}/ack", status_code=200)
 async def ack_event(event_id: str, request: Request):
-    """Terminal success: this event is done and must never be served again.
+    """Terminal success: never serve this event again.
 
-    Conditional on the token, so a consumer whose claim already lapsed cannot
-    retire an event another one now owns.
+    Conditional on the token, so a lapsed consumer cannot retire an event
+    another one now owns.
     """
     _require_bearer(request)
     token = _required_claim_token(request)
@@ -462,21 +441,13 @@ async def ack_event(event_id: str, request: Request):
 async def nack_event(event_id: str, request: Request):
     """Known failure: return the event to the queue, after a backoff.
 
-    Turns a transient failure — a token refresh that lost a race, a provider
-    5xx — into a bounded series of retries rather than a quarter of an hour of
-    silence each time.
+    The backoff is what makes the attempt budget mean anything. Releasing
+    immediately put the event back on the next poll, so five attempts spanned
+    four minutes — shorter than the provider incidents and expired tokens it
+    exists for. Doubling from two seconds spreads them over about half an hour.
 
-    **The backoff is what makes the attempt budget mean anything.** Releasing
-    immediately put the event back on the very next poll, so five attempts at a
-    60-second interval spanned four minutes — and both failures named above
-    routinely outlast that, which landed the common transient failure in the
-    same place as the old claim-regardless behaviour, just four minutes later.
-    Doubling from two seconds spreads the same five attempts across roughly half
-    an hour.
-
-    No new column: `claim_expires_at` in the future with `claim_token` cleared
-    already reads as "not deliverable yet" to the claim query's `free`
-    predicate, which is the same shape a live claim uses.
+    No new column: a future `claim_expires_at` with `claim_token` cleared
+    already reads as "not deliverable yet" to the claim query.
     """
     _require_bearer(request)
     token = _required_claim_token(request)

@@ -100,17 +100,14 @@ def pending_timed_out(
 async def run_is_current(session, model, pk, token_column, run_id) -> bool:
     """Does the row still belong to the run holding ``run_id``?
 
-    A fresh ``SELECT`` rather than the loaded instance's attribute: the whole
-    point is to see what *another* session committed while this one was
-    streaming, and an identity-mapped object cannot show that.
+    A fresh ``SELECT``, not the loaded instance: the point is to see what
+    another session committed while this one was streaming.
 
-    ``run_id is None`` keeps the old behaviour, so a run that predates its
-    surface's token — one already in flight across the upgrade that added it —
-    is never discarded by this.
+    ``run_id is None`` keeps the old behaviour, so a run already in flight
+    across the upgrade that added the token is never discarded.
 
-    The complement of :func:`pending_timed_out`, and needed because that one
-    cannot answer this question: the heartbeat says whether a run is *alive*,
-    this says whether its writes are still *wanted*.
+    The complement of :func:`pending_timed_out` — that says whether a run is
+    *alive*, this says whether its writes are still *wanted*.
     """
     if run_id is None:
         return True
@@ -124,11 +121,10 @@ async def run_is_current(session, model, pk, token_column, run_id) -> bool:
 
 # ── Starting one run, per surface ───────────────────────────────────────────
 #
-# The mirror of the `settle_*` pair below: what a row should look like the
-# moment a run claims it. Each mints the token the run owns its columns by and
-# hands it back, so the caller's only job is to pass it to the background task.
-# Keeping the two halves next to each other is what stops the set of columns one
-# touches from drifting from the set the other clears.
+# The mirror of `settle_*` below: what a row looks like the moment a run claims
+# it. Each mints the token the run owns its columns by and returns it for the
+# caller to pass to the background task. Kept adjacent so the columns one
+# touches cannot drift from the columns the other clears.
 
 
 def begin_training_status_run(athlete, now: Optional[datetime] = None) -> str:
@@ -154,12 +150,9 @@ def begin_goal_guidance_run(goal, now: Optional[datetime] = None) -> str:
 def begin_activity_analysis_run(activity, now: Optional[datetime] = None) -> str:
     run_id = uuid.uuid4().hex
     activity.analysis_status = "pending"
-    # Cleared here rather than by the caller, like both siblings above. It used
-    # to live in `trigger_analysis`, which meant the invariant held only for the
-    # callers that remembered it — and a caller that did not (an auto-analyse on
-    # an already-analysed activity, after a re-import or a FIT reprocess) left
-    # `pending` sitting on top of the previous run's prose, which the UI renders
-    # as the live one for as long as the run takes.
+    # Cleared here rather than by the caller, like both siblings above: in
+    # `trigger_analysis` the invariant held only for callers that remembered
+    # it, leaving `pending` on top of the previous run's prose.
     activity.analysis = None
     activity.analysis_progress = None
     activity.analysis_run_id = run_id

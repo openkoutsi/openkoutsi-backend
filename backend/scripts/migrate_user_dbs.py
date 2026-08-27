@@ -5,31 +5,21 @@ The per-user Alembic env migrates a single database selected by ``USER_ID``.
 With one SQLite file per user, upgrading a deployment means running it once per
 user; this script automates that loop over ``data/users/*/user.db``.
 
-It runs from the container entrypoint, before uvicorn is exec'd, and that is
-deliberate: ``set -e`` plus a non-zero exit here is what stops a container from
-serving a database whose schema is behind the code. Checked once, at the only
-moment it can change. A runtime guard would be a schema read on every request
-for a condition that cannot become false while the process runs.
+It runs from the container entrypoint, before uvicorn is exec'd: ``set -e``
+plus a non-zero exit is what stops a container serving a schema behind its code,
+checked once at the only moment it can change. So what matters is that it be
+*cheap* rather than elsewhere (issue #50). Two things make it so:
 
-Which is why what matters is that this be *cheap*, not that it be elsewhere
-(issue #50). Two things make it so:
+* **One process, not one per user.** Spawning an interpreter per user cost a
+  startup, a ``backend`` import and an ``env.py`` exec each — ~0.89 s, almost
+  none of it migration work. Alembic's Python API re-execs ``env.py`` per
+  ``upgrade``, which is all the isolation the per-user env needs.
+* **Users already at head are skipped**, so a deploy shipping no user migration
+  is one small read per user.
 
-* **One process, not one per user.** This used to spawn a fresh interpreter per
-  user through ``subprocess``, so each user cost a Python startup, a full
-  ``backend`` package import and an ``env.py`` exec — measured at ~0.89 s each,
-  almost none of it migration work. Alembic's Python API re-execs ``env.py`` on
-  every ``upgrade`` call, which is all the isolation the per-user env needs.
-* **Users already at head are skipped.** On a deploy that ships no user
-  migration — most deploys — the loop is one small read per user and nothing
-  else.
-
-Not parallelised, on purpose. After the two changes above the steady state is N
-cheap reads, and the only deploy that does real work per user is the one
-shipping a user migration — precisely the deploy where deterministic ordering
-and a readable list of which users failed are worth more than wall-clock time.
-If a single migration ever turns out to be slow enough to matter, a ``--jobs``
-flag is the escape hatch; a thread pool contending for the same disk is not an
-improvement until then.
+Not parallelised: the steady state is N cheap reads, and the one deploy that
+does real work is where deterministic ordering and a readable list of failures
+beat wall-clock time. ``--jobs`` is the escape hatch if that changes.
 
 Usage (from repo root):
     uv run python backend/scripts/migrate_user_dbs.py
@@ -72,12 +62,10 @@ def find_user_ids(data_dir: Path) -> list[str]:
 def build_config() -> Config:
     """One config for the whole run.
 
-    ``env.py`` re-reads ``USER_ID`` from the environment on every exec and sets
-    ``sqlalchemy.url`` from it, so a single ``Config`` serves every user.
-
-    ``config_file_name`` is cleared after the first use by :func:`migrate_user`:
-    ``env.py`` calls ``fileConfig()`` whenever it is set, which would otherwise
-    tear down and rebuild logging once per user.
+    ``env.py`` re-reads ``USER_ID`` per exec and sets ``sqlalchemy.url`` from
+    it, so one ``Config`` serves every user. :func:`migrate_user` clears
+    ``config_file_name`` after first use, since ``env.py`` calls
+    ``fileConfig()`` whenever it is set.
     """
     return Config(str(REPO_ROOT / ALEMBIC_INI))
 
@@ -90,11 +78,10 @@ def head_revision(cfg: Config) -> Optional[str]:
 def current_revision(db_path: str) -> Optional[str]:
     """What ``user.db`` says it is at, without going through Alembic.
 
-    ``None`` covers both "no ``alembic_version`` table" and "the table is
-    empty". A database created by ``init_user_db`` before stamping was added
-    (issue #50) is at head schema-wise but says nothing, and it has to be
-    upgraded rather than skipped — every migration in this tree is idempotent
-    precisely so that replay is safe.
+    ``None`` covers both "no ``alembic_version`` table" and "empty". A database
+    created before stamping was added (issue #50) is at head but says nothing,
+    so it is upgraded rather than skipped — replay is safe, every migration in
+    this tree being idempotent.
     """
     try:
         con = sqlite3.connect(db_path)
@@ -122,9 +109,8 @@ def migrate_user(cfg: Config, user_id: str, head: Optional[str], dry_run: bool) 
     try:
         command.upgrade(cfg, "head")
     except Exception as exc:
-        # In-process now, so this arrives as an exception rather than a return
-        # code — but the contract is unchanged: one user's failure costs that
-        # user their upgrade, not everyone else's.
+        # In-process, so a failure arrives as an exception rather than a return
+        # code. The contract is unchanged: one user's failure costs only theirs.
         print("FAILED")
         sys.stderr.write(f"{type(exc).__name__}: {exc}\n")
         return False

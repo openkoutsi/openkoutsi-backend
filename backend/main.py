@@ -55,12 +55,9 @@ async def lifespan(app: FastAPI):
     except Exception:
         log.exception("Could not settle stranded LLM runs")
 
-    # Background work is periodic asyncio tasks rather than a scheduler
-    # dependency; the token-expiry sweep (issue #46) joins the bridge pollers on
-    # that pattern. All three now run under one claim on the registry rather
-    # than in whichever process happened to boot (issue #50) — see
-    # `services.leadership` for why the claim is per-cycle rather than a term of
-    # office, and why losing it cancels the cycle in flight.
+    # Periodic asyncio tasks rather than a scheduler dependency. All three run
+    # under one claim on the registry rather than in whichever process booted
+    # (issue #50); see `services.leadership` for why it is per-cycle.
     supervisor = asyncio.create_task(_background_work())
 
     yield
@@ -72,18 +69,15 @@ async def lifespan(app: FastAPI):
         pass
     except Exception:
         # `cancel()` on an already-failed task is a no-op, so this is the
-        # original failure resurfacing hours later on the shutdown path. Report
-        # it here rather than letting it out as an ASGI lifespan error — the
-        # loop below is what should have caught it, and this is the backstop.
+        # original failure resurfacing on the shutdown path. Reported here
+        # rather than escaping as an ASGI lifespan error.
         log.exception("Background work supervisor had already failed")
 
 
 async def _background_work() -> None:
     """Hold the background-work claim, and run everything it covers.
 
-    One claim for all three, re-taken from standby whenever it is lost. Three
-    independent claims would be three elections for one decision, and would let
-    a process be leader for Strava and not for Wahoo.
+    One claim for all three, re-taken from standby whenever it is lost.
     """
     from backend.app.api.strava import (
         strava_bridge_poller_configured,
@@ -99,8 +93,8 @@ async def _background_work() -> None:
         pat_expiry_sweep_once,
     )
 
-    # Asked once, before contending: an instance with no bridge configured
-    # should not take a claim it has nothing to do with.
+    # Asked before contending: an instance with no bridge configured should not
+    # take a claim it has nothing to do with.
     jobs: list[tuple[str, float, object]] = [
         ("PAT expiry sweep", float(SWEEP_INTERVAL_SECONDS), pat_expiry_sweep_once),
     ]
@@ -112,17 +106,12 @@ async def _background_work() -> None:
     from backend.app.services.leadership import STANDBY_POLL_S
 
     while True:
-        # Everything from taking the claim to driving the jobs is guarded, not
-        # just the work itself. `leadership._guarded` wraps `work()`, but the
-        # path through `registry_session()` to `leases.acquire` is a database
-        # call like any other: a pool `TimeoutError` or an `OperationalError`
-        # there used to kill this task outright, stopping both bridge pollers
-        # and the expiry sweep until the container restarted — silently, since
-        # nothing awaits this task until shutdown.
-        #
-        # That matters more since this change than before it: contention on the
-        # registry is something this design *introduces*, a standby write per
-        # process every ~15 s plus a renewal every 30 s.
+        # Guarded from taking the claim through to driving the jobs, not just
+        # around the work: `leadership._guarded` wraps `work()` only, so a pool
+        # `TimeoutError` from `registry_session()` used to kill this task
+        # outright and stop all background work until the container restarted —
+        # silently, since nothing awaits it until shutdown. This design is also
+        # what introduces that registry contention in the first place.
         try:
             async with hold_background_work() as lost:
                 running = [
