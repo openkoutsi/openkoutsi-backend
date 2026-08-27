@@ -1,27 +1,17 @@
-"""Talking to a webhook bridge, with the claim semantics the queue now has.
+"""Talking to a webhook bridge (issue #50).
 
-Both bridges expose the same three-verb protocol, and the backend consumes both
+Both bridges expose the same three-verb protocol and the backend consumes them
 identically, so the client lives here once rather than twice in `api/`.
 
-**Why claim-then-ack rather than process-then-claim** (issue #50). The old order
-processed an event and only then claimed it, so a consumer that died mid-import
-left the event unclaimed and it was served again. Reversing that — claim first,
-then process — would have converted the duplicate into a *loss*, which is worse
-here: the import is idempotent by `(provider, external_id)` so a replay mostly
-returns early, but the LLM analysis it triggers is not, and a lost one is
-invisible.
+Claim-then-ack, not process-then-claim: the old order re-served an event whose
+consumer died mid-import, and claiming first would have turned that duplicate
+into a *loss* — the import is idempotent by `(provider, external_id)`, but the
+LLM analysis it triggers is not. So the claim carries a deadline instead, and an
+unacked event becomes deliverable again when it expires.
 
-So the claim carries a deadline. An event is handed out, and if no ack arrives
-before it expires the event becomes deliverable again. At-least-once with a
-bound, rather than at-most-once with a hole.
-
-**The fallback matters more than it looks.** The backend and the two bridges are
-three separate images, and the deploy recreates only the services whose digest
-moved, in whatever order Compose picks. A new backend can therefore meet an old
-bridge that has no `/events/claim`. Without the fallback below, that window is
-one in which nothing drains either queue and the backlog grows against a ceiling
-of 10 000. It is ten lines, and it can be deleted a release after both bridges
-have shipped.
+The 404 fallback covers the deploy window where a new backend meets an old
+bridge that has no `/events/claim` — Compose recreates the three images in its
+own order. Deletable a release after both bridges have shipped.
 """
 
 from __future__ import annotations
@@ -35,16 +25,9 @@ import httpx
 log = logging.getLogger(__name__)
 
 #: When to next probe a bridge that answered 404/405, keyed by base URL.
-#:
-#: A permanent latch would be wrong in exactly the deploy this fallback exists
-#: for. Compose recreates the three images in whatever order it picks, so the
-#: backend can be replaced first, meet the *old* bridge, latch — and then never
-#: notice the bridge being replaced seconds later. It would run the pre-#50
-#: flow, with every failure mode this change fixes silently live again, until
-#: someone restarted it, which on a healthy deployment can be weeks.
-#:
-#: One extra request per bridge every five minutes against a 60-second poll,
-#: and the window closes on its own.
+#: Expires rather than latching: the backend can be recreated before the bridge,
+#: latch against the old one, and otherwise never notice it being replaced
+#: seconds later — running the pre-#50 flow until someone restarts it.
 _LEGACY_UNTIL: dict[str, float] = {}
 _RE_PROBE_AFTER_S = 300.0
 
@@ -60,9 +43,8 @@ class BridgeClient:
     async def claim_batch(self) -> list[dict]:
         """Take a batch of events, each held until its claim expires.
 
-        Returns events carrying a ``claim_token``; on a legacy bridge they carry
-        ``None`` and the caller's ack/nack become no-ops, which reproduces the
-        old behaviour exactly rather than half of it.
+        Events carry a ``claim_token``; on a legacy bridge it is ``None`` and
+        ack/nack fall back to the old behaviour.
         """
         if _LEGACY_UNTIL.get(self._base, 0.0) <= time.monotonic():
             try:
@@ -106,10 +88,10 @@ class BridgeClient:
         )
 
     async def nack(self, event_id: str, claim_token: Optional[str]) -> None:
-        """This attempt failed: make it deliverable again now.
+        """This attempt failed: return it to the queue after a backoff.
 
-        On a legacy bridge there is nothing to release — an unclaimed event is
-        already deliverable — so this is correctly a no-op there.
+        A no-op on a legacy bridge, where an unclaimed event is already
+        deliverable.
         """
         if claim_token is None:
             return
@@ -123,23 +105,18 @@ class BridgeClient:
                 f"{self._base}{path}", headers=self._headers
             )
             # `httpx` raises only for transport failures, so without this a 401
-            # (a secret rotated on one side) or a 500 (bridge disk full, the
-            # column upgrade not applied) reads as success. This is the half of
-            # the protocol that can wedge the queue, and it was the half with no
-            # telemetry: a bridge that has stopped acking presents only as a
-            # queue that mysteriously reprocesses everything every 15 minutes.
+            # or a 500 reads as success — and a bridge that has stopped acking
+            # would present only as a queue that reprocesses everything.
             response.raise_for_status()
         except httpx.HTTPError:
-            # The visibility deadline still covers this: the event comes back
-            # and the consumer's own idempotency check absorbs the replay. What
-            # was missing was any record of *why*.
+            # The visibility deadline covers this: the event comes back and the
+            # consumer's idempotency check absorbs the replay.
             log.warning(
                 "Could not %s bridge event %s", verb, event_id, exc_info=True
             )
             return
 
         if response.json().get("status") == "stale":
-            # A normal outcome — this claim lapsed and somebody else owns the
-            # event. A spike in these is the signal that the visibility window
-            # is too short for the drain.
+            # Normal: the claim lapsed and somebody else owns the event. A spike
+            # means the visibility window is too short for the drain.
             log.info("Bridge reported a stale %s for event %s", verb, event_id)

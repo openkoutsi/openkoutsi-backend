@@ -412,18 +412,15 @@ class ProviderConnection(RegistryBase):
 
 
 class RegistryLease(RegistryBase, LeaseMixin):
-    """Cross-process mutual exclusion for work that belongs to the *instance*.
+    """Cross-process mutual exclusion for work belonging to the *instance*.
 
-    ``SyncLease`` lives in a user's own database because the writes it guards
-    land there. This one cannot: what it arbitrates — who runs the background
-    pollers this tick — is not any one user's, and a lease is only meaningful to
-    holders that can all see the same row. The registry is the only database
-    every process opens.
+    ``SyncLease`` lives in a user's database because the writes it guards land
+    there. This cannot: who runs the background pollers is nobody's user-level
+    decision, and a lease only means something to holders seeing the same row.
+    The registry is the one database every process opens.
 
-    One name in use: ``background-work``, taken by :mod:`backend.app.services.leadership`.
-    Whether the background work runs is one decision, and splitting it per
-    poller would let a process be leader for Strava and not for Wahoo — more
-    states to reason about, for no benefit.
+    One name in use: ``background-work``, taken by
+    :mod:`backend.app.services.leadership`.
     """
 
     __tablename__ = "registry_leases"

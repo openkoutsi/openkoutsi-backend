@@ -76,20 +76,14 @@ async def init_user_db(user_id: str) -> None:
 def _stamp_at_head(connection) -> None:
     """Record that a freshly created database is at the latest revision.
 
-    ``create_all`` builds the current schema but writes no ``alembic_version``
-    row, so without this a new user's database claims to be at no revision at
-    all and the next deploy replays every migration against it. That works —
-    every migration in this tree is idempotent — but it is real work per new
-    user, once, for nothing, and it defeats the "skip users already at head"
-    check in ``scripts/migrate_user_dbs.py`` for exactly the newest accounts
-    (issue #50).
+    ``create_all`` writes no ``alembic_version`` row, so without this a new
+    user's database claims no revision and the next deploy replays every
+    migration against it — harmless, since they are idempotent, but real work
+    for nothing, and it defeats the "skip users at head" check in
+    ``scripts/migrate_user_dbs.py`` (issue #50). ``docker-entrypoint.sh``
+    already does this for a fresh registry database.
 
-    The same thing ``docker-entrypoint.sh`` already does for a fresh registry
-    database, for the same reason.
-
-    Best-effort: a database that exists and is usable is worth more than a
-    stamp. If this fails the only cost is that the next migration run replays
-    rather than skips.
+    Best-effort: if it fails, the next migration run replays rather than skips.
     """
     from alembic.migration import MigrationContext
 
@@ -111,9 +105,8 @@ def _stamp_at_head(connection) -> None:
 def _user_script_directory():
     """The per-user migration tree, read once.
 
-    Cached because this is now on the path of *every* new user database rather
-    than once per deploy, and re-reading the ini per call re-parses it for
-    nothing.
+    Cached because this is on the path of every new user database rather than
+    once per deploy.
     """
     from pathlib import Path as _Path
 

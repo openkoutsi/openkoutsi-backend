@@ -1,33 +1,20 @@
 """One process at a time runs the background work (issue #50).
 
-The three ``lifespan`` pollers — both bridge pollers and the token-expiry sweep
-— are ``asyncio`` tasks started by whichever process boots. Two processes run
-two of each, and for the bridge pollers that is not merely wasteful: each drains
-the same unclaimed events, so an activity is imported twice, analysed twice and
-billed twice. It is the reason ``DEPLOY.md`` says to run exactly one process,
-and the reason ``--workers 2`` is not currently a safe thing to write down.
+Without this, two processes each start their own copy of the three ``lifespan``
+pollers, and both bridge pollers drain the same events — an activity imported,
+analysed and billed twice.
 
-**A per-cycle claim, not a term of office.** The obvious shape is "elect a
-leader, it holds leadership until it dies", and it is the wrong one here. Every
-lease carries a deadline — that is how a holder that dies frees it — and the
-token-expiry sweep's cycle is 24 hours, which no sane deadline can span. Holding
-leadership across cycles therefore needs a renewal task purely to keep a claim
-alive between two pieces of work, where claiming at the top of each cycle needs
-nothing. A process that loses a tick simply skips it; the next one is 60 seconds
-away.
+The claim is taken per cycle rather than held as a term of office: a lease needs
+a deadline to survive a dead holder, and no sane deadline spans the expiry
+sweep's 24 hours. A process that loses a tick just skips it.
 
-Renewal is still needed *within* a cycle, because a cycle is not instant: a
-bridge poll can process a hundred events, each a FIT download and parse. So the
-deadline is short (a process that dies frees the work quickly) and pushed out
-while the holder is demonstrably alive. The two concerns are separated onto
-their own tasks, so a slow drain can never starve its own renewal.
+Renewal is still needed *within* a cycle (a bridge poll can be a hundred FIT
+downloads), so the deadline is short and pushed out on its own task — a slow
+drain cannot starve its own renewal.
 
-**Losing the lease mid-cycle cancels the work.** Finishing the cycle first is
-tempting and wrong: a lapsed deadline means another process may already be
-draining the same queue, and two processes doing that is the duplicate import
-this exists to prevent. Cancellation is safe on all three — a bridge event is
-not claimed until it has been processed, so a cancelled one is simply re-served
-on the next tick, and the expiry sweep commits its progress per token.
+Losing the lease mid-cycle cancels the work rather than finishing it: another
+process may already be draining the same queue. Safe on all three — a bridge
+event is not acked until processed, and the expiry sweep commits per token.
 """
 
 from __future__ import annotations
@@ -46,20 +33,16 @@ from backend.app.models.registry_orm import RegistryLease
 
 log = logging.getLogger(__name__)
 
-#: The one lease name. "Who runs the background work" is a single decision —
-#: one per poller would let a process be leader for Strava and not for Wahoo,
-#: which is more states to reason about for no benefit.
+#: One lease for all three pollers — per-poller leases would let a process be
+#: leader for Strava and not for Wahoo, for no benefit.
 BACKGROUND_WORK = "background-work"
 
-#: How long a claim outlives the holder that stopped renewing it. Four missed
-#: renewals, so a transient registry hiccup does not hand the work away, while a
-#: process that actually died frees it inside two minutes rather than inside a
-#: cycle.
+#: Four missed renewals, so a registry hiccup does not hand the work away but a
+#: dead process frees it in two minutes.
 LEASE_TTL = timedelta(seconds=120)
 RENEW_EVERY_S = 30.0
 
-#: How long a process that lost the claim waits before trying again. Jittered,
-#: so N standbys that started together do not all wake into the same contention.
+#: Standby retry, jittered so simultaneous starts do not collide.
 STANDBY_POLL_S = 15.0
 STANDBY_JITTER_S = 5.0
 
@@ -67,10 +50,9 @@ STANDBY_JITTER_S = 5.0
 async def _renew_until_lost(token: str, lost: asyncio.Event) -> None:
     """Keep the claim alive; set ``lost`` the moment it is not.
 
-    Runs as its own task so that however long the work takes, renewal keeps its
-    own cadence. An exception here is treated as loss: continuing to work on the
-    strength of a claim we could not confirm is the failure mode this module
-    exists to prevent, and the cost of being wrong is one skipped tick.
+    Its own task, so renewal keeps its cadence however long the work takes. An
+    exception counts as loss — working on a claim we could not confirm is the
+    failure this module prevents, and being wrong costs one skipped tick.
     """
     try:
         while True:
@@ -96,20 +78,17 @@ async def _renew_until_lost(token: str, lost: asyncio.Event) -> None:
 async def hold_background_work() -> AsyncIterator[asyncio.Event]:
     """Wait until this process owns the background work, then hold it.
 
-    Yields an event that is set if the claim is ever lost, so the caller can
-    stop rather than keep working on a claim it no longer has.
+    Yields an event set if the claim is ever lost, so the caller can stop.
 
-    Uses ``acquire``/``renew``/``release`` rather than :func:`leases.hold`
-    deliberately: ``hold`` logs a warning every time it fails to take a lease,
-    which for a standby polling every fifteen seconds would be a log line every
-    fifteen seconds, forever, on every process that is not the leader. Failing
-    to win an election is not a warning.
+    Uses ``acquire``/``renew``/``release`` rather than :func:`leases.hold`,
+    whose warning on a failed acquisition would be a log line every 15 s
+    forever on every standby. Failing to win an election is not a warning.
     """
     token: Optional[str] = None
     while token is None:
         async with registry_session() as session:
-            # `wait=0` is exactly one attempt: a loser should go and stand by,
-            # not queue behind the winner for a lease measured in minutes.
+            # One attempt: a loser stands by rather than queueing behind the
+            # winner for a lease measured in minutes.
             token = await leases.acquire(
                 session, RegistryLease, BACKGROUND_WORK, ttl=LEASE_TTL, wait=0
             )
@@ -129,11 +108,9 @@ async def hold_background_work() -> AsyncIterator[asyncio.Event]:
             await renewer
         except asyncio.CancelledError:
             pass
-        # Releasing on the way out is what makes a redeploy hand over in
-        # milliseconds instead of after a full TTL. Shielded, because this runs
-        # on the shutdown path where the surrounding task is already being
-        # cancelled, and an unreleased lease means no background work anywhere
-        # until it expires.
+        # Releasing here is what makes a redeploy hand over in milliseconds
+        # rather than after a full TTL. Shielded because this runs on the
+        # shutdown path, where the surrounding task is already cancelled.
         if not lost.is_set():
             try:
                 await asyncio.shield(_release(token))
@@ -156,9 +133,8 @@ async def run_until_lost(
 ) -> None:
     """Run ``work`` every ``interval_s`` for as long as the claim holds.
 
-    Returns when the claim is lost — mid-cycle if necessary. The caller is
-    expected to be inside :func:`hold_background_work`, which is what makes
-    "returned" mean "stand by and try again" rather than "finished".
+    Returns when the claim is lost, mid-cycle if necessary. Callers run inside
+    :func:`hold_background_work`, so "returned" means "stand by", not "done".
     """
     while not lost.is_set():
         cycle = asyncio.create_task(_guarded(work, label))
@@ -167,16 +143,16 @@ async def run_until_lost(
             {cycle, loss}, return_when=asyncio.FIRST_COMPLETED
         )
         if cycle not in done:
-            # The claim went first. Stop this cycle where it stands: another
-            # process may already be doing the same work.
+            # Claim lost first — stop here, another process may already be
+            # doing the same work.
             cycle.cancel()
             try:
                 await cycle
             except asyncio.CancelledError:
                 pass
             log.info("Stopped %s mid-cycle after losing the lease", label)
-        # Awaited, not merely cancelled: an unretrieved cancelled task surfaces
-        # as "Task was destroyed but it is pending" at loop teardown.
+        # Awaited, not just cancelled: an unretrieved cancelled task surfaces as
+        # "Task was destroyed but it is pending" at loop teardown.
         loss.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await loss

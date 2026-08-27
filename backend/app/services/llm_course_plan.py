@@ -398,12 +398,10 @@ async def generate_course_plan_bg(
             # writes back out — the callbacks cannot do it themselves, being
             # synchronous and unable to read another session's commit.
             if not await _run_is_current(session, course_id, run_id):
-                # Only when **nobody** owns the row. This surface had run tokens
-                # first and the other three copied this block from it, including
-                # the defect: keyed on the id alone, a slow run that lost its
-                # claim to a *re-trigger* blanked the columns the live run was
-                # writing. When a newer run holds the token the correct action
-                # is none at all — it overwrites every one of these itself.
+                # Only when **nobody** owns the row. This surface had run
+                # tokens first and the other three copied the defect from it:
+                # keyed on the id alone, a slow run that lost its claim to a
+                # re-trigger blanked the columns the live run was writing.
                 cleared = await session.execute(
                     update(Course)
                     .where(

@@ -30,8 +30,7 @@ router = APIRouter(prefix="/strava", tags=["strava"])
 def strava_bridge_poller_configured() -> bool:
     """Whether this instance has a Strava bridge to poll at all.
 
-    Checked before contending for the background-work lease, so an instance with
-    no Strava bridge never takes leadership it has nothing to do with.
+    Checked before contending for the background-work lease.
     """
     if not settings.bridge_url or not settings.bridge_secret:
         log.info("Strava bridge not configured — poller inactive")
@@ -49,23 +48,18 @@ async def _poll_bridge_once() -> None:
     """Claim a batch, process it, ack what succeeded (issue #50).
 
     The claim carries a deadline, so an event whose consumer dies mid-import
-    becomes deliverable again rather than being silently retired. That is why
-    the ack is conditional on success where the old `claim` call was not: with
-    `attempts` bounding redelivery, a transient failure no longer has to be
-    treated as terminal to avoid a retry loop.
+    becomes deliverable again. The ack is conditional on success where the old
+    `claim` call was not, since `attempts` now bounds redelivery.
     """
     async with httpx.AsyncClient(timeout=10.0) as http:
         client = BridgeClient(http, settings.bridge_url, settings.bridge_secret)
         events = await client.claim_batch()
 
         # The bridge spends an attempt on the whole batch at claim time, but
-        # this loop consumes them one at a time — and each event can be a FIT
-        # download, a parse and an LLM analysis, so a batch is minutes rather
-        # than milliseconds. Two routine events stop it mid-way: a redeploy
-        # cancels the supervisor, and losing the lease cancels the cycle by
-        # design. Without the handler below, every event not yet reached keeps
-        # its spent attempt and sits unavailable for the full visibility
-        # window — so a few deploys during a backlog drain retire its tail.
+        # this loop consumes them one at a time, and a batch is minutes rather
+        # than milliseconds. A redeploy or a lost lease stops it mid-way, so
+        # without the handler below every event not yet reached keeps its spent
+        # attempt for the full visibility window.
         unprocessed = {e.get("id", ""): e.get("claim_token") for e in events}
         try:
             for event in events:
@@ -77,9 +71,8 @@ async def _poll_bridge_once() -> None:
                     await process_webhook_event(event)
                 except Exception:
                     log.exception("Failed to process bridge event %s", event_id)
-                    # Back to the queue after a backoff, rather than held for
-                    # the deadline. A genuinely poisonous event still retires
-                    # once it has used up `max_delivery_attempts`.
+                    # Back to the queue after a backoff. A poisonous event still
+                    # retires once it has used up `max_delivery_attempts`.
                     await client.nack(event_id, claim_token)
                     unprocessed.pop(event_id, None)
                     continue
@@ -87,8 +80,7 @@ async def _poll_bridge_once() -> None:
                 await client.ack(event_id, claim_token)
                 unprocessed.pop(event_id, None)
         except asyncio.CancelledError:
-            # Hand back what was never attempted, so cancellation costs those
-            # events nothing.
+            # Hand back what was never attempted, so cancellation is free.
             for event_id, claim_token in unprocessed.items():
                 with contextlib.suppress(Exception):
                     await client.nack(event_id, claim_token)

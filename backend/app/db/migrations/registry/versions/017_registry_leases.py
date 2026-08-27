@@ -1,19 +1,15 @@
 """Add registry_leases (issue #50).
 
-The three ``lifespan`` pollers — both bridge pollers and the token-expiry sweep
-— are ``asyncio`` tasks with no leader election. Two processes therefore run two
-of each: the bridge queues get drained twice, and each drain is a real import
-and a real LLM bill. That is the assumption `DEPLOY.md` names when it says to
-run exactly one process.
+The three ``lifespan`` pollers had no leader election, so two processes ran two
+of each and drained the bridge queues twice — a real import and a real LLM bill
+each time. That is the assumption `DEPLOY.md` names in requiring one process.
 
-``sync_leases`` cannot hold this. It lives in a user's own database, because the
-writes it guards land there; who runs the background work for the whole instance
-is not any one user's decision, and a lease only means something to holders that
-can see the same row. The registry is the database every process opens.
+``sync_leases`` cannot hold this: it lives in a user's own database, and who
+runs the instance's background work is nobody's user-level decision. The
+registry is the database every process opens.
 
-Idempotent, like every migration in this tree: safe to run against DBs already
-migrated or created fresh by SQLAlchemy create_all (which builds the tables but
-neither stamps alembic).
+Idempotent, like every migration here — safe against DBs already migrated or
+built by ``create_all`` with no alembic stamp.
 """
 from alembic import op
 import sqlalchemy as sa

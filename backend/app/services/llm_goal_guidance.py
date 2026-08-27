@@ -338,22 +338,17 @@ async def generate_goal_guidance_bg(
                 label=f"Goal guidance for goal {goal_id}",
             )
 
-            # The guarantee. `stream_into_db` has committed by now, so a run
-            # that lost its claim takes its own writes back out; the callbacks
-            # cannot, being synchronous and unable to see another session's
-            # commit.
+            # `stream_into_db` has committed by now, so a run that lost its
+            # claim takes its own writes back out; the callbacks cannot, being
+            # synchronous and unable to see another session's commit.
             if not await run_is_current(
                 session, Goal, goal_id, Goal.guidance_run_id, run_id
             ):
-                # Only when **nobody** owns the row. There are two reasons the
-                # check above can fail and they want opposite actions: the row
-                # was settled (token cleared) and this run's writes are
-                # unwanted, or the row was *re-triggered* and a live run holds
-                # the token. In the second case that run is writing these very
-                # columns, and clearing them would destroy its work — it
-                # overwrites every one of them itself, so the correct action is
-                # none at all. Making the UPDATE conditional also closes the
-                # window between the check and the write.
+                # Only when **nobody** owns the row. The check above fails for two
+                # opposite reasons: the row was settled (token cleared), so these
+                # writes are unwanted; or it was re-triggered and a live run holds
+                # the token and is writing these very columns. Clearing in the
+                # second case would destroy that run's work.
                 cleared = await session.execute(
                     update(Goal)
                     .where(
