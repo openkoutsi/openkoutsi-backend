@@ -56,3 +56,14 @@ jobs:
           name: backend-coverage
           path: coverage.xml
           if-no-files-found: ignore
+
+      # Feeds the README badge and the per-file report. Deliberately not
+      # `fail_ci_if_error` — a coverage upload is reporting, and a Codecov
+      # outage (or a fork PR, which cannot read the secret) must not turn a
+      # green test run red.
+      - name: Send coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: ./coverage.xml
+          fail_ci_if_error: false

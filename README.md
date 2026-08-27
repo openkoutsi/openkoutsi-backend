@@ -1,5 +1,7 @@
 # openkoutsi-backend
 
+[![codecov](https://codecov.io/gh/openkoutsi/openkoutsi-backend/graph/badge.svg)](https://codecov.io/gh/openkoutsi/openkoutsi-backend)
+
 The backend (FastAPI API + bridge services + core library) for openkoutsi, a self-hosted cycling coaching platform. Upload FIT files or sync from Strava/Wahoo, track fitness metrics (Fitness/Fatigue/Form), and generate periodized training plans from your own server.
 
 > **koutsi** (κουτσί) — Finnish for "coach"
@@ -179,9 +181,19 @@ around 65 ms per test compiling DDL that SQLite then executes in under 2 ms, and
 ~1450 tests taking a database that was roughly a quarter of the suite's runtime. The
 statements are read back out of `sqlite_master` after a real `create_all`, so they are
 exactly what SQLAlchemy emits and there is no second description of the schema to
-drift. CI measures coverage with `COVERAGE_CORE=sysmon` (`sys.monitoring`, Python
-3.12+) instead of the default C trace function, which costs a few percent rather than
-the ~75% the tracer adds.
+drift.
+
+CI measures coverage with `COVERAGE_CORE=sysmon` (`sys.monitoring`, Python 3.12+)
+rather than the default C trace function, and uploads `coverage.xml` to Codecov —
+that is where the badge at the top comes from. The tracer is both slower and, here,
+wrong: it takes the suite from 4m04 to 6m22, and it reports **80%** where
+`sys.monitoring` reports **91%**. The gap is not noise. It is almost entirely
+`backend/app/api/*`: `auth.py` reads 44% under the tracer and 92% under
+`sys.monitoring`, `chat.py` 52% against 98%, `courses.py` 47% against 95%. Those are
+`async` route handlers doing their database work through SQLAlchemy's asyncio layer,
+which runs the sync half inside greenlets; a stack-based trace function loses the
+frames across a greenlet switch, so half of the HTTP API looked untested when it was
+not. 1361 lines across 40 files were being under-counted that way.
 
 ## Environment variables
 
