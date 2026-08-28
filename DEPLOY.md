@@ -337,6 +337,26 @@ This step is only needed when upgrading an existing deployment — new installs 
 > redeploy that interrupted a generation. The sweep walks `data/users/*/user.db`
 > and inherits the same single-process assumption as the bridge pollers.
 
+> **Note:** per-user migration `028_achievements_dirty` adds a nullable
+> `athletes.achievements_dirty_at` column. It adds no rows, deletes none,
+> backfills nothing, and needs no new environment variables. Applied
+> automatically by the entrypoint's per-user migration loop, or by the helper
+> script above. **No recompute is required afterwards**: NULL means "no
+> achievement recompute is owed", which is correct for every existing athlete
+> because the code this replaces reconciled eagerly on every write.
+>
+> Related runtime behaviour, needing no configuration: achievement unlocks are no
+> longer reconciled inline on every upload, edit and sync. Those paths now stamp
+> this column and return; the reconcile — which re-reads the athlete's entire
+> history and every plan, and so made importing a season quadratic — runs on the
+> next `GET /api/achievements`, on the daily first read of
+> `GET /api/athlete/training-status`, during a data export, or in a new daily
+> background sweep for an athlete who reads none of those. The visible change is
+> that the inbox message announcing new badges arrives on the athlete's next app
+> load rather than at upload time; the badges themselves are identical, since
+> unlocks are a pure function of the data. Expect an occasional
+> `Achievement sweep settled N athlete(s)` line.
+
 ### Backing up before a migration
 
 Per-user databases run in **WAL mode**, so `cp user.db` on its own can miss
@@ -386,9 +406,10 @@ uv run uvicorn backend.main:app --host 0.0.0.0 --port 8000
 **Run exactly one process — no `--workers`, no gunicorn.** The backend is
 single-process by design, and several things depend on that:
 
-- The **bridge pollers** and the **token-expiry sweep** now run under a single
-  claim on the registry (`registry_leases`, name `background-work`), so only one
-  process runs them at a time and a second stands by. The event protocol
+- The **bridge pollers**, the **token-expiry sweep** and the **achievement
+  sweep** now run under a single claim on the registry (`registry_leases`, name
+  `background-work`), so only one process runs them at a time and a second stands
+  by. The event protocol
   underneath carries a deadline too: a consumer claims a batch, processes it and
   acks what succeeded, and an unacked claim becomes deliverable again once it
   expires. Two processes therefore no longer drain the same events.

@@ -15,6 +15,17 @@ async def _log_ride(client, auth_headers, *, day, **fields):
     return await client.post("/api/activities", json=payload, headers=auth_headers)
 
 
+async def _settle(client, auth_headers):
+    """Run the reconcile that logging a ride now only *marks* (issue #69).
+
+    Uploads mark the athlete dirty and return — the full-history recompute they
+    used to do inline made importing a season quadratic. Reading the achievements
+    is what settles the flag, writes the unlock rows and emits the inbox message,
+    which is what the dashboard does on the athlete's next load anyway.
+    """
+    return await client.get("/api/achievements", headers=auth_headers)
+
+
 class TestGetAchievements:
     async def test_new_athlete_gets_a_catalogue_and_no_unlocks(self, client, auth_headers):
         resp = await client.get("/api/achievements", headers=auth_headers)
@@ -298,6 +309,7 @@ class TestEngagementBadges:
 class TestInboxNotification:
     async def test_unlocks_land_in_the_inbox(self, client, auth_headers):
         await _log_ride(client, auth_headers, day=date.today())
+        await _settle(client, auth_headers)
 
         messages = (await client.get("/api/messages", headers=auth_headers)).json()
 
@@ -310,6 +322,7 @@ class TestInboxNotification:
     ):
         """The whole point of the message: which badge, not how many."""
         await _log_ride(client, auth_headers, day=date.today())
+        await _settle(client, auth_headers)
 
         messages = (await client.get("/api/messages", headers=auth_headers)).json()
         msg = [m for m in messages["items"] if m["type"] == "achievement_unlocked"][0]
@@ -325,6 +338,7 @@ class TestInboxNotification:
             client, auth_headers, day=date.today(),
             duration_s=6 * 3600, distance_m=180_000, elevation_m=2_500,
         )
+        await _settle(client, auth_headers)
 
         messages = (await client.get("/api/messages", headers=auth_headers)).json()
 
@@ -338,6 +352,7 @@ class TestInboxNotification:
             client, auth_headers, day=date.today(),
             duration_s=6 * 3600, distance_m=180_000, elevation_m=2_500,
         )
+        await _settle(client, auth_headers)
 
         messages = (await client.get("/api/messages", headers=auth_headers)).json()
         msg = [m for m in messages["items"] if m["type"] == "achievement_unlocked"][0]
@@ -357,6 +372,7 @@ class TestInboxNotification:
             client, auth_headers, day=date.today(),
             duration_s=6 * 3600, distance_m=180_000, elevation_m=2_500,
         )
+        await _settle(client, auth_headers)
 
         messages = (await client.get("/api/messages", headers=auth_headers)).json()
         msg = [m for m in messages["items"] if m["type"] == "achievement_unlocked"][0]
@@ -419,3 +435,120 @@ class TestGoalBadges:
         assert ("goals_reached", 1.0) not in {
             (u["achievement_id"], u["tier"]) for u in body["unlocked"]
         }
+
+
+class TestWritesDoNotRecompute:
+    """The point of issue #69.
+
+    ``recompute_achievements`` re-reads the athlete's entire activity history and
+    every plan; it has no incremental path. Running it inline on every ingest
+    event made importing a season N events × O(N) activities, for a result only
+    the last pass kept. Writes now mark and return.
+    """
+
+    @staticmethod
+    def _count_scans(monkeypatch):
+        """Count full-history scans, whoever triggers them."""
+        from backend.app.services import achievements as svc
+
+        real = svc.compute_achievements
+        calls = {"n": 0}
+
+        async def counting(*args, **kwargs):
+            calls["n"] += 1
+            return await real(*args, **kwargs)
+
+        monkeypatch.setattr(svc, "compute_achievements", counting)
+        return calls
+
+    async def test_edits_do_not_scan_history(
+        self, client, auth_headers, monkeypatch
+    ):
+        created = await _log_ride(client, auth_headers, day=date.today())
+        activity_id = created.json()["id"]
+        await _settle(client, auth_headers)
+
+        calls = self._count_scans(monkeypatch)
+        for rpe in range(1, 6):
+            resp = await client.patch(
+                f"/api/activities/{activity_id}",
+                json={"rpe": rpe},
+                headers=auth_headers,
+            )
+            assert resp.status_code == 200
+
+        # Five edits used to cost five passes over the whole history.
+        assert calls["n"] == 0
+
+    async def test_uploads_do_not_scan_history(
+        self, client, auth_headers, monkeypatch
+    ):
+        calls = self._count_scans(monkeypatch)
+
+        for offset in range(5):
+            resp = await _log_ride(
+                client, auth_headers, day=date.today() - timedelta(days=offset)
+            )
+            assert resp.status_code in (200, 201)
+
+        assert calls["n"] == 0
+
+    async def test_one_read_settles_the_whole_batch(
+        self, client, auth_headers, monkeypatch
+    ):
+        """And the deferred result is the one an eager recompute would have given."""
+        for offset in range(5):
+            await _log_ride(
+                client, auth_headers,
+                day=date.today() - timedelta(days=offset),
+                duration_s=3600 * (offset + 1),
+            )
+
+        calls = self._count_scans(monkeypatch)
+        body = (await _settle(client, auth_headers)).json()
+
+        assert calls["n"] == 1
+        assert body["progress"]["activity_count"] == 5.0
+        unlocked = {(u["achievement_id"], u["tier"]) for u in body["unlocked"]}
+        assert ("activity_count", 1.0) in unlocked
+
+    async def test_the_inbox_message_waits_for_the_read(self, client, auth_headers):
+        """The one behavioural trade: unlocks are announced on the next read.
+
+        Accepted deliberately — the message is an in-app inbox row, so it is
+        unreadable until the athlete opens the app, and the dashboard's
+        achievements card is what settles it on that same load.
+        """
+        await _log_ride(client, auth_headers, day=date.today())
+
+        messages = (await client.get("/api/messages", headers=auth_headers)).json()
+        assert [
+            m for m in messages["items"] if m["type"] == "achievement_unlocked"
+        ] == []
+
+        await _settle(client, auth_headers)
+
+        messages = (await client.get("/api/messages", headers=auth_headers)).json()
+        assert len(
+            [m for m in messages["items"] if m["type"] == "achievement_unlocked"]
+        ) == 1
+
+    async def test_a_deleted_activity_still_revokes_its_badge(
+        self, client, auth_headers
+    ):
+        """Deferring must not turn a revoke into a badge the history won't support."""
+        created = await _log_ride(
+            client, auth_headers, day=date.today(), elevation_m=2_500,
+        )
+        activity_id = created.json()["id"]
+        body = (await _settle(client, auth_headers)).json()
+        assert any(u["achievement_id"] == "single_ride_elevation" for u in body["unlocked"])
+
+        assert (
+            await client.delete(
+                f"/api/activities/{activity_id}", headers=auth_headers
+            )
+        ).status_code in (200, 204)
+
+        body = (await _settle(client, auth_headers)).json()
+        assert body["unlocked"] == []

@@ -87,6 +87,10 @@ async def _background_work() -> None:
         wahoo_bridge_poller_configured,
         wahoo_bridge_poller_once,
     )
+    from backend.app.services.achievements_sweep import (
+        SWEEP_INTERVAL_SECONDS as ACHIEVEMENTS_SWEEP_INTERVAL_SECONDS,
+        achievements_sweep_once,
+    )
     from backend.app.services.leadership import hold_background_work, run_until_lost
     from backend.app.services.pat_expiry import (
         SWEEP_INTERVAL_SECONDS,
@@ -97,6 +101,14 @@ async def _background_work() -> None:
     # take a claim it has nothing to do with.
     jobs: list[tuple[str, float, object]] = [
         ("PAT expiry sweep", float(SWEEP_INTERVAL_SECONDS), pat_expiry_sweep_once),
+        # Settles the athletes a write path marked but no read has reconciled
+        # since (issue #69). Unconditional: unlike the pollers there is nothing
+        # to configure, and an instance with no dirty athletes sweeps nothing.
+        (
+            "Achievement sweep",
+            float(ACHIEVEMENTS_SWEEP_INTERVAL_SECONDS),
+            achievements_sweep_once,
+        ),
     ]
     if strava_bridge_poller_configured():
         jobs.insert(0, ("Strava bridge poll", 60.0, strava_bridge_poller_once))

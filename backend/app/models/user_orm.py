@@ -68,6 +68,16 @@ class Athlete(UserBase):
     # over the run that replaced it. Mirrors `Course.plan_run_id` (issue #50).
     training_status_run_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
+    # Set by every write path that can change what the athlete has earned, and
+    # cleared by the reconcile that settles it (issue #69). Achievements are the
+    # one piece of derived state with no incremental path — `recompute_achievements`
+    # re-reads the entire activity history and every plan — so doing it inline per
+    # ingest event made a season-long import quadratic. Writes now mark; reads and
+    # the daily sweep settle. NULL means nothing is owed.
+    achievements_dirty_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now

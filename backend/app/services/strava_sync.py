@@ -213,6 +213,11 @@ async def _process_event_for_user(
                         await recalculate_from(athlete.id, start_date, session)
                 else:
                     await session.commit()
+                # A higher-priority source can restate distance, elevation or
+                # sport type on an activity that already exists, and all three
+                # feed badges (issue #69).
+                from backend.app.services.achievements import mark_achievements_dirty
+                await mark_achievements_dirty(athlete.id, session)
                 return
 
             activity = Activity(
@@ -263,10 +268,10 @@ async def _process_event_for_user(
         # the deterministic adherence snapshot so the score moves on ingest.
         from backend.app.services.activity_workout_matcher import find_and_link_workout
         from backend.app.services.plan_adherence import catch_up_adherence
-        from backend.app.services.achievements import recompute_achievements_safe
+        from backend.app.services.achievements import mark_achievements_dirty
         await find_and_link_workout(session, athlete.id, activity)
         await catch_up_adherence(athlete.id, session)
-        await recompute_achievements_safe(athlete.id, session)
+        await mark_achievements_dirty(athlete.id, session)
 
         app_cfg = athlete.app_settings or {}
         # Issue #9: skip instance-paid auto hooks for denied users on a gated
@@ -323,6 +328,12 @@ async def _process_event_for_user(
 
         await session.commit()
 
+        # Unlocks track the data, not the events that produced it, so losing the
+        # ride that earned a tier has to revoke it — exactly as deleting the
+        # activity through the API does (issue #69).
+        from backend.app.services.achievements import mark_achievements_dirty
+        await mark_achievements_dirty(athlete.id, session)
+
         if start_date:
             from backend.app.services.metrics_engine import recalculate_from
             await recalculate_from(athlete.id, start_date, session)
@@ -351,3 +362,8 @@ async def _process_event_for_user(
         if "type" in updates or "sport_type" in updates:
             act.sport_type = updates.get("sport_type") or updates.get("type")
         await session.commit()
+
+        # `sport_type` is what the multisport badge counts distinct values of, so
+        # a re-typed ride can earn or un-earn a tier (issue #69).
+        from backend.app.services.achievements import mark_achievements_dirty
+        await mark_achievements_dirty(athlete.id, session)

@@ -19,7 +19,7 @@ from backend.app.schemas.goals import (
     GoalUpdate,
 )
 from backend.app.schemas.pagination import Page, PageParams, paginate_params
-from backend.app.services.achievements import recompute_achievements_safe
+from backend.app.services.achievements import mark_achievements_dirty
 from backend.app.services.stranded_runs import (
     begin_goal_guidance_run,
     pending_timed_out,
@@ -89,7 +89,7 @@ async def update_goal(
     await session.refresh(goal)
     # Marking a goal achieved can unlock a badge (issue #33); un-marking it
     # takes the badge back, since unlocks track the data rather than events.
-    await recompute_achievements_safe(athlete.id, session)
+    await mark_achievements_dirty(athlete.id, session)
     return goal
 
 

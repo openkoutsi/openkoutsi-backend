@@ -311,7 +311,9 @@ class TestProcessEventUpdate:
 
         assert act.name == "Evening Ride"
         assert act.sport_type == "VirtualRide"
-        session.commit.assert_called_once()
+        # Two commits: the edit itself, then `mark_achievements_dirty` recording
+        # that a re-typed ride can move the multisport badge (issue #69).
+        assert session.commit.await_count == 2
 
     async def test_update_no_op_when_empty_updates(self):
         athlete = _make_athlete()
