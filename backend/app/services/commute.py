@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Iterable, Optional
+from typing import Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,7 +35,6 @@ from openkoutsi.commute import (
     match_commute,
     near_miss_criteria,
     parse_rules,
-    propose_rule,
 )
 from backend.app.core.timezones import resolve_zone
 from backend.app.models.user_orm import Activity
@@ -347,17 +346,6 @@ async def labelled_samples(session: AsyncSession, athlete) -> list[RideSample]:
         for activity in result.scalars()
         if has_label(activity)
     ]
-
-
-async def propose_from_history(
-    session: AsyncSession, athlete, *, rule_id: str = "proposed"
-) -> Optional[CommuteRule]:
-    """A rule describing the athlete's own labelled commutes, or None.
-
-    Returns None below the ten-ride floor (issue #63): clustering three rides
-    produces a confident-looking rule out of nothing.
-    """
-    return propose_rule(await labelled_samples(session, athlete), rule_id=rule_id)
 
 
 async def rule_feedback(session: AsyncSession, athlete) -> dict:

@@ -190,6 +190,45 @@ class TestAnsweringASuggestion:
         # Accepted, then un-applied: the ride is not suggested again.
         assert _commute_state(resp.json()) in ("accepted", "dismissed")
 
+    async def test_dismissing_a_ride_you_had_accepted_takes_the_label_back_off(
+        self, client, auth_headers
+    ):
+        """The chip's "No" after an accept — changing your mind on the activity page.
+
+        The label has to come *off*, not just the state flip: leaving it applied
+        would mean a ride the athlete has just said is not a commute still counts
+        toward the commuter badge and still skips the RPE prompt.
+        """
+        await _set_rules(client, auth_headers, [MORNING_EVENING_RULE])
+        ride = await _ride(client, auth_headers)
+        await client.patch(
+            f"/api/activities/{ride['id']}",
+            json={"label_answers": {"commute": "accepted"}},
+            headers=auth_headers,
+        )
+
+        resp = await client.patch(
+            f"/api/activities/{ride['id']}",
+            json={"label_answers": {"commute": "dismissed"}},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["labels"] == []
+        assert _commute_state(resp.json()) == "dismissed"
+
+    async def test_accepting_twice_is_harmless(self, client, auth_headers):
+        """The bulk-review screen can answer a ride the prompt already answered."""
+        await _set_rules(client, auth_headers, [MORNING_EVENING_RULE])
+        ride = await _ride(client, auth_headers)
+        for _ in range(2):
+            resp = await client.patch(
+                f"/api/activities/{ride['id']}",
+                json={"label_answers": {"commute": "accepted"}},
+                headers=auth_headers,
+            )
+            assert resp.status_code == 200
+        assert resp.json()["labels"] == ["commute"]
+
     @pytest.mark.parametrize("answer", ["maybe", "pending", "", "yes"])
     async def test_an_unknown_answer_is_rejected(self, client, auth_headers, answer):
         ride = await _ride(client, auth_headers)
@@ -208,6 +247,43 @@ class TestAnsweringASuggestion:
             headers=auth_headers,
         )
         assert resp.status_code == 422
+
+
+class TestStalePendingSuggestions:
+    async def test_a_provider_flag_clears_a_suggestion_left_pending(
+        self, session, seeded_athlete
+    ):
+        """Strava's flag can land on a ride a rule had already flagged.
+
+        Leaving the pending suggestion in place would show the athlete a "looks
+        like a commute — yes/no?" prompt about a ride already labelled one.
+        """
+        from backend.app.services.commute import (
+            adopt_provider_flag,
+            evaluate,
+            rules_for,
+        )
+        from openkoutsi.commute import parse_rules
+
+        activity = Activity(
+            id="stale-pending",
+            athlete_id=seeded_athlete.id,
+            sport_type="Ride",
+            start_time=datetime(2026, 8, 26, 7, 30, tzinfo=timezone.utc),
+            duration_s=1200,
+            distance_m=5400.0,
+            status="processed",
+        )
+        rules = parse_rules([MORNING_EVENING_RULE])
+        assert evaluate(activity, rules, None) == "pending"
+
+        adopt_provider_flag(activity, True)
+        assert activity.labels == ["commute"]
+
+        # A later pass over an already-labelled ride withdraws nothing and
+        # leaves the accepted answer standing.
+        assert evaluate(activity, rules, None) is None
+        assert activity.label_suggestions["commute"]["state"] == "accepted"
 
 
 class TestDismissalIsDurable:
