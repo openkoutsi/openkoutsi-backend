@@ -55,6 +55,7 @@ from backend.app.services.providers.base import NormalizedActivity
 from backend.app.services.providers.registry import PROVIDERS
 from backend.app.services.weight import effective_weight_for, load_weight_log, w_per_kg
 from backend.app.services.aerobic_metrics import apply_aerobic_metrics
+from backend.app.services.commute import adopt_provider_flag, evaluate_activity
 from openkoutsi.training_math import (
     calculate_load,
     compute_distance_bests,
@@ -603,6 +604,11 @@ async def sync_provider_activities(
                     avg_cadence=norm.avg_cadence,
                     status="pending",
                 )
+                # The provider's own commute flag, where it has one, is the athlete's
+                # assertion rather than our guess — so it is applied outright instead
+                # of being suggested (issue #63). Done before the rules ever run, so
+                # a flagged ride never also collects a pending suggestion.
+                adopt_provider_flag(activity, norm.commute)
                 session.add(activity)
                 await session.flush()
 
@@ -782,6 +788,12 @@ async def _apply_import(
         intensity, variability_index(np_val, activity.avg_power)
     )
     activity.workout_category = category.value if category else None
+
+    # Distance, duration and start time are all set by now, so the rules have
+    # what they need (issue #63). A provider that carries its own commute flag
+    # is handled separately at the point the payload is read — that one is the
+    # athlete's own assertion and is applied, not suggested.
+    await evaluate_activity(session, athlete, activity)
 
     _add_streams(activity, session, streams)
     _add_power_bests(activity, athlete, session, power_data, weight_log)

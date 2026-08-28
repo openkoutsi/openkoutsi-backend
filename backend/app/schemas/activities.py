@@ -22,12 +22,57 @@ def _aerobic_ratios(activity) -> dict[str, float | None]:
     }
 
 
+class LabelSuggestion(BaseModel):
+    """A label openkoutsi thinks applies, and what the athlete said about it.
+
+    ``state`` is ``pending`` (awaiting an answer), ``accepted`` or ``dismissed``.
+    ``source`` says what proposed it — ``rule:<id>`` for one of the athlete's own
+    commute rules, ``strava`` for the provider's own flag — so a client can
+    explain *why* the ride was picked out, and the athlete can go fix the rule
+    rather than dismissing the same wrong suggestion forever.
+    """
+
+    state: str
+    source: Optional[str] = None
+    at: Optional[str] = None
+
+
+def _clean_suggestions(raw: Any) -> dict[str, dict]:
+    """The suggestion column, with anything unreadable dropped.
+
+    Defensive despite this column having exactly one writer: a row written by a
+    future version, or hand-edited during support, must not turn every activity
+    read into a 500.
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, dict] = {}
+    for label, entry in raw.items():
+        if not isinstance(label, str) or not isinstance(entry, dict):
+            continue
+        state = entry.get("state")
+        if not isinstance(state, str):
+            continue
+        cleaned: dict[str, str] = {"state": state}
+        for key in ("source", "at"):
+            value = entry.get(key)
+            if isinstance(value, str):
+                cleaned[key] = value
+        out[label] = cleaned
+    return out
+
+
 class ActivityUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=200)
     workout_category: Optional[str] = None
     labels: Optional[list[str]] = None
     notes: Optional[str] = Field(None, max_length=5000)
     rpe: Optional[int] = Field(None, ge=1, le=10)
+    # Answering a suggestion (issue #63): ``{"commute": "accepted"}`` applies the
+    # label and records the answer in one write, so the label and its suggestion
+    # can never drift apart; ``"dismissed"`` records the refusal durably, which
+    # is what stops the same ride being suggested again after every reprocess.
+    label_answers: Optional[dict[str, str]] = None
 
 
 class FrontendAnalysisBody(BaseModel):
@@ -114,6 +159,10 @@ class ActivityResponse(BaseModel):
     decoupling_reason: Optional[str] = None
     workout_category: Optional[str] = None
     labels: list[str] = []
+    # Labels proposed but not (yet) applied — see `LabelSuggestion` and
+    # `services.commute`. Kept strictly apart from `labels` above, which is only
+    # ever what the athlete has confirmed.
+    label_suggestions: dict[str, LabelSuggestion] = {}
     notes: Optional[str] = None
     rpe: Optional[int] = None
     has_fit_file: bool = False
@@ -150,6 +199,7 @@ class ActivityResponse(BaseModel):
             **values,
             "sources": [s.provider for s in (activity.sources or [])],
             "labels": activity.labels or [],
+            "label_suggestions": _clean_suggestions(activity.label_suggestions),
             # Issue #43: a progress code only means anything while the run is in
             # flight. The analyzer clears it on the way out, but a task killed
             # between its last progress commit and settling would leave one
@@ -178,6 +228,40 @@ class ActivityListResponse(BaseModel):
     total: int
     page: int
     page_size: int
+
+
+class CommuteScanResponse(BaseModel):
+    """Outcome of looking at the whole back catalogue (issue #63)."""
+
+    scanned: int = 0
+    suggested: int = 0
+    applied: int = 0
+
+
+class CommuteRuleProposal(BaseModel):
+    """A rule derived from the athlete's own labelled commutes, if there are enough.
+
+    ``rule`` is null when the athlete has fewer than the ten labelled rides the
+    clustering needs — below that a "cluster" is a coincidence, and a
+    confident-looking rule built from three rides is worse than no proposal.
+    """
+
+    rule: Optional[dict] = None
+    sample_count: int = 0
+    min_samples: int
+
+
+class CommuteFeedback(BaseModel):
+    """What the athlete's own answers say about their rules being wrong.
+
+    Reported, never applied: silently widening a rule every time its output is
+    accepted is a feedback loop with no brake, and only the athlete knows
+    whether the 9 km ride was the commute or the long way round.
+    """
+
+    unmatched_manual_labels: int = 0
+    widen: list[dict] = []
+    review: list[dict] = []
 
 
 class RpeQueueResponse(BaseModel):

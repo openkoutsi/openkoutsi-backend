@@ -38,6 +38,12 @@ class NormalizedActivity:
     max_hr: Optional[float]
     avg_speed_ms: Optional[float]
     avg_cadence: Optional[float]
+    #: The provider's own "this was a commute" flag, when it has one (issue
+    #: #63). Strava carries it; nothing else we sync from does, hence the
+    #: default. ``None`` means "this provider does not say", which is different
+    #: from ``False`` — a provider default of "not a commute" must not overrule
+    #: the athlete's own rules, so only ``True`` is ever acted on.
+    commute: Optional[bool] = None
 
 
 class BaseProviderClient(ABC):

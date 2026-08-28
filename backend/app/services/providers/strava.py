@@ -212,4 +212,7 @@ def _normalize_activity(raw: dict) -> NormalizedActivity:
         max_hr=raw.get("max_heartrate"),
         avg_speed_ms=raw.get("average_speed"),
         avg_cadence=raw.get("average_cadence"),
+        # The athlete's own tick in Strava, not a guess of ours (issue #63).
+        # Read as a strict boolean: the key is absent on older payloads.
+        commute=raw.get("commute") is True,
     )

@@ -47,6 +47,8 @@ from backend.app.services.pat_expiry import (
     EMAIL_OPT_OUT_SETTING as PAT_EXPIRY_EMAIL_SETTING,
 )
 from backend.app.services.athlete_experience import VALID_EXPERIENCE_LEVELS
+from backend.app.services.commute import RULES_KEY, reevaluate_pending
+from openkoutsi.commute import parse_rule
 from backend.app.services.stranded_runs import (
     begin_training_status_run,
     pending_timed_out,
@@ -208,6 +210,7 @@ async def update_athlete(
     if body.date_of_birth is not None:
         athlete.date_of_birth = body.date_of_birth
     weight_changed = False
+    rules_changed = False
     if body.weight_kg is not None:
         weight_changed = True
         athlete.weight_kg = body.weight_kg
@@ -357,6 +360,46 @@ async def update_athlete(
             else:
                 new_settings["llm_api_key_enc"] = None
 
+        # Commute rules (issue #63). Validated here rather than left to the
+        # detector's defensive parser, because a rule the athlete *typed* and we
+        # silently ignore is a support ticket: the settings screen shows what
+        # they saved and detection quietly never fires. The parser stays
+        # forgiving about what is already stored; this endpoint is strict about
+        # what is arriving.
+        if RULES_KEY in new_settings:
+            raw_rules = new_settings.get(RULES_KEY)
+            if raw_rules is not None and not isinstance(raw_rules, list):
+                raise HTTPException(
+                    status_code=400, detail=f"Invalid {RULES_KEY}: must be a list of rules."
+                )
+            if isinstance(raw_rules, list):
+                parsed = [parse_rule(entry) for entry in raw_rules]
+                for index, rule in enumerate(parsed):
+                    if rule is None:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=(
+                                f"Invalid {RULES_KEY}[{index}]: a rule needs an id and at "
+                                "least one criterion. A rule with no criteria would match "
+                                "nothing."
+                            ),
+                        )
+                ids = [r.id for r in parsed if r is not None]
+                if len(set(ids)) != len(ids):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid {RULES_KEY}: rule ids must be unique.",
+                    )
+                # Stored normalised, so what comes back out is what the detector
+                # will actually use rather than whatever shape was posted. An
+                # empty list is kept as an empty list rather than being stripped
+                # by the None-deletion below — "I have no rules" is a state the
+                # athlete can choose, and it must survive the merge.
+                new_settings[RULES_KEY] = [r.as_dict() for r in parsed if r is not None]
+            rules_changed = new_settings[RULES_KEY] != (athlete.app_settings or {}).get(
+                RULES_KEY
+            )
+
         # Merge into existing settings. Explicit None values are treated as
         # deletions so callers can remove a key without a full-replace round-trip.
         merged = {**(athlete.app_settings or {}), **new_settings}
@@ -375,6 +418,15 @@ async def update_athlete(
     athlete.updated_at = datetime.now(timezone.utc)
     await session.commit()
     await session.refresh(athlete)
+
+    if rules_changed:
+        # Editing a rule re-evaluates rather than freezing what already fired
+        # (issue #63): a narrowed rule withdraws the suggestions it no longer
+        # stands behind, a widened one picks up what it now covers. Only
+        # unanswered activities are touched, so this can never resurrect a
+        # dismissal or undo an acceptance.
+        await reevaluate_pending(session, athlete)
+
     providers = await _get_connected_providers(ctx.user_id, registry_session)
     consent_ok = await _get_consent_accepted(ctx.user_id, registry_session)
     return _athlete_response(athlete, providers, consent_accepted=consent_ok)

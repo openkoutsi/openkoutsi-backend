@@ -2091,6 +2091,24 @@
             "description": "Only include activities carrying at least one of these labels (e.g. race, commute)"
           },
           {
+            "name": "suggested_label",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only activities with an unanswered suggestion for this label (issue #63). What the bulk-review screen filters on.",
+              "title": "Suggested Label"
+            },
+            "description": "Only activities with an unanswered suggestion for this label (issue #63). What the bulk-review screen filters on."
+          },
+          {
             "name": "exclude_labels",
             "in": "query",
             "required": false,
@@ -2311,7 +2329,7 @@
           "activities"
         ],
         "summary": "Pending RPE-rating queue",
-        "description": "Qualifying cycling activities still awaiting an RPE rating (issue #28).\n\nReturns activities that are cycling sports, ingested after the athlete's\n``rpe_head`` cursor, and still lack an ``rpe`` \u2014 oldest-first (by ingestion\n``created_at``). ``commute``-labelled rides are excluded so easy spins don't\nnag.\n\nThe cursor is stored in ``app_settings.rpe_head``. On the very first call\n(cursor unset) it is pinned to the athlete's most recent activity so the\nbacklog of their entire history is *not* surfaced; only rides ingested from\nthen on are prompted. Advancing the cursor is done by the caller via\n``PATCH /api/athlete`` (set ``app_settings.rpe_head`` to the handled\nactivity's ``created_at``).\n\n**Personal access token scope:** `activities:read`",
+        "description": "Qualifying cycling activities still awaiting an RPE rating (issue #28).\n\nReturns activities that are cycling sports, ingested after the athlete's\n``rpe_head`` cursor, and still lack an ``rpe`` \u2014 oldest-first (by ingestion\n``created_at``). ``commute``-labelled rides are excluded so easy spins don't\nnag.\n\nA ride with a *pending* commute suggestion is deliberately still in the\nqueue (issue #63). The prompt is where the athlete answers it \u2014 the client\nreads ``label_suggestions`` off each item and pre-ticks its \"This was a\ncommute\" box \u2014 so filtering suggested rides out here would remove them from\nthe one surface that asks. Only an answered suggestion, which by then has\napplied the label, takes a ride out.\n\nThe cursor is stored in ``app_settings.rpe_head``. On the very first call\n(cursor unset) it is pinned to the athlete's most recent activity so the\nbacklog of their entire history is *not* surfaced; only rides ingested from\nthen on are prompted. Advancing the cursor is done by the caller via\n``PATCH /api/athlete`` (set ``app_settings.rpe_head`` to the handled\nactivity's ``created_at``).\n\n**Personal access token scope:** `activities:read`",
         "operationId": "getRpeQueue",
         "responses": {
           "200": {
@@ -2320,6 +2338,123 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RpeQueueResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "activities:read"
+        }
+      }
+    },
+    "/api/activities/commute/scan": {
+      "post": {
+        "tags": [
+          "activities"
+        ],
+        "summary": "Look for commutes in the whole history",
+        "description": "Run the athlete's commute rules over their entire activity history.\n\nThe answer to an imported back catalogue \u2014 a decade of rides that arrived\nwith no provider flag and no labels, which the per-ingest hook will never\nsee. Deliberately an explicit request rather than something a rule edit does\non its own: it can touch tens of thousands of rows.\n\nSuggests; does not label. Only a rule the athlete marked ``auto_apply``\nwrites to `labels`, and Strava's own flag, which is handled at sync time.\n\n**Personal access token scope:** `activities:write`",
+        "operationId": "scanCommutes",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "force",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "boolean",
+              "description": "Re-examine activities the athlete has already answered. Off by default: a dismissal is meant to be durable.",
+              "default": false,
+              "title": "Force"
+            },
+            "description": "Re-examine activities the athlete has already answered. Off by default: a dismissal is meant to be durable."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommuteScanResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "activities:write"
+        }
+      }
+    },
+    "/api/activities/commute/proposal": {
+      "get": {
+        "tags": [
+          "activities"
+        ],
+        "summary": "A commute rule derived from your own labelled rides",
+        "description": "Propose rule parameters from the commutes the athlete has already labelled.\n\nWhat makes rule configuration something other than a chore: nobody is going\nto hand-type \"between 4.2 and 6.8 km, 06:41\u201308:12\", but they will happily\nnudge those numbers once something has proposed them.\n\nBuilt from `labels`, never from our own suggestions \u2014 a proposal should be\nderived from what the athlete confirmed, not from what we guessed.\n\n**Personal access token scope:** `activities:read`",
+        "operationId": "getCommuteRuleProposal",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommuteRuleProposal"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "activities:read"
+        }
+      }
+    },
+    "/api/activities/commute/feedback": {
+      "get": {
+        "tags": [
+          "activities"
+        ],
+        "summary": "Where your commute rules look wrong",
+        "description": "Rides the rules missed, and rules whose suggestions keep being dismissed.\n\nTwo signals read straight off the suggestion column rather than kept as\ncounters \u2014 `source` already records which rule fired, so there is nothing to\nkeep in sync and nothing to drift.\n\n**Personal access token scope:** `activities:read`",
+        "operationId": "getCommuteFeedback",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CommuteFeedback"
                 }
               }
             }
@@ -8039,6 +8174,14 @@
             "title": "Labels",
             "default": []
           },
+          "label_suggestions": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/LabelSuggestion"
+            },
+            "type": "object",
+            "title": "Label Suggestions",
+            "default": {}
+          },
           "notes": {
             "anyOf": [
               {
@@ -8489,6 +8632,14 @@
             "title": "Labels",
             "default": []
           },
+          "label_suggestions": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/LabelSuggestion"
+            },
+            "type": "object",
+            "title": "Label Suggestions",
+            "default": {}
+          },
           "notes": {
             "anyOf": [
               {
@@ -8656,6 +8807,20 @@
               }
             ],
             "title": "Rpe"
+          },
+          "label_answers": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Label Answers"
           }
         },
         "type": "object",
@@ -9598,6 +9763,89 @@
         ],
         "title": "ChatTurnBody",
         "description": "One question from the athlete.\n\n``message`` is the *only* thing the client sends. Everything the model\nactually receives \u2014 the system prompt, the scope policy, the replayed\nhistory \u2014 is built server-side in ``services.llm_chat``, which is the whole\ndifference between this and the ``/api/llm/chat`` proxy issue #45 removed."
+      },
+      "CommuteFeedback": {
+        "properties": {
+          "unmatched_manual_labels": {
+            "type": "integer",
+            "title": "Unmatched Manual Labels",
+            "default": 0
+          },
+          "widen": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Widen",
+            "default": []
+          },
+          "review": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Review",
+            "default": []
+          }
+        },
+        "type": "object",
+        "title": "CommuteFeedback",
+        "description": "What the athlete's own answers say about their rules being wrong.\n\nReported, never applied: silently widening a rule every time its output is\naccepted is a feedback loop with no brake, and only the athlete knows\nwhether the 9 km ride was the commute or the long way round."
+      },
+      "CommuteRuleProposal": {
+        "properties": {
+          "rule": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rule"
+          },
+          "sample_count": {
+            "type": "integer",
+            "title": "Sample Count",
+            "default": 0
+          },
+          "min_samples": {
+            "type": "integer",
+            "title": "Min Samples"
+          }
+        },
+        "type": "object",
+        "required": [
+          "min_samples"
+        ],
+        "title": "CommuteRuleProposal",
+        "description": "A rule derived from the athlete's own labelled commutes, if there are enough.\n\n``rule`` is null when the athlete has fewer than the ten labelled rides the\nclustering needs \u2014 below that a \"cluster\" is a coincidence, and a\nconfident-looking rule built from three rides is worse than no proposal."
+      },
+      "CommuteScanResponse": {
+        "properties": {
+          "scanned": {
+            "type": "integer",
+            "title": "Scanned",
+            "default": 0
+          },
+          "suggested": {
+            "type": "integer",
+            "title": "Suggested",
+            "default": 0
+          },
+          "applied": {
+            "type": "integer",
+            "title": "Applied",
+            "default": 0
+          }
+        },
+        "type": "object",
+        "title": "CommuteScanResponse",
+        "description": "Outcome of looking at the whole back catalogue (issue #63)."
       },
       "ConfirmEmailChangeRequest": {
         "properties": {
@@ -12046,6 +12294,42 @@
           "created_at"
         ],
         "title": "InvitationResponse"
+      },
+      "LabelSuggestion": {
+        "properties": {
+          "state": {
+            "type": "string",
+            "title": "State"
+          },
+          "source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source"
+          },
+          "at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "state"
+        ],
+        "title": "LabelSuggestion",
+        "description": "A label openkoutsi thinks applies, and what the athlete said about it.\n\n``state`` is ``pending`` (awaiting an answer), ``accepted`` or ``dismissed``.\n``source`` says what proposed it \u2014 ``rule:<id>`` for one of the athlete's own\ncommute rules, ``strava`` for the provider's own flag \u2014 so a client can\nexplain *why* the ride was picked out, and the athlete can go fix the rule\nrather than dismissing the same wrong suggestion forever."
       },
       "LinkActivityRequest": {
         "properties": {

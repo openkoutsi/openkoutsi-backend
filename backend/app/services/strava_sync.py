@@ -18,6 +18,7 @@ from sqlalchemy import select
 
 from backend.app.models.registry_orm import ProviderConnection
 from backend.app.models.user_orm import Activity, ActivitySource, Athlete
+from backend.app.services.commute import adopt_provider_flag
 from backend.app.services.provider_sync import (
     _DUPLICATE_WINDOW,
     activity_create_guard,
@@ -163,6 +164,9 @@ async def _process_event_for_user(
             max_hr=raw.get("max_heartrate"),
             avg_speed_ms=raw.get("average_speed"),
             avg_cadence=raw.get("average_cadence"),
+            # Strava's own commute flag — the athlete set it themselves, so it
+            # is applied rather than suggested (issue #63).
+            commute=raw.get("commute") is True,
         )
 
         # The dedup window and the create/attach that follows it run under the
@@ -235,6 +239,11 @@ async def _process_event_for_user(
                 avg_cadence=norm.avg_cadence,
                 status="pending",
             )
+            # The provider's own commute flag, where it has one, is the athlete's
+            # assertion rather than our guess — so it is applied outright instead
+            # of being suggested (issue #63). Done before the rules ever run, so
+            # a flagged ride never also collects a pending suggestion.
+            adopt_provider_flag(activity, norm.commute)
             session.add(activity)
             await session.flush()
 

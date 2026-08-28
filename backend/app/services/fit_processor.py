@@ -33,6 +33,7 @@ from backend.app.models.user_orm import (
     Athlete,
 )
 from backend.app.services.aerobic_metrics import apply_aerobic_metrics
+from backend.app.services.commute import evaluate_activity
 from backend.app.services.weight import effective_weight_for, load_weight_log, w_per_kg
 from backend.app.services.zone_times import compute_zone_times
 
@@ -146,6 +147,12 @@ async def process_activity_file(
     vi = variability_index(wp, activity.avg_power)
     category = classify_workout(intensity, vi)
     activity.workout_category = category.value if category else None
+
+    # Commute detection reads distance, duration and the local clock, all of
+    # which are set above, so it goes after them and before the commit (issue
+    # #63). It writes a *suggestion*, never the label — see
+    # `services.commute` for why those have to stay apart.
+    await evaluate_activity(session, athlete, activity)
 
     # Every channel is on the one 1 Hz clock the parser resampled onto, gaps as
     # None (issue #76), and ``to_json_stream`` is what keeps a NaN from ever
