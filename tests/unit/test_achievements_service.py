@@ -21,6 +21,7 @@ from backend.app.models.user_orm import (
 from backend.app.services.achievements import (
     compute_achievements,
     gamification_enabled,
+    mark_achievements_dirty,
     recompute_achievements,
 )
 
@@ -565,3 +566,124 @@ class TestPlanAndGoalRules:
         comp = await compute_achievements(seeded_athlete, session, today=_TODAY)
 
         assert comp.progress["goals_reached"] == 0
+
+
+# ── The dirty flag (issue #69) ───────────────────────────────────────────────
+
+class TestDirtyFlag:
+    """Writes mark, reads settle.
+
+    The reconcile has no incremental path — it re-reads the athlete's whole
+    history every time — so running it inline per ingest event made importing a
+    season quadratic. These pin the two halves of the split that replaced it.
+    """
+
+    async def test_marking_records_the_debt_without_paying_it(
+        self, session, seeded_athlete
+    ):
+        _activity(session, seeded_athlete, day=_TODAY, duration_s=3600)
+        await session.commit()
+
+        await mark_achievements_dirty(seeded_athlete.id, session)
+
+        assert seeded_athlete.achievements_dirty_at is not None
+        # The whole point: no reconcile ran, so no rows were written.
+        assert await _unlocks(session, seeded_athlete) == {}
+
+    async def test_a_settle_clears_the_mark(self, session, seeded_athlete):
+        _activity(session, seeded_athlete, day=_TODAY, duration_s=3600)
+        await session.commit()
+        await mark_achievements_dirty(seeded_athlete.id, session)
+
+        created = await _recompute(session, seeded_athlete)
+
+        assert created
+        assert seeded_athlete.achievements_dirty_at is None
+
+    async def test_a_settle_clears_the_mark_even_when_nothing_changed(
+        self, session, seeded_athlete
+    ):
+        """A no-op reconcile still has to drop the flag, or it pins forever."""
+        _activity(session, seeded_athlete, day=_TODAY, duration_s=3600)
+        await session.commit()
+        await _recompute(session, seeded_athlete)
+
+        await mark_achievements_dirty(seeded_athlete.id, session)
+        created = await _recompute(session, seeded_athlete)
+
+        assert created == []
+        assert seeded_athlete.achievements_dirty_at is None
+
+    async def test_the_mark_is_cleared_for_an_opted_out_athlete(
+        self, session, seeded_athlete
+    ):
+        """The mark deliberately doesn't check the preference, so the settle must.
+
+        Otherwise an athlete who turned gamification off stays in the sweep's
+        work list forever, for a recompute that can never produce anything.
+        """
+        _activity(session, seeded_athlete, day=_TODAY, duration_s=3600)
+        seeded_athlete.app_settings = {"gamification": False}
+        await session.commit()
+        await mark_achievements_dirty(seeded_athlete.id, session)
+
+        created, comp = await recompute_achievements(
+            seeded_athlete.id, session, today=_TODAY
+        )
+
+        assert created == []
+        assert comp is None
+        assert seeded_athlete.achievements_dirty_at is None
+
+    async def test_deferring_converges_on_the_same_rows(self, session, seeded_athlete):
+        """The property the whole change rests on.
+
+        Unlocks are a pure function of the data, so N writes followed by one
+        reconcile must produce exactly what reconciling after every write would.
+        """
+        for offset in range(5):
+            _activity(
+                session, seeded_athlete,
+                day=_TODAY - timedelta(days=offset),
+                duration_s=3600 * (offset + 1),
+            )
+            await session.commit()
+            await mark_achievements_dirty(seeded_athlete.id, session)
+        deferred = await _recompute(session, seeded_athlete)
+
+        # Same data, reconciled from scratch after every single write.
+        for row in list((await session.execute(select(AchievementUnlock))).scalars()):
+            await session.delete(row)
+        await session.commit()
+        eager = []
+        for _ in range(5):
+            eager.extend(await _recompute(session, seeded_athlete))
+
+        def key(rows):
+            return sorted((r.achievement_id, r.tier, r.achieved_on) for r in rows)
+
+        assert key(deferred) == key(eager)
+        assert deferred  # the comparison would be vacuous on two empty lists
+
+    async def test_a_failed_mark_leaves_the_session_usable(
+        self, session, seeded_athlete, monkeypatch
+    ):
+        """Same guarantee as the reconcile it replaced: never fail an upload.
+
+        A swallowed exception is not enough — the caller keeps using this session,
+        so a failure has to be rolled back or its next statement raises
+        ``PendingRollbackError``.
+        """
+        _activity(session, seeded_athlete, day=_TODAY, duration_s=3600)
+        await session.commit()
+
+        async def boom():
+            raise RuntimeError("commit exploded")
+
+        real_commit = session.commit
+        monkeypatch.setattr(session, "commit", boom)
+        await mark_achievements_dirty(seeded_athlete.id, session)
+        monkeypatch.setattr(session, "commit", real_commit)
+
+        rows = (await session.execute(select(Activity))).scalars().all()
+        assert len(rows) == 1

@@ -76,7 +76,7 @@ from openkoutsi.categorization import WorkoutCategory, classify_workout
 from openkoutsi.sport_matching import CYCLING_SPORT_TYPES
 from backend.app.services.activity_workout_matcher import find_and_link_workout
 from backend.app.services.plan_adherence import catch_up_adherence
-from backend.app.services.achievements import recompute_achievements_safe
+from backend.app.services.achievements import mark_achievements_dirty
 
 _MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB
 # The bulk-import request cap, which is a different question from the
@@ -288,7 +288,7 @@ async def _bg_process_and_recalculate(
             await find_and_link_workout(session, athlete_id, target_act)
             await recalculate_from(athlete_id, start_date, session)
             await catch_up_adherence(athlete_id, session)
-            await recompute_achievements_safe(athlete_id, session)
+            await mark_achievements_dirty(athlete_id, session)
 
         except Exception:
             try:
@@ -679,7 +679,7 @@ async def create_manual_activity(
     if payload.start_time is not None:
         await find_and_link_workout(session, athlete.id, activity)
         await catch_up_adherence(athlete.id, session)
-        await recompute_achievements_safe(athlete.id, session)
+        await mark_achievements_dirty(athlete.id, session)
 
     if load is not None and payload.start_time is not None:
         start_date = (
@@ -1124,7 +1124,7 @@ async def reprocess_activity(
 
     await find_and_link_workout(session, athlete.id, activity)
     await catch_up_adherence(athlete.id, session)
-    await recompute_achievements_safe(athlete.id, session)
+    await mark_achievements_dirty(athlete.id, session)
 
     # Update fitness metrics from this activity's date forward
     if activity.start_time is not None:
@@ -1205,7 +1205,7 @@ async def update_activity(
     await session.refresh(activity)
     # RPE, notes and labels all feed achievements, so an edit can earn (or
     # un-earn) a badge just as an upload can.
-    await recompute_achievements_safe(athlete.id, session)
+    await mark_achievements_dirty(athlete.id, session)
     return ActivityResponse.model_validate(activity)
 
 
@@ -1241,7 +1241,7 @@ async def delete_activity(
 
     # Unlocks are derived state: losing the activity that earned a tier must
     # revoke it, not leave a badge the history no longer supports.
-    await recompute_achievements_safe(athlete.id, session)
+    await mark_achievements_dirty(athlete.id, session)
 
     if start_date:
         background_tasks.add_task(_bg_recalculate, athlete.id, start_date, ctx.user_id)

@@ -24,7 +24,7 @@ from backend.app.schemas.plans import (
     GenerateUpcomingResultItem, PlanAdherenceSummary, PlanAdherencePoint,
 )
 from backend.app.models.user_orm import PlanAdherenceDaily
-from backend.app.services.achievements import recompute_achievements_safe
+from backend.app.services.achievements import mark_achievements_dirty
 from backend.app.services.plan_adherence import (
     score_plan, catch_up_adherence, workout_date, workout_match_score,
 )
@@ -386,7 +386,7 @@ async def update_plan(
     await session.refresh(plan)
     # Editing a plan's dates changes whether it counts as finished, so the plan
     # achievements (issue #33) may need to move with it.
-    await recompute_achievements_safe(athlete.id, session)
+    await mark_achievements_dirty(athlete.id, session)
     return _plan_response_with_adherence(plan)
 
 

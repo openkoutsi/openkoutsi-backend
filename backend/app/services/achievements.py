@@ -14,6 +14,20 @@ The reconcile is a full rewrite, not an append: rows are inserted, re-dated or
 self-heal their snapshots. Deleting an activity can therefore revoke a tier —
 that is the deliberate trade for never showing a badge the history no longer
 supports.
+
+Unlike those two, there is no incremental path here: every reconcile costs the
+athlete's lifetime history. So the split is *when*, not *how much* (issue #69):
+
+- **write paths mark**, with :func:`mark_achievements_dirty` — one indexed row
+  write, O(1) in history, so importing a season is N cheap marks rather than N
+  full scans,
+- **reads and the daily sweep settle**, with :func:`recompute_achievements` —
+  ``GET /achievements`` (which reconciles on every read anyway),
+  ``GET /athlete/training-status`` on its daily first-read cadence, and
+  ``achievements_sweep`` for an athlete who reads neither.
+
+Deferring costs nothing but latency: unlocks are a pure function of the data, so
+a late reconcile writes exactly the rows an eager one would have.
 """
 
 from __future__ import annotations
@@ -451,12 +465,27 @@ async def recompute_achievements(
     notifies on, and handing back the computation lets a read endpoint render
     the response without scanning the athlete's whole history a second time.
     Pass *athlete* when the caller already has the row.
+
+    Settles ``achievements_dirty_at`` (issue #69). A write landing *during* the
+    compute is cleared without having been seen, which is benign only because no
+    reader gates on the flag: ``GET /achievements`` reconciles unconditionally —
+    it has to, since the response needs progress and streaks whatever the flag
+    says — so the next read picks that write up regardless. **That is a
+    precondition for anyone adding a gated consumer**: gate on the flag and this
+    race starts dropping unlocks until something else recomputes.
     """
     if athlete is None:
         athlete = (
             await session.execute(select(Athlete).where(Athlete.id == athlete_id))
         ).scalar_one_or_none()
-    if athlete is None or not gamification_enabled(athlete):
+    if athlete is None:
+        return [], None
+    if not gamification_enabled(athlete):
+        # Settle the flag anyway. The write paths mark unconditionally — they
+        # don't consult the preference — so an athlete who opted out still gets
+        # marked, and leaving it set would pin them in the sweep's work list
+        # forever for a recompute that can never produce anything.
+        await _clear_dirty(athlete, session)
         return [], None
 
     comp = await compute_achievements(athlete, session, today)
@@ -517,11 +546,75 @@ async def recompute_achievements(
             await session.delete(row)
             changed = True
 
+    # Settled: whatever a write path marked has now been folded in. Cleared in
+    # the *same* commit as the rows, so the two can never disagree on disk.
+    if athlete.achievements_dirty_at is not None:
+        athlete.achievements_dirty_at = None
+        changed = True
+
     if changed:
         await session.commit()
     if created:
         await _notify(athlete, created)
     return created, comp
+
+
+async def _clear_dirty(athlete: Athlete, session: AsyncSession) -> None:
+    """Drop the pending-recompute mark, if there is one."""
+    if athlete.achievements_dirty_at is None:
+        return
+    athlete.achievements_dirty_at = None
+    await session.commit()
+
+
+async def mark_achievements_dirty(athlete_id: str, session: AsyncSession) -> None:
+    """Record that a recompute is owed, without doing it (issue #69).
+
+    This is what every write path calls instead of reconciling inline. The
+    reconcile re-reads the athlete's whole activity history and every plan, so
+    running it per ingest event made importing a season quadratic — N events each
+    paying O(N), for a result only the last pass kept. Stamping one column costs
+    the same whether the athlete has ten activities or ten thousand.
+
+    Nothing is lost by deferring: unlocks are a pure function of the data, so the
+    reconcile that eventually runs produces exactly the rows an eager one would
+    have, and ``_notify`` still emits a single message for the batch.
+
+    Deliberately does **not** check ``gamification_enabled``. The flag claims a
+    recompute is *owed*, not that one will produce badges, and keeping it to a
+    single unconditional rule — every write marks — is worth more than the sweep
+    pass it saves: ``recompute_achievements`` clears the mark for an opted-out
+    athlete rather than leaving it pinned.
+
+    Loads the row rather than issuing a bulk ``UPDATE``. A bulk update writes the
+    column but leaves an ``Athlete`` already in this session holding the stale
+    value, and the settle decides whether to clear by reading that attribute — so
+    a mark and a settle sharing one session would leave the flag set on disk with
+    nothing left to clear it, pinning the athlete in the sweep forever. This is a
+    primary-key fetch that usually hits the identity map, and the cost this
+    function exists to avoid is the history scan, not one indexed row.
+
+    Same failure isolation as :func:`recompute_achievements_safe`, and for the
+    same reason: achievements are a nice-to-have on top of an upload, and the
+    caller carries on using this session, so a failure has to be rolled back
+    rather than merely swallowed or the caller's next statement raises
+    ``PendingRollbackError``. Same precondition too — every call site commits its
+    own work first, so the rollback can only ever discard this mark.
+    """
+    try:
+        athlete = await session.get(Athlete, athlete_id)
+        if athlete is None:
+            return
+        athlete.achievements_dirty_at = datetime.now(timezone.utc)
+        await session.commit()
+    except Exception:
+        log.warning(
+            "Could not mark achievements dirty for athlete %s", athlete_id, exc_info=True
+        )
+        try:
+            await session.rollback()
+        except Exception:
+            log.warning("Rollback after a failed dirty mark failed", exc_info=True)
 
 
 async def _notify(athlete: Athlete, created: list[AchievementUnlock]) -> None:

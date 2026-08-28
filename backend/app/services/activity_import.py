@@ -21,11 +21,11 @@ after a partial failure then skips everything already present and says so, rathe
 than failing.
 
 **The expensive work happens once, at the end.** ``recalculate_from`` over three
-years of history, run nine hundred times, is quadratic and pointless: the
-metrics, plan adherence and achievements are all recomputed a single time once
-every file has landed. That also means one inbox message about the badges an
-import unlocked instead of a wall of them, since a recompute announces its whole
-batch together.
+years of history, run nine hundred times, is quadratic and pointless: the metrics
+and plan adherence are recomputed a single time once every file has landed, and
+the achievements are marked for the next reconcile to settle. Either way the
+import earns one inbox message about the badges it unlocked rather than a wall of
+them, since a recompute announces its whole batch together.
 """
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ from backend.app.models.user_orm import (
     Athlete,
     ImportJob,
 )
-from backend.app.services.achievements import recompute_achievements_safe
+from backend.app.services.achievements import mark_achievements_dirty
 from backend.app.services.activity_archive import (
     ArchiveError,
     ArchiveTooLarge,
@@ -379,13 +379,19 @@ async def _finalise(job: ImportJob, session, athlete_id: str, earliest: date | N
     from its start date to today, so calling it per activity over a multi-year
     import is quadratic in the size of the import — and the answer it produces
     on the way is thrown away by the next call anyway.
+
+    Achievements are only *marked* here (issue #69). This job was already the one
+    caller doing the reconcile once rather than per file, so it was never the
+    quadratic case — but a multi-year import is exactly where that single pass is
+    most expensive, and there is nothing to be gained by paying for it inline
+    when the athlete's next read settles it anyway.
     """
     if earliest is None:
         return
     try:
         await recalculate_from(athlete_id, earliest, session)
         await catch_up_adherence(athlete_id, session)
-        await recompute_achievements_safe(athlete_id, session)
+        await mark_achievements_dirty(athlete_id, session)
     except Exception:
         # The activities are imported and correct; the derived metrics are not.
         # Recording that on the job beats failing an import that did land — but

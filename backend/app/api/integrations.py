@@ -240,6 +240,7 @@ async def _bg_provider_sync(user_id: str, provider: str) -> None:
     from backend.app.services.metrics_engine import recalculate_from
     from backend.app.services.aerobic_metrics import refit_cp_snapshots
     from backend.app.services.weight import backfill_missing_power_best_weights
+    from backend.app.services.achievements import mark_achievements_dirty
 
     # Step 1: Refresh the token once from the registry.
     async with _RegistrySessionLocal() as reg_session:
@@ -288,6 +289,14 @@ async def _bg_provider_sync(user_id: str, provider: str) -> None:
                     since=datetime.combine(earliest, time.min, tzinfo=timezone.utc),
                 )
                 await session.commit()
+                # A full history import is the single largest change an athlete's
+                # badges will ever see, and this path used to make none of it —
+                # unlike the bridge pollers and the file importer, it never
+                # touched achievements at all, so the unlocks stayed whatever the
+                # last unrelated read left them (issue #69). Marked rather than
+                # recomputed, like every other write path: the reconcile costs
+                # the whole imported history, and the next read settles it.
+                await mark_achievements_dirty(athlete.id, session)
 
             log.info(
                 "%s sync complete: %d new activities for user %s",

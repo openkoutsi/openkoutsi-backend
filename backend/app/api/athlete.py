@@ -800,6 +800,9 @@ async def _export_achievements(athlete: Athlete, session: AsyncSession) -> list[
 
     The catalogue itself is code, not data, so only the unlocks are exported —
     the ids are the stable machine keys the API uses.
+
+    Reads the stored rows rather than recomputing: ``export_athlete`` settles the
+    athlete first (issue #69), so by the time this runs the table is current.
     """
     return await _export_rows(
         session,
@@ -850,6 +853,15 @@ async def export_athlete(
     registry_session: AsyncSession = Depends(get_registry_session),
 ):
     ctx, session, athlete = ctx_athlete
+
+    # Settle any pending achievement recompute before reading the unlock rows
+    # (issue #69). The write paths only mark now, so an export taken straight
+    # after an upload would otherwise omit the badges that upload earned — and an
+    # export that under-reports is a worse failure than a slow one. Done first,
+    # so `_export_achievements` below reads the settled table. Ordered before the
+    # inbox read too, so a message this reconcile emits is in the export as well.
+    from backend.app.services.achievements import recompute_achievements_safe
+    await recompute_achievements_safe(athlete.id, session)
 
     user_result = await registry_session.execute(
         select(User).where(User.id == ctx.user_id)

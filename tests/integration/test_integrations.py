@@ -7,7 +7,7 @@ via the HTTP test client wired to in-memory SQLite databases.
 ProviderConnection records live in the registry DB (registry_session).
 Activity data lives in the team DB (session).
 """
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -296,6 +296,65 @@ class TestSync:
     async def test_unauthenticated_returns_401(self, client):
         resp = await client.post("/api/integrations/strava/sync")
         assert resp.status_code == 401
+
+    async def test_a_history_import_marks_achievements_for_recompute(
+        self, registry_engine, registry_session, user_engine, session,
+        seeded_athlete, auth_headers,
+    ):
+        """This path used to leave achievements untouched entirely (issue #69).
+
+        Unlike the bridge pollers and the file importer, the manual history
+        import never recomputed and never marked, so a season of imported rides
+        earned nothing until some unrelated read happened to reconcile. It marks
+        now — deferred like every other write path, because the reconcile costs
+        the whole imported history.
+        """
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
+        from backend.app.api import integrations as integrations_api
+
+        await _add_connection(registry_session, _TEST_USER_ID, "strava")
+        assert seeded_athlete.achievements_dirty_at is None
+
+        registry_factory = async_sessionmaker(registry_engine, expire_on_commit=False)
+
+        with (
+            patch.object(
+                integrations_api, "_RegistrySessionLocal", registry_factory, create=True
+            ),
+            patch(
+                "backend.app.db.registry._RegistrySessionLocal", registry_factory
+            ),
+            patch(
+                "backend.app.db.user_session.init_user_db", AsyncMock()
+            ),
+            patch(
+                "backend.app.db.user_session.get_user_session_factory",
+                _real_session_factory(user_engine),
+            ),
+            patch.object(
+                integrations_api, "ensure_fresh_token",
+                AsyncMock(return_value="token"),
+            ),
+            patch.object(
+                integrations_api, "sync_provider_activities",
+                AsyncMock(return_value=(12, date(2026, 1, 1))),
+            ),
+            patch(
+                "backend.app.services.metrics_engine.recalculate_from", AsyncMock()
+            ),
+            patch(
+                "backend.app.services.weight.backfill_missing_power_best_weights",
+                AsyncMock(),
+            ),
+            patch(
+                "backend.app.services.aerobic_metrics.refit_cp_snapshots", AsyncMock()
+            ),
+        ):
+            await integrations_api._bg_provider_sync(_TEST_USER_ID, "strava")
+
+        await session.refresh(seeded_athlete)
+        assert seeded_athlete.achievements_dirty_at is not None
 
 
 # ── /{provider}/disconnect ─────────────────────────────────────────────────────
