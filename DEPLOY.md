@@ -357,6 +357,30 @@ This step is only needed when upgrading an existing deployment — new installs 
 > unlocks are a pure function of the data. Expect an occasional
 > `Achievement sweep settled N athlete(s)` line.
 
+> **Note:** per-user migration `029_activity_label_suggestions` adds a nullable
+> `activities.label_suggestions` column, holding the commute labels openkoutsi
+> has *proposed* but the athlete has not yet confirmed (issue #63). It adds no
+> rows, deletes none, backfills nothing, and needs no new environment variables.
+> Applied automatically by the entrypoint's per-user migration loop, or by the
+> helper script above. NULL means "nothing has been suggested for this activity",
+> which is correct for every activity that exists when this lands.
+>
+> **Nothing is labelled by the upgrade.** The column is kept strictly apart from
+> `activities.labels`, which stays exactly as the athlete left it, so no
+> `commuter` badge tier and no RPE-prompt queue changes as a result of deploying
+> this. Detection only starts producing anything once an athlete writes a rule in
+> **Settings → Commute detection**; an athlete with no rules sees no change at
+> all.
+>
+> Related runtime behaviour, needing no configuration: new activities are checked
+> against the athlete's rules as they arrive, and Strava's own `commute` flag —
+> which the sync previously read past — now applies the label directly, since it
+> is the athlete's own assertion rather than a heuristic. The **back catalogue is
+> deliberately not scanned on deploy**: it is an explicit
+> `POST /api/activities/commute/scan` from the settings screen, because it walks
+> every activity the athlete has and that is their call to make, not a
+> migration's.
+
 ### Backing up before a migration
 
 Per-user databases run in **WAL mode**, so `cp user.db` on its own can miss

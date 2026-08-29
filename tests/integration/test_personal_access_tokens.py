@@ -634,6 +634,23 @@ class TestUnreachableSurfaces:
         assert resp.status_code == 200
         assert resp.json()["app_settings"]["ask_for_rpe"] is False
 
+    async def test_commute_rules_are_ordinary_settings(
+        self, pat_client, registry_session, own_athlete
+    ):
+        """Issue #63: only the LLM keys are guarded, and the guard is specific.
+
+        Commute rules describe the athlete's own riding — they spend nothing and
+        redirect nothing — so a token with `athlete:write` may set them.
+        """
+        raw = await _issue(registry_session, scopes=["athlete:write", "athlete:read"])
+        resp = await pat_client.patch(
+            "/api/athlete",
+            json={"app_settings": {"commute_rules": [{"id": "x", "sport_types": ["Ride"]}]}},
+            headers=_pat_headers(raw),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["app_settings"]["commute_rules"][0]["id"] == "x"
+
 
 class TestExportScope:
     async def test_export_needs_its_own_grant(

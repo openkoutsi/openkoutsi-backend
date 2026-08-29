@@ -45,6 +45,9 @@ from backend.app.schemas.activities import (
     IntervalResponse,
     ManualActivityCreate,
     RpeQueueResponse,
+    CommuteScanResponse,
+    CommuteRuleProposal,
+    CommuteFeedback,
 )
 from backend.app.core.limiter import limiter
 from backend.app.core.scopes import pat_forbidden, pat_scopes
@@ -71,6 +74,8 @@ from backend.app.services.provider_sync import (
 )
 from backend.app.services.weight import load_weight_log
 from backend.app.services.aerobic_metrics import apply_aerobic_metrics, replace_w_bal_stream
+from backend.app.services import commute as commute_service
+from openkoutsi.commute import MIN_SAMPLES_FOR_PROPOSAL, propose_rule
 from openkoutsi.training_math import calculate_load, variability_index
 from openkoutsi.categorization import WorkoutCategory, classify_workout
 from openkoutsi.sport_matching import CYCLING_SPORT_TYPES
@@ -107,6 +112,20 @@ router = APIRouter(
     tags=["activities"],
     dependencies=[pat_scopes(read="activities:read", write="activities:write")],
 )
+
+
+def _has_pending_suggestion_clause(label: str):
+    """Correlated EXISTS: is ``label`` suggested on this Activity and unanswered?
+
+    ``label_suggestions`` is a JSON object keyed by label, so unlike the array
+    membership test below this reads a nested field: ``json_extract`` pulls
+    ``$.<label>.state`` and we compare it to ``pending``. Activities with a NULL
+    column, no entry for this label, or an answered one all fail the comparison
+    and are excluded, which is exactly the set the review screen wants.
+    """
+    return (
+        func.json_extract(Activity.label_suggestions, f"$.{label}.state") == "pending"
+    )
 
 
 def _has_label_clause(label: str):
@@ -675,6 +694,11 @@ async def create_manual_activity(
     await session.commit()
     await session.refresh(activity)
 
+    # A hand-logged ride still describes a commute, and this path has no
+    # processing pass to hang the detector off (issue #63).
+    if await commute_service.evaluate_activity(session, athlete, activity):
+        await session.commit()
+
     # Workout matching and the fitness recalc are both keyed on the date.
     if payload.start_time is not None:
         await find_and_link_workout(session, athlete.id, activity)
@@ -703,6 +727,13 @@ async def list_activities(
     labels: Optional[list[str]] = Query(
         None,
         description="Only include activities carrying at least one of these labels (e.g. race, commute)",
+    ),
+    suggested_label: Optional[str] = Query(
+        None,
+        description=(
+            "Only activities with an unanswered suggestion for this label "
+            "(issue #63). What the bulk-review screen filters on."
+        ),
     ),
     exclude_labels: Optional[list[str]] = Query(
         None,
@@ -738,6 +769,12 @@ async def list_activities(
         if bad:
             raise HTTPException(status_code=422, detail=f"Unknown labels: {bad}")
         base_query = base_query.where(or_(*[_has_label_clause(lbl) for lbl in labels]))
+    if suggested_label:
+        if suggested_label not in _VALID_LABELS:
+            raise HTTPException(
+                status_code=422, detail=f"Unknown labels: [{suggested_label!r}]"
+            )
+        base_query = base_query.where(_has_pending_suggestion_clause(suggested_label))
     if exclude_labels:
         bad = [lbl for lbl in exclude_labels if lbl not in _VALID_LABELS]
         if bad:
@@ -798,6 +835,13 @@ async def get_rpe_queue(ctx_athlete=Depends(get_ctx_session_athlete)):
     ``created_at``). ``commute``-labelled rides are excluded so easy spins don't
     nag.
 
+    A ride with a *pending* commute suggestion is deliberately still in the
+    queue (issue #63). The prompt is where the athlete answers it — the client
+    reads ``label_suggestions`` off each item and pre-ticks its "This was a
+    commute" box — so filtering suggested rides out here would remove them from
+    the one surface that asks. Only an answered suggestion, which by then has
+    applied the label, takes a ride out.
+
     The cursor is stored in ``app_settings.rpe_head``. On the very first call
     (cursor unset) it is pinned to the athlete's most recent activity so the
     backlog of their entire history is *not* surfaced; only rides ingested from
@@ -846,6 +890,82 @@ async def get_rpe_queue(ctx_athlete=Depends(get_ctx_session_athlete)):
     result = await session.execute(query)
     items = [ActivityResponse.model_validate(a) for a in result.scalars().all()]
     return RpeQueueResponse(items=items, rpe_head=rpe_head_raw)
+
+
+# ── Commute detection (issue #63) ────────────────────────────────────────────
+# Declared before `/{activity_id}`: FastAPI matches in declaration order, so a
+# literal path has to come first or the path parameter swallows it.
+
+
+@router.post("/commute/scan", response_model=CommuteScanResponse,
+             operation_id="scanCommutes", summary="Look for commutes in the whole history")
+# A full-history read plus a write transaction — at least as costly as an
+# import, which carries the same limit two endpoints up. Nothing else stops a
+# client, or a retry loop behind a slow response, calling it back to back.
+@limiter.limit("5/hour")
+async def scan_commutes(
+    request: Request,
+    force: bool = Query(
+        False,
+        description=(
+            "Re-examine activities the athlete has already answered. Off by "
+            "default: a dismissal is meant to be durable."
+        ),
+    ),
+    ctx_athlete=Depends(get_ctx_session_athlete),
+):
+    """Run the athlete's commute rules over their entire activity history.
+
+    The answer to an imported back catalogue — a decade of rides that arrived
+    with no provider flag and no labels, which the per-ingest hook will never
+    see. Deliberately an explicit request rather than something a rule edit does
+    on its own: it can touch tens of thousands of rows.
+
+    Suggests; does not label. Only a rule the athlete marked ``auto_apply``
+    writes to `labels`, and Strava's own flag, which is handled at sync time.
+    """
+    ctx, session, athlete = ctx_athlete
+    result = await commute_service.scan_history(session, athlete, force=force)
+    if result["applied"]:
+        await mark_achievements_dirty(athlete.id, session)
+    return CommuteScanResponse(**result)
+
+
+@router.get("/commute/proposal", response_model=CommuteRuleProposal,
+            operation_id="getCommuteRuleProposal",
+            summary="A commute rule derived from your own labelled rides")
+async def get_commute_rule_proposal(ctx_athlete=Depends(get_ctx_session_athlete)):
+    """Propose rule parameters from the commutes the athlete has already labelled.
+
+    What makes rule configuration something other than a chore: nobody is going
+    to hand-type "between 4.2 and 6.8 km, 06:41–08:12", but they will happily
+    nudge those numbers once something has proposed them.
+
+    Built from `labels`, never from our own suggestions — a proposal should be
+    derived from what the athlete confirmed, not from what we guessed.
+    """
+    ctx, session, athlete = ctx_athlete
+    samples = await commute_service.labelled_samples(session, athlete)
+    rule = propose_rule(samples)
+    return CommuteRuleProposal(
+        rule=rule.as_dict() if rule else None,
+        sample_count=len(samples),
+        min_samples=MIN_SAMPLES_FOR_PROPOSAL,
+    )
+
+
+@router.get("/commute/feedback", response_model=CommuteFeedback,
+            operation_id="getCommuteFeedback",
+            summary="Where your commute rules look wrong")
+async def get_commute_feedback(ctx_athlete=Depends(get_ctx_session_athlete)):
+    """Rides the rules missed, and rules whose suggestions keep being dismissed.
+
+    Two signals read straight off the suggestion column rather than kept as
+    counters — `source` already records which rule fired, so there is nothing to
+    keep in sync and nothing to drift.
+    """
+    ctx, session, athlete = ctx_athlete
+    return CommuteFeedback(**await commute_service.rule_feedback(session, athlete))
 
 
 @router.get("/{activity_id}", response_model=ActivityDetailResponse)
@@ -1120,6 +1240,12 @@ async def reprocess_activity(
     else:
         stream_map.pop("w_bal", None)
 
+    # Re-run the commute rules too, so a ride processed before the athlete wrote
+    # a rule picks one up (issue #63). An answered suggestion is left alone:
+    # `evaluate` refuses to overwrite a terminal state, which is what makes a
+    # dismissal survive a reprocess rather than coming back every time.
+    await commute_service.evaluate_activity(session, athlete, activity)
+
     await session.commit()
 
     await find_and_link_workout(session, athlete.id, activity)
@@ -1195,7 +1321,57 @@ async def update_activity(
         bad = [lbl for lbl in labels if lbl not in _VALID_LABELS]
         if bad:
             raise HTTPException(status_code=422, detail=f"Unknown labels: {bad}")
+        # A label set by hand is the athlete's final word on this ride, so any
+        # suggestion still hanging over it is answered by the same edit (issue
+        # #63) — otherwise unticking a suggested label would leave the
+        # suggestion pending and the ride would be proposed all over again.
+        for label in _VALID_LABELS:
+            state = commute_service.suggestion_state(activity, label)
+            if state is None:
+                # Nothing was ever suggested for this label, so there is nothing
+                # to answer. Without this guard, hand-labelling a ride writes a
+                # suggestion entry out of thin air — `{"labels": ["race"]}` on
+                # an account with no rules at all would record a `race`
+                # suggestion, and `race` has no detector. The column means
+                # "labels openkoutsi thinks apply"; it must not become a log of
+                # what the athlete applied by hand.
+                continue
+            if label in labels:
+                if state != commute_service.STATE_ACCEPTED:
+                    commute_service.answer_suggestion(
+                        activity, label, commute_service.STATE_ACCEPTED
+                    )
+            else:
+                # Any answered-or-pending suggestion, not just a pending one.
+                # Un-ticking an *accepted* label is the athlete rejecting it
+                # just as much as un-ticking a pending one, and leaving it at
+                # `accepted` hides that rejection from `rule_feedback`, whose
+                # "this rule is too wide" signal counts dismissals. The same
+                # athlete action would otherwise produce different feedback
+                # depending on whether the client sent `labels` or
+                # `label_answers`.
+                if state != commute_service.STATE_DISMISSED:
+                    commute_service.answer_suggestion(
+                        activity, label, commute_service.STATE_DISMISSED
+                    )
         activity.labels = labels
+    if "label_answers" in payload.model_fields_set:
+        # Answering a suggestion without restating the whole label list. Accept
+        # applies the label and records the answer in one write, so the two can
+        # never drift apart.
+        for label, answer in (payload.label_answers or {}).items():
+            if label not in _VALID_LABELS:
+                raise HTTPException(status_code=422, detail=f"Unknown labels: [{label!r}]")
+            if answer not in (commute_service.STATE_ACCEPTED, commute_service.STATE_DISMISSED):
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Unknown answer for {label}: {answer}",
+                )
+            if answer == commute_service.STATE_ACCEPTED:
+                commute_service.apply_label(activity, label)
+            else:
+                commute_service.remove_label(activity, label)
+            commute_service.answer_suggestion(activity, label, answer)
     if "notes" in payload.model_fields_set:
         activity.notes = payload.notes
     if "rpe" in payload.model_fields_set:

@@ -167,6 +167,21 @@ class Activity(UserBase):
     # well-supported one. Set even when the fit was rejected.
     cp_fit_points: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     labels: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    # Labels openkoutsi *thinks* apply, kept strictly apart from the ones the
+    # athlete has actually applied above (issue #63). Shape:
+    # {"commute": {"state": "pending"|"accepted"|"dismissed", "source": ..., "at": ...}}
+    #
+    # A separate column rather than an early write into `labels`, for two
+    # reasons that are not just tidiness. The `commuter` badge counts *labelled*
+    # activities (`services.achievements`), so applying a guess mints tiers the
+    # athlete never claimed; and the RPE queue excludes commute-labelled rides,
+    # so writing the label early would delete the ride from the very prompt
+    # where the athlete would have confirmed it.
+    #
+    # Persisted rather than derived on read because a dismissal has to be
+    # durable: a suggestion recomputed on every read and re-offered after the
+    # athlete said no is worse than not having the feature at all.
+    label_suggestions: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # Rate of Perceived Exertion (RPE): athlete's subjective 1–10 effort score
     # for the ride. Nullable until the athlete rates it (issue #28).
