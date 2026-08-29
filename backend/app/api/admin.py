@@ -110,6 +110,7 @@ def _user_response(user: User, entitlement: LlmEntitlement | None = None) -> Use
         id=user.id,
         username=user.username,
         email=user.email,
+        email_verified_at=user.email_verified_at,
         roles=_roles_of(user),
         created_at=user.created_at,
         consented_at=user.consented_at,
