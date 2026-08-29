@@ -1,6 +1,7 @@
-"""Integration tests for the admin email escape hatch (issue #62).
+"""Integration tests for the admin console's view of a user's email address.
 
-Covers ``PATCH /api/admin/users/{user_id}/email``.
+Covers ``PATCH /api/admin/users/{user_id}/email`` — the escape hatch of issue
+#62 — and the confirmation status the user listing reports alongside it.
 
 Users change their own address themselves, and that flow needs approval from the
 address being left as well as the one being claimed — which is what stops
@@ -58,7 +59,7 @@ async def auth_client(app, registry_session):
 
 async def _make_user(
     registry_session, *, email: str | None, username: str | None = None,
-    admin: bool = False,
+    admin: bool = False, verified: bool = True,
 ) -> User:
     from backend.app.api.consent import CURRENT_CONSENT_VERSION
 
@@ -67,7 +68,7 @@ async def _make_user(
         id=str(uuid.uuid4()),
         username=username,
         email=email,
-        email_verified_at=now if email else None,
+        email_verified_at=now if email and verified else None,
         password_hash=hash_password(_GOOD_PW),
         roles=json.dumps(["administrator"] if admin else ["user"]),
         consented_at=now,
@@ -324,3 +325,66 @@ class TestClearingMustBeDeliberate:
         )
         assert resp.status_code == 200
         assert (await _reload(registry_session, victim)).email is None
+
+
+class TestListingReportsConfirmation:
+    """``GET /api/admin/users`` says whether each address was confirmed.
+
+    An unconfirmed row cannot sign in — login by email requires
+    ``email_verified_at`` — so a self-serve signup nobody finished looks in the
+    listing exactly like a working account. The console is the only place that
+    difference is visible, and it changes what an admin does: an unconfirmed row
+    wants a resend or a delete, not a password reset.
+    """
+
+    async def _users(self, auth_client, headers) -> dict[str, dict]:
+        resp = await auth_client.get(f"{_PREFIX}/users", headers=headers)
+        assert resp.status_code == 200, resp.text
+        return {u["id"]: u for u in resp.json()["items"]}
+
+    async def test_confirmed_and_unconfirmed_are_distinguishable(
+        self, auth_client, registry_session
+    ):
+        headers = await _admin_headers(auth_client, registry_session)
+        confirmed = await _make_user(registry_session, email="done@example.com")
+        stub = await _make_user(
+            registry_session, email="abandoned@example.com", verified=False
+        )
+
+        users = await self._users(auth_client, headers)
+        assert users[confirmed.id]["email_verified_at"] is not None
+        assert users[stub.id]["email_verified_at"] is None
+
+    async def test_an_account_without_an_address_has_nothing_to_confirm(
+        self, auth_client, registry_session
+    ):
+        """Null here must not be read as "unconfirmed" — read it with ``email``."""
+        headers = await _admin_headers(auth_client, registry_session)
+        invited = await _make_user(registry_session, email=None, username="invited")
+
+        users = await self._users(auth_client, headers)
+        assert users[invited.id]["email"] is None
+        assert users[invited.id]["email_verified_at"] is None
+
+    async def test_the_escape_hatch_reports_the_address_it_just_verified(
+        self, auth_client, registry_session
+    ):
+        """The same field on the PATCH response, so the row updates in place."""
+        headers = await _admin_headers(auth_client, registry_session)
+        stub = await _make_user(
+            registry_session, email="abandoned@example.com", verified=False
+        )
+
+        resp = await auth_client.patch(
+            f"{_PREFIX}/users/{stub.id}/email",
+            json={"email": "rescued@example.com"},
+            headers=headers,
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["email_verified_at"] is not None
+
+        cleared = await auth_client.patch(
+            f"{_PREFIX}/users/{stub.id}/email", json={"email": None}, headers=headers
+        )
+        assert cleared.status_code == 200, cleared.text
+        assert cleared.json()["email_verified_at"] is None

@@ -14955,6 +14955,18 @@
             ],
             "title": "Email"
           },
+          "email_verified_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email Verified At"
+          },
           "roles": {
             "items": {
               "type": "string"

@@ -46,6 +46,13 @@ class UserResponse(BaseModel):
     # Nullable since self-serve signup accounts are keyed by email, not username.
     username: Optional[str] = None
     email: Optional[str] = None
+    # When the address above was confirmed; null while it is unconfirmed. Read
+    # it together with ``email``: null on an account that has no address means
+    # "nothing to confirm", not "unconfirmed". A self-serve signup writes the
+    # user row before the address is confirmed, so an abandoned attempt leaves a
+    # row here that can never sign in — worth telling apart from a real account
+    # in the console, and the only place an admin can see it at all.
+    email_verified_at: Optional[datetime] = None
     roles: list[str]
     created_at: datetime
     consented_at: Optional[datetime] = None

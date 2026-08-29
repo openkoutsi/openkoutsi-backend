@@ -33,6 +33,34 @@ If no email provider is configured, self-serve signup stays unavailable even whe
 the toggle is on (the sign-up page hides itself), so accounts can never get stuck
 un-verifiable.
 
+### Which addresses are confirmed
+
+Step 2 above writes the account row *before* the address is confirmed, so a
+signup nobody finished leaves a row behind. It cannot sign in — login by email
+requires the address to be verified — but it is listed like any other account,
+and the console is the only place that difference is visible.
+
+The **Users** tab shows it under each account: **Confirmed** (hover for the date)
+or **Not confirmed**. Accounts with no address at all show neither, because there
+is nothing to confirm — an invite-created account is reached by username.
+
+`GET /api/admin/users` carries the same thing as `email_verified_at`, next to
+`email`:
+
+```bash
+curl https://api.your-domain/api/admin/users \
+  -H "Authorization: Bearer <admin-access-token>"
+```
+
+Read the two fields together: `email_verified_at: null` on an account whose
+`email` is also null means "nothing to confirm", not "unconfirmed".
+
+An unconfirmed row wants a different remedy from a working account. Ask the user
+to sign up again — a fresh attempt reuses the row and mails a new link, so
+nothing has to be cleaned up first — or delete it, which frees the address. A
+password reset does not help: it never stamps the address, and login by email
+needs that stamp, so the account still cannot sign in.
+
 ### Changing an email address (issue #62)
 
 Users change their own address from **Profile → Email address**; there is no admin
