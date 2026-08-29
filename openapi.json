@@ -9841,6 +9841,11 @@
             "type": "integer",
             "title": "Applied",
             "default": 0
+          },
+          "withdrawn": {
+            "type": "integer",
+            "title": "Withdrawn",
+            "default": 0
           }
         },
         "type": "object",

@@ -187,8 +187,50 @@ class TestAnsweringASuggestion:
             f"/api/activities/{ride['id']}", json={"labels": []}, headers=auth_headers
         )
         assert resp.json()["labels"] == []
-        # Accepted, then un-applied: the ride is not suggested again.
-        assert _commute_state(resp.json()) in ("accepted", "dismissed")
+        # Specifically *dismissed*, not merely "not pending". Leaving it at
+        # `accepted` would keep the ride out of re-suggestion but hide the
+        # rejection from `rule_feedback`, whose "too wide" signal counts
+        # dismissals — so the same athlete action would produce different
+        # feedback depending on which field the client sent.
+        assert _commute_state(resp.json()) == "dismissed"
+
+    async def test_hand_labelling_does_not_invent_a_suggestion(
+        self, client, auth_headers
+    ):
+        """`label_suggestions` records what openkoutsi proposed, nothing else.
+
+        `race` has no detector at all, so a suggestion entry for it could only
+        ever be a record of the athlete's own action in a column that does not
+        mean that.
+        """
+        ride = await _ride(client, auth_headers)  # no rules configured
+        resp = await client.patch(
+            f"/api/activities/{ride['id']}",
+            json={"labels": ["race"]},
+            headers=auth_headers,
+        )
+        assert resp.json()["labels"] == ["race"]
+        assert resp.json()["label_suggestions"] == {}
+
+    async def test_a_hand_label_then_untick_leaves_the_ride_detectable(
+        self, client, auth_headers
+    ):
+        """The freeze-out the invented entry would have caused.
+
+        A suggestion written from nothing is a *terminal* state, so a hand-label
+        followed by an un-tick would have locked the ride out of detection for
+        good — no rule could ever suggest it again.
+        """
+        ride = await _ride(client, auth_headers)
+        for labels in (["commute"], []):
+            await client.patch(
+                f"/api/activities/{ride['id']}",
+                json={"labels": labels},
+                headers=auth_headers,
+            )
+        await _set_rules(client, auth_headers, [MORNING_EVENING_RULE])
+
+        assert _commute_state(await _get(client, auth_headers, ride["id"])) == "pending"
 
     async def test_dismissing_a_ride_you_had_accepted_takes_the_label_back_off(
         self, client, auth_headers
@@ -591,7 +633,7 @@ class TestHistoryScan:
     async def test_scanning_without_rules_does_nothing(self, client, auth_headers):
         await _ride(client, auth_headers)
         resp = await client.post("/api/activities/commute/scan", headers=auth_headers)
-        assert resp.json() == {"scanned": 0, "suggested": 0, "applied": 0}
+        assert resp.json() == {"scanned": 0, "suggested": 0, "applied": 0, "withdrawn": 0}
 
     async def test_the_review_filter_returns_only_unanswered_suggestions(
         self, client, auth_headers
@@ -621,6 +663,124 @@ class TestHistoryScan:
             "/api/activities?suggested_label=groceries", headers=auth_headers
         )
         assert resp.status_code == 422
+
+
+class TestScanPersistence:
+    """Written at the *session* level on purpose.
+
+    `conftest.client` overrides `get_ctx_and_session` with one shared session
+    for the whole test, so an uncommitted change is still visible to the
+    assertion that follows the request — every request-level test in this module
+    is really asserting in-memory state. A commit bug is therefore invisible
+    from there, and has to be caught by crossing a transaction boundary.
+    """
+
+    async def test_a_scan_that_only_withdraws_still_commits(
+        self, session, seeded_athlete
+    ):
+        """`evaluate` returns None for "nothing changed" *and* for "withdrew".
+
+        Counting only the pending/accepted returns meant a scan whose sole
+        effect was retracting suggestions rolled back, leaving the review screen
+        offering rides no rule stands behind. The realistic trigger is an
+        athlete correcting their timezone, which is not a rule edit and so never
+        reaches `reevaluate_pending`.
+        """
+        from backend.app.services import commute as commute_service
+
+        athlete = seeded_athlete
+        athlete.app_settings = {
+            "timezone": "UTC",
+            "commute_rules": [
+                {
+                    "id": "to-work",
+                    "sport_types": ["Ride"],
+                    "windows": [{"start": "06:30", "end": "08:30"}],
+                }
+            ],
+        }
+        activity = Activity(
+            id="scan-withdraw",
+            athlete_id=athlete.id,
+            sport_type="Ride",
+            start_time=datetime(2026, 8, 26, 7, 30, tzinfo=timezone.utc),
+            duration_s=1200,
+            distance_m=5400.0,
+            status="processed",
+        )
+        session.add(activity)
+        await session.commit()
+
+        assert await commute_service.evaluate_activity(session, athlete, activity) == "pending"
+        await session.commit()
+
+        # 07:30Z is 00:30 in Los Angeles — outside the window, so the rule no
+        # longer stands behind this ride.
+        athlete.app_settings = {**athlete.app_settings, "timezone": "America/Los_Angeles"}
+        await session.commit()
+
+        result = await commute_service.scan_history(session, athlete)
+        assert result["withdrawn"] == 1
+        assert result["suggested"] == 0
+
+        await session.rollback()
+        session.expire_all()
+        fresh = await session.get(Activity, "scan-withdraw")
+        assert commute_service.suggestion_state(fresh) is None
+
+    async def test_a_scan_that_changes_nothing_reports_nothing(
+        self, session, seeded_athlete
+    ):
+        """The counter must not fire on activities the rules simply skip."""
+        from backend.app.services import commute as commute_service
+
+        athlete = seeded_athlete
+        athlete.app_settings = {
+            "commute_rules": [{"id": "to-work", "sport_types": ["Ride"]}]
+        }
+        session.add(
+            Activity(
+                id="scan-noop",
+                athlete_id=athlete.id,
+                sport_type="Run",
+                start_time=datetime(2026, 8, 26, 7, 30, tzinfo=timezone.utc),
+                duration_s=1200,
+                distance_m=5400.0,
+                status="processed",
+            )
+        )
+        await session.commit()
+
+        result = await commute_service.scan_history(session, athlete)
+        assert result == {"scanned": 1, "suggested": 0, "applied": 0, "withdrawn": 0}
+
+
+class TestRuleLimits:
+    async def test_too_many_rules_are_rejected(self, client, auth_headers):
+        """The list is walked per ingest and per activity in re-evaluation."""
+        from backend.app.services.commute import MAX_RULES
+
+        rules = [
+            {"id": f"r{i}", "sport_types": ["Ride"]} for i in range(MAX_RULES + 1)
+        ]
+        resp = await client.patch(
+            "/api/athlete",
+            json={"app_settings": {"commute_rules": rules}},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 400
+        assert str(MAX_RULES) in resp.json()["detail"]
+
+    async def test_the_cap_itself_is_allowed(self, client, auth_headers):
+        from backend.app.services.commute import MAX_RULES
+
+        rules = [{"id": f"r{i}", "sport_types": ["Ride"]} for i in range(MAX_RULES)]
+        resp = await client.patch(
+            "/api/athlete",
+            json={"app_settings": {"commute_rules": rules}},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
 
 
 class TestRuleProposal:
@@ -708,6 +868,30 @@ class TestRuleFeedback:
         ).json()
         assert data["unmatched_manual_labels"] == 1
         assert data["widen"] == []
+
+    async def test_unticking_the_label_counts_as_a_rejection_too(
+        self, client, auth_headers
+    ):
+        """The plain "untick the box" path must reach the same signal.
+
+        Otherwise a rule the athlete rejects three times through `labels` is
+        never flagged, while the same three rejections through `label_answers`
+        are — and `labels` is the path the label buttons use.
+        """
+        await _set_rules(client, auth_headers, [MORNING_EVENING_RULE])
+        for day in range(24, 27):
+            ride = await _ride(client, auth_headers, start=f"2026-08-{day:02d}T07:30:00Z")
+            for labels in (["commute"], []):
+                await client.patch(
+                    f"/api/activities/{ride['id']}",
+                    json={"labels": labels},
+                    headers=auth_headers,
+                )
+
+        data = (
+            await client.get("/api/activities/commute/feedback", headers=auth_headers)
+        ).json()
+        assert data["review"] == [{"rule_id": "to-work", "dismissed": 3}]
 
     async def test_repeated_dismissals_flag_the_rule_for_review(self, client, auth_headers):
         await _set_rules(client, auth_headers, [MORNING_EVENING_RULE])
@@ -844,13 +1028,23 @@ class TestStravaCommuteFlag:
         }
         assert _normalize_activity(raw).commute is True
 
-    async def test_a_payload_without_the_key_normalizes_to_false(self):
+    async def test_absent_and_false_stay_distinguishable(self):
+        """`NormalizedActivity.commute` is documented as three-valued.
+
+        "Strava does not say" is not "the athlete says no" — and Strava is the
+        only provider that has the field, so collapsing them here would throw
+        the distinction away in the one place it exists. Nothing acts on the
+        difference today; `adopt_provider_flag` keeps the strictness by acting
+        only on True.
+        """
         from backend.app.services.providers.strava import _normalize_activity
 
-        raw = {
+        base = {
             "id": 1,
             "start_date": "2026-08-26T07:30:00Z",
             "sport_type": "Ride",
             "moving_time": 1200,
         }
-        assert _normalize_activity(raw).commute is False
+        assert _normalize_activity(base).commute is None
+        assert _normalize_activity({**base, "commute": False}).commute is False
+        assert _normalize_activity({**base, "commute": True}).commute is True

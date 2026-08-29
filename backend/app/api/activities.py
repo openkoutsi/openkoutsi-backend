@@ -899,7 +899,12 @@ async def get_rpe_queue(ctx_athlete=Depends(get_ctx_session_athlete)):
 
 @router.post("/commute/scan", response_model=CommuteScanResponse,
              operation_id="scanCommutes", summary="Look for commutes in the whole history")
+# A full-history read plus a write transaction — at least as costly as an
+# import, which carries the same limit two endpoints up. Nothing else stops a
+# client, or a retry loop behind a slow response, calling it back to back.
+@limiter.limit("5/hour")
 async def scan_commutes(
+    request: Request,
     force: bool = Query(
         False,
         description=(
@@ -1322,14 +1327,33 @@ async def update_activity(
         # suggestion pending and the ride would be proposed all over again.
         for label in _VALID_LABELS:
             state = commute_service.suggestion_state(activity, label)
-            if label in labels and state != commute_service.STATE_ACCEPTED:
-                commute_service.answer_suggestion(
-                    activity, label, commute_service.STATE_ACCEPTED
-                )
-            elif label not in labels and state == commute_service.STATE_PENDING:
-                commute_service.answer_suggestion(
-                    activity, label, commute_service.STATE_DISMISSED
-                )
+            if state is None:
+                # Nothing was ever suggested for this label, so there is nothing
+                # to answer. Without this guard, hand-labelling a ride writes a
+                # suggestion entry out of thin air — `{"labels": ["race"]}` on
+                # an account with no rules at all would record a `race`
+                # suggestion, and `race` has no detector. The column means
+                # "labels openkoutsi thinks apply"; it must not become a log of
+                # what the athlete applied by hand.
+                continue
+            if label in labels:
+                if state != commute_service.STATE_ACCEPTED:
+                    commute_service.answer_suggestion(
+                        activity, label, commute_service.STATE_ACCEPTED
+                    )
+            else:
+                # Any answered-or-pending suggestion, not just a pending one.
+                # Un-ticking an *accepted* label is the athlete rejecting it
+                # just as much as un-ticking a pending one, and leaving it at
+                # `accepted` hides that rejection from `rule_feedback`, whose
+                # "this rule is too wide" signal counts dismissals. The same
+                # athlete action would otherwise produce different feedback
+                # depending on whether the client sent `labels` or
+                # `label_answers`.
+                if state != commute_service.STATE_DISMISSED:
+                    commute_service.answer_suggestion(
+                        activity, label, commute_service.STATE_DISMISSED
+                    )
         activity.labels = labels
     if "label_answers" in payload.model_fields_set:
         # Answering a suggestion without restating the whole label list. Accept

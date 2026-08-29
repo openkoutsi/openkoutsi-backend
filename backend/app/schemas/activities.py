@@ -236,6 +236,11 @@ class CommuteScanResponse(BaseModel):
     scanned: int = 0
     suggested: int = 0
     applied: int = 0
+    # Pending suggestions the scan *retracted*, because the rules no longer
+    # stand behind them. Reported because a scan that only withdraws would
+    # otherwise answer `{"scanned": N, "suggested": 0, "applied": 0}`, which
+    # reads as "nothing happened" when something did.
+    withdrawn: int = 0
 
 
 class CommuteRuleProposal(BaseModel):

@@ -214,5 +214,11 @@ def _normalize_activity(raw: dict) -> NormalizedActivity:
         avg_cadence=raw.get("average_cadence"),
         # The athlete's own tick in Strava, not a guess of ours (issue #63).
         # Read as a strict boolean: the key is absent on older payloads.
-        commute=raw.get("commute") is True,
+        # `raw.get`, not `... is True`: `NormalizedActivity.commute` is
+        # documented as three-valued, and absent ("Strava does not say")
+        # is not the same as False ("the athlete says no"). Collapsing
+        # them here would throw away the distinction in the one provider
+        # that has it. The strictness that matters lives in
+        # `adopt_provider_flag`, which acts only on True.
+        commute=raw.get("commute"),
     )

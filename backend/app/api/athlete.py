@@ -47,7 +47,7 @@ from backend.app.services.pat_expiry import (
     EMAIL_OPT_OUT_SETTING as PAT_EXPIRY_EMAIL_SETTING,
 )
 from backend.app.services.athlete_experience import VALID_EXPERIENCE_LEVELS
-from backend.app.services.commute import RULES_KEY, reevaluate_pending
+from backend.app.services.commute import MAX_RULES, RULES_KEY, reevaluate_pending
 from openkoutsi.commute import parse_rule
 from backend.app.services.stranded_runs import (
     begin_training_status_run,
@@ -384,6 +384,11 @@ async def update_athlete(
                                 "nothing."
                             ),
                         )
+                if len(parsed) > MAX_RULES:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Invalid {RULES_KEY}: at most {MAX_RULES} rules.",
+                    )
                 ids = [r.id for r in parsed if r is not None]
                 if len(set(ids)) != len(ids):
                     raise HTTPException(

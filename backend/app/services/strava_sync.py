@@ -166,7 +166,13 @@ async def _process_event_for_user(
             avg_cadence=raw.get("average_cadence"),
             # Strava's own commute flag — the athlete set it themselves, so it
             # is applied rather than suggested (issue #63).
-            commute=raw.get("commute") is True,
+            # `raw.get`, not `... is True`: `NormalizedActivity.commute` is
+            # documented as three-valued, and absent ("Strava does not say")
+            # is not the same as False ("the athlete says no"). Collapsing
+            # them here would throw away the distinction in the one provider
+            # that has it. The strictness that matters lives in
+            # `adopt_provider_flag`, which acts only on True.
+            commute=raw.get("commute"),
         )
 
         # The dedup window and the create/attach that follows it run under the

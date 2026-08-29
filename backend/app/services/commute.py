@@ -65,6 +65,14 @@ SOURCE_STRAVA = "strava"
 #: wrong. Three is "not a slip of the finger" without being a season's worth.
 DISMISSALS_BEFORE_REVIEW = 3
 
+#: Ceiling on how many rules one athlete may store. The list is walked on every
+#: ingest and once per activity in `reevaluate_pending`, which runs inline in
+#: `PATCH /api/athlete` — so an unbounded list makes the athlete's own next
+#: upload slow and holds a request worker for the length of the re-evaluation.
+#: Fifty is far past any real commuter; the cap is against accident and abuse,
+#: not against anybody's actual riding.
+MAX_RULES = 50
+
 
 def rules_for(athlete) -> list[CommuteRule]:
     """The athlete's parsed commute rules — never raises, whatever is stored."""
@@ -312,22 +320,66 @@ async def scan_history(session: AsyncSession, athlete, *, force: bool = False) -
     rules = rules_for(athlete)
     tz = athlete_zone(athlete)
     if not rules:
-        return {"scanned": 0, "suggested": 0, "applied": 0}
+        return {"scanned": 0, "suggested": 0, "applied": 0, "withdrawn": 0}
 
     result = await session.execute(
         select(Activity).where(Activity.athlete_id == athlete.id)
     )
-    scanned = suggested = applied = 0
+    scanned = suggested = applied = withdrawn = 0
     for activity in result.scalars():
         scanned += 1
+        # `evaluate` returns None both for "nothing changed" and for "there was
+        # a pending suggestion and I just withdrew it", so the return value
+        # alone cannot decide whether there is anything to commit. Comparing
+        # before and after can — the same thing `reevaluate_pending` does.
+        # Without this a scan whose only effect is retracting suggestions rolls
+        # back, and the review screen keeps offering rides no rule stands
+        # behind. The realistic trigger is an athlete correcting their timezone,
+        # which is not a rule edit and so never reaches `reevaluate_pending`.
+        before = (suggestion_state(activity), tuple(activity.labels or []))
         state = evaluate(activity, rules, tz, force=force)
         if state == STATE_PENDING:
             suggested += 1
         elif state == STATE_ACCEPTED:
             applied += 1
-    if suggested or applied:
+        elif before != (suggestion_state(activity), tuple(activity.labels or [])):
+            withdrawn += 1
+    if suggested or applied or withdrawn:
         await session.commit()
-    return {"scanned": scanned, "suggested": suggested, "applied": applied}
+    return {
+        "scanned": scanned,
+        "suggested": suggested,
+        "applied": applied,
+        "withdrawn": withdrawn,
+    }
+
+
+#: The columns any of this actually reads. Selected explicitly rather than
+#: hydrating whole ``Activity`` entities: a row carries ~45 columns including
+#: the LLM analysis prose, the athlete's notes and the `zone_times` blob, and
+#: an athlete's whole history can run to tens of thousands of rows. Same
+#: reasoning, and the same shape, as ``services.achievements._load_facts``.
+_SAMPLE_COLUMNS = (
+    Activity.sport_type,
+    Activity.start_time,
+    Activity.duration_s,
+    Activity.distance_m,
+    Activity.labels,
+    Activity.label_suggestions,
+)
+
+
+def _row_sample(row, tz) -> RideSample:
+    """:func:`sample_for` for a column row rather than an ORM entity."""
+    start = _as_utc(row.start_time)
+    if start is not None and tz is not None:
+        start = start.astimezone(tz)
+    return RideSample(
+        sport_type=row.sport_type,
+        local_start=start,
+        duration_s=row.duration_s,
+        distance_m=row.distance_m,
+    )
 
 
 async def labelled_samples(session: AsyncSession, athlete) -> list[RideSample]:
@@ -336,15 +388,17 @@ async def labelled_samples(session: AsyncSession, athlete) -> list[RideSample]:
     What the rule proposal is derived from. Reads ``labels`` rather than the
     suggestion column on purpose: a proposal should be built from what the
     athlete has confirmed, never from what we guessed.
+
+    Read-only, so it never hydrates entities — see :data:`_SAMPLE_COLUMNS`.
     """
     tz = athlete_zone(athlete)
     result = await session.execute(
-        select(Activity).where(Activity.athlete_id == athlete.id)
+        select(*_SAMPLE_COLUMNS).where(Activity.athlete_id == athlete.id)
     )
     return [
-        sample_for(activity, tz)
-        for activity in result.scalars()
-        if has_label(activity)
+        _row_sample(row, tz)
+        for row in result
+        if COMMUTE in (row.labels or [])
     ]
 
 
@@ -367,19 +421,20 @@ async def rule_feedback(session: AsyncSession, athlete) -> dict:
     rules = rules_for(athlete)
     tz = athlete_zone(athlete)
 
+    # Read-only, so columns rather than entities — see `_SAMPLE_COLUMNS`.
     result = await session.execute(
-        select(Activity).where(Activity.athlete_id == athlete.id)
+        select(*_SAMPLE_COLUMNS).where(Activity.athlete_id == athlete.id)
     )
-    activities = list(result.scalars())
 
     dismissed_by_rule: dict[str, int] = {}
     widen: dict[str, dict] = {}
     unmatched_manual = 0
 
-    for activity in activities:
-        state = suggestion_state(activity)
-        entry = _suggestions(activity).get(COMMUTE) or {}
-        source = entry.get("source") if isinstance(entry, dict) else None
+    for row in result:
+        entry = (row.label_suggestions or {}).get(COMMUTE)
+        entry = entry if isinstance(entry, dict) else {}
+        state = entry.get("state")
+        source = entry.get("source")
 
         if state == STATE_DISMISSED and isinstance(source, str) and source.startswith("rule:"):
             rule_id = source[len("rule:") :]
@@ -389,20 +444,19 @@ async def rule_feedback(session: AsyncSession, athlete) -> dict:
         # A hand-labelled ride the rules did not catch is the "too narrow"
         # signal — but only when the athlete labelled it themselves, so a ride
         # whose label came from a rule or from Strava is not evidence.
-        if not has_label(activity) or source is not None:
+        if COMMUTE not in (row.labels or []) or source is not None:
             continue
+        sample = _row_sample(row, tz)
         if match_commute(
             rules,
-            sport_type=activity.sport_type,
-            start_time=_as_utc(activity.start_time),
-            duration_s=activity.duration_s,
-            distance_m=activity.distance_m,
-            tz=tz,
+            sport_type=sample.sport_type,
+            start_time=sample.local_start,
+            duration_s=sample.duration_s,
+            distance_m=sample.distance_m,
         ) is not None:
             continue
 
         unmatched_manual += 1
-        sample = sample_for(activity, tz)
         for rule in rules:
             failed = near_miss_criteria(
                 rule,
