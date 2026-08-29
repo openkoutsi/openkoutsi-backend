@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from openkoutsi.commute import (
+    MAX_WINDOWS_PER_RULE,
     CommuteRule,
     RideSample,
     TimeWindow,
@@ -296,6 +297,55 @@ class TestParsing:
     def test_weekday_values_out_of_range_are_dropped(self):
         rule = parse_rule({"id": "x", "sport_types": ["Ride"], "weekdays": [0, 7, -1, "mon", True]})
         assert rule is not None and rule.weekdays == frozenset({0})
+
+
+class TestWindowCap:
+    """Windows are an independent multiplier on matching cost.
+
+    `matches` runs `any(w.contains(minute) for w in self.windows)` per rule per
+    activity, so the real shape is activities × rules × windows — capping the
+    rule count bounds only one of the three.
+    """
+
+    def test_windows_are_truncated_at_the_cap(self):
+        rule = parse_rule(
+            {
+                "id": "x",
+                "windows": [
+                    {"start": "00:00", "end": "00:30"}
+                    for _ in range(MAX_WINDOWS_PER_RULE * 4)
+                ],
+            }
+        )
+        assert rule is not None
+        assert len(rule.windows) == MAX_WINDOWS_PER_RULE
+
+    def test_a_realistic_rule_is_untouched(self):
+        """Two windows is the normal case; the cap must be nowhere near it."""
+        rule = parse_rule(
+            {
+                "id": "x",
+                "windows": [
+                    {"start": "06:30", "end": "08:30"},
+                    {"start": "15:30", "end": "18:00"},
+                ],
+            }
+        )
+        assert rule is not None and len(rule.windows) == 2
+
+    def test_the_cap_applies_to_stored_rules_too(self):
+        """It lives in `parse_rule`, which is the path every ingest reads."""
+        rules = parse_rules(
+            [{"id": "x", "windows": [{"start": "00:00", "end": "00:30"}] * 500}]
+        )
+        assert len(rules[0].windows) == MAX_WINDOWS_PER_RULE
+
+    def test_unreadable_windows_do_not_consume_the_budget(self):
+        """Only the valid ones cost anything at match time."""
+        entries = [{"start": "nope", "end": "nope"}] * 100
+        entries.append({"start": "07:00", "end": "09:00"})
+        rule = parse_rule({"id": "x", "windows": entries})
+        assert rule is not None and len(rule.windows) == 1
 
 
 class TestParseRulesIsTotal:

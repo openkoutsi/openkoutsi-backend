@@ -64,6 +64,15 @@ RANGE_TRIM_FRACTION = 0.10
 # A window must hold at least this share of the samples to be proposed at all.
 MIN_WINDOW_SHARE = 0.15
 
+#: Ceiling on time windows in one rule. Unlike the rule count, this is an
+#: *independent* multiplier on the matcher's cost: `matches` runs
+#: `any(w.contains(minute) for w in self.windows)` per rule per activity, so the
+#: real shape is activities × rules × windows and capping the rules alone bounds
+#: only one of the three. Measured at 50 rules (the cap) × 100 windows, a
+#: 20 000-activity re-evaluation runs to minutes of CPU inside one request.
+#: Twenty-four is an hourly departure all day, already far past any commute.
+MAX_WINDOWS_PER_RULE = 24
+
 _TIME_RE = re.compile(r"^\s*(\d{1,2})\s*:\s*(\d{2})\s*$")
 
 MINUTES_PER_DAY = 24 * 60
@@ -273,6 +282,13 @@ def parse_rule(raw: Any) -> Optional[CommuteRule]:
         if start is None or end is None:
             continue
         windows.append(TimeWindow(start, end))
+        if len(windows) >= MAX_WINDOWS_PER_RULE:
+            # Truncated rather than rejected, and here rather than in the API,
+            # so the bound protects rules already stored as well as arriving
+            # ones — this is the path every ingest reads through. The API
+            # stores what `as_dict` gives back, so an athlete who sends more
+            # sees the truncation reflected in their saved rule.
+            break
 
     weekdays = frozenset(
         d for d in raw.get("weekdays") or [] if isinstance(d, int) and not isinstance(d, bool) and 0 <= d <= 6

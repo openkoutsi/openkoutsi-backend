@@ -755,6 +755,56 @@ class TestScanPersistence:
         assert result == {"scanned": 1, "suggested": 0, "applied": 0, "withdrawn": 0}
 
 
+    async def test_writes_persist_across_streaming_batches(
+        self, session, seeded_athlete, monkeypatch
+    ):
+        """The risk the streaming change introduces, tested directly.
+
+        With `yield_per`, `session.dirty` holds only the current batch — earlier
+        batches have already been flushed. That looks exactly like tracking
+        being dropped and their writes lost. It isn't: each batch flushes into
+        the *same* transaction. Batch size is patched down rather than seeding
+        thousands of rows, so the multi-batch path is what actually runs.
+        """
+        from backend.app.services import commute as commute_service
+
+        monkeypatch.setattr(commute_service, "_YIELD_PER", 2)
+
+        athlete = seeded_athlete
+        athlete.app_settings = {
+            "commute_rules": [
+                {
+                    "id": "to-work",
+                    "sport_types": ["Ride"],
+                    "windows": [{"start": "06:30", "end": "08:30"}],
+                }
+            ]
+        }
+        ids = [f"batched-{i}" for i in range(5)]
+        for index, activity_id in enumerate(ids):
+            session.add(
+                Activity(
+                    id=activity_id,
+                    athlete_id=athlete.id,
+                    sport_type="Ride",
+                    start_time=datetime(2026, 8, 3 + index, 7, 30, tzinfo=timezone.utc),
+                    duration_s=1200,
+                    distance_m=5400.0,
+                    status="processed",
+                )
+            )
+        await session.commit()
+
+        result = await commute_service.scan_history(session, athlete)
+        assert result["suggested"] == 5
+
+        await session.rollback()
+        session.expire_all()
+        for activity_id in ids:
+            fresh = await session.get(Activity, activity_id)
+            assert commute_service.suggestion_state(fresh) == "pending", activity_id
+
+
 class TestRuleLimits:
     async def test_too_many_rules_are_rejected(self, client, auth_headers):
         """The list is walked per ingest and per activity in re-evaluation."""
