@@ -169,6 +169,13 @@ def run_match(session, registry_session):
                 "get_user_session_factory",
                 return_value=lambda: _user_session(),
             ),
+            # `failure_recovery` deliberately opens a *fresh* session — the
+            # original may be exactly what failed — so it resolves the factory
+            # through its own module and needs redirecting separately.
+            patch(
+                "backend.app.services.llm_streaming.get_user_session_factory",
+                return_value=lambda: _user_session(),
+            ),
             patch.object(course_surface, "registry_session", _registry),
         ):
             await course_surface.match_course_surface(
@@ -176,6 +183,12 @@ def run_match(session, registry_session):
             )
 
     return _run
+
+
+
+async def _always_enabled(_session) -> bool:
+    """Stand in for the capability check when the test drives the job directly."""
+    return True
 
 
 @pytest.fixture(autouse=True)
@@ -621,3 +634,204 @@ class TestTheRouteLlmWall:
         assert all(
             entry == ["gravel", surface_math.CONFIRMED] for entry in track.surfaces
         )
+
+
+class TestTheRunToken:
+    """The guards that stop two runs writing over each other.
+
+    A match holds its columns by token, exactly as a plan run does. These are
+    the branches that would silently corrupt a segment table if they were
+    wrong — a stale run writing surface classes onto segments a later
+    re-analysis has already replaced.
+    """
+
+    async def test_a_run_that_lost_its_token_before_starting_does_nothing(
+        self, session, seeded_athlete, course, run_match
+    ):
+        row = (
+            await session.execute(select(Course).where(Course.id == course["id"]))
+        ).scalar_one()
+        row.surface_run_id = "somebody-elses-run"
+        await session.commit()
+
+        matcher = _FakeMatcher(_all("gravel"))
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def _user_session():
+            yield session
+
+        @asynccontextmanager
+        async def _registry():
+            yield session  # unused on this path; the run bails before matching
+
+        with (
+            patch.object(
+                course_surface,
+                "get_user_session_factory",
+                return_value=lambda: _user_session(),
+            ),
+            patch.object(course_surface, "registry_session", _registry),
+            patch.object(course_surface, "course_recon_enabled", _always_enabled),
+        ):
+            await course_surface.match_course_surface(
+                seeded_athlete.id, course["id"], "test-user-00000000", "my-run", matcher
+            )
+        assert matcher.calls == 0, "a superseded run must not even ask"
+
+    async def test_a_run_superseded_while_it_was_matching_discards_its_writes(
+        self, session, seeded_athlete, course
+    ):
+        """The expensive case: the sidecar answered, but a re-analysis landed.
+
+        Its segment table is the current one, so this run's classes describe
+        distances that no longer exist and must be thrown away.
+        """
+        row = (
+            await session.execute(select(Course).where(Course.id == course["id"]))
+        ).scalar_one()
+        run_id = course_surface.claim_run(row)
+        await session.commit()
+
+        class _StealsTheToken(_FakeMatcher):
+            async def match(self, points):
+                # A re-analysis lands mid-flight and clears the token.
+                row.surface_run_id = None
+                await session.commit()
+                return await super().match(points)
+
+        from contextlib import asynccontextmanager
+
+        @asynccontextmanager
+        async def _user_session():
+            yield session
+
+        @asynccontextmanager
+        async def _registry():
+            yield session
+
+        with (
+            patch.object(
+                course_surface,
+                "get_user_session_factory",
+                return_value=lambda: _user_session(),
+            ),
+            patch.object(course_surface, "registry_session", _registry),
+            patch.object(course_surface, "course_recon_enabled", _always_enabled),
+        ):
+            await course_surface.match_course_surface(
+                seeded_athlete.id,
+                course["id"],
+                "test-user-00000000",
+                run_id,
+                _StealsTheToken(_all("gravel")),
+            )
+
+        await session.refresh(row)
+        segments = (
+            await session.execute(
+                select(CourseSegment).where(CourseSegment.course_id == course["id"])
+            )
+        ).scalars().all()
+        assert all(s.surface is None for s in segments), "stale run wrote anyway"
+
+    async def test_a_course_that_vanished_is_not_an_error(
+        self, session, seeded_athlete, run_match
+    ):
+        matcher = _FakeMatcher(_all("gravel"))
+        await run_match("no-such-course", seeded_athlete.id, matcher)
+        assert matcher.calls == 0
+
+    async def test_settling_a_match_that_is_not_pending_is_a_no_op(self):
+        class _Row:
+            surface_status = course_surface.DONE
+            surface_run_id = None
+            surface_updated_at = None
+
+        assert course_surface.settle_course_surface(_Row()) is False
+
+
+class TestMoreDegradation:
+    async def test_a_course_with_no_stored_track_cannot_be_matched(
+        self, client, auth_headers, session, seeded_athlete, course, run_match
+    ):
+        """Nothing to send, so nothing is claimed — and no error is raised."""
+        track = await session.get(CourseTrack, course["id"])
+        await session.delete(track)
+        await session.commit()
+
+        matcher = _FakeMatcher(_all("gravel"))
+        await run_match(course["id"], seeded_athlete.id, matcher)
+        assert matcher.calls == 0
+
+        detail = await client.get(f"/api/courses/{course['id']}", headers=auth_headers)
+        assert detail.json()["surface_status"] == course_surface.UNAVAILABLE
+        assert detail.json()["status"] == "ready"
+
+    async def test_an_athlete_without_ftp_keeps_the_match_but_not_a_resolve(
+        self, session, seeded_athlete, course, run_match
+    ):
+        """The physics cannot run, but what the matcher said is still true.
+
+        Keeping it means the surface is there the moment the athlete fills in
+        their profile, without another trip to the sidecar.
+        """
+        seeded_athlete.ftp = None
+        await session.commit()
+
+        await run_match(course["id"], seeded_athlete.id, _FakeMatcher(_all("gravel")))
+
+        track = await session.get(CourseTrack, course["id"])
+        await session.refresh(track)
+        assert track.surfaces, "the match itself is worth keeping"
+        segments = (
+            await session.execute(
+                select(CourseSegment).where(CourseSegment.course_id == course["id"])
+            )
+        ).scalars().all()
+        assert all(
+            s.surface is None for s in segments
+        ), "segments must not be half-updated"
+
+    async def test_a_crash_mid_match_settles_the_course_rather_than_stranding_it(
+        self, client, auth_headers, session, seeded_athlete, course, run_match
+    ):
+        """An unexpected failure must not leave a spinner running for ever.
+
+        `stream_into_db`-style recovery only settles what it is running; a
+        failure *outside* the inner handler needs the fresh-session fallback,
+        which is the branch this exercises.
+        """
+        row = (
+            await session.execute(select(Course).where(Course.id == course["id"]))
+        ).scalar_one()
+        course_surface.claim_run(row)
+        await session.commit()
+
+        class _Explodes(_FakeMatcher):
+            async def match(self, points):
+                raise RuntimeError("the sidecar returned something impossible")
+
+        await run_match(course["id"], seeded_athlete.id, _Explodes())
+
+        await session.refresh(row)
+        assert row.surface_status == course_surface.UNAVAILABLE
+        assert row.surface_run_id is None
+
+        detail = await client.get(f"/api/courses/{course['id']}", headers=auth_headers)
+        assert detail.status_code == 200
+        assert detail.json()["status"] == "ready", "the course itself is untouched"
+
+    async def test_a_course_with_no_bike_still_matches_on_defaults(
+        self, client, auth_headers, session, seeded_athlete, course, run_match
+    ):
+        """Deleting a bike nulls `course.bike_id`; that must not break a match."""
+        row = (
+            await session.execute(select(Course).where(Course.id == course["id"]))
+        ).scalar_one()
+        row.bike_id = None
+        await session.commit()
+
+        await run_match(course["id"], seeded_athlete.id, _FakeMatcher(_all("gravel")))
+        detail = await client.get(f"/api/courses/{course['id']}", headers=auth_headers)
+        assert detail.json()["surface_status"] == course_surface.DONE

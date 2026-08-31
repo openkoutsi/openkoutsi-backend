@@ -77,22 +77,6 @@ def settle_course_surface(course, now: Optional[datetime] = None) -> bool:
     return True
 
 
-async def surface_matching_available(
-    registry: AsyncSession,
-    matcher: SurfaceMatcher | None = None,
-) -> bool:
-    """Whether this instance can classify a surface at all.
-
-    Both halves have to be true and they mean different things — the admin
-    switched the capability on, *and* a sidecar is actually configured — so
-    they are kept apart internally and only ANDed here, where a caller wants
-    the single effective answer.
-    """
-    if not await course_recon_enabled(registry):
-        return False
-    return (matcher or get_surface_matcher()).is_configured
-
-
 async def match_course_surface(
     athlete_id: str,
     course_id: str,

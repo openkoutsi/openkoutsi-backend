@@ -14,6 +14,8 @@ are the point rather than an afterthought:
 """
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import httpx
 import pytest
 
@@ -326,3 +328,60 @@ class TestMatchTrack:
 
     async def test_an_empty_track_stores_nothing(self):
         assert await sm.match_track(_client(_responding([])), [], []) is None
+
+
+class TestTheWallClockBudget:
+    """Chunk count bounds the requests; this bounds the wall clock."""
+
+    async def test_it_stops_once_the_budget_is_spent(self):
+        """A slow sidecar must not hold a course open indefinitely.
+
+        The clock is driven by the handler so the test is deterministic rather
+        than actually slow: each request burns 100 s against a 150 s budget.
+        """
+        clock = {"t": 0.0}
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            clock["t"] += 100.0
+            return httpx.Response(200, json=_trace(["gravel"] * sm.CHUNK_POINTS))
+
+        with (
+            patch.object(sm, "TOTAL_BUDGET_S", 150.0),
+            patch.object(sm.time, "monotonic", lambda: clock["t"]),
+        ):
+            got = await _client(handler).match([(61.5, 20.5)] * 5000)
+
+        assert calls["n"] < 6, "the budget must cut the run short"
+        assert got is not None, "what was matched before the budget ran out survives"
+        assert got[0] == "gravel"
+        assert got[-1] is None, "the unreached tail reads as unknown, not as a guess"
+
+    async def test_an_exhausted_budget_still_degrades_rather_than_failing(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=_trace(["gravel"] * 4))
+
+        with patch.object(sm, "TOTAL_BUDGET_S", -1.0):
+            assert await _client(handler).match(_POINTS) is None
+
+    async def test_an_empty_point_list_matches_nothing(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise AssertionError("must not reach the sidecar with no points")
+
+        assert await _client(handler).match([]) is None
+
+
+class TestTheFactory:
+    def test_an_unconfigured_instance_gets_the_null_matcher(self, monkeypatch):
+        monkeypatch.setattr(sm.settings, "valhalla_url", "")
+        assert isinstance(sm.build_surface_matcher(), sm.NullSurfaceMatcher)
+
+    def test_a_configured_one_gets_a_real_client(self, monkeypatch):
+        monkeypatch.setattr(sm.settings, "valhalla_url", BASE)
+        matcher = sm.build_surface_matcher()
+        assert isinstance(matcher, sm.ValhallaSurfaceMatcher)
+        assert matcher.is_configured is True
+
+    def test_a_trailing_slash_does_not_produce_a_double_slash_url(self):
+        assert sm.ValhallaSurfaceMatcher(httpx.AsyncClient(), BASE + "/")._base == BASE
