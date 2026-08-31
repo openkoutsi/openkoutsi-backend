@@ -330,8 +330,9 @@ class CourseAnalysis:
 def thin_track(route: Route, spacing_m: float = THIN_SPACING_M) -> CourseTrack:
     """Reduce a parsed route to roughly ``spacing_m`` point spacing.
 
-    Distance accumulates by haversine with the same :data:`geo.MAX_STEP_M`
-    glitch rule the activity path uses. The first and last points are always
+    Distance accumulates by haversine under the same :func:`geo.step_is_travel`
+    glitch rule the activity path uses, using each point's ``offset_s`` where
+    the route carried times. The first and last points are always
     kept, and the spacing widens if ``spacing_m`` would produce more than
     :data:`MAX_THINNED_POINTS` of them. Points missing elevation are filled by linear interpolation over
     distance between their nearest elevated neighbours (ends take the nearest
@@ -345,12 +346,17 @@ def thin_track(route: Route, spacing_m: float = THIN_SPACING_M) -> CourseTrack:
     cumulative: list[float] = []
     total = 0.0
     prev: tuple[float, float] | None = None
+    prev_offset: int | None = None
     for point in route.points:
         if prev is not None:
             step = geo.haversine_m(prev[0], prev[1], point.latitude, point.longitude)
-            if step <= geo.MAX_STEP_M:
+            dt = None
+            if point.offset_s is not None and prev_offset is not None:
+                dt = float(point.offset_s - prev_offset)
+            if geo.step_is_travel(step, dt):
                 total += step
         prev = (point.latitude, point.longitude)
+        prev_offset = point.offset_s
         cumulative.append(total)
 
     if total > 0:

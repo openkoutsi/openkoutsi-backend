@@ -52,7 +52,7 @@ _SPORT_ATTR = {
 }
 
 _MAX_SPEED_INTERVAL_S = 60.0
-_MAX_SPEED_MS = 60.0
+_MAX_SPEED_MS = geo.MAX_STEP_SPEED_MS
 
 # An activity name longer than this is a description, or a crafted file
 # trying to write a multi-megabyte string into a column every list endpoint
@@ -272,7 +272,12 @@ def _derived_speed(points: list[_Point]) -> dict[int, float]:
                 step = point.distance - previous.distance
             elif None not in (previous.lat, previous.lon, point.lat, point.lon):
                 step = geo.haversine_m(previous.lat, previous.lon, point.lat, point.lon)
-            if step is not None and 0 <= step <= geo.MAX_STEP_M and 0 < dt <= _MAX_SPEED_INTERVAL_S:
+            if (
+                step is not None
+                and step >= 0
+                and geo.step_is_travel(step, dt)
+                and 0 < dt <= _MAX_SPEED_INTERVAL_S
+            ):
                 speed = step / dt
                 if speed <= _MAX_SPEED_MS:
                     out[index] = speed
@@ -296,11 +301,22 @@ def summarizeWorkout(fileish: Fileish) -> workout.Profile:
         lap_total = sum(lap.distance_m for lap in activity.laps if lap.distance_m)
         distance = lap_total if lap_total else None
     if distance is None:
+        # Times go along so the glitch rule is about implied speed rather than
+        # a bare metre count: a TCX from a smart-recording device can leave
+        # hundreds of metres between consecutive trackpoints, and every one of
+        # them is distance the athlete covered.
+        origin = next((p.time for p in points if p.time is not None), None)
         distance = geo.track_distance_m(
             [
                 (p.lat, p.lon) if p.lat is not None and p.lon is not None else None
                 for p in points
-            ]
+            ],
+            [
+                (p.time - origin).total_seconds()
+                if (origin is not None and p.time is not None)
+                else None
+                for p in points
+            ],
         )
 
     derived_speed = _derived_speed(points)

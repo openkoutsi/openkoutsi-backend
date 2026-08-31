@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import gzip
 import math
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -84,6 +84,17 @@ def _trkpt(second: int, *, lat: float = 61.5, lon: float = 20.5, hr: int | None 
             "</gpxtpx:TrackPointExtension></extensions>"
         )
     return f'<trkpt lat="{lat}" lon="{lon}">{inner}</trkpt>'
+
+
+def _sparse_trkpt(offset_s: int, *, lat: float = 61.5, lon: float = 20.5) -> str:
+    """A track point minutes rather than seconds from the start.
+
+    ``_trkpt`` puts its offset in the ``second`` field, which stops at 59; a
+    variable-rate recording is defined by the gaps being longer than that.
+    """
+    time = datetime(2024, 3, 2, 9, 0, tzinfo=timezone.utc) + timedelta(seconds=offset_s)
+    stamp = time.isoformat().replace("+00:00", "Z")
+    return f'<trkpt lat="{lat}" lon="{lon}"><ele>10</ele><time>{stamp}</time></trkpt>'
 
 
 class TestGpxProfile:
@@ -317,6 +328,51 @@ class TestStreamAlignment:
 
         one_step = geo.haversine_m(61.5, 20.5, 61.5, 20.5001)
         assert profile.distance == pytest.approx(2 * one_step, abs=2)
+
+    def test_a_smart_recording_track_reports_its_whole_distance(self):
+        """A route planner's export, ridden and downloaded (issue: a 84 km
+        route summarised as 60 km).
+
+        Komoot and every other planner write a point per direction change
+        rather than one a second, so a long straight arrives as a single step
+        of kilometres. Judged as metres those steps look like GPS glitches and
+        were dropped; judged as speed they are a rider at 21 km/h. The whole
+        distance is the athlete's, and nothing in the file marks the parts that
+        went missing, so the error is invisible unless it is tested for.
+        """
+        # Ten legs of ~1.1 km, each taking three minutes: 22 km/h, and every
+        # leg comfortably past the metre cap a 1 Hz assumption produces.
+        points = "".join(
+            _sparse_trkpt(minute * 180, lat=61.5 + minute * 0.01) for minute in range(11)
+        )
+        profile = gpx.summarizeWorkout(_gpx_document(f"<trkseg>{points}</trkseg>"))
+
+        expected = 10 * geo.haversine_m(61.5, 20.5, 61.51, 20.5)
+        assert expected > 11_000  # ~11 km of real riding
+        assert profile.distance == pytest.approx(expected, rel=0.001)
+
+    def test_a_sparse_route_keeps_its_coordinates_and_its_distance(self):
+        points = "".join(
+            _sparse_trkpt(minute * 180, lat=61.5 + minute * 0.01) for minute in range(11)
+        )
+        route = gpx.extract_route(_gpx_document(f"<trkseg>{points}</trkseg>"))
+
+        assert len(route.points) == 11
+        assert route.distance_m == pytest.approx(
+            10 * geo.haversine_m(61.5, 20.5, 61.51, 20.5), rel=0.001
+        )
+
+    def test_a_genuine_glitch_in_a_sparse_track_is_still_rejected(self):
+        # The same sparse track with one fix in the Atlantic three minutes in.
+        # Sparse sampling must not become a licence to accept anything.
+        points = (
+            _sparse_trkpt(0)
+            + _sparse_trkpt(180, lat=0.5, lon=-30.0)
+            + _sparse_trkpt(360, lat=61.51)
+        )
+        profile = gpx.summarizeWorkout(_gpx_document(f"<trkseg>{points}</trkseg>"))
+
+        assert profile.distance < 1_000
 
 
 class TestBrokenFiles:
@@ -592,6 +648,51 @@ class TestGeo:
         assert geo.track_distance_m(clean) == pytest.approx(
             geo.haversine_m(61.5, 20.5, 61.5, 20.5001), abs=0.1
         )
+
+    def test_a_teleport_is_still_rejected_when_the_track_carries_time(self):
+        # Same Atlantic excursion, now with timestamps two seconds apart: the
+        # speed rule has to reach the same verdict the metre cap did.
+        glitched = [(61.5, 20.5), (0.5, -30.0), (61.5, 20.5001)]
+        assert geo.track_distance_m(glitched, [0.0, 2.0, 4.0]) < 100
+
+    def test_a_long_gap_does_not_license_a_teleport(self):
+        # Half an hour at 60 m/s is 108 km, so the speed rule alone would wave
+        # through a jump of that order. 3 000 km is not a ride whatever the gap.
+        assert not geo.step_is_travel(3_000_000.0, 1800.0)
+
+    def test_a_sparsely_sampled_step_is_travel_not_a_glitch(self):
+        """The bug this file exists to not have again.
+
+        A Komoot export of a seven-hour ride carries a point roughly every 30 s
+        and, on a long straight, one every fifteen minutes — kilometres apart.
+        Those kilometres were ridden. Judging them on distance alone called a
+        3.5 km step at 15 km/h a GPS glitch and silently subtracted it, which
+        turned an 84 km route into 60 km with nothing anywhere saying so.
+        """
+        assert geo.step_is_travel(3490.0, 818.0)  # 15.4 km/h
+        assert geo.step_is_travel(1486.0, 234.0)  # 22.9 km/h
+        # …while the same distance in two seconds is still wrong, not fast.
+        assert not geo.step_is_travel(3490.0, 2.0)
+
+    def test_a_variable_rate_track_keeps_its_kilometres(self):
+        # Two fixes 5 km apart, ten minutes between them: 30 km/h, a road ride
+        # recorded by a device that writes a point only when the heading
+        # changes. The whole 5 km counts.
+        far = geo.haversine_m(61.5, 20.5, 61.545, 20.5)
+        assert far > 4_000  # far beyond anything a 1 Hz-shaped cap would pass
+        assert geo.track_distance_m(
+            [(61.5, 20.5), (61.545, 20.5)], [0.0, 600.0]
+        ) == pytest.approx(far, abs=0.1)
+
+    def test_a_track_with_no_times_falls_back_to_the_metre_cap(self):
+        # A course or route file states no clock, so there is no speed to
+        # judge; the fallback still has to pass ordinary route geometry.
+        assert geo.step_is_travel(3490.0, None)
+        assert not geo.step_is_travel(3_000_000.0, None)
+
+    def test_elapsed_must_line_up_with_the_points(self):
+        with pytest.raises(ValueError):
+            geo.cumulative_distance_m([(61.5, 20.5), (61.5, 20.6)], [0.0])
 
     def test_points_with_no_fix_carry_the_distance_forward(self):
         cumulative = geo.cumulative_distance_m(

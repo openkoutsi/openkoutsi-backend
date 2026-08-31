@@ -74,8 +74,9 @@ _EXTENSION_CHANNELS = {
 # slow athlete: deriving a speed across it would describe the café rather than
 # the ride.
 _MAX_SPEED_INTERVAL_S = 60.0
-# 216 km/h. Above this the pair of fixes is wrong, not fast.
-_MAX_SPEED_MS = 60.0
+# 216 km/h. Above this the pair of fixes is wrong, not fast — the same rule
+# `geo.step_is_travel` applies to the distance, so they cannot drift apart.
+_MAX_SPEED_MS = geo.MAX_STEP_SPEED_MS
 
 # `<name>` becomes the activity's name, which is a String column echoed back
 # by every endpoint that lists activities. Nothing in XML bounds the length
@@ -284,6 +285,12 @@ def _derive(points: list[_Point]) -> tuple[float, dict[int, float]]:
     computed across a ``<trkseg>`` boundary: a new segment means the device was
     paused, and the metres between the last fix before the pause and the first
     after it were not travelled at any speed worth recording.
+
+    A step is counted when :func:`geo.step_is_travel` says the athlete rode it,
+    which for a timestamped point means the implied speed is plausible. The two
+    thresholds below are about the *speed stream* and not about the distance:
+    a point too far from the last one in time gets no speed sample, but the
+    metres between them are still metres.
     """
     distance = 0.0
     derived_speed: dict[int, float] = {}
@@ -296,14 +303,12 @@ def _derive(points: list[_Point]) -> tuple[float, dict[int, float]]:
             previous = points[previous_index]
             if previous.segment == point.segment:
                 step = geo.haversine_m(previous.lat, previous.lon, point.lat, point.lon)
-                if step <= geo.MAX_STEP_M:
+                dt = None
+                if previous.time is not None and point.time is not None:
+                    dt = (point.time - previous.time).total_seconds()
+                if geo.step_is_travel(step, dt):
                     distance += step
-                    if (
-                        previous.time is not None
-                        and point.time is not None
-                        and "speed" not in point.channels
-                    ):
-                        dt = (point.time - previous.time).total_seconds()
+                    if dt is not None and "speed" not in point.channels:
                         if 0 < dt <= _MAX_SPEED_INTERVAL_S:
                             speed = step / dt
                             if speed <= _MAX_SPEED_MS:
