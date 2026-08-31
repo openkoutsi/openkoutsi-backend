@@ -82,14 +82,19 @@ def _mud_sector(fraction_start=0.4, fraction_end=0.45):
 
 
 def _using(matcher):
-    """Patch the matcher accessor everywhere it is looked up.
+    """Make the API and the job both see this matcher.
 
-    It is fetched by name in two modules rather than resolved through a FastAPI
-    dependency, because the background job is not a request and has no
-    dependency graph to override.
+    The two ask different questions on purpose: the routes only need to know
+    whether a sidecar is wired up — a settings read, so that answering it on
+    `GET /courses/{id}` costs nothing — while the background job needs the
+    client itself. Neither is a FastAPI dependency, because the job is not a
+    request and has no dependency graph to override.
     """
     return (
-        patch("backend.app.api.courses.get_surface_matcher", return_value=matcher),
+        patch(
+            "backend.app.api.courses.surface_matching_configured",
+            return_value=matcher.is_configured,
+        ),
         patch(
             "backend.app.services.course_surface.get_surface_matcher",
             return_value=matcher,
@@ -184,6 +189,36 @@ def run_match(session, registry_session):
 
     return _run
 
+
+
+async def _run_recording(events, session, course_id, athlete_id, matcher):
+    """Drive the job, recording every session open and close in order."""
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def _user_session():
+        events.append("open")
+        try:
+            yield session
+        finally:
+            events.append("close")
+
+    @asynccontextmanager
+    async def _registry():
+        yield session
+
+    with (
+        patch.object(
+            course_surface,
+            "get_user_session_factory",
+            return_value=lambda: _user_session(),
+        ),
+        patch.object(course_surface, "registry_session", _registry),
+        patch.object(course_surface, "course_recon_enabled", _always_enabled),
+    ):
+        await course_surface.match_course_surface(
+            athlete_id, course_id, "test-user-00000000", None, matcher
+        )
 
 
 async def _always_enabled(_session) -> bool:
@@ -835,3 +870,142 @@ class TestMoreDegradation:
         await run_match(course["id"], seeded_athlete.id, _FakeMatcher(_all("gravel")))
         detail = await client.get(f"/api/courses/{course['id']}", headers=auth_headers)
         assert detail.json()["surface_status"] == course_surface.DONE
+
+
+class TestResourceLifetime:
+    """What the optional background pass must not do to the app around it."""
+
+    async def test_no_database_connection_is_held_across_the_sidecar_call(
+        self, session, seeded_athlete, course, run_match
+    ):
+        """The athlete's pool is three connections deep with two of overflow.
+
+        Holding one across up to TOTAL_BUDGET_S of network I/O is how an
+        optional feature makes somebody's *interactive* requests queue behind a
+        routing engine — the app looking broken while the feature degrades.
+        """
+        # Observed through the session *factory* rather than a session object:
+        # the harness hands both blocks the same session, so only the open and
+        # close events distinguish "one session spanning the call" from "one
+        # before it and one after".
+        events: list[str] = []
+
+        class _RecordsWhenItRuns(_FakeMatcher):
+            async def match(self, points):
+                events.append("match")
+                return await super().match(points)
+
+        await _run_recording(
+            events, session, course["id"], seeded_athlete.id,
+            _RecordsWhenItRuns(_all("gravel")),
+        )
+        assert "match" in events, "the matcher was never reached"
+        before = events[: events.index("match")]
+        assert "close" in before, (
+            "the read session was still open across the sidecar call"
+        )
+        assert events[events.index("match") + 1 :].count("open") >= 1, (
+            "nothing reopened a session to write the result"
+        )
+
+    async def test_the_result_still_lands(
+        self, client, auth_headers, session, seeded_athlete, course, run_match
+    ):
+        """Reopening a session to write must not lose the match."""
+        await run_match(course["id"], seeded_athlete.id, _FakeMatcher(_all("gravel")))
+        detail = await client.get(f"/api/courses/{course['id']}", headers=auth_headers)
+        assert detail.json()["surface_status"] == course_surface.DONE
+        assert {s["surface"] for s in detail.json()["segments"]} == {
+            surface_math.GRAVEL
+        }
+
+    async def test_matches_beyond_the_slot_count_settle_rather_than_queue(
+        self, session, seeded_athlete, course, run_match
+    ):
+        """A course that cannot get a slot gets a status it already handles.
+
+        Queueing would hold a connection waiting for a turn, which is the thing
+        the slot count exists to prevent.
+        """
+        matcher = _FakeMatcher(_all("gravel"))
+        try:
+            for _ in range(course_surface._max_concurrent()):
+                assert course_surface._try_claim_slot()
+            await run_match(course["id"], seeded_athlete.id, matcher)
+            assert matcher.calls == 0, "ran anyway with every slot taken"
+        finally:
+            for _ in range(course_surface._max_concurrent()):
+                course_surface._release_slot()
+
+        row = (
+            await session.execute(select(Course).where(Course.id == course["id"]))
+        ).scalar_one()
+        await session.refresh(row)
+        assert row.surface_status == course_surface.UNAVAILABLE
+
+    async def test_a_slot_is_released_even_when_the_match_explodes(
+        self, session, seeded_athlete, course, run_match
+    ):
+        """Otherwise one crash permanently costs the instance a slot."""
+        before = course_surface._active_matches
+
+        class _Explodes(_FakeMatcher):
+            async def match(self, points):
+                raise RuntimeError("boom")
+
+        await run_match(course["id"], seeded_athlete.id, _Explodes())
+        assert course_surface._active_matches == before
+
+
+class TestSurfaceRawAttribution:
+    async def test_an_unmatched_segment_does_not_borrow_another_stretch_raw(
+        self, client, auth_headers, session, seeded_athlete, course, run_match
+    ):
+        """`impassable` and "never matched" both normalise to unknown.
+
+        Keyed by class, a segment nobody matched would report the raw value of
+        whichever unknown run came last — so a stretch the matcher said nothing
+        about could claim to be `impassable`, which is exactly the scary label
+        the normalisation maps that value to unknown to avoid inventing.
+        """
+
+        def _impassable_head(n):
+            return ["impassable" if i < n // 4 else None for i in range(n)]
+
+        await run_match(
+            course["id"], seeded_athlete.id, _FakeMatcher(_impassable_head)
+        )
+        detail = await client.get(f"/api/courses/{course['id']}", headers=auth_headers)
+        segments = detail.json()["segments"]
+        unknown = [s for s in segments if s["surface"] == surface_math.UNKNOWN]
+        assert unknown, "expected unmatched stretches"
+        assert all(s["surface_raw"] is None for s in unknown), (
+            "an unidentified surface has no matcher answer to quote"
+        )
+
+    async def test_a_matched_segment_still_reports_what_the_matcher_said(
+        self, client, auth_headers, session, seeded_athlete, course, run_match
+    ):
+        """The property `surface_raw` exists for, unchanged."""
+        await run_match(course["id"], seeded_athlete.id, _FakeMatcher(_all("gravel")))
+        detail = await client.get(f"/api/courses/{course['id']}", headers=auth_headers)
+        assert {s["surface_raw"] for s in detail.json()["segments"]} == {"gravel"}
+
+
+class TestAMalformedStoredRibbon:
+    async def test_reading_the_course_degrades_rather_than_500ing(
+        self, client, auth_headers, session, course
+    ):
+        """`surface_ribbon` is read on `GET /courses/{id}` and by the prompt.
+
+        One bad row must cost the sectors, not the course.
+        """
+        row = (
+            await session.execute(select(Course).where(Course.id == course["id"]))
+        ).scalar_one()
+        row.surface_ribbon = [[0, 1000, "gravel"], [1000, 2000, "dirt", "confirmed", 5]]
+        await session.commit()
+
+        resp = await client.get(f"/api/courses/{course['id']}", headers=auth_headers)
+        assert resp.status_code == 200
+        assert resp.json()["rough_sectors"] is not None

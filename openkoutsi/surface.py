@@ -87,7 +87,10 @@ def normalise(raw: str | None) -> str:
     confident: "we could not tell" and "smooth tarmac" are different answers
     and the athlete is entitled to know which one they got.
     """
-    if raw is None:
+    # Anything that is not a string is not a surface value, and this is a read
+    # path: a stored row that somehow holds a number must classify as unknown
+    # rather than raise on `.strip()` while somebody is opening their course.
+    if not isinstance(raw, str):
         return UNKNOWN
     return _FROM_MATCHER.get(raw.strip().lower(), UNKNOWN)
 
@@ -117,7 +120,7 @@ def confidence_for(raw: str | None) -> str:
     under-claiming is the safe direction; the UI and the docs must use the same
     wording rather than the shorter, wronger one.
     """
-    if raw is None:
+    if not isinstance(raw, str):
         return INFERRED
     # A class we could not identify can never be confirmed — `impassable`
     # normalises to UNKNOWN, so it must not report as a fact merely because it
@@ -556,9 +559,17 @@ def rough_sector_json(ribbon: Sequence | None) -> list:
     """
     out: list = []
     for entry in ribbon or []:
-        start, end, klass, confidence, step = (list(entry) + [0])[:5]
+        # Padded to a fixed width rather than by one: this is read on
+        # `GET /courses/{id}` and when building the plan prompt, so a single
+        # malformed row must produce a course with no sectors, not a 500 on
+        # reading the course.
+        start, end, klass, confidence, step = (
+            list(entry) + [None, None, None, None, 0]
+        )[:5]
+        if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
+            continue
         if end > start and severity_rank(klass) >= ROUGH_SECTOR_MIN_RANK:
-            out.append([start, end - start, klass, confidence, step])
+            out.append([start, end - start, klass, confidence, step or 0])
     return out
 
 
@@ -574,8 +585,14 @@ def points_from_json(stored: Sequence | None) -> list[SurfacePoint] | None:
         return None
     points: list[SurfacePoint] = []
     for entry in stored:
+        # A bare string would index character-by-character — `entry[0]` on
+        # "asphalt" is "a" — and classify the whole course wrongly without
+        # raising, which is worse than failing. Only a real sequence of two is
+        # a stored pair.
+        if not isinstance(entry, (list, tuple)):
+            entry = []
         raw = entry[0] if entry else None
-        confidence = entry[1] if entry and len(entry) > 1 else None
+        confidence = entry[1] if len(entry) > 1 else None
         points.append(
             SurfacePoint(
                 surface=normalise(raw),

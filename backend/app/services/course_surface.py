@@ -59,6 +59,40 @@ DONE = "done"
 UNAVAILABLE = "unavailable"
 
 
+#: Matches in flight in this process.
+#:
+#: A plain counter rather than an :class:`asyncio.Semaphore`, for the reason
+#: ``llm_agent._active_runs`` sets out: the one thing this guard must never do
+#: is *wait*, and waiting is a semaphore's whole purpose. Testing ``.locked()``
+#: before ``async with`` looks non-blocking and is not. asyncio is cooperative
+#: and there is no ``await`` between reading this and incrementing it, so the
+#: check and the claim are one indivisible step.
+#:
+#: It bounds two things at once: how much of the athlete's small connection
+#: pool the optional background pass can occupy, and how many simultaneous
+#: requests are aimed at a sidecar that is one container on a two-core box.
+_active_matches = 0
+MAX_CONCURRENT_MATCHES = 2
+
+
+def _max_concurrent() -> int:
+    return max(1, MAX_CONCURRENT_MATCHES)
+
+
+def _try_claim_slot() -> bool:
+    """Take a slot if one is free. Never waits, never raises."""
+    global _active_matches
+    if _active_matches >= _max_concurrent():
+        return False
+    _active_matches += 1
+    return True
+
+
+def _release_slot() -> None:
+    global _active_matches
+    _active_matches = max(0, _active_matches - 1)
+
+
 def settle_course_surface(course, now: Optional[datetime] = None) -> bool:
     """Settle a match that a restart left ``pending``. Returns True when it did.
 
@@ -114,92 +148,147 @@ async def match_course_surface(
         if stuck is not None:
             settle_course_surface(stuck)
 
-    async with failure_recovery(
-        user_id, f"Surface match for course {course_id}", _clear_pending
-    ):
-        async with get_user_session_factory(user_id)() as session:
-            course = (
-                await session.execute(
-                    select(Course).where(
-                        Course.id == course_id, Course.athlete_id == athlete_id
+    if not _try_claim_slot():
+        # Every slot busy. Settling to `unavailable` rather than queueing is
+        # the honest answer: the athlete has a complete Stage 1 course, and a
+        # status this feature already has and already handles beats holding a
+        # database connection open waiting for a turn.
+        log.info(
+            "All %d surface-match slots busy; not matching course %s now",
+            _max_concurrent(),
+            course_id,
+        )
+        async with failure_recovery(
+            user_id, f"Surface match for course {course_id}", _clear_pending
+        ):
+            async with get_user_session_factory(user_id)() as session:
+                course = await _load_course(session, course_id, athlete_id)
+                if course is not None:
+                    await _settle(session, course, run_id, UNAVAILABLE)
+        return
+
+    try:
+        async with failure_recovery(
+            user_id, f"Surface match for course {course_id}", _clear_pending
+        ):
+            # ── read ────────────────────────────────────────────────────────
+            # Everything the match needs is read and the session closed before
+            # the sidecar is called. Holding a pooled connection across up to
+            # TOTAL_BUDGET_S of network I/O would let a handful of concurrent
+            # matches exhaust this athlete's pool (pool_size=3, max_overflow=2)
+            # and make their *interactive* requests queue behind a routing
+            # engine — the optional feature degrading the app around it.
+            async with get_user_session_factory(user_id)() as session:
+                course = await _load_course(session, course_id, athlete_id)
+                if course is None:
+                    return
+                if run_id is not None and course.surface_run_id != run_id:
+                    # Superseded before we started — a re-analysis, or a second
+                    # match request. The run holding the token owns the columns.
+                    return
+
+                track = await session.get(CourseTrack, course_id)
+                if track is None or not track.points:
+                    await _settle(session, course, run_id, UNAVAILABLE)
+                    return
+
+                stored_points = list(track.points)
+                target_time_s = course.target_time_s
+                target_power_w = course.target_power_w
+                bike = await _bike_params(session, course)
+                athlete = (
+                    await session.execute(
+                        select(Athlete).where(Athlete.id == athlete_id)
                     )
+                ).scalar_one_or_none()
+                rider = (
+                    course_math.RiderParams(
+                        ftp_w=float(athlete.ftp), weight_kg=float(athlete.weight_kg)
+                    )
+                    if athlete is not None and athlete.ftp and athlete.weight_kg
+                    else None
                 )
-            ).scalar_one_or_none()
-            if course is None:
-                return
-            if run_id is not None and course.surface_run_id != run_id:
-                # Superseded before we started — a re-analysis, or a second
-                # match request. The run that holds the token owns the columns.
-                return
 
-            track = await session.get(CourseTrack, course_id)
-            if track is None or not track.points:
-                await _settle(session, course, run_id, UNAVAILABLE)
-                return
-
-            points = [(row[0], row[1]) for row in track.points]
-            distances = [row[3] for row in track.points]
+            # ── match, holding no database connection ───────────────────────
+            points = [(row[0], row[1]) for row in stored_points]
+            distances = [row[3] for row in stored_points]
             surfaces = await match_track(matcher, points, distances)
-            if surfaces is None or not any(entry[0] for entry in surfaces):
-                # Nothing identified is not the same as "the whole route is
-                # unknown": drawing a full-length grey band would claim we had
-                # looked and found something when we had only looked. The
-                # client already collapses this case, but asserting it here
-                # too means the property holds whichever layer produced it.
-                await _settle(session, course, run_id, UNAVAILABLE)
-                return
 
-            athlete = (
-                await session.execute(select(Athlete).where(Athlete.id == athlete_id))
-            ).scalar_one_or_none()
-            if athlete is None or not athlete.ftp or not athlete.weight_kg:
-                # The physics cannot re-solve without these. Keep what the
-                # matcher said — it is still true about the road — but leave
-                # the segments alone rather than half-updating them.
+            solved = None
+            if surfaces is not None and any(entry[0] for entry in surfaces) and rider:
+                solved, reason = await asyncio.to_thread(
+                    course_analysis.analyze_stored_track,
+                    stored_points,
+                    rider,
+                    bike,
+                    target_time_s,
+                    target_power_w,
+                    surfaces,
+                )
+                if solved is None:
+                    log.warning(
+                        "Course %s could not be re-solved after matching (%s)",
+                        course_id,
+                        reason,
+                    )
+
+            # ── write ───────────────────────────────────────────────────────
+            async with get_user_session_factory(user_id)() as session:
+                course = await _load_course(session, course_id, athlete_id)
+                if course is None:
+                    return
+                # The token re-check that already guarded a re-analysis landing
+                # mid-match now also spans the session boundary, which is what
+                # makes reopening safe. It is a truer check here than before:
+                # it reads outside the transaction it is trying to detect a
+                # change against.
+                if run_id is not None and course.surface_run_id != run_id:
+                    log.info(
+                        "Surface match for course %s superseded; discarding", course_id
+                    )
+                    return
+
+                if surfaces is None or not any(entry[0] for entry in surfaces):
+                    # Nothing identified is not "the whole route is unknown":
+                    # drawing a full-length grey band would claim we had looked
+                    # and found something when we had only looked.
+                    await _settle(session, course, run_id, UNAVAILABLE)
+                    return
+
+                track = await session.get(CourseTrack, course_id)
+                if track is None:
+                    await _settle(session, course, run_id, UNAVAILABLE)
+                    return
                 track.surfaces = surfaces
                 track.surface_matched_at = datetime.now(timezone.utc)
-                await _settle(session, course, run_id, UNAVAILABLE)
-                return
 
-            bike = await _bike_params(session, course)
-            rider = course_math.RiderParams(
-                ftp_w=float(athlete.ftp), weight_kg=float(athlete.weight_kg)
-            )
-            analysis, reason = await asyncio.to_thread(
-                course_analysis.analyze_stored_track,
-                track.points,
-                rider,
-                bike,
-                course.target_time_s,
-                course.target_power_w,
-                surfaces,
-            )
-            if analysis is None:
-                log.warning(
-                    "Course %s could not be re-solved after matching (%s)",
-                    course_id,
-                    reason,
+                if solved is None or rider is None:
+                    # The matcher answered but the physics could not re-solve —
+                    # no FTP or weight on the profile, most likely. Keep what
+                    # the matcher said, since it is still true about the road,
+                    # rather than half-updating the segments.
+                    await _settle(session, course, run_id, UNAVAILABLE)
+                    return
+
+                await course_analysis.persist_analysis(
+                    course, solved, session, rider=rider
                 )
-                await _settle(session, course, run_id, UNAVAILABLE)
-                return
+                course.surface_status = DONE
+                course.surface_run_id = None
+                course.surface_updated_at = datetime.now(timezone.utc)
+                await session.commit()
+    finally:
+        _release_slot()
 
-            # Re-check the token before writing: a re-analysis may have landed
-            # while we were out at the sidecar, and its segment table is the
-            # current one. Same guarantee `generate_course_plan_bg` makes.
-            await session.refresh(course)
-            if run_id is not None and course.surface_run_id != run_id:
-                log.info("Surface match for course %s superseded; discarding", course_id)
-                return
 
-            track.surfaces = surfaces
-            track.surface_matched_at = datetime.now(timezone.utc)
-            await course_analysis.persist_analysis(
-                course, analysis, session, rider=rider
+async def _load_course(session: AsyncSession, course_id: str, athlete_id: str):
+    return (
+        await session.execute(
+            select(Course).where(
+                Course.id == course_id, Course.athlete_id == athlete_id
             )
-            course.surface_status = DONE
-            course.surface_run_id = None
-            course.surface_updated_at = datetime.now(timezone.utc)
-            await session.commit()
+        )
+    ).scalar_one_or_none()
 
 
 async def _settle(

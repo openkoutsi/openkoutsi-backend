@@ -156,6 +156,16 @@ class ValhallaSurfaceMatcher:
             chunks = chunks[:MAX_CHUNKS]
 
         for start, end in chunks:
+            if _UNAVAILABLE_UNTIL.get(self._base, 0.0) > time.monotonic():
+                # The sidecar died mid-course. Without this the breaker is only
+                # ever consulted at entry, so a course already in flight spends
+                # the rest of its budget re-proving what the first failed chunk
+                # established — up to MAX_CHUNKS connect timeouts.
+                log.warning(
+                    "Surface matcher at %s went away mid-course; stopping early",
+                    self._base,
+                )
+                break
             if time.monotonic() >= deadline:
                 log.warning(
                     "Surface matching hit its %.0f s budget; the rest of the "
@@ -175,8 +185,16 @@ class ValhallaSurfaceMatcher:
                 if seen[i]:
                     # Second opinion on an overlap point. Two chunks that
                     # disagree mean the snap is not settled, whichever one
-                    # spoke last.
-                    if answers[i] != value:
+                    # spoke last — but a chunk that snapped *nothing* has not
+                    # disagreed, it has only stayed silent, and silence must
+                    # not discard a good answer. Map matching is least certain
+                    # at the head of a trace, which is exactly what an overlap
+                    # is, so treating None as a contradiction threw away
+                    # CHUNK_OVERLAP points at every boundary — and they landed
+                    # as UNKNOWN, whose Crr is the *pavement* curve, quietly
+                    # re-solving them as the tarmac this feature exists to
+                    # stop assuming.
+                    if value is not None and answers[i] != value:
                         disputed[i] = True
                 elif value is not None:
                     # Only a real match counts as having been seen. A chunk
@@ -215,13 +233,34 @@ class ValhallaSurfaceMatcher:
             # match and read as "all unknown" instead of as a failure.
             response.raise_for_status()
             payload = response.json()
-        except (httpx.HTTPError, ValueError):
+            # A 200 only promises *valid JSON*, not the shape we asked for. A
+            # proxy answering with an error envelope, or an engine whose
+            # response shape has moved, lands here — and reading it must fail
+            # on this module's own degradation path rather than raise out of it.
+            if not isinstance(payload, dict):
+                raise ValueError("trace_attributes did not return an object")
+            surfaces = _surfaces_from_trace(payload, len(points))
+        except httpx.HTTPStatusError as exc:
+            # A 4xx is a statement about *this request* — a shape the engine
+            # will not take, a trace it cannot snap — not about the sidecar's
+            # health. Failing the chunk is right; writing the whole sidecar off
+            # on behalf of every other athlete's course is not, and it would
+            # present as an intermittent five-minute outage nobody could
+            # diagnose from `surface_status` alone.
+            status = exc.response.status_code
+            log.warning(
+                "Surface matcher at %s refused a chunk with %s", self._base, status
+            )
+            if status >= 500 or status == 429:
+                _UNAVAILABLE_UNTIL[self._base] = time.monotonic() + _RE_PROBE_AFTER_S
+            return None
+        except (httpx.HTTPError, ValueError, AttributeError, TypeError):
             log.warning("Surface matcher at %s did not answer", self._base)
             _UNAVAILABLE_UNTIL[self._base] = time.monotonic() + _RE_PROBE_AFTER_S
             return None
 
         _UNAVAILABLE_UNTIL.pop(self._base, None)
-        return _surfaces_from_trace(payload, len(points))
+        return surfaces
 
 
 def _chunk_indices(total: int):
@@ -321,13 +360,47 @@ async def match_track(
 # ── wiring ────────────────────────────────────────────────────────────────────
 
 
+def surface_matching_configured() -> bool:
+    """Whether a sidecar is wired up. A settings read, and nothing more.
+
+    Most callers only want this — a course response saying whether the action
+    can be offered — and building an HTTP client to answer it would allocate a
+    connection pool per request on the hottest course route.
+    """
+    return bool(settings.valhalla_url)
+
+
+#: The one client the matcher uses, built on first need and closed at shutdown.
+#: Every other outbound client in this codebase is scoped by an ``async with``;
+#: this one cannot be, because the background match outlives the request that
+#: scheduled it. So it is owned here instead of by nobody: an
+#: ``httpx.AsyncClient`` that is dropped rather than closed does not reliably
+#: release the sockets in its pool, and this is a path a course page hits.
+_client: httpx.AsyncClient | None = None
+
+
 def build_surface_matcher() -> SurfaceMatcher:
     """The matcher this instance is configured for, or the absent one."""
-    if not settings.valhalla_url:
+    global _client
+    if not surface_matching_configured():
         return NullSurfaceMatcher()
-    return ValhallaSurfaceMatcher(
-        httpx.AsyncClient(timeout=REQUEST_TIMEOUT), settings.valhalla_url
-    )
+    if _client is None or _client.is_closed:
+        _client = httpx.AsyncClient(
+            timeout=REQUEST_TIMEOUT,
+            # Sized against the chunk loop, which is sequential: one live
+            # connection is enough, and a small idle pool keeps the sidecar
+            # from collecting sockets between courses.
+            limits=httpx.Limits(max_connections=4, max_keepalive_connections=2),
+        )
+    return ValhallaSurfaceMatcher(_client, settings.valhalla_url)
+
+
+async def close_surface_matcher() -> None:
+    """Release the shared client. Called from the app's lifespan shutdown."""
+    global _client
+    if _client is not None and not _client.is_closed:
+        await _client.aclose()
+    _client = None
 
 
 def get_surface_matcher() -> SurfaceMatcher:
@@ -337,6 +410,8 @@ def get_surface_matcher() -> SurfaceMatcher:
 
 __all__ = [
     "CHUNK_OVERLAP",
+    "close_surface_matcher",
+    "surface_matching_configured",
     "CHUNK_POINTS",
     "MATCH_SPACING_M",
     "MAX_CHUNKS",

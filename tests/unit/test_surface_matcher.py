@@ -385,3 +385,160 @@ class TestTheFactory:
 
     def test_a_trailing_slash_does_not_produce_a_double_slash_url(self):
         assert sm.ValhallaSurfaceMatcher(httpx.AsyncClient(), BASE + "/")._base == BASE
+
+
+class TestOverlapSilence:
+    """Silence from one chunk must not discard another chunk's real match.
+
+    Map matching is least certain at the *head* of a trace, and an overlap is
+    exactly the leading CHUNK_OVERLAP points of every chunk after the first.
+    Counting `None` as disagreement threw those away at every boundary — and
+    they landed as UNKNOWN, whose Crr is the pavement curve, silently
+    re-solving them as the tarmac this feature exists to stop assuming.
+    """
+
+    async def test_an_unmatched_second_opinion_does_not_discard_a_good_match(self):
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(200, json=_trace(["gravel"] * sm.CHUNK_POINTS))
+            # Chunk 2 fails to snap its leading overlap, then matches the rest.
+            values = [None] * sm.CHUNK_OVERLAP + ["gravel"] * (
+                sm.CHUNK_POINTS - sm.CHUNK_OVERLAP
+            )
+            return httpx.Response(200, json=_trace(values))
+
+        got = await _client(handler).match([(61.5, 20.5)] * 1200)
+        overlap = range(sm.CHUNK_POINTS - sm.CHUNK_OVERLAP, sm.CHUNK_POINTS)
+        assert all(got[i] == "gravel" for i in overlap), (
+            "chunk 1 matched these cleanly; chunk 2 merely said nothing"
+        )
+
+    async def test_a_real_disagreement_still_disputes(self):
+        """The rule it must not weaken: value vs different value is unsettled."""
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            value = "gravel" if calls["n"] == 1 else "dirt"
+            return httpx.Response(200, json=_trace([value] * sm.CHUNK_POINTS))
+
+        got = await _client(handler).match([(61.5, 20.5)] * 1200)
+        overlap = range(sm.CHUNK_POINTS - sm.CHUNK_OVERLAP, sm.CHUNK_POINTS)
+        assert all(got[i] is None for i in overlap)
+
+
+class TestTheCircuitBreaker:
+    async def test_a_4xx_does_not_write_the_sidecar_off_for_other_courses(self):
+        """A 400 is about this request — a shape the engine will not take.
+
+        Valhalla returns 400 for a chunk over its configured max_trace_shape,
+        so one athlete's awkward course must not give every other athlete
+        `unavailable` for the next five minutes.
+        """
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return httpx.Response(400, text="Exceeded max shape count")
+            return httpx.Response(200, json=_trace(["gravel"] * 4))
+
+        matcher = _client(handler)
+        assert await matcher.match(_POINTS) is None
+        assert await matcher.match(_POINTS) is not None, "the breaker tripped on a 4xx"
+        assert calls["n"] == 2
+
+    @pytest.mark.parametrize("status", [500, 502, 503, 429])
+    async def test_a_5xx_or_429_does_trip_it(self, status):
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            return httpx.Response(status, text="unwell")
+
+        matcher = _client(handler)
+        await matcher.match(_POINTS)
+        await matcher.match(_POINTS)
+        assert calls["n"] == 1, "an unhealthy sidecar should not be re-probed at once"
+
+    async def test_a_course_in_flight_stops_when_the_sidecar_dies(self):
+        """Otherwise the breaker is only ever consulted at entry.
+
+        A long course would spend the rest of its budget re-proving what the
+        first failed chunk already established.
+        """
+        calls = {"n": 0}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            calls["n"] += 1
+            raise httpx.ConnectError("down")
+
+        await _client(handler).match([(61.5, 20.5)] * (sm.CHUNK_POINTS * 10))
+        assert calls["n"] == 1, "kept hammering a sidecar already known to be down"
+
+
+class TestAMisshapenPayload:
+    """A 200 promises valid JSON, not the shape we asked for."""
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            ["not", "an", "object"],
+            {"edges": ["a string"], "matched_points": [{"edge_index": 0}]},
+            {"edges": [{"surface": "gravel"}], "matched_points": ["a string"]},
+        ],
+    )
+    async def test_it_degrades_instead_of_raising(self, payload):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=payload)
+
+        assert await _client(handler).match(_POINTS) is None
+
+    async def test_it_marks_the_sidecar_unhealthy_like_any_other_non_answer(self):
+        """Every other way of not getting an answer sets the breaker."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=["not an object"])
+
+        await _client(handler).match(_POINTS)
+        assert BASE in sm._UNAVAILABLE_UNTIL
+
+
+class TestClientLifetime:
+    """`is_configured` is a settings read; it must not allocate a pool."""
+
+    def test_repeated_calls_share_one_client(self, monkeypatch):
+        monkeypatch.setattr(sm.settings, "valhalla_url", BASE)
+        monkeypatch.setattr(sm, "_client", None)
+        clients = {id(sm.get_surface_matcher()._http) for _ in range(5)}
+        assert len(clients) == 1
+
+    def test_asking_whether_it_is_configured_builds_nothing(self, monkeypatch):
+        monkeypatch.setattr(sm.settings, "valhalla_url", BASE)
+        monkeypatch.setattr(sm, "_client", None)
+        assert sm.surface_matching_configured() is True
+        assert sm._client is None, "answering a settings question opened a pool"
+
+    def test_an_unconfigured_instance_says_so_without_a_client(self, monkeypatch):
+        monkeypatch.setattr(sm.settings, "valhalla_url", "")
+        assert sm.surface_matching_configured() is False
+
+    async def test_closing_releases_the_client(self, monkeypatch):
+        monkeypatch.setattr(sm.settings, "valhalla_url", BASE)
+        monkeypatch.setattr(sm, "_client", None)
+        sm.get_surface_matcher()
+        assert sm._client is not None
+        await sm.close_surface_matcher()
+        assert sm._client is None
+
+    async def test_a_closed_client_is_rebuilt_rather_than_reused(self, monkeypatch):
+        """Shutdown then use must not hand out a client that cannot connect."""
+        monkeypatch.setattr(sm.settings, "valhalla_url", BASE)
+        monkeypatch.setattr(sm, "_client", None)
+        sm.get_surface_matcher()
+        await sm.close_surface_matcher()
+        assert sm.get_surface_matcher()._http.is_closed is False
+        await sm.close_surface_matcher()

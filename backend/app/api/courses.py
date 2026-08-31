@@ -39,7 +39,7 @@ from backend.app.schemas.pagination import Page, PageParams, paginate_params
 from backend.app.services import course_analysis, course_surface
 from backend.app.services.instance_features import course_recon_enabled
 from backend.app.services.stranded_runs import pending_timed_out, settle_course_plan
-from backend.app.services.surface_matcher import get_surface_matcher
+from backend.app.services.surface_matcher import surface_matching_configured
 from openkoutsi import surface as surface_math
 from openkoutsi.course import BikeParams, RiderParams
 from openkoutsi.gpx import ActivityParseError
@@ -160,8 +160,7 @@ async def _schedule_surface_match(
     Nothing here waits on the sidecar: the athlete already has a complete
     Stage 1 result, and a course that never gets matched keeps it.
     """
-    matcher = get_surface_matcher()
-    if not matcher.is_configured:
+    if not surface_matching_configured():
         return False
     run_id = course_surface.claim_run(course)
     await session.commit()
@@ -293,7 +292,7 @@ async def get_course(
 ):
     ctx, session, athlete = ctx_athlete
     await _get_owned_course(course_id, athlete, session)
-    return await _detail(course_id, session, get_surface_matcher().is_configured)
+    return await _detail(course_id, session, surface_matching_configured())
 
 
 @router.delete("/{course_id}", status_code=204,
@@ -385,7 +384,7 @@ async def reanalyze_course(
 
     await course_analysis.persist_analysis(course, analysis, session, rider=rider)
     await session.commit()
-    available = get_surface_matcher().is_configured
+    available = surface_matching_configured()
     if available and not track_row.surfaces:
         # An unmatched course being re-solved on an instance that *can* match:
         # take the opportunity rather than making the athlete ask for it.
@@ -418,7 +417,7 @@ async def match_course_surface(
     if course.status != "ready":
         raise HTTPException(status_code=409, detail="Course is not ready to be matched")
 
-    if not get_surface_matcher().is_configured:
+    if not surface_matching_configured():
         # The instance allows course recon but has no sidecar wired up. Absent,
         # not broken: say so plainly rather than accepting work nothing will do.
         raise HTTPException(

@@ -1065,8 +1065,16 @@ def _label_segment_surfaces(
     for.
     """
     distances = [p.distance_m for p in profile.points]
-    raw_by_surface = {run.surface: run.raw for run in runs}
+    # Resolved per segment, by position, rather than through a class → raw map.
+    # Keyed by class, every segment of a class would take whichever run of that
+    # class came last — harmless for the seven real classes, which map 1:1, but
+    # UNKNOWN is reachable from `impassable`, from an unrecognised value and
+    # from a point that was never matched at all. A segment nobody matched
+    # would then report `surface_raw: "impassable"` because some other stretch
+    # of the course was, which is precisely the scary label the normalisation
+    # maps `impassable` to UNKNOWN to avoid inventing.
     limit = min(len(distances), len(surface_points))
+    run_at = _run_index(runs, distances, limit)
 
     out: list[Segment] = []
     i = 0
@@ -1087,11 +1095,43 @@ def _label_segment_surfaces(
             if member
             else surface_math.INFERRED
         )
+        # The raw value of the run this segment actually sits in, and only
+        # when that run agrees with the segment's class — a segment assembled
+        # across a dissolved boundary has no single matcher answer to quote.
+        raw = None
+        if member and segment.surface != surface_math.UNKNOWN:
+            # Never quoted for UNKNOWN. That class is reachable from
+            # `impassable`, from an unrecognised value and from a point nobody
+            # matched at all — so one unknown run can span all three, and its
+            # first point's raw value describes none of the rest. "We could not
+            # identify this" has no matcher answer to show, which is the honest
+            # thing for `surface_raw` to say about it.
+            run = run_at.get(i - len(member))
+            if run is not None and run.surface == segment.surface:
+                raw = run.raw
         out.append(
             replace(
                 segment,
                 surface_confidence=confidence,
-                surface_raw=raw_by_surface.get(segment.surface),
+                surface_raw=raw,
             )
         )
     return out
+
+
+def _run_index(runs: Sequence, distances: Sequence[float], limit: int) -> dict:
+    """Point index → the surface run covering it."""
+    index: dict = {}
+    if not runs:
+        return index
+    position = 0
+    for run in runs:
+        while position < limit and distances[position] < run.start_distance_m:
+            position += 1
+        start = position
+        while position < limit and distances[position] < run.end_distance_m:
+            index[position] = run
+            position += 1
+        if position == start and start < limit:
+            index[start] = run
+    return index
