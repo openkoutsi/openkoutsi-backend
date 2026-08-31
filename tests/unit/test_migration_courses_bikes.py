@@ -29,7 +29,13 @@ from backend.app.models.user_orm import (
 MIGRATION = "backend.app.db.migrations.user.versions.025_courses_bikes"
 # Later migrations that reshape the same tables. The ORM is always at head, so
 # any comparison against it has to be against the whole chain, not just 025.
-LATER_MIGRATIONS = ["backend.app.db.migrations.user.versions.026_course_target_power"]
+# Every migration that has touched a course table since 025 created them. The
+# schema-parity check below replays them all, so a new one lands here too or
+# the ORM and the migrated database drift apart unnoticed.
+LATER_MIGRATIONS = [
+    "backend.app.db.migrations.user.versions.026_course_target_power",
+    "backend.app.db.migrations.user.versions.030_course_surface",
+]
 
 NEW_TABLES = {"bikes", "courses", "course_tracks", "course_segments"}
 

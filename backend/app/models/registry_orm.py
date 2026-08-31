@@ -326,6 +326,23 @@ class InstanceSettings(RegistryBase):
     allow_mcp_server: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default="1"
     )
+    # Course recon (issue #56). Defaults **off**, breaking the convention the
+    # two switches above set, and deliberately: unlike them it gates a feature
+    # whose useful half needs infrastructure that is not there. Surface
+    # classification map-matches against OSM through a Valhalla sidecar the
+    # self-hoster runs, builds tiles for, and refreshes themselves — measured
+    # at over 5 GB of peak RAM to build, against a default box with 2 GB — so
+    # the honest default for an instance that has made no such decision is
+    # "not offered" rather than "offered and quietly degraded".
+    #
+    # Off refuses the *capability*: every course and bike endpoint, the
+    # background matcher and the plan generator, not merely the entry point.
+    # It does not refuse the data export — a right to your own data is not a
+    # feature an instance toggles — and it deletes nothing, so turning it back
+    # on returns every stored course intact.
+    allow_course_recon: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
     )

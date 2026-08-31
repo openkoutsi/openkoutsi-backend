@@ -46,6 +46,15 @@ class Settings(BaseSettings):
     wahoo_bridge_url: str = ""
     wahoo_bridge_secret: str = ""
 
+    # Optional OSM surface-classification sidecar (issue #56) — a Valhalla
+    # instance the self-hoster runs themselves, reachable only from inside the
+    # deployment (http://valhalla:8002 under the ops Compose profile). Optional
+    # by design and unset by default: with no URL, course recon simply has no
+    # surface data, which is a complete Stage 1 result rather than a failure.
+    # Deployment topology, so it lives here beside the bridge URLs rather than
+    # in InstanceSettings — nothing about it is a per-instance policy choice.
+    valhalla_url: str = ""
+
     # Comma-separated list of LLM base URLs that users are allowed to choose from.
     # When set, users can only pick from this list; the free-text URL input is hidden.
     # When empty (default), users may enter any URL (subject to SSRF guards).

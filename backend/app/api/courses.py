@@ -36,15 +36,42 @@ from backend.app.schemas.courses import (
     CourseSummaryResponse,
 )
 from backend.app.schemas.pagination import Page, PageParams, paginate_params
-from backend.app.services import course_analysis
+from backend.app.services import course_analysis, course_surface
+from backend.app.services.instance_features import course_recon_enabled
 from backend.app.services.stranded_runs import pending_timed_out, settle_course_plan
+from backend.app.services.surface_matcher import get_surface_matcher
+from openkoutsi import surface as surface_math
 from openkoutsi.course import BikeParams, RiderParams
 from openkoutsi.gpx import ActivityParseError
+
+async def require_course_recon(
+    registry_session: AsyncSession = Depends(get_registry_session),
+) -> None:
+    """404 when the self-hoster has course recon switched off (issue #56).
+
+    404 rather than 403, following the personal-access-token switch: a
+    capability an instance does not offer should look absent, not forbidden.
+    Nothing is deleted when it is off — every stored course, its segments and
+    its uploaded file stay exactly where they are and come back untouched when
+    the switch is flipped.
+    """
+    if not await course_recon_enabled(registry_session):
+        raise HTTPException(status_code=404, detail="Course recon is not available")
+
 
 router = APIRouter(
     prefix="/courses",
     tags=["courses"],
-    dependencies=[pat_scopes(read="courses:read", write="courses:write")],
+    dependencies=[
+        pat_scopes(read="courses:read", write="courses:write"),
+        # Issue #56. On the router rather than per route, and mirrored in the
+        # background matcher and the plan generator, because the switch refuses
+        # the *capability* — the lesson `allow_personal_access_tokens` learned
+        # by being checked only at issuance and leaving /mcp open. The GDPR
+        # export deliberately stays outside it: a right to your own data is not
+        # a feature an instance toggles.
+        Depends(require_course_recon),
+    ],
 )
 
 # A GPX course is text; even a very long one is a few MB. The cap bounds the
@@ -100,7 +127,9 @@ async def _check_owned_goal(goal_id: str, athlete, session: AsyncSession) -> Non
         raise HTTPException(status_code=404, detail="Goal not found")
 
 
-async def _detail(course_id: str, session: AsyncSession) -> CourseDetailResponse:
+async def _detail(
+    course_id: str, session: AsyncSession, matching_available: bool = False
+) -> CourseDetailResponse:
     # Re-select so the selectin-loaded segments are fresh after a commit — and
     # `populate_existing` is what makes that true. These sessions run with
     # `expire_on_commit=False`, so a plain re-select finds the row already in
@@ -114,7 +143,32 @@ async def _detail(course_id: str, session: AsyncSession) -> CourseDetailResponse
         .execution_options(populate_existing=True)
     )
     course = result.scalar_one()
-    return CourseDetailResponse.model_validate(course)
+    detail = CourseDetailResponse.model_validate(course)
+    detail.rough_sectors = surface_math.rough_sector_json(course.surface_ribbon)
+    detail.surface_matching_available = matching_available
+    return detail
+
+
+async def _schedule_surface_match(
+    course: Course, athlete_id: str, user_id: str, session: AsyncSession
+) -> bool:
+    """Start the background surface pass for a course, if there is one to run.
+
+    Returns whether this instance can match at all, which the response carries
+    so the UI can offer the action on an older course rather than guessing.
+
+    Nothing here waits on the sidecar: the athlete already has a complete
+    Stage 1 result, and a course that never gets matched keeps it.
+    """
+    matcher = get_surface_matcher()
+    if not matcher.is_configured:
+        return False
+    run_id = course_surface.claim_run(course)
+    await session.commit()
+    asyncio.create_task(
+        course_surface.match_course_surface(athlete_id, course.id, user_id, run_id)
+    )
+    return True
 
 
 @router.post("", response_model=CourseDetailResponse, status_code=201,
@@ -200,7 +254,12 @@ async def create_course(
         await session.rollback()
         course_analysis.delete_blob_by_key(key, ctx.user_id)
         raise
-    return await _detail(course_id, session)
+    # Stage 1's answer is already committed and about to be returned; the
+    # surface pass runs behind it (issue #56). Scheduled after the commit on
+    # purpose — a match that starts before the course exists has nothing to
+    # read, and a sidecar that is slow must not hold up the upload.
+    available = await _schedule_surface_match(course, athlete.id, ctx.user_id, session)
+    return await _detail(course_id, session, available)
 
 
 @router.get("", response_model=Page[CourseSummaryResponse],
@@ -233,8 +292,8 @@ async def get_course(
     ctx_athlete=Depends(get_ctx_session_athlete),
 ):
     ctx, session, athlete = ctx_athlete
-    course = await _get_owned_course(course_id, athlete, session)
-    return CourseDetailResponse.model_validate(course)
+    await _get_owned_course(course_id, athlete, session)
+    return await _detail(course_id, session, get_surface_matcher().is_configured)
 
 
 @router.delete("/{course_id}", status_code=204,
@@ -309,6 +368,9 @@ async def reanalyze_course(
     bike_params = BikeParams(
         tyre_width_mm=bike.tyre_width_mm, riding_position=bike.riding_position
     )
+    # Re-solving reuses the stored match rather than asking again: the track
+    # has not moved, so what the matcher said about it still holds. Changing
+    # bike or target therefore costs no sidecar round trip at all.
     analysis, reason = await asyncio.to_thread(
         course_analysis.analyze_stored_track,
         track_row.points,
@@ -316,13 +378,62 @@ async def reanalyze_course(
         bike_params,
         course.target_time_s,
         course.target_power_w,
+        track_row.surfaces,
     )
     if analysis is None:
         raise _reason_error(422, reason)
 
     await course_analysis.persist_analysis(course, analysis, session, rider=rider)
     await session.commit()
-    return await _detail(course_id, session)
+    available = get_surface_matcher().is_configured
+    if available and not track_row.surfaces:
+        # An unmatched course being re-solved on an instance that *can* match:
+        # take the opportunity rather than making the athlete ask for it.
+        available = await _schedule_surface_match(
+            course, athlete.id, ctx.user_id, session
+        )
+    return await _detail(course_id, session, available)
+
+
+@router.post("/{course_id}/surface", status_code=202, dependencies=[pat_forbidden()],
+             operation_id="matchCourseSurface",
+             summary="Classify the road surface under a stored course")
+async def match_course_surface(
+    course_id: str,
+    ctx_athlete=Depends(get_ctx_session_athlete),
+):
+    """Match, or re-match, a course that is already stored (issue #56).
+
+    This is most of the value of turning the sidecar on. Because the track
+    persists, an instance that enables surface classification later can enrich
+    every course it already holds — no re-upload, no re-analysis by hand.
+    Re-running it on an already-matched course is how a course picks up
+    refreshed OSM tiles.
+
+    Idempotent: a match already in flight returns the same pending status
+    rather than starting a second one.
+    """
+    ctx, session, athlete = ctx_athlete
+    course = await _get_owned_course(course_id, athlete, session)
+    if course.status != "ready":
+        raise HTTPException(status_code=409, detail="Course is not ready to be matched")
+
+    if not get_surface_matcher().is_configured:
+        # The instance allows course recon but has no sidecar wired up. Absent,
+        # not broken: say so plainly rather than accepting work nothing will do.
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "no_surface_matcher",
+                "message": "This instance has no surface matcher configured.",
+            },
+        )
+
+    if course.surface_status == course_surface.PENDING:
+        return {"status": course_surface.PENDING}
+
+    await _schedule_surface_match(course, athlete.id, ctx.user_id, session)
+    return {"status": course_surface.PENDING}
 
 
 @router.get("/{course_id}/plan", response_model=CoursePlanResponse,

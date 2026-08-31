@@ -128,4 +128,5 @@ class TestPublicInstanceInfo:
             "email_enabled",
             "allow_self_signup",
             "allow_personal_access_tokens",
+            "allow_course_recon",
         }

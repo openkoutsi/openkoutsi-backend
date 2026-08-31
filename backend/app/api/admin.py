@@ -518,6 +518,7 @@ def _settings_response(instance: InstanceSettings) -> InstanceSettingsResponse:
         allow_self_signup=bool(instance.allow_self_signup),
         allow_personal_access_tokens=bool(instance.allow_personal_access_tokens),
         allow_mcp_server=bool(instance.allow_mcp_server),
+        allow_course_recon=bool(instance.allow_course_recon),
     )
 
 
@@ -554,6 +555,8 @@ async def update_instance_settings(
         instance.allow_personal_access_tokens = bool(body.allow_personal_access_tokens)
     if body.allow_mcp_server is not None:
         instance.allow_mcp_server = bool(body.allow_mcp_server)
+    if body.allow_course_recon is not None:
+        instance.allow_course_recon = bool(body.allow_course_recon)
 
     await session.commit()
     await session.refresh(instance)

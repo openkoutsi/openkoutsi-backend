@@ -71,6 +71,12 @@ async def _upload_course(client, auth_headers, bike_id: str, *, path=COURSE_GPX,
     return resp
 
 
+@pytest.fixture(autouse=True)
+def _course_recon_enabled(course_recon_on):
+    """Course recon defaults off (issue #56); these tests are about an instance
+    whose admin switched it on. `TestInstanceSwitch` covers the other case."""
+
+
 class TestCourseUpload:
     async def test_upload_produces_a_segment_table_and_profile(
         self, client, auth_headers, session, seeded_athlete

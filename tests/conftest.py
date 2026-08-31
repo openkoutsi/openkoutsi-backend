@@ -242,6 +242,32 @@ async def registry_session(registry_engine, _test_password_hash):
 
 
 @pytest.fixture
+async def course_recon_on(registry_session):
+    """Switch course recon on for this test (issue #56).
+
+    It ships **off**: the half that distinguishes it — classifying the road
+    surface under a course — needs a routing sidecar the self-hoster builds
+    tiles for themselves, so an instance that has made no decision about that
+    has not implicitly said yes. Tests about the feature are therefore tests
+    about an instance whose admin turned it on, and the ones about it being
+    off say so explicitly rather than relying on the default.
+    """
+    from sqlalchemy import select as _select
+
+    from backend.app.models.registry_orm import InstanceSettings
+
+    instance = (
+        await registry_session.execute(_select(InstanceSettings).limit(1))
+    ).scalar_one_or_none()
+    if instance is None:
+        instance = InstanceSettings(id=1)
+        registry_session.add(instance)
+    instance.allow_course_recon = True
+    await registry_session.commit()
+    return instance
+
+
+@pytest.fixture
 async def session(user_engine):
     """Async session backed by the in-memory per-user engine (training data)."""
     factory = async_sessionmaker(user_engine, expire_on_commit=False)

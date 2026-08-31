@@ -12,13 +12,20 @@ from sqlalchemy import select, update
 
 from backend.app.core.deps import get_ctx_session_athlete
 from backend.app.core.scopes import pat_scopes
+from backend.app.api.courses import require_course_recon
 from backend.app.models.user_orm import Bike, Course
 from backend.app.schemas.bikes import BikeCreate, BikeResponse, BikeUpdate
 
 router = APIRouter(
     prefix="/bikes",
     tags=["bikes"],
-    dependencies=[pat_scopes(read="bikes:read", write="bikes:write")],
+    dependencies=[
+        pat_scopes(read="bikes:read", write="bikes:write"),
+        # Issue #56: gated with courses, because a bike exists for nothing but
+        # course pacing. Leaving it reachable while courses are off would offer
+        # an athlete a form whose only purpose is a feature they cannot use.
+        Depends(require_course_recon),
+    ],
 )
 
 

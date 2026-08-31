@@ -54,6 +54,13 @@ class InstanceInfoResponse(BaseModel):
     # instance. Exposed here (rather than only on the admin settings endpoint)
     # so the settings card can hide itself without an admin round trip.
     allow_personal_access_tokens: bool = True
+    # Issue #56: whether this instance offers course recon at all, so the web
+    # app can leave the Courses page out of its navigation rather than send
+    # someone to a 404. Only the *capability* is published — whether a surface
+    # matcher is actually wired up is deployment topology and stays on the
+    # authenticated course response, where a caller has already identified
+    # themselves.
+    allow_course_recon: bool = False
 
 
 @router.get("/instance-info", response_model=InstanceInfoResponse,
@@ -81,6 +88,9 @@ async def get_instance_info(
         allow_personal_access_tokens=(
             bool(instance.allow_personal_access_tokens) if instance else True
         ),
+        # Absent reads as no, unlike the token switch above: this one defaults
+        # off, so an instance that has never been configured has not consented.
+        allow_course_recon=bool(instance and instance.allow_course_recon),
     )
 
 

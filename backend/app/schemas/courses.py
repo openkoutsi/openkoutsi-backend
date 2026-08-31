@@ -17,6 +17,17 @@ class CourseSegmentResponse(BaseModel):
     duration_s: Optional[float] = None
     start_offset_s: Optional[float] = None
     speed_capped: bool = False
+    # Surface classification (issue #56). All optional: a course analysed
+    # before this landed, or on an instance with no matcher, reads exactly as
+    # it always did rather than as a course with something missing.
+    surface: Optional[str] = None
+    #: "confirmed" when only an explicit OSM tag could have produced this
+    #: class; "inferred" when openkoutsi could not confirm one. Carried
+    #: separately, never folded into `surface`, because a guess and a fact
+    #: shown at equal weight is worse than no answer at all.
+    surface_confidence: Optional[str] = None
+    surface_raw: Optional[str] = None
+    crr_used: Optional[float] = None
 
     model_config = {"from_attributes": True}
 
@@ -57,6 +68,30 @@ class CourseDetailResponse(CourseSummaryResponse):
     # response shape in this module.
     profile: Optional[list] = None
     segments: list[CourseSegmentResponse] = []
+    # ── Surface classification (issue #56) ──────────────────────────────────
+    #: None = never matched (an instance with no sidecar, or a course from
+    #: before the feature); "pending" while the background match runs; "done";
+    #: "unavailable" when the matcher could not answer. None of these is an
+    #: error — the course itself is complete either way.
+    surface_status: Optional[str] = None
+    surface_updated_at: Optional[datetime] = None
+    #: Whether this instance could match this course if asked. Published here
+    #: rather than on the public instance info because it is deployment
+    #: topology, and an unauthenticated caller has no business learning it.
+    surface_matching_available: bool = False
+    #: The surface at full run resolution, run-length encoded as
+    #: ``[start_m, end_m, class, confidence, severity_step]``.
+    #:
+    #: Separate from `segments` because the two have different jobs: the
+    #: segment table is pacing-shaped and has a minimum row length, and this
+    #: has none. A 130 m sector of mud inside 40 km of asphalt is the most
+    #: important thing on that course and has to stay drawable and nameable
+    #: even where the pacing rows fold it into a longer one.
+    surface_ribbon: Optional[list] = None
+    #: Stretches worth saying out loud, as
+    #: ``[start_m, length_m, class, confidence, severity_step]`` — including
+    #: ones too short to earn their own pacing row.
+    rough_sectors: Optional[list] = None
 
 
 class CourseReanalyzeBody(BaseModel):

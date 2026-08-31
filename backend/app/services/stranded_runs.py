@@ -190,6 +190,18 @@ def settle_goal_guidance(goal, now: Optional[datetime] = None) -> bool:
     return True
 
 
+def settle_course_surface(course, now: Optional[datetime] = None) -> bool:
+    """Settle a stranded surface match. Delegates to the module that owns it.
+
+    Imported lazily: ``course_surface`` reaches the matcher and the analysis
+    service, and this module is imported during startup before any of that is
+    needed.
+    """
+    from backend.app.services.course_surface import settle_course_surface as _settle
+
+    return _settle(course, now)
+
+
 def settle_course_plan(course, now: Optional[datetime] = None) -> bool:
     if course.plan_status != "pending":
         return False
@@ -307,6 +319,21 @@ async def settle_stranded_user_runs(user_id: str, now: Optional[datetime] = None
             if not pending_timed_out(course.plan_updated_at, now):
                 continue
             settled += settle_course_plan(course, now)
+
+        # A surface match a redeploy interrupted (issue #56). Same shape and
+        # same reasoning as the plan above, but it settles to `unavailable`
+        # rather than `error`: nothing about the course is wrong, the match
+        # simply did not finish, and the athlete still has a complete Stage 1
+        # result in front of them.
+        matching = (
+            await session.execute(
+                select(Course).where(Course.surface_status == "pending")
+            )
+        ).scalars().all()
+        for course in matching:
+            if not pending_timed_out(course.surface_updated_at, now):
+                continue
+            settled += settle_course_surface(course, now)
 
         if settled:
             await session.commit()

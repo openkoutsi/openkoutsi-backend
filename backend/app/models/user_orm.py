@@ -827,6 +827,29 @@ class Course(UserBase):
         DateTime(timezone=True), nullable=True
     )
 
+    # ── Surface classification (issue #56) ──────────────────────────────────
+    # The status shape is plan_*'s, for the same reason: the match runs in the
+    # background on its own session, so `stranded_runs` settles it at boot and
+    # a run whose token no longer matches discards its own writes.
+    # None throughout means "never matched" — which is the state of every
+    # course on an instance with no sidecar, and is an absence rather than a
+    # failure.
+    surface_status: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    surface_run_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    surface_updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # The surface at full run resolution: [[start_m, end_m, class, confidence,
+    # severity_step], …], run-length encoded so it stays small.
+    #
+    # Kept here rather than folded into the segment table because the two have
+    # different jobs. `course_segments` is pacing-shaped and has a minimum row
+    # length; this has none, so a 130 m sector of mud in the middle of 40 km of
+    # asphalt is still drawn and still named even when the pacing rows quite
+    # reasonably fold it into a longer one. Coordinate-free, like everything
+    # else on this table.
+    surface_ribbon: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
@@ -849,8 +872,8 @@ class CourseTrack(UserBase):
 
     One row per course, the points as a JSON series (the ``ActivityStream``
     pattern) rather than a row per point: ``[[lat, lon, elevation_m,
-    distance_m], …]`` at ~8 m spacing. Loaded only by re-analysis (and by the
-    Stage 2 surface work when it lands) — never serialized into an API
+    distance_m], …]`` at ~8 m spacing. Loaded only by re-analysis and by the
+    surface matcher (issue #56) — never serialized into an API
     response, an MCP result, or an LLM prompt. Deliberately its own table so
     that reading a course, listing courses and building the plan prompt touch
     rows with nothing location-shaped in them.
@@ -862,6 +885,20 @@ class CourseTrack(UserBase):
         String, ForeignKey("courses.id", ondelete="CASCADE"), primary_key=True
     )
     points: Mapped[list] = mapped_column(JSON, nullable=False)
+    # What the matcher said about each of those points (issue #56):
+    # ``[[raw_value, confidence], …]``, aligned to ``points``.
+    #
+    # Only the raw value and its confidence are stored — the class, and every
+    # dissolving decision made from it, are re-derived on read. That way tuning
+    # a threshold later re-reads correctly from what is already on disk instead
+    # of needing every stored course re-matched. It lives on this table because
+    # it is the same length as the track and, like the track, is loaded only by
+    # re-analysis: listing courses and building the plan prompt must keep
+    # touching rows with nothing per-point in them.
+    surfaces: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    surface_matched_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     course: Mapped["Course"] = relationship("Course", back_populates="track")
 
@@ -893,5 +930,18 @@ class CourseSegment(UserBase):
     duration_s: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     start_offset_s: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     speed_capped: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Surface classification (issue #56). All nullable: a course analysed
+    # before this landed, or on an instance with no sidecar, reads exactly the
+    # same as one whose match has not run.
+    surface: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # "confirmed" when only an explicit OSM tag could have produced this class;
+    # "inferred" when openkoutsi could not confirm one. Never flattened away —
+    # a guess shown beside a fact at equal weight is worse than no answer.
+    surface_confidence: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Exactly what the matcher said, preserved rather than discarded.
+    surface_raw: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # The rolling-resistance coefficient this row was solved with, so a number
+    # the athlete is asked to trust can be inspected rather than taken on faith.
+    crr_used: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     course: Mapped["Course"] = relationship("Course", back_populates="segments")

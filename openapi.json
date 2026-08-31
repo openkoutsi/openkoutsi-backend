@@ -7519,6 +7519,55 @@
         }
       }
     },
+    "/api/courses/{course_id}/surface": {
+      "post": {
+        "tags": [
+          "courses"
+        ],
+        "summary": "Classify the road surface under a stored course",
+        "description": "Match, or re-match, a course that is already stored (issue #56).\n\nThis is most of the value of turning the sidecar on. Because the track\npersists, an instance that enables surface classification later can enrich\nevery course it already holds \u2014 no re-upload, no re-analysis by hand.\nRe-running it on an already-matched course is how a course picks up\nrefreshed OSM tiles.\n\nIdempotent: a match already in flight returns the same pending status\nrather than starting a second one.\n\n**Not available to personal access tokens.**",
+        "operationId": "matchCourseSurface",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "course_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Course Id"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-personal-access-token": {
+          "allowed": false
+        }
+      }
+    },
     "/api/courses/{course_id}/plan": {
       "get": {
         "tags": [
@@ -10136,6 +10185,58 @@
             "type": "array",
             "title": "Segments",
             "default": []
+          },
+          "surface_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Surface Status"
+          },
+          "surface_updated_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Surface Updated At"
+          },
+          "surface_matching_available": {
+            "type": "boolean",
+            "title": "Surface Matching Available",
+            "default": false
+          },
+          "surface_ribbon": {
+            "anyOf": [
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Surface Ribbon"
+          },
+          "rough_sectors": {
+            "anyOf": [
+              {
+                "items": {},
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rough Sectors"
           }
         },
         "type": "object",
@@ -10368,6 +10469,50 @@
             "type": "boolean",
             "title": "Speed Capped",
             "default": false
+          },
+          "surface": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Surface"
+          },
+          "surface_confidence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Surface Confidence"
+          },
+          "surface_raw": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Surface Raw"
+          },
+          "crr_used": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Crr Used"
           }
         },
         "type": "object",
@@ -11778,6 +11923,11 @@
             "type": "boolean",
             "title": "Allow Personal Access Tokens",
             "default": true
+          },
+          "allow_course_recon": {
+            "type": "boolean",
+            "title": "Allow Course Recon",
+            "default": false
           }
         },
         "type": "object",
@@ -11868,6 +12018,17 @@
               }
             ],
             "title": "Allow Mcp Server"
+          },
+          "allow_course_recon": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Allow Course Recon"
           }
         },
         "type": "object",
@@ -11924,6 +12085,11 @@
             "type": "boolean",
             "title": "Allow Mcp Server",
             "default": true
+          },
+          "allow_course_recon": {
+            "type": "boolean",
+            "title": "Allow Course Recon",
+            "default": false
           }
         },
         "type": "object",

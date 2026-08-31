@@ -271,6 +271,64 @@ Two things are worth knowing when a user asks for MCP access:
   record is the opposite of the task-shaped tools this surface exists to publish;
   it stays a deliberate grant for a backup script, over the REST route, audited.
 
+## Course recon and road surfaces
+
+`allow_course_recon` is an instance setting, **off by default**, shown as
+**Allow course recon** in the admin console's **Settings** tab beside the two
+switches below. It gates the whole feature: uploading a course, the segment
+table, the pacing plan and the bikes the physics is solved for.
+
+> ⚠️ **Upgrading from a release before this?** Course recon shipped ungated, so
+> the migration that adds this switch turns it **off** on an instance that was
+> already using it. Nothing is deleted — every stored course, its segments and
+> its uploaded file stay where they are and come back untouched — but somebody
+> has to turn the switch on before an athlete can reach them again. It stays
+> in the data export throughout, switch or no switch.
+
+It defaults off, breaking the convention the two switches below set, because it
+is the only one that gates a feature needing infrastructure the instance may not
+have. The half that distinguishes course recon — classifying the road surface
+under a course — map-matches against OpenStreetMap through a **Valhalla sidecar
+you run yourself**, whose tiles you build and refresh yourself. A full-country
+build was measured at over 5 GB of peak RAM, against a default box with 2 GB. An
+instance that has made no decision about that has not implicitly said yes.
+
+```bash
+curl -X PATCH https://api.your-domain/api/admin/settings \
+  -H "Authorization: Bearer <admin session token>" \
+  -H "Content-Type: application/json" \
+  -d '{"allow_course_recon": true}'
+```
+
+Turning it off refuses the **capability**: every course and bike endpoint, the
+background surface matcher, and the plan generator. It does **not** refuse the
+data export, which is deliberate — a right to your own data is not a feature an
+instance switches off.
+
+### The surface sidecar is separate, and optional again
+
+The switch above offers course recon. Whether a course also gets a *road
+surface* depends on a second thing: `VALHALLA_URL` pointing at a running
+sidecar. With the switch on and no sidecar, course recon works fully and every
+course is solved as dry pavement — which the written plan says out loud. See the
+ops repository for building and shipping tiles.
+
+With a sidecar configured, a course is matched in the background after its
+segment table is returned, so upload stays as fast as it was. **A course already
+stored can be matched too**, which is most of the value of turning the sidecar
+on later:
+
+```bash
+curl -X POST https://api.your-domain/api/courses/<course-id>/surface \
+  -H "Authorization: Bearer <session token>"
+```
+
+Surfaces come back with a confidence. Where only an explicit OpenStreetMap tag
+could have produced the class, it is **confirmed**; where openkoutsi cannot
+confirm a tag, it is **inferred** and is shown, and described to the coach, as a
+guess. OSM surface coverage is genuinely uneven, and presenting the two at equal
+weight would be worse than showing neither.
+
 ### Turning the MCP server off
 
 `allow_mcp_server` is an instance setting, **on by default**, shown as

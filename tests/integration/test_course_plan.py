@@ -8,6 +8,8 @@ captures the exact request payload and the test greps it.
 """
 from __future__ import annotations
 
+import pytest
+
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -118,6 +120,54 @@ async def _run_plan_bg(session, course_id: str, athlete_id: str, requests_out=No
         )
 
 
+async def _match_course(session, course_id: str, rough: bool = False) -> None:
+    """Give a stored course a surface, by running the real analysis path.
+
+    No matcher and no HTTP: the per-point series is written straight onto the
+    track row, which is exactly what a completed match leaves behind, and the
+    course is then re-solved from it.
+    """
+    from backend.app.models.user_orm import Bike, CourseTrack
+    from backend.app.services import course_analysis
+    from openkoutsi import course as course_math
+
+    track = await session.get(CourseTrack, course_id)
+    n = len(track.points)
+    lo, hi = int(n * 0.40), int(n * 0.45)
+    values = [
+        "dirt" if (rough and lo <= i < hi) else "paved_smooth" for i in range(n)
+    ]
+    track.surfaces = [[v, "confirmed" if v != "paved_smooth" else "inferred"] for v in values]
+
+    course = (
+        await session.execute(select(Course).where(Course.id == course_id))
+    ).scalar_one()
+    bike = await session.get(Bike, course.bike_id)
+    analysis, _ = course_analysis.analyze_stored_track(
+        track.points,
+        course_math.RiderParams(ftp_w=250.0, weight_kg=75.0),
+        course_math.BikeParams(
+            tyre_width_mm=bike.tyre_width_mm, riding_position=bike.riding_position
+        ),
+        course.target_time_s,
+        course.target_power_w,
+        track.surfaces,
+    )
+    await course_analysis.persist_analysis(
+        course,
+        analysis,
+        session,
+        rider=course_math.RiderParams(ftp_w=250.0, weight_kg=75.0),
+    )
+    await session.commit()
+
+
+@pytest.fixture(autouse=True)
+def _course_recon_enabled(course_recon_on):
+    """Course recon defaults off (issue #56); these tests are about an instance
+    whose admin switched it on. `TestInstanceSwitch` covers the other case."""
+
+
 class TestCoursePlan:
     async def test_no_plan_yet(self, client, auth_headers, session, seeded_athlete):
         course_id = await _seed_course(client, auth_headers, session, seeded_athlete)
@@ -220,6 +270,89 @@ class TestCoursePlan:
             m.get("content", "") for req in requests for m in req.get("messages", [])
         )
         assert "still air" in payload
+        # With no surface match, the physics really did solve this as pavement
+        # and the plan has to admit it rather than quietly assume it.
+        assert "dry pavement" in payload
+
+    async def test_an_unmatched_course_is_not_told_about_surfaces(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        """A course with no match must not get the confidence paragraph.
+
+        Handing the model rules about inferred surfaces on a course that has
+        none invites it to write about a distinction that is not in the table.
+        """
+        course_id = await _seed_course(client, auth_headers, session, seeded_athlete)
+        with patch(
+            "backend.app.services.llm_course_plan.generate_course_plan_bg",
+            new_callable=AsyncMock,
+        ):
+            await client.post(
+                f"/api/courses/{course_id}/plan", json={}, headers=auth_headers
+            )
+        requests: list = []
+        await _run_plan_bg(session, course_id, seeded_athlete.id, requests)
+        payload = " ".join(
+            m.get("content", "") for req in requests for m in req.get("messages", [])
+        )
+        assert "inferred" not in payload
+        assert "Rough sectors" not in payload
+
+    async def test_a_matched_course_names_inferred_surfaces_as_guesses(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        """Confidence has to reach the *prose*, not stop at the API.
+
+        OSM coverage is uneven, and a plan that talked about gravel at km 47
+        with the same certainty either way would be the quiet dishonesty this
+        project refuses elsewhere.
+        """
+        course_id = await _seed_course(client, auth_headers, session, seeded_athlete)
+        await _match_course(session, course_id)
+
+        with patch(
+            "backend.app.services.llm_course_plan.generate_course_plan_bg",
+            new_callable=AsyncMock,
+        ):
+            await client.post(
+                f"/api/courses/{course_id}/plan", json={}, headers=auth_headers
+            )
+        requests: list = []
+        await _run_plan_bg(session, course_id, seeded_athlete.id, requests)
+        payload = " ".join(
+            m.get("content", "") for req in requests for m in req.get("messages", [])
+        )
+        assert "inferred" in payload, "the weaker claim must be labelled"
+        assert "still air" in payload, "the wind caveat still applies"
+        assert "dry pavement" not in payload, "the surface is known now"
+
+    async def test_a_matched_course_names_its_rough_sectors(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        """Including the short ones, which is the whole point of the list.
+
+        A rider expecting smooth asphalt needs to be told about a short mud
+        sector before they hit it, and a sector too short to have earned its
+        own row in the segment table is exactly the one they would otherwise
+        meet by surprise.
+        """
+        course_id = await _seed_course(client, auth_headers, session, seeded_athlete)
+        await _match_course(session, course_id, rough=True)
+
+        with patch(
+            "backend.app.services.llm_course_plan.generate_course_plan_bg",
+            new_callable=AsyncMock,
+        ):
+            await client.post(
+                f"/api/courses/{course_id}/plan", json={}, headers=auth_headers
+            )
+        requests: list = []
+        await _run_plan_bg(session, course_id, seeded_athlete.id, requests)
+        payload = " ".join(
+            m.get("content", "") for req in requests for m in req.get("messages", [])
+        )
+        assert "Rough sectors" in payload
+        assert "dirt" in payload
 
     async def test_the_prompt_names_a_power_target_and_its_splits(
         self, client, auth_headers, session, seeded_athlete

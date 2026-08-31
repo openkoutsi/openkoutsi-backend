@@ -7,6 +7,8 @@ the course needing a bike picked again.
 """
 from __future__ import annotations
 
+import pytest
+
 from sqlalchemy import select
 
 from backend.app.models.user_orm import Bike, Course
@@ -18,6 +20,12 @@ async def _create_bike(client, auth_headers, **overrides):
     resp = await client.post("/api/bikes", json=payload, headers=auth_headers)
     assert resp.status_code == 201, resp.text
     return resp.json()
+
+
+@pytest.fixture(autouse=True)
+def _course_recon_enabled(course_recon_on):
+    """Course recon defaults off (issue #56); these tests are about an instance
+    whose admin switched it on. `TestInstanceSwitch` covers the other case."""
 
 
 class TestBikesCrud:
