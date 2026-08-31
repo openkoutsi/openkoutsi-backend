@@ -61,6 +61,54 @@ class TestAllowSelfSignupSetting:
         assert resp.json()["allow_self_signup"] is True
 
 
+class TestAllowCourseReconSetting:
+    """The switch an upgrading admin actually has to flip (issue #56).
+
+    `DEPLOY.md` tells them to use this endpoint, so the endpoint is what the
+    test exercises — writing the column directly would prove the ORM works and
+    leave the path an admin takes untested.
+    """
+
+    async def test_defaults_off_and_round_trips(self, client, auth_headers):
+        resp = await client.get("/api/admin/settings", headers=auth_headers)
+        # Off unless somebody said otherwise: the half of course recon that
+        # distinguishes it needs a routing sidecar the self-hoster builds tiles
+        # for, and an instance that has made no decision has not said yes.
+        assert resp.json()["allow_course_recon"] is False
+
+        resp = await client.patch(
+            "/api/admin/settings",
+            json={"allow_course_recon": True},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["allow_course_recon"] is True
+
+        resp = await client.get("/api/admin/settings", headers=auth_headers)
+        assert resp.json()["allow_course_recon"] is True
+
+    async def test_turning_it_on_opens_the_courses_api(self, client, auth_headers):
+        """The whole point of the switch, end to end."""
+        assert (await client.get("/api/courses", headers=auth_headers)).status_code == 404
+
+        await client.patch(
+            "/api/admin/settings",
+            json={"allow_course_recon": True},
+            headers=auth_headers,
+        )
+        assert (await client.get("/api/courses", headers=auth_headers)).status_code == 200
+
+    async def test_it_is_published_to_unauthenticated_callers(self, client, auth_headers):
+        """So the web app can leave Courses out of its navigation."""
+        await client.patch(
+            "/api/admin/settings",
+            json={"allow_course_recon": True},
+            headers=auth_headers,
+        )
+        resp = await client.get("/api/public/instance-info")
+        assert resp.json()["allow_course_recon"] is True
+
+
 class TestLlmModelPresetStructuredOutputs:
     async def test_defaults_on_and_round_trips_opt_out(self, client, auth_headers):
         resp = await client.patch(

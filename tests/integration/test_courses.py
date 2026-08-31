@@ -14,6 +14,7 @@ The properties that matter, in the order the issue states them:
 from __future__ import annotations
 
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -643,3 +644,41 @@ class TestCourseExport:
 
             bikes = json.loads(zf.read("bikes.json"))
             assert [b["id"] for b in bikes] == [bike["id"]]
+
+
+class TestStoringATrack:
+    async def test_replacing_a_track_clears_the_surface_matched_against_it(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        """Answers matched against the old points describe a different road.
+
+        Nothing re-stores a track today — upload always mints a new course id,
+        and re-analysis reuses the stored one — but the reset is what keeps the
+        invariant true if a caller ever does, and a stale surface silently
+        surviving a track change is the kind of wrong that reads as right.
+        """
+        from backend.app.models.user_orm import CourseTrack as CourseTrackRow
+        from backend.app.services import course_analysis
+
+        await _seed_rider(session, seeded_athlete)
+        bike = await _create_bike(client, auth_headers)
+        created = await _upload_course(client, auth_headers, bike["id"])
+        assert created.status_code == 201
+
+        course_id = created.json()["id"]
+        row = await session.get(CourseTrackRow, course_id)
+        row.surfaces = [["gravel", "confirmed"]] * len(row.points)
+        row.surface_matched_at = datetime.now(timezone.utc)
+        await session.commit()
+
+        course = (
+            await session.execute(select(Course).where(Course.id == course_id))
+        ).scalar_one()
+        await course_analysis.store_track(
+            course, course_analysis.track_from_points(row.points), session
+        )
+        await session.commit()
+
+        await session.refresh(row)
+        assert row.surfaces is None
+        assert row.surface_matched_at is None
