@@ -38,11 +38,19 @@ _ELEVATION_NOISE_M = 3.0
 # keep short climbs.
 _ELEVATION_SMOOTHING_SAMPLES = 15
 
-# A single step longer than this between consecutive fixes is a GPS glitch — a
-# fix that jumped continents, or a receiver reacquiring after a tunnel — not a
-# metre the athlete travelled. At 1 Hz it allows 500 m/s; devices that record
-# every few seconds still sit far below it.
-MAX_STEP_M = 500.0
+# 216 km/h. A step whose implied speed is above this is a wrong pair of fixes,
+# not a fast one — the same rule the parsers already apply to a derived speed
+# stream, applied here to the distance that speed came from.
+MAX_STEP_SPEED_MS = 60.0
+
+# The same glitch rule for a track that carries no time: a course file, a route
+# export, or a point whose `<time>` was missing or unparseable. A cap in metres
+# alone cannot tell travel from a glitch — that depends entirely on how long the
+# step took — so it is set where *catastrophe* begins rather than where "far"
+# does: a receiver reacquiring after a tunnel lands within a few km, while a
+# corrupt fix lands thousands of km away or at (0, 0), which `_valid` already
+# drops. Prefer :func:`step_is_travel` with a real ``dt_s`` wherever one exists.
+MAX_STEP_M = 10_000.0
 
 
 def haversine_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -73,32 +81,74 @@ def _valid(point: tuple[float, float] | None) -> bool:
     return -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0
 
 
-def cumulative_distance_m(points: Sequence[tuple[float, float] | None]) -> list[float]:
+def step_is_travel(step_m: float, dt_s: float | None) -> bool:
+    """Did the athlete ride these metres, or did the receiver jump?
+
+    The one place that decision is made, because getting it wrong is silent in
+    both directions: too permissive and a glitch adds phantom kilometres, too
+    strict and real ones are subtracted from a total nobody can check.
+
+    Where the track carries time, the test is the implied **speed**: a step is
+    travel unless it would have taken more than :data:`MAX_STEP_SPEED_MS`. That
+    is the only test that holds for every recording rate, and recording rate is
+    not something a file has to tell us. A 1 Hz head unit writes a point every
+    few metres; smart recording writes one every few hundred; a route planner
+    exports a vertex per direction change, which on a long straight puts
+    kilometres between consecutive points. All three are the same ride.
+
+    Where it does not — a course, a route export, a point with no parseable
+    ``<time>`` — there is nothing to compute a speed from and
+    :data:`MAX_STEP_M` is the fallback.
+    """
+    if dt_s is not None and dt_s > 0:
+        return step_m <= dt_s * MAX_STEP_SPEED_MS
+    return step_m <= MAX_STEP_M
+
+
+def cumulative_distance_m(
+    points: Sequence[tuple[float, float] | None],
+    elapsed_s: Sequence[float | None] | None = None,
+) -> list[float]:
     """Running distance along a track, one entry per point.
 
     Points without a fix (``None``, out of range, or the (0, 0) a device writes
     before it locks on) carry the distance forward unchanged rather than
-    dropping out, so index ``i`` of the result still describes point ``i``. A
-    step longer than :data:`MAX_STEP_M` is treated as a re-acquisition rather
-    than as travel.
+    dropping out, so index ``i`` of the result still describes point ``i``.
+    Steps that are not travel (see :func:`step_is_travel`) are skipped.
+
+    ``elapsed_s``, when given, is seconds from an arbitrary origin for each
+    point — one entry per point, ``None`` where the point had no time. Passing
+    it is what lets the glitch rule be about speed rather than about distance;
+    without it every step falls back to :data:`MAX_STEP_M`, which on a track
+    recorded at anything other than ~1 Hz will throw away real kilometres.
     """
+    if elapsed_s is not None and len(elapsed_s) != len(points):
+        raise ValueError("elapsed_s must be the same length as points")
+
     out: list[float] = []
     total = 0.0
     previous: tuple[float, float] | None = None
-    for point in points:
+    previous_time: float | None = None
+    for index, point in enumerate(points):
+        now = elapsed_s[index] if elapsed_s is not None else None
         if _valid(point):
             if previous is not None:
                 step = haversine_m(previous[0], previous[1], point[0], point[1])
-                if step <= MAX_STEP_M:
+                dt = None if (now is None or previous_time is None) else now - previous_time
+                if step_is_travel(step, dt):
                     total += step
             previous = point  # type: ignore[assignment]
+            previous_time = now
         out.append(total)
     return out
 
 
-def track_distance_m(points: Sequence[tuple[float, float] | None]) -> float:
+def track_distance_m(
+    points: Sequence[tuple[float, float] | None],
+    elapsed_s: Sequence[float | None] | None = None,
+) -> float:
     """Total distance along a coordinate track, in metres."""
-    cumulative = cumulative_distance_m(points)
+    cumulative = cumulative_distance_m(points, elapsed_s)
     return cumulative[-1] if cumulative else 0.0
 
 

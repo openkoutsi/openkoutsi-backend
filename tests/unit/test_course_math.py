@@ -90,6 +90,38 @@ class TestThinning:
         assert track.points[0].distance_m == 0.0
         assert track.total_distance_m == pytest.approx(1000.0, rel=0.01)
 
+    def test_a_sparse_route_keeps_its_whole_distance(self):
+        """A planner's export is spaced by direction change, not by the clock.
+
+        ``thin_track`` re-derives distance rather than trusting ``Route``, so
+        it has to apply the glitch rule itself — and applying it as a bare
+        metre cap silently shortened long straights, which then shortened
+        every gradient, segment and pacing split computed from them.
+        """
+        spacing = 2_000.0  # 2 km between consecutive points
+        route = _route(spacing, 11, lambda d: 100.0)
+        # Three minutes a leg: 40 km/h, quick but entirely rideable.
+        route = Route(
+            points=[
+                RoutePoint(
+                    latitude=p.latitude,
+                    longitude=p.longitude,
+                    elevation_m=p.elevation_m,
+                    offset_s=i * 180,
+                )
+                for i, p in enumerate(route.points)
+            ]
+        )
+        track = course.thin_track(route)
+
+        assert track.total_distance_m == pytest.approx(10 * spacing, rel=0.01)
+
+    def test_a_sparse_route_with_no_times_still_keeps_its_distance(self):
+        # A course file states no clock at all, which is the common case for
+        # the upload path; the timeless fallback must still pass 2 km legs.
+        track = course.thin_track(_route(2_000.0, 11, lambda d: 100.0))
+        assert track.total_distance_m == pytest.approx(20_000.0, rel=0.01)
+
     def test_an_empty_route_yields_an_empty_track(self):
         assert course.thin_track(Route(points=[])).points == []
 
