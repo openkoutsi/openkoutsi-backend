@@ -14,6 +14,7 @@ are the point rather than an afterthought:
 """
 from __future__ import annotations
 
+import logging
 from unittest.mock import patch
 
 import httpx
@@ -97,6 +98,32 @@ class TestTheRequestItBuilds:
         attributes = captured["json"]["filters"]["attributes"]
         assert "edge.surface" in attributes
         assert captured["json"]["filters"]["action"] == "include"
+
+    async def test_it_asks_for_matched_points_by_their_filter_names(self):
+        """The engine's filter keys are not its response keys.
+
+        Points come back under `matched_points`, but they are requested as
+        `matched.…` — `kMatchedEdgeIndex = "matched.edge_index"` in
+        valhalla/baldr/attributes_controller.h. Asking for
+        `matched_points.edge_index` is rejected on the engine's own stdout and
+        answered with a 200 that simply omits the points, so nothing in our
+        logs or our response says the request was wrong.
+        """
+        captured: dict = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            import json
+
+            captured["json"] = json.loads(request.content)
+            return httpx.Response(200, json=_trace(["gravel"] * 4))
+
+        await _client(handler).match(_POINTS)
+        attributes = captured["json"]["filters"]["attributes"]
+        assert "matched.edge_index" in attributes
+        assert "matched.type" in attributes
+        assert not any(a.startswith("matched_points.") for a in attributes), (
+            "matched_points.* is the response shape, not the filter vocabulary"
+        )
 
 
 class TestParsing:
@@ -542,3 +569,79 @@ class TestClientLifetime:
         await sm.close_surface_matcher()
         assert sm.get_surface_matcher()._http.is_closed is False
         await sm.close_surface_matcher()
+
+
+class TestAnEngineThatRejectedOurFilter:
+    """The shape a live Valhalla returns when the filter keys are wrong.
+
+    It answers 200 with the edges it understood and omits `matched_points`
+    entirely, reporting `Invalid filter attribute` only on its own stdout. That
+    is indistinguishable from a healthy answer unless something looks for it —
+    which is how a whole deployment classified nothing while reporting no
+    error anywhere in the backend.
+    """
+
+    _REJECTED = {
+        "edges": [
+            {"surface": "paved_smooth", "way_id": 1},
+            {"surface": "gravel", "way_id": 2},
+        ]
+        # ...and no matched_points at all.
+    }
+
+    async def test_it_degrades_rather_than_claiming_an_all_unknown_course(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=self._REJECTED)
+
+        assert await _client(handler).match(_POINTS) is None
+
+    async def test_it_says_so_in_the_log(self):
+        """The one thing that would have made this obvious in minutes.
+
+        Captured with a handler attached straight to this module's logger
+        rather than through `caplog`. Somewhere earlier in a full run Alembic's
+        `fileConfig` fires with its default `disable_existing_loggers=True`,
+        which sets `disabled` on every logger imported by then — so a
+        caplog-based assertion here passes alone and fails in the suite. The
+        app process never calls `fileConfig` (the entrypoint migrates in a
+        separate process, and `_stamp_at_head` reads the script directory
+        without executing `env.py`), so this is a test-process artefact; the
+        test just should not depend on global logging state to prove a local
+        thing.
+        """
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json=self._REJECTED)
+
+        records: list[logging.LogRecord] = []
+
+        class _Collect(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        logger = logging.getLogger(sm.__name__)
+        was_disabled, was_level = logger.disabled, logger.level
+        collector = _Collect()
+        logger.disabled = False
+        logger.setLevel(logging.WARNING)
+        logger.addHandler(collector)
+        try:
+            await _client(handler).match(_POINTS)
+        finally:
+            logger.removeHandler(collector)
+            logger.disabled, logger.level = was_disabled, was_level
+
+        messages = [record.getMessage() for record in records]
+        assert any(
+            "matched_points" in message and "filter" in message
+            for message in messages
+        ), f"a response with edges but no points must name why; got {messages}"
+
+    async def test_a_genuinely_empty_answer_is_not_mistaken_for_it(self):
+        """No edges *and* no points is the engine snapping nothing, which is
+        an ordinary outcome and must not raise the filter warning."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"edges": [], "matched_points": []})
+
+        assert await _client(handler).match(_POINTS) is None
