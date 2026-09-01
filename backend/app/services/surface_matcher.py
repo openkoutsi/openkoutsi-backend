@@ -70,13 +70,21 @@ TOTAL_BUDGET_S = 120.0
 _UNAVAILABLE_UNTIL: dict[str, float] = {}
 _RE_PROBE_AFTER_S = 300.0
 
+# The engine's *filter* keys are not its *response* keys. Matched points come
+# back under `matched_points`, but they are requested as `matched.…` — see
+# `kMatchedEdgeIndex = "matched.edge_index"` in valhalla/baldr/
+# attributes_controller.h. Getting this wrong is quiet: the engine logs
+# `Invalid filter attribute` on its own stdout, answers 200 with the edges it
+# did understand, and simply omits `matched_points` — so every point comes back
+# unmatched and the course degrades to "unavailable" with nothing in the
+# backend log to say why. `_surfaces_from_trace` now names that case.
 _ATTRIBUTES = [
     "edge.surface",
     "edge.road_class",
     "edge.use",
     "edge.way_id",
-    "matched_points.edge_index",
-    "matched_points.type",
+    "matched.edge_index",
+    "matched.type",
 ]
 
 
@@ -282,6 +290,20 @@ def _surfaces_from_trace(payload: dict, count: int) -> list[Optional[str]]:
     edges = payload.get("edges") or []
     surfaces = [edge.get("surface") for edge in edges]
     matched = payload.get("matched_points") or []
+
+    if edges and not matched:
+        # The engine understood the request well enough to return edges but
+        # gave us no points to hang them on. Without the mapping there is
+        # nothing to store, and the likeliest cause is that it rejected our
+        # filter keys — which it reports on its *own* stdout and not in the
+        # response, so say it here or nobody sees it.
+        log.warning(
+            "Surface matcher returned %d edges but no matched_points. The "
+            "engine may have rejected the filter attributes (%s) — check its "
+            "log for 'Invalid filter attribute'.",
+            len(edges),
+            ", ".join(a for a in _ATTRIBUTES if a.startswith("matched.")),
+        )
 
     out: list[Optional[str]] = [None] * count
     for i, point in enumerate(matched[:count]):
