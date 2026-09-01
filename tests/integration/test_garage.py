@@ -121,6 +121,38 @@ class TestBikeFields:
         assert detail["bike_id"] == first["id"]
         assert detail["bike_name"] == "Gravel"
 
+    async def test_an_edit_cannot_take_a_sport_from_another_bike(
+        self, client, auth_headers
+    ):
+        """The same 409 on the PATCH path, which is the one an athlete reaches
+        by editing rather than by adding — and the easier of the two to leave
+        untested, since the create path looks like it covers it."""
+        gravel = await _create_bike(
+            client, auth_headers, name="Gravel", default_sports=["GravelRide"]
+        )
+        road = await _create_bike(client, auth_headers, name="Road", default_sports=["Ride"])
+
+        resp = await client.patch(
+            f"/api/bikes/{road['id']}",
+            json={"default_sports": ["Ride", "GravelRide"]},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 409
+        detail = resp.json()["detail"]
+        assert detail["sport"] == "GravelRide"
+        assert detail["bike_id"] == gravel["id"]
+        # And the refused edit changed nothing.
+        assert (await _get_bike(client, auth_headers, road["id"]))["default_sports"] == ["Ride"]
+
+    async def test_an_edit_to_a_non_cycling_sport_is_refused(self, client, auth_headers):
+        bike = await _create_bike(client, auth_headers)
+        resp = await client.patch(
+            f"/api/bikes/{bike['id']}",
+            json={"default_sports": ["Run"]},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 422
+
     async def test_the_collision_check_ignores_the_bike_being_edited(
         self, client, auth_headers
     ):

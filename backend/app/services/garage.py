@@ -45,12 +45,6 @@ SOURCE_AUTO = "auto"
 #: or an edit to what a bike claims.
 SOURCE_MANUAL = "manual"
 
-#: Ceiling on how many sports one bike may claim. The cycling vocabulary is
-#: seven strings long, so this is a bound on nonsense rather than on anyone's
-#: riding — but the column is JSON and reaches a per-athlete map built on every
-#: ingest, so it does not go unbounded.
-MAX_DEFAULT_SPORTS = len(CYCLING_SPORT_TYPES)
-
 #: Rows per batch for the history scan. It writes, so it needs entities and
 #: cannot select columns; streaming keeps peak memory flat across a history of
 #: any size while each batch still flushes into the same transaction. Same
@@ -82,6 +76,11 @@ def normalise_default_sports(raw: Optional[Iterable[str]]) -> Optional[list[str]
 
     An empty list normalises to ``None`` — the column means "claims nothing"
     either way, and keeping one spelling of that keeps the API's answers stable.
+
+    The result needs no length cap: it holds only distinct members of
+    :data:`CYCLING_SPORT_TYPES`, so it is bounded by that vocabulary however
+    long the input is. That matters because this list reaches a per-athlete map
+    rebuilt on every ingest.
     """
     if raw is None:
         return None
@@ -97,13 +96,7 @@ def normalise_default_sports(raw: Optional[Iterable[str]]) -> Optional[list[str]
             )
         if sport not in out:
             out.append(sport)
-    if len(out) > MAX_DEFAULT_SPORTS:
-        raise SportClaimError("Too many sports claimed", sport=out[MAX_DEFAULT_SPORTS])
     return out or None
-
-
-def is_retired(bike: Bike) -> bool:
-    return bike.retired_at is not None
 
 
 async def check_sport_claims(
