@@ -593,10 +593,22 @@ def points_from_json(stored: Sequence | None) -> list[SurfacePoint] | None:
             entry = []
         raw = entry[0] if entry else None
         confidence = entry[1] if len(entry) > 1 else None
+        surface = normalise(raw)
+        stored = confidence if confidence in CONFIDENCES else confidence_for(raw)
         points.append(
             SurfacePoint(
-                surface=normalise(raw),
-                confidence=confidence if confidence in CONFIDENCES else confidence_for(raw),
+                surface=surface,
+                # "Unknown implies inferred" has to hold here too, and for the
+                # same reason it holds in `confidence_for`: by construction,
+                # not by two rules agreeing. The class is re-derived on read
+                # precisely so `_FROM_MATCHER` can be tuned later without
+                # re-matching every stored course — retire a value, or give
+                # `impassable` a class of its own, and rows written under the
+                # old vocabulary would otherwise re-read as
+                # unknown-and-*confirmed*. A stored literal is a value from a
+                # previous release's vocabulary, never a fact about a class
+                # this one cannot identify.
+                confidence=INFERRED if surface == UNKNOWN else stored,
                 raw=raw,
             )
         )

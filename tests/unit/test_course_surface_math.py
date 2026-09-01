@@ -360,6 +360,41 @@ class TestStoredSeries:
         [point] = surface.points_from_json([["gravel", surface.CONFIRMED]])
         assert point.surface == surface.GRAVEL and point.raw == "gravel"
 
+    @pytest.mark.parametrize(
+        "raw", ["future_enum", "impassable", 1.5, None]
+    )
+    def test_a_stored_confirmed_cannot_survive_a_class_we_no_longer_recognise(self, raw):
+        """"Unknown implies inferred" has to hold on the read path too.
+
+        The class is re-derived on read precisely so `_FROM_MATCHER` can be
+        tuned later without re-matching every stored course. That makes stored
+        confidence a value from a *previous* release's vocabulary — so taking
+        it at face value would let a row written before a mapping changed
+        re-read as unknown-and-confirmed, which is "we confirmed that we do
+        not know".
+        """
+        [point] = surface.points_from_json([[raw, surface.CONFIRMED]])
+        assert point.surface == surface.UNKNOWN
+        assert point.confidence == surface.INFERRED
+
+    def test_a_stored_confidence_is_still_honoured_for_a_class_we_do_know(self):
+        """The tuning the storage format exists for still works."""
+        [point] = surface.points_from_json([["gravel", surface.INFERRED]])
+        assert point.surface == surface.GRAVEL
+        assert point.confidence == surface.INFERRED
+
+    def test_the_invariant_holds_however_the_point_was_built(self):
+        """Read path and write path cannot disagree about the same input."""
+        for raw in ("paved_smooth", "gravel", "impassable", "wat", None, 1.5):
+            written = surface.SurfacePoint(
+                surface=surface.normalise(raw),
+                confidence=surface.confidence_for(raw),
+                raw=raw,
+            )
+            [read] = surface.points_from_json([[raw, written.confidence]])
+            assert read.surface == written.surface
+            assert read.confidence == written.confidence
+
     @pytest.mark.parametrize("stored", [None, []])
     def test_nothing_stored_reads_as_nothing(self, stored):
         assert surface.points_from_json(stored) is None
