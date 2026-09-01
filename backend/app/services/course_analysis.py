@@ -30,6 +30,7 @@ from backend.app.core.file_encryption import decrypt_file, encrypt_file
 from backend.app.models.user_orm import Course, CourseSegment
 from backend.app.models.user_orm import CourseTrack as CourseTrackRow
 from openkoutsi import course as course_math
+from openkoutsi import surface as surface_math
 from openkoutsi import gpx
 
 
@@ -48,9 +49,15 @@ def parse_and_analyze(
     bike: course_math.BikeParams,
     target_time_s: int | None,
     target_power_w: int | None = None,
+    surfaces: list | None = None,
 ) -> tuple[ParsedCourse | None, str | None]:
     """Parse a GPX course and run the full analysis. Sync and CPU-bound —
     call through ``asyncio.to_thread``.
+
+    ``surfaces`` is the stored per-point matcher answers (issue #56) when this
+    course already has some. Coordinate-free by construction — it is one
+    ``[raw, confidence]`` pair per track point — so passing it in adds no way
+    for a coordinate to reach the analysis.
 
     Returns ``(parsed, None)`` or ``(None, reason)`` with the profile reason
     codes from :func:`openkoutsi.course.course_profile`. A file that is not
@@ -63,7 +70,12 @@ def parse_and_analyze(
     if profile is None:
         return None, reason
     analysis = course_math.analyze_course(
-        profile, rider, bike, target_time_s, target_power_w
+        profile,
+        rider,
+        bike,
+        target_time_s,
+        target_power_w,
+        surface_points=surface_math.points_from_json(surfaces),
     )
     return ParsedCourse(track=track, name=route.name, analysis=analysis), None
 
@@ -74,6 +86,7 @@ def analyze_stored_track(
     bike: course_math.BikeParams,
     target_time_s: int | None,
     target_power_w: int | None = None,
+    surfaces: list | None = None,
 ) -> tuple[course_math.CourseAnalysis | None, str | None]:
     """Re-analysis without re-upload: run on the ``course_tracks`` JSON row.
 
@@ -88,7 +101,14 @@ def analyze_stored_track(
     if profile is None:
         return None, reason
     return (
-        course_math.analyze_course(profile, rider, bike, target_time_s, target_power_w),
+        course_math.analyze_course(
+            profile,
+            rider,
+            bike,
+            target_time_s,
+            target_power_w,
+            surface_points=surface_math.points_from_json(surfaces),
+        ),
         None,
     )
 
@@ -201,6 +221,12 @@ async def persist_analysis(
     course.profile = [
         [p.distance_m, p.elevation_m, p.gradient] for p in analysis.profile
     ]
+    # The surface at full run resolution (issue #56). Derived state like the
+    # rest of this, so it is rewritten on every analysis — including back to
+    # None when a course is re-solved with no surface data.
+    course.surface_ribbon = (
+        surface_math.ribbon_json(analysis.surface_runs) or None
+    )
 
     pacing = analysis.pacing
     course.predicted_time_s = pacing.predicted_time_s
@@ -239,6 +265,10 @@ async def persist_analysis(
                 duration_s=plan.duration_s,
                 start_offset_s=plan.start_offset_s,
                 speed_capped=plan.speed_capped,
+                surface=seg.surface,
+                surface_confidence=seg.surface_confidence,
+                surface_raw=seg.surface_raw,
+                crr_used=plan.crr_used,
             )
         )
     # A refused target still deserves a segment table — the athlete should see
@@ -255,14 +285,23 @@ async def persist_analysis(
                     avg_gradient=seg.avg_gradient,
                     elevation_change_m=seg.elevation_change_m,
                     segment_type=seg.segment_type,
+                    surface=seg.surface,
+                    surface_confidence=seg.surface_confidence,
+                    surface_raw=seg.surface_raw,
                 )
             )
 
 
 async def store_track(course: Course, track: course_math.CourseTrack, session: AsyncSession) -> None:
-    """Upsert the thinned track row for a course."""
+    """Upsert the thinned track row for a course.
+
+    Re-uploading resets the surface: the points changed, so answers matched
+    against the old ones describe a different road.
+    """
     existing = await session.get(CourseTrackRow, course.id)
     if existing is not None:
         existing.points = track_points_json(track)
+        existing.surfaces = None
+        existing.surface_matched_at = None
     else:
         session.add(CourseTrackRow(course_id=course.id, points=track_points_json(track)))

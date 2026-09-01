@@ -30,9 +30,9 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
-from . import geo
+from . import geo, surface as surface_math
 from .gpx import Route
 
 # ── physical constants ────────────────────────────────────────────────────────
@@ -170,27 +170,6 @@ def max_sustainable_intensity(duration_s: float) -> float:
     return max(SUSTAINABLE_INTENSITY_FLOOR, 1.0 - 0.05 * math.log2(duration_s / 3600.0))
 
 
-def crr_for_tyre_width(width_mm: int | None) -> float:
-    """Rolling-resistance coefficient on pavement, by tyre width.
-
-    Measured Crr for road tyres spans roughly 0.003–0.007
-    (bicyclerollingresistance.com drum tests). Width is a workable proxy: the
-    26–32 mm range rolls best at sensible pressures, narrower gives a little
-    back on real road surfaces, and wider means heavier casings. Stage 1
-    assumes pavement throughout — the plan prose says so — and Stage 2 (#56)
-    replaces this with a per-surface value.
-    """
-    if width_mm is None:
-        return 0.0045
-    if width_mm <= 25:
-        return 0.0045
-    if width_mm <= 32:
-        return 0.0042
-    if width_mm <= 45:
-        return 0.0050
-    return 0.0065
-
-
 # ── dataclasses ───────────────────────────────────────────────────────────────
 
 
@@ -262,7 +241,7 @@ class BikeParams:
 
     @property
     def crr(self) -> float:
-        return crr_for_tyre_width(self.tyre_width_mm)
+        return surface_math.crr_for_tyre_width(self.tyre_width_mm)
 
 
 @dataclass(frozen=True)
@@ -274,6 +253,11 @@ class Segment:
     avg_gradient: float
     elevation_change_m: float
     segment_type: str  # "climb" | "flat" | "descent"
+    # Stage 2 (#56). None throughout on an instance with no surface matching,
+    # which is the same shape a course analysed before the feature existed has.
+    surface: str | None = None
+    surface_confidence: str | None = None  # "confirmed" | "inferred"
+    surface_raw: str | None = None  # exactly what the matcher said
 
 
 @dataclass(frozen=True)
@@ -286,6 +270,10 @@ class SegmentPlan:
     duration_s: float
     start_offset_s: float
     speed_capped: bool
+    #: The rolling-resistance coefficient this split was solved with. Stored
+    #: so a number the athlete is asked to trust can be inspected rather than
+    #: taken on faith.
+    crr_used: float | None = None
 
 
 @dataclass(frozen=True)
@@ -322,6 +310,13 @@ class CourseAnalysis:
     profile: list[ProfilePoint]  # downsampled for charting
     segments: list[Segment]
     pacing: PacingSolution
+    #: Stage 2 (#56). The surface at full run resolution, and the stretches
+    #: worth naming out loud. Kept beside the segment table rather than folded
+    #: into it because the table has a minimum row length and these do not: a
+    #: 130 m sector of mud must survive into the plan even when the pacing
+    #: rows quite reasonably fold it into a longer one.
+    surface_runs: list = field(default_factory=list)
+    rough_sectors: list = field(default_factory=list)
 
 
 # ── ingest ────────────────────────────────────────────────────────────────────
@@ -472,40 +467,52 @@ def course_profile(track: CourseTrack) -> tuple[CourseProfile | None, str | None
 # ── segmentation ──────────────────────────────────────────────────────────────
 
 
-def segment_by_gradient(profile: CourseProfile) -> list[Segment]:
-    """Split the course where gradient meaningfully changes.
+def segment_by_gradient(
+    profile: CourseProfile,
+    surfaces: Sequence[str] | None = None,
+) -> list[Segment]:
+    """Split the course where gradient — or surface — meaningfully changes.
 
     Greedy first pass: an interval joins the running segment while its
     gradient stays within :data:`SEGMENT_SPLIT_GRADE` of the segment's
-    length-weighted mean. Dissolve pass: segments shorter than
-    :data:`MIN_SEGMENT_LENGTH_M` merge into the neighbour with the closer
-    mean gradient, repeatedly, so noise cannot shatter the route into
-    hundreds of rows. Segments tile the course exactly.
+    length-weighted mean *and* its surface class is unchanged. Dissolve pass:
+    segments shorter than :data:`MIN_SEGMENT_LENGTH_M` merge into the
+    neighbour with the closer mean gradient, repeatedly, so noise cannot
+    shatter the route into hundreds of rows. Segments tile the course exactly.
+
+    ``surfaces`` is one class per profile point, already dissolved by
+    :func:`openkoutsi.surface.dissolve_runs`. **A merge never crosses a surface
+    boundary.** All the judgement about which boundaries are real — which short
+    runs are match noise and which are a 130 m sector of mud worth keeping —
+    was made there, on severity; this pass only honours the answer. Putting
+    that decision in one place is what stops the gradient floor from quietly
+    swallowing a sector the surface pass went to the trouble of preserving.
     """
     pts = profile.points
     if len(pts) < 2:
         return []
 
-    # (start_d, end_d, elevation_change) per raw segment.
-    raw: list[list[float]] = []
-    for a, b in zip(pts, pts[1:]):
+    # (start_d, end_d, elevation_change, surface) per raw segment.
+    raw: list[list] = []
+    for i, (a, b) in enumerate(zip(pts, pts[1:])):
         length = b.distance_m - a.distance_m
         if length <= 0:
             continue
         rise = b.elevation_m - a.elevation_m
         grad = rise / length
+        face = surfaces[i] if surfaces is not None and i < len(surfaces) else None
         if raw:
             seg = raw[-1]
             seg_len = seg[1] - seg[0]
             seg_grad = seg[2] / seg_len if seg_len > 0 else 0.0
-            if abs(grad - seg_grad) <= SEGMENT_SPLIT_GRADE:
+            if abs(grad - seg_grad) <= SEGMENT_SPLIT_GRADE and seg[3] == face:
                 seg[1] = b.distance_m
                 seg[2] += rise
                 continue
-        raw.append([a.distance_m, b.distance_m, rise])
+        raw.append([a.distance_m, b.distance_m, rise, face])
 
     # Dissolve short segments into the gradient-closer neighbour.
-    def _grad(seg: list[float]) -> float:
+    def _grad(seg: list) -> float:
         length = seg[1] - seg[0]
         return seg[2] / length if length > 0 else 0.0
 
@@ -530,8 +537,17 @@ def segment_by_gradient(profile: CourseProfile) -> list[Segment]:
             i = nxt[i]
             continue
         p, q = prev[i], nxt[i]
+        # Only a same-surface neighbour is a candidate: the surface pass has
+        # already decided this boundary is real, and merging across it would
+        # hand the segment a rolling-resistance figure for a road it is not on.
+        # A short segment with no same-surface neighbour simply keeps its row.
+        if p != -1 and raw[p][3] != seg[3]:
+            p = -1
+        if q != -1 and raw[q][3] != seg[3]:
+            q = -1
         if p == -1 and q == -1:
-            break  # the only segment left: nothing to dissolve into
+            i = nxt[i]
+            continue
         if p == -1:
             target = q
         elif q == -1:
@@ -540,7 +556,7 @@ def segment_by_gradient(profile: CourseProfile) -> list[Segment]:
             # Ties go to the lower index, as `min` over [i-1, i+1] did.
             target = p if abs(_grad(raw[p]) - _grad(seg)) <= abs(_grad(raw[q]) - _grad(seg)) else q
         lo, hi = (p, i) if target == p else (i, q)
-        raw[lo] = [raw[lo][0], raw[hi][1], raw[lo][2] + raw[hi][2]]
+        raw[lo] = [raw[lo][0], raw[hi][1], raw[lo][2] + raw[hi][2], raw[lo][3]]
         dead[hi] = True
         nxt[lo] = nxt[hi]
         if nxt[hi] != -1:
@@ -568,6 +584,7 @@ def segment_by_gradient(profile: CourseProfile) -> list[Segment]:
                 avg_gradient=grad,
                 elevation_change_m=seg[2],
                 segment_type=kind,
+                surface=seg[3],
             )
         )
     return segments
@@ -640,12 +657,16 @@ def predict_splits(
     cap: on such roads the model has nothing honest to say about watts.
     """
     total_mass = rider.weight_kg + BIKE_AND_KIT_MASS_KG
-    crr = bike.crr
     cda = bike.cda_m2
 
     plans: list[SegmentPlan] = []
     offset = 0.0
     for segment in segments:
+        # Stage 2 (#56): rolling resistance comes from the segment's own
+        # surface where one was matched. With no surface data — or on asphalt —
+        # this returns exactly what the tyre-width curve alone returned, so a
+        # course analysed without a matcher keeps the numbers it always had.
+        crr = surface_math.crr_for(segment.surface, bike.tyre_width_mm)
         power = intensity * rider.ftp_w * _effort_weight(segment.avg_gradient)
         coasting_speed = solve_speed_ms(0.0, segment.avg_gradient, total_mass, crr, cda)
         if coasting_speed >= DESCENT_SPEED_CAP_MS:
@@ -663,6 +684,7 @@ def predict_splits(
                 duration_s=duration,
                 start_offset_s=offset,
                 speed_capped=capped,
+                crr_used=crr,
             )
         )
         offset += duration
@@ -975,12 +997,16 @@ def analyze_course(
     bike: BikeParams,
     target_time_s: float | None = None,
     target_power_w: float | None = None,
+    surface_points: Sequence | None = None,
 ) -> CourseAnalysis:
     """The full analysis of a course profile — coordinate-free by construction.
 
     Takes the profile rather than a track on purpose: the one conversion in
     :func:`course_profile` is where coordinates end, and nothing reachable
-    from here can carry one.
+    from here can carry one. ``surface_points`` is
+    :class:`openkoutsi.surface.SurfacePoint` per profile point — matched from
+    coordinates elsewhere, but itself carrying none, so Stage 2 adds no way for
+    one to reach this function.
 
     The two targets are alternatives — a ride is paced *to a finish time* or
     *to a number of watts*, never to both — and the API refuses a request
@@ -991,7 +1017,19 @@ def analyze_course(
     gain = geo.elevation_gain_m(elevations, smoothing=1)
     loss = geo.elevation_gain_m(list(reversed(elevations)), smoothing=1)
 
-    segments = segment_by_gradient(profile)
+    runs: list = []
+    sectors: list = []
+    classes: list[str] | None = None
+    if surface_points:
+        distances = [p.distance_m for p in profile.points]
+        n = min(len(surface_points), len(distances))
+        runs = surface_math.build_runs(surface_points[:n], distances[:n])
+        sectors = surface_math.rough_sectors(runs)
+        classes = surface_math.dissolve_runs(surface_points[:n], distances[:n])
+
+    segments = segment_by_gradient(profile, classes)
+    if classes is not None:
+        segments = _label_segment_surfaces(segments, runs, surface_points, profile)
     if target_power_w is not None:
         pacing = solve_target_power(segments, rider, bike, target_power_w)
     elif target_time_s is not None:
@@ -1008,4 +1046,98 @@ def analyze_course(
         profile=_resample_profile(profile.points),
         segments=segments,
         pacing=pacing,
+        surface_runs=runs,
+        rough_sectors=sectors,
     )
+
+
+def _label_segment_surfaces(
+    segments: Sequence[Segment],
+    runs: Sequence,
+    surface_points: Sequence,
+    profile: CourseProfile,
+) -> list[Segment]:
+    """Attach confidence and the raw matcher value to each segment.
+
+    The class itself came from segmentation; what is added here is how much it
+    should be trusted, measured against what the matcher *originally* said —
+    see :func:`openkoutsi.surface.run_confidence`. A segment whose class exists
+    only because a short run was dissolved into it therefore reads ``inferred``
+    rather than inheriting the confidence of the class it was absorbed by.
+
+    Segments tile the course in order, so this walks them and the points
+    together in one pass rather than re-scanning the points per segment: the
+    latter is quadratic, and worst on exactly the long courses this feature is
+    for.
+    """
+    distances = [p.distance_m for p in profile.points]
+    # Resolved per segment, by position, rather than through a class → raw map.
+    # Keyed by class, every segment of a class would take whichever run of that
+    # class came last — harmless for the seven real classes, which map 1:1, but
+    # UNKNOWN is reachable from `impassable`, from an unrecognised value and
+    # from a point that was never matched at all. A segment nobody matched
+    # would then report `surface_raw: "impassable"` because some other stretch
+    # of the course was, which is precisely the scary label the normalisation
+    # maps `impassable` to UNKNOWN to avoid inventing.
+    limit = min(len(distances), len(surface_points))
+    run_at = _run_index(runs, distances, limit)
+
+    out: list[Segment] = []
+    i = 0
+    for segment in segments:
+        while i < limit and distances[i] < segment.start_distance_m:
+            i += 1
+        member: list = []
+        lengths: list[float] = []
+        j = i
+        while j < limit and distances[j] < segment.end_distance_m:
+            nxt = distances[j + 1] if j + 1 < len(distances) else segment.end_distance_m
+            member.append(surface_points[j])
+            lengths.append(max(0.0, min(nxt, segment.end_distance_m) - distances[j]))
+            j += 1
+        i = j
+        confidence = (
+            surface_math.run_confidence(member, lengths, segment.surface)
+            if member
+            else surface_math.INFERRED
+        )
+        # The raw value of the run this segment actually sits in, and only
+        # when that run agrees with the segment's class — a segment assembled
+        # across a dissolved boundary has no single matcher answer to quote.
+        raw = None
+        if member and segment.surface != surface_math.UNKNOWN:
+            # Never quoted for UNKNOWN. That class is reachable from
+            # `impassable`, from an unrecognised value and from a point nobody
+            # matched at all — so one unknown run can span all three, and its
+            # first point's raw value describes none of the rest. "We could not
+            # identify this" has no matcher answer to show, which is the honest
+            # thing for `surface_raw` to say about it.
+            run = run_at.get(i - len(member))
+            if run is not None and run.surface == segment.surface:
+                raw = run.raw
+        out.append(
+            replace(
+                segment,
+                surface_confidence=confidence,
+                surface_raw=raw,
+            )
+        )
+    return out
+
+
+def _run_index(runs: Sequence, distances: Sequence[float], limit: int) -> dict:
+    """Point index → the surface run covering it."""
+    index: dict = {}
+    if not runs:
+        return index
+    position = 0
+    for run in runs:
+        while position < limit and distances[position] < run.start_distance_m:
+            position += 1
+        start = position
+        while position < limit and distances[position] < run.end_distance_m:
+            index[position] = run
+            position += 1
+        if position == start and start < limit:
+            index[start] = run
+    return index

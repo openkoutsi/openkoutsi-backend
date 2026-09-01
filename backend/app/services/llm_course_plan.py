@@ -24,6 +24,7 @@ from typing import AsyncIterator, Sequence
 from sqlalchemy import select, update
 
 from openkoutsi import course as course_math
+from openkoutsi import surface as surface_math
 
 from ..db.user_session import get_user_session_factory
 from ..models.user_orm import Athlete, Course, CourseSegment
@@ -41,6 +42,40 @@ _GUARD_INTERVAL_S = 0.5
 
 _MOOD_RE = re.compile(r"^MOOD:\s?(cheer|knowing|neutral|stern)\s*$", re.IGNORECASE)
 _FALLBACK_MOOD = "knowing"
+
+# The base prompt is an f-string, so the slot has to be a value it can
+# interpolate literally and `_build_system_prompt` can swap afterwards.
+_SURFACE_RULE_PLACEHOLDER = "@@SURFACE_RULE@@"
+_SURFACE_RULE = _SURFACE_RULE_PLACEHOLDER
+
+# No surface data: the physics solved this course as dry pavement, and a plan
+# that did not say so would be quietly claiming to know something it does not.
+_SURFACE_RULE_UNMATCHED = """\
+Say plainly, once, that the road surface has not been classified for this \
+course and every figure assumes dry pavement.
+
+"""
+
+# Matched: the class per segment is real, but half of it is a weaker claim than
+# the other half, and flattening the two is the specific dishonesty this
+# feature exists to avoid.
+_SURFACE_RULE_MATCHED = """\
+The table names a road surface per segment, matched against OpenStreetMap. \
+Use it — a gravel sector and a tarmac one are ridden differently, and the \
+power targets already account for the difference. Two rules about it:
+
+Rows marked "inferred" are a guess. OpenStreetMap surface coverage is uneven, \
+and where nobody recorded a surface the class comes from the road type rather \
+than from a fact. Never present an inferred surface as certain; where the plan \
+turns on one, say that it may not be right.
+
+If a "Rough sectors" list is given, warn about each entry explicitly, with its \
+distance — including the short ones. A rider who expects 40 km of smooth \
+asphalt needs to be told about 130 m of mud before they hit it, and a sector \
+too short to have its own row in the segment table is exactly the one they \
+will otherwise meet by surprise.
+
+"""
 
 _SYSTEM_PROMPT_BASE = f"""\
 You are Koutsi, an expert endurance sports coach. The athlete has uploaded a \
@@ -61,18 +96,31 @@ themselves and adjust.
 Hard rules: never invent local knowledge about roads, weather, or scenery — \
 you know nothing about this course beyond the table. Never do arithmetic: \
 every number you state must appear in the table. State plainly, once, that all \
-speed and time predictions assume still air and a dry paved surface, and that \
-wind will move them. If the pacing model marked the athlete's target time as \
-not achievable, open with that: say why in the model's terms (the power it \
-would take against what is sustainable) and build the plan around the fastest \
-realistic ride instead.
+speed and time predictions assume still air, and that wind will move them. If \
+the pacing model marked the athlete's target time as not achievable, open with \
+that: say why in the model's terms (the power it would take against what is \
+sustainable) and build the plan around the fastest realistic ride instead.
 
+{_SURFACE_RULE}\
 {_MOOD_RULE}\
 """
 
 
-def _build_system_prompt(locale: str | None, coaching_style: str | None) -> str:
-    return _decorate(_SYSTEM_PROMPT_BASE, locale, coaching_style)
+def _build_system_prompt(
+    locale: str | None, coaching_style: str | None, matched: bool = False
+) -> str:
+    """The system prompt, with the surface paragraph the course has earned.
+
+    Two different honest statements, and saying the wrong one is worse than
+    saying neither: a course with no surface data is being solved as dry
+    pavement and the plan has to admit it, while a matched course must not
+    present an inferred class as a fact.
+    """
+    base = _SYSTEM_PROMPT_BASE.replace(
+        _SURFACE_RULE_PLACEHOLDER,
+        _SURFACE_RULE_MATCHED if matched else _SURFACE_RULE_UNMATCHED,
+    )
+    return _decorate(base, locale, coaching_style)
 
 
 def _hms(seconds: float | None) -> str:
@@ -142,7 +190,13 @@ def _build_course_prompt(
     if level:
         lines.append(f"  Self-reported experience level: {level}")
 
-    lines.append("\nPacing model (still air, dry pavement, bike+kit mass included):")
+    # The assumptions line names what the model actually assumed. Once a
+    # surface is matched, "dry pavement" is no longer one of them — the table
+    # below carries a class per segment and the Crr came from it.
+    assumptions = "still air, bike+kit mass included"
+    if not any(row.surface for row in segments):
+        assumptions = "still air, dry pavement, bike+kit mass included"
+    lines.append(f"\nPacing model ({assumptions}):")
     if course.target_power_w:
         share = (
             f" ({course.target_power_w / course.ftp_w_used * 100:.0f}% of FTP)"
@@ -201,19 +255,49 @@ def _build_course_prompt(
             lines.append(f"  Intensity: {course.intensity:.2f} × FTP")
         lines.append(f"  Predicted total time: {_hms(course.predicted_time_s)}")
 
+    matched = any(row.surface for row in segments)
+    surface_column = " | surface" if matched else ""
     lines.append(
-        "\nSegments (start km | length km | avg grade | type | target power | est. speed | split | cumulative):"
+        "\nSegments (start km | length km | avg grade | type | target power | "
+        f"est. speed | split | cumulative{surface_column}):"
     )
     for row in segments:
         power = f"{row.power_w:.0f} W" if row.power_w else "coast"
         if row.power_w and course.ftp_w_used:
             power += f" ({row.power_w / course.ftp_w_used * 100:.0f}% FTP)"
         speed = f"{(row.speed_ms or 0) * 3.6:.1f} km/h"
+        # The confidence travels with the class, in every row, rather than
+        # being stated once in a preamble the model may not carry through to
+        # the sentence it eventually writes about km 47.
+        surface = ""
+        if matched:
+            label = row.surface or "unknown"
+            if row.surface_confidence == surface_math.INFERRED:
+                label += " (inferred, not confirmed by an OSM tag)"
+            surface = f" | {label}"
         lines.append(
             f"  {row.start_distance_m / 1000:5.1f} | {row.length_m / 1000:4.1f} | "
             f"{row.avg_gradient * 100:+.1f}% | {row.segment_type:7s} | {power} | "
-            f"{speed} | {_hms(row.duration_s)} | {_hms(row.start_offset_s)}"
+            f"{speed} | {_hms(row.duration_s)} | {_hms(row.start_offset_s)}{surface}"
         )
+
+    # Sharp surface changes, including ones too short to have earned their own
+    # pacing row. This is the block that puts "130 m of mud at km 41" into the
+    # prose: a rider expecting 40 km of tarmac needs that as a sentence before
+    # the day, not as a colour on a chart they may not look at.
+    sectors = surface_math.rough_sector_json(course.surface_ribbon)
+    if sectors:
+        lines.append("\nRough sectors (where the road surface turns bad):")
+        for start_m, length_m, klass, confidence, _step in sectors:
+            qualifier = (
+                " — inferred, not confirmed by an OSM tag"
+                if confidence == surface_math.INFERRED
+                else ""
+            )
+            lines.append(
+                f"  - {klass} from km {start_m / 1000:.1f}, "
+                f"{length_m:.0f} m long{qualifier}"
+            )
 
     climbs = course_math.key_climbs(_segment_plans(segments))
     if climbs:
@@ -264,10 +348,16 @@ def _stream_course_plan(
     coaching_style: str | None = None,
     usage_out: dict | None = None,
 ) -> AsyncIterator[str]:
+    # Whether this course actually has a surface decides which of the two
+    # honest statements the system prompt makes, so it is read from the same
+    # rows the table is built from rather than from the instance's settings:
+    # a course uploaded before the sidecar existed is unmatched even where the
+    # instance can match, and its plan must say dry pavement.
+    matched = any(row.surface for row in segments)
     return stream_chat_completion(
         athlete,
         user_id,
-        system_prompt=_build_system_prompt(locale, coaching_style),
+        system_prompt=_build_system_prompt(locale, coaching_style, matched),
         user_prompt=_build_course_prompt(athlete, course, segments, now),
         usage_out=usage_out,
     )

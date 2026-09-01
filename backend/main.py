@@ -62,6 +62,14 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    # The surface matcher's HTTP client outlives any single request — the
+    # background match that uses it is scheduled by one and finishes after it —
+    # so it is owned by the app rather than by an `async with`, and released
+    # here (issue #56). No-op on an instance with no sidecar configured.
+    from backend.app.services.surface_matcher import close_surface_matcher
+
+    await close_surface_matcher()
+
     supervisor.cancel()
     try:
         await supervisor

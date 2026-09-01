@@ -199,6 +199,13 @@ class InstanceSettingsResponse(BaseModel):
     # over data the caller's credential already reaches. Off refuses the
     # endpoint outright, handshake included.
     allow_mcp_server: bool = True
+    # Issue #56: offer course recon on this instance. Defaults **off**, unlike
+    # the two above, because the half that distinguishes it — classifying the
+    # road surface under a course — needs a routing sidecar the self-hoster
+    # builds tiles for themselves. Off refuses the capability: every course and
+    # bike endpoint, the background matcher and the plan generator. It never
+    # refuses the data export, and it deletes nothing.
+    allow_course_recon: bool = False
 
 
 class InstanceSettingsPatch(BaseModel):
@@ -211,6 +218,7 @@ class InstanceSettingsPatch(BaseModel):
     allow_self_signup: Optional[bool] = None
     allow_personal_access_tokens: Optional[bool] = None
     allow_mcp_server: Optional[bool] = None
+    allow_course_recon: Optional[bool] = None
 
 
 # ── LLM usage stats (instance admin, issue #9) ──────────────────────────────

@@ -194,6 +194,14 @@ WAHOO_CLIENT_SECRET=
 WAHOO_BRIDGE_URL=                  # public URL of the Wahoo bridge, e.g. https://wahoo-bridge.your-domain
 WAHOO_BRIDGE_SECRET=               # shared secret — must match WAHOO_BRIDGE_SECRET in wahoo_bridge/.env
 
+# Road surface classification (optional, issue #56) — a Valhalla sidecar you run
+# yourself, reachable only from inside the deployment. Leave unset and a course
+# is solved as dry pavement, which the written plan says out loud; the feature
+# is absent, not broken. Tiles are built and shipped by hand — see the
+# openkoutsi-ops repository. Course recon itself is gated separately by the
+# `allow_course_recon` instance setting, which defaults **off** (below).
+VALHALLA_URL=                      # e.g. http://valhalla:8002
+
 # Email (optional) — all email goes through the swappable email module
 # (backend/app/services/email/). Leave unset to keep email disabled; features
 # that need it stay unavailable rather than erroring.
@@ -382,6 +390,43 @@ This step is only needed when upgrading an existing deployment — new installs 
 > migration's.
 
 ### Backing up before a migration
+
+> **Note:** per-user migration `030_course_surface` adds ten nullable columns
+> across `course_segments`, `courses` and `course_tracks` — the road surface
+> under a course, how much it should be trusted, and the rolling resistance
+> each segment was solved with (issue #56). It adds no rows, deletes none,
+> backfills nothing, and needs no new **mandatory** environment variables.
+> Applied automatically by the entrypoint's per-user migration loop, or by the
+> helper script above. NULL everywhere means "nobody has looked at the road
+> under this course", which is the correct — and the only honest — answer for
+> every course that exists when this lands.
+>
+> Nothing is re-analysed by the upgrade. A stored course keeps the numbers it
+> had; it gains a surface only when a match is run for it, and on an instance
+> with no sidecar configured it never is.
+
+> ⚠️ **Note:** registry migration `018_course_recon_toggle` adds
+> `instance_settings.allow_course_recon` — boolean, non-null, **default false**
+> — and that default is **visible on upgrade**. Course recon shipped ungated,
+> so an instance already using it loses course upload, the segment table and
+> the pacing plan until an admin switches this on, in the admin console under
+> **Settings → Allow course recon** (or by `PATCH /api/admin/settings`, see
+> [ADMIN.md](ADMIN.md)).
+>
+> **This is deliberate, and nothing is deleted.** Every stored course, its
+> segments and its uploaded GPX stay exactly where they are, remain in the data
+> export the whole time — the export is deliberately outside the switch — and
+> come back untouched when it is flipped. The default is off because the half
+> of the feature that distinguishes it, classifying the road surface under a
+> course, map-matches against OpenStreetMap through a Valhalla sidecar the
+> self-hoster builds tiles for themselves; an instance that has made no
+> decision about that has not implicitly said yes. Unlike the per-user
+> migrations this one runs on the **registry** chain
+> (`alembic -c backend/alembic-registry.ini upgrade head`), which the
+> entrypoint applies automatically.
+>
+> If you are upgrading an instance whose athletes use course recon, flip the
+> switch as part of the deploy rather than after somebody reports a 404.
 
 Per-user databases run in **WAL mode**, so `cp user.db` on its own can miss
 committed transactions still sitting in the `-wal` file. Use SQLite's own backup
