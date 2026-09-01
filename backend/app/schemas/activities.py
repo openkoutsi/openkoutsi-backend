@@ -73,6 +73,12 @@ class ActivityUpdate(BaseModel):
     # can never drift apart; ``"dismissed"`` records the refusal durably, which
     # is what stops the same ride being suggested again after every reprocess.
     label_answers: Optional[dict[str, str]] = None
+    # The bike this ride was done on (issue #64). Setting it stamps
+    # `bike_source = "manual"`, which is what stops the next reprocess or sync
+    # putting the automatic guess back; passing an explicit `null` clears both
+    # columns back to unassigned, so "no bike" is expressible and is not the
+    # same as "never asked".
+    bike_id: Optional[str] = None
 
 
 class FrontendAnalysisBody(BaseModel):
@@ -158,6 +164,12 @@ class ActivityResponse(BaseModel):
     decoupling_pct: Optional[float] = None
     decoupling_reason: Optional[str] = None
     workout_category: Optional[str] = None
+    # Which bike, and who decided (issue #64). `bike_source` is `auto` when a
+    # bike's claimed sports matched, `manual` when the athlete picked it, and
+    # null when nothing is assigned — the UI shows it so the athlete can tell
+    # whether their correction actually stuck.
+    bike_id: Optional[str] = None
+    bike_source: Optional[str] = None
     labels: list[str] = []
     # Labels proposed but not (yet) applied — see `LabelSuggestion` and
     # `services.commute`. Kept strictly apart from `labels` above, which is only

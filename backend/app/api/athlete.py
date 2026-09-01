@@ -711,10 +711,26 @@ async def _export_goals(athlete: Athlete, session: AsyncSession) -> list[dict]:
 
 
 async def _export_bikes(athlete: Athlete, session: AsyncSession) -> list[dict]:
+    """Bikes with their maintenance log and accessories nested (issue #64).
+
+    Nested rather than two more top-level files: neither is meaningful apart
+    from the bike it hangs off, and the same shape is what ``_export_courses``
+    does with its segments.
+    """
     return await _export_rows(
         session,
         select(Bike).where(Bike.athlete_id == athlete.id).order_by(Bike.created_at),
         exclude=("athlete_id",),
+        extra=lambda b: {
+            "maintenance": [
+                _dump(m, exclude=("athlete_id", "bike_id"))
+                for m in sorted(b.maintenance, key=lambda m: (m.performed_on, m.created_at))
+            ],
+            "accessories": [
+                _dump(a, exclude=("athlete_id", "bike_id"))
+                for a in sorted(b.accessories, key=lambda a: a.created_at)
+            ],
+        },
     )
 
 

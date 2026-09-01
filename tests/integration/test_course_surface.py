@@ -585,9 +585,15 @@ class TestTheInstanceSwitch:
         for path in ("/api/courses", f"/api/courses/{course['id']}"):
             assert (await client.get(path, headers=auth_headers)).status_code == 404
 
-    async def test_bikes_go_with_them(self, client, auth_headers, course):
-        """A bike exists for nothing but course pacing."""
-        assert (await client.get("/api/bikes", headers=auth_headers)).status_code == 404
+    async def test_bikes_do_not_go_with_them(self, client, auth_headers, course):
+        """Bikes used to 404 here, on the reasoning that a bike existed for
+        nothing but course pacing (issue #55). The garage (issue #64) made that
+        false: a bike is now where the athlete's own kilometres, maintenance
+        history and equipment live, none of which depends on whether this
+        instance offers GPX course analysis. The switch still refuses the
+        capability it names — every course route above — and nothing more.
+        """
+        assert (await client.get("/api/bikes", headers=auth_headers)).status_code == 200
 
     async def test_re_analysis_and_matching_are_refused_too(
         self, client, auth_headers, course

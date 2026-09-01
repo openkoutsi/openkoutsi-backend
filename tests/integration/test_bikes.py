@@ -4,10 +4,15 @@ A bike is the small equipment concept the course physics reads: tyre width →
 rolling resistance, riding position → drag area. The interesting behaviour is
 around deletion — a deleted bike must never take a course with it, only leave
 the course needing a bike picked again.
+
+Issue #64 promoted the same row into the garage and, with it, lifted the
+course-recon gate from this router: a bike is now where an athlete's own
+kilometres and maintenance history live, which has nothing to do with whether
+the self-hoster switched on GPX course analysis. These tests therefore run with
+the switch at its default (off) — see ``test_garage.py`` for the one that
+states that directly.
 """
 from __future__ import annotations
-
-import pytest
 
 from sqlalchemy import select
 
@@ -20,12 +25,6 @@ async def _create_bike(client, auth_headers, **overrides):
     resp = await client.post("/api/bikes", json=payload, headers=auth_headers)
     assert resp.status_code == 201, resp.text
     return resp.json()
-
-
-@pytest.fixture(autouse=True)
-def _course_recon_enabled(course_recon_on):
-    """Course recon defaults off (issue #56); these tests are about an instance
-    whose admin switched it on. `TestInstanceSwitch` covers the other case."""
 
 
 class TestBikesCrud:

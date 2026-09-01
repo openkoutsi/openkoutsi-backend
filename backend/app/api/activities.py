@@ -27,6 +27,7 @@ from backend.app.models.user_orm import (
     ActivitySource,
     ActivityStream,
     Athlete,
+    Bike,
     ImportJob,
 )
 from backend.app.schemas.imports import (
@@ -75,6 +76,7 @@ from backend.app.services.provider_sync import (
 from backend.app.services.weight import load_weight_log
 from backend.app.services.aerobic_metrics import apply_aerobic_metrics, replace_w_bal_stream
 from backend.app.services import commute as commute_service
+from backend.app.services import garage as garage_service
 from openkoutsi.commute import MIN_SAMPLES_FOR_PROPOSAL, propose_rule
 from openkoutsi.training_math import calculate_load, variability_index
 from openkoutsi.categorization import WorkoutCategory, classify_workout
@@ -699,6 +701,13 @@ async def create_manual_activity(
     if await commute_service.evaluate_activity(session, athlete, activity):
         await session.commit()
 
+    # Same gap for the garage (issue #64): a ride logged by hand is a ride on a
+    # bike, and leaving this path out is how a per-bike total ends up right for
+    # rides that arrived from Strava and quietly short for the rest.
+    if await garage_service.assign_bike(session, athlete, activity):
+        await session.commit()
+        await session.refresh(activity)
+
     # Workout matching and the fitness recalc are both keyed on the date.
     if payload.start_time is not None:
         await find_and_link_workout(session, athlete.id, activity)
@@ -1246,6 +1255,12 @@ async def reprocess_activity(
     # dismissal survive a reprocess rather than coming back every time.
     await commute_service.evaluate_activity(session, athlete, activity)
 
+    # Re-run the bike mapping too, so a ride processed before the athlete
+    # described their bikes picks one up (issue #64). A bike set by hand is
+    # never overwritten — `bike_source` is what makes that correction durable
+    # across exactly this call.
+    await garage_service.assign_bike(session, athlete, activity)
+
     await session.commit()
 
     await find_and_link_workout(session, athlete.id, activity)
@@ -1372,6 +1387,30 @@ async def update_activity(
             else:
                 commute_service.remove_label(activity, label)
             commute_service.answer_suggestion(activity, label, answer)
+    if "bike_id" in payload.model_fields_set:
+        # The athlete's correction of the automatic guess (issue #64). Stamping
+        # `manual` is the whole mechanism: without it the next reprocess or
+        # provider sync would put the guess straight back, which is precisely
+        # the failure this override exists to prevent.
+        if payload.bike_id is None:
+            activity.bike_id = None
+            activity.bike_source = None
+        else:
+            bike = (
+                await session.execute(
+                    select(Bike).where(
+                        Bike.id == payload.bike_id, Bike.athlete_id == athlete.id
+                    )
+                )
+            ).scalar_one_or_none()
+            if bike is None:
+                raise HTTPException(status_code=404, detail="Bike not found")
+            # Retired and unclaimed bikes are deliberately accepted here even
+            # though they are hidden from the course picker: correcting an old
+            # ride onto the bike it was actually done on is the point of the
+            # override, and that bike is often exactly the one since sold.
+            activity.bike_id = bike.id
+            activity.bike_source = garage_service.SOURCE_MANUAL
     if "notes" in payload.model_fields_set:
         activity.notes = payload.notes
     if "rpe" in payload.model_fields_set:
