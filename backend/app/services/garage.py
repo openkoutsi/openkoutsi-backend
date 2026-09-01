@@ -143,29 +143,38 @@ async def claim_map(session: AsyncSession, athlete) -> dict[str, str]:
     keeps the rides it already has — see :func:`assign_bike`, which will not
     strip an assignment just because the bike it points at has been retired.
     """
+    return _claims(await _fleet(session, athlete))
+
+
+async def _fleet(session: AsyncSession, athlete) -> list:
+    """Every bike the athlete has, as the three columns assignment reads.
+
+    One query rather than two: :func:`assign_bike` needs both the claim map and
+    the retired set, and it runs once per activity on every ingest path — a
+    first import of a decade of history pays whatever this costs some thousands
+    of times. Ordered so the tie-break below is a fact rather than a hope.
+    """
     result = await session.execute(
-        select(Bike.id, Bike.default_sports).where(
-            Bike.athlete_id == athlete.id, Bike.retired_at.is_(None)
-        )
+        select(Bike.id, Bike.default_sports, Bike.retired_at)
+        .where(Bike.athlete_id == athlete.id)
+        .order_by(Bike.created_at)
     )
+    return list(result)
+
+
+def _claims(fleet: list) -> dict[str, str]:
     mapping: dict[str, str] = {}
-    for bike_id, sports in result:
+    for bike_id, sports, retired_at in fleet:
+        if retired_at is not None:
+            continue
         for sport in sports or ():
-            # First claim wins if two somehow exist. `check_sport_claims` stops
-            # that being created through the API; a database edited by hand, or
-            # a bike un-retired into a collision, should still be deterministic
-            # rather than dependent on row order.
+            # First claim wins if two somehow exist — and "first" means the
+            # oldest bike, because `_fleet` orders by `created_at`. Without
+            # that ordering this sentence would be a wish: the winner would be
+            # whatever the query planner happened to return, which is the row
+            # order this is meant to be independent of.
             mapping.setdefault(sport, bike_id)
     return mapping
-
-
-async def _retired_ids(session: AsyncSession, athlete) -> set[str]:
-    result = await session.execute(
-        select(Bike.id).where(
-            Bike.athlete_id == athlete.id, Bike.retired_at.is_not(None)
-        )
-    )
-    return set(result.scalars())
 
 
 def assign(
@@ -227,10 +236,12 @@ async def assign_bike(
     Cheap when no bike claims anything, which is the common case, so it is safe
     to call unconditionally.
     """
-    claims = await claim_map(session, athlete)
+    fleet = await _fleet(session, athlete)
+    claims = _claims(fleet)
     if not claims and activity.bike_source != SOURCE_AUTO:
         return None
-    return assign(activity, claims, retired_ids=await _retired_ids(session, athlete))
+    retired = {bike_id for bike_id, _sports, retired_at in fleet if retired_at is not None}
+    return assign(activity, claims, retired_ids=retired)
 
 
 async def assign_history(session: AsyncSession, athlete) -> dict:
@@ -320,6 +331,24 @@ def maintenance_order(entry) -> tuple:
     return (entry.performed_on, entry.created_at, entry.id)
 
 
+def _span(km: float) -> Optional[float]:
+    """A distance, or ``None`` where the arithmetic came out impossible.
+
+    Both spans below are differences between readings that nothing forces into
+    order. ``km_since`` goes negative whenever the athlete's odometer readings
+    run ahead of the distance openkoutsi has tracked — the ordinary state
+    before ``odometer_base_km`` is set — and ``previous_component_km`` goes
+    negative on any backdated entry carrying a lower reading than the one
+    before it, which a free-form log invites.
+
+    Neither is a distance anything can render: nobody has ridden −2 980 km
+    since fitting a tyre. This module already answers "unknown" rather than
+    "zero" for a missing reading, and an impossible span earns the same answer
+    — the alternative is a confident number that is wrong.
+    """
+    return km if km >= 0 else None
+
+
 def component_spans(entries: list, lifetime: Optional[float]) -> dict[str, dict]:
     """Per-entry component life, keyed by entry id.
 
@@ -351,9 +380,9 @@ def component_spans(entries: list, lifetime: Optional[float]) -> dict[str, dict]
             and entry.odometer_km is not None
             and getattr(prior, "odometer_km", None) is not None
         ):
-            span = entry.odometer_km - prior.odometer_km
+            span = _span(entry.odometer_km - prior.odometer_km)
         since = (
-            lifetime - entry.odometer_km
+            _span(lifetime - entry.odometer_km)
             if lifetime is not None and entry.odometer_km is not None
             else None
         )

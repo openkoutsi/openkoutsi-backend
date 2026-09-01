@@ -271,3 +271,45 @@ class TestComponentSpans:
 
     def test_an_empty_log_is_an_empty_answer(self):
         assert garage.component_spans([], 1000.0) == {}
+
+    def test_a_backdated_entry_gives_an_unknown_span_not_a_negative_one(self):
+        """A free-form log invites a typo or an out-of-order entry, and no
+        client can draw "minus 1 200 km"."""
+        first = FakeEntry("1", "tyres", date(2026, 1, 1), 4200.0)
+        second = FakeEntry("2", "tyres", date(2026, 2, 1), 3000.0)
+        spans = garage.component_spans([first, second], 6000.0)
+        assert spans["2"]["previous_component_km"] is None
+
+    def test_readings_ahead_of_the_lifetime_give_an_unknown_running_figure(self):
+        """The ordinary state before `odometer_base_km` is set: real readings
+        off a bike computer against a distance openkoutsi has barely seen."""
+        entry = FakeEntry("1", "tyres", date(2026, 6, 1), 3000.0)
+        spans = garage.component_spans([entry], 20.0)
+        assert spans["1"]["km_since"] is None
+
+    def test_a_zero_span_is_still_a_span(self):
+        """Only *impossible* is unknown. Two entries at the same reading is a
+        real answer — nothing has been ridden since — and must not vanish."""
+        first = FakeEntry("1", "tyres", date(2026, 1, 1), 1000.0)
+        second = FakeEntry("2", "tyres", date(2026, 2, 1), 1000.0)
+        spans = garage.component_spans([first, second], 1000.0)
+        assert spans["2"]["previous_component_km"] == 0.0
+        assert spans["2"]["km_since"] == 0.0
+
+
+class TestClaims:
+    def test_a_retired_bike_claims_nothing(self):
+        fleet = [
+            ("sold", ["GravelRide"], datetime(2026, 1, 1, tzinfo=timezone.utc)),
+            ("kept", ["Ride"], None),
+        ]
+        assert garage._claims(fleet) == {"Ride": "kept"}
+
+    def test_the_first_bike_in_the_fleet_wins_a_collision(self):
+        """`_fleet` orders by `created_at`, so "first" means the oldest bike —
+        a fact rather than whatever the query planner happened to return."""
+        fleet = [("older", ["Ride"], None), ("newer", ["Ride"], None)]
+        assert garage._claims(fleet) == {"Ride": "older"}
+
+    def test_a_bike_claiming_nothing_contributes_nothing(self):
+        assert garage._claims([("b", None, None), ("c", [], None)]) == {}

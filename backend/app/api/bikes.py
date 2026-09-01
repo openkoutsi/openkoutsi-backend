@@ -214,13 +214,23 @@ async def update_bike(
     ctx, session, athlete = ctx_athlete
     bike = await _get_owned_bike(bike_id, athlete, session)
     fields = body.model_dump(exclude_unset=True)
-    if "default_sports" in fields:
+    # Bringing a bike back is a claim event too, even when the payload names no
+    # sports. `check_sport_claims` counts only *active* bikes, which is what
+    # lets a replacement claim a retired bike's sport — so un-retiring the
+    # original is the one way back into two active bikes claiming one sport,
+    # and it is the ordinary retire-and-replace sequence run in reverse.
+    unretiring = "retired_at" in fields and fields["retired_at"] is None
+    if "default_sports" in fields or unretiring:
         try:
-            fields["default_sports"] = garage_service.normalise_default_sports(
-                fields["default_sports"]
-            )
+            if "default_sports" in fields:
+                fields["default_sports"] = garage_service.normalise_default_sports(
+                    fields["default_sports"]
+                )
             await garage_service.check_sport_claims(
-                session, athlete, fields["default_sports"], exclude_bike_id=bike.id
+                session,
+                athlete,
+                fields.get("default_sports", bike.default_sports),
+                exclude_bike_id=bike.id,
             )
         except garage_service.SportClaimError as exc:
             raise _claim_conflict(exc)

@@ -1393,8 +1393,18 @@ async def update_activity(
         # provider sync would put the guess straight back, which is precisely
         # the failure this override exists to prevent.
         if payload.bike_id is None:
+            # "None of mine" is a choice, so it is stamped like any other. It
+            # has to be: `(NULL, NULL)` is the exact predicate automapping
+            # reads as free to fill, so clearing without the marker would let
+            # the next reprocess or re-sync put the guess straight back — the
+            # one correction that did not survive the events this override
+            # exists to survive. The bike stays NULL, so no total moves.
+            #
+            # `delete_bike` deliberately writes both NULL instead: there the
+            # bike is gone and no choice was made, so there is nothing to
+            # record and automapping should be free to fill the gap.
             activity.bike_id = None
-            activity.bike_source = None
+            activity.bike_source = garage_service.SOURCE_MANUAL
         else:
             bike = (
                 await session.execute(

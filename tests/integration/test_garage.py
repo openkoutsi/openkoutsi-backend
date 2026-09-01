@@ -185,6 +185,96 @@ class TestBikeFields:
         )
         assert resp.status_code == 201
 
+    async def test_un_retiring_into_a_collision_is_refused(self, client, auth_headers):
+        """The one way back into two active bikes claiming one sport: the
+        retirement exclusion is what lets the replacement take the claim, so
+        bringing the original back has to be a claim event too."""
+        old = await _create_bike(
+            client, auth_headers, name="Old gravel", default_sports=["GravelRide"]
+        )
+        await client.patch(
+            f"/api/bikes/{old['id']}",
+            json={"retired_at": "2026-01-01T00:00:00Z"},
+            headers=auth_headers,
+        )
+        new = await _create_bike(
+            client, auth_headers, name="New gravel", default_sports=["GravelRide"]
+        )
+
+        resp = await client.patch(
+            f"/api/bikes/{old['id']}", json={"retired_at": None}, headers=auth_headers
+        )
+        assert resp.status_code == 409
+        detail = resp.json()["detail"]
+        assert detail["sport"] == "GravelRide"
+        assert detail["bike_id"] == new["id"]
+        # Refused means refused: the bike is still retired.
+        assert (await _get_bike(client, auth_headers, old["id"]))["retired_at"] is not None
+        # And the next gravel ride still goes to the replacement.
+        assert (
+            await _ride(client, auth_headers, sport_type="GravelRide")
+        )["bike_id"] == new["id"]
+
+    async def test_un_retiring_a_bike_with_no_contested_claim_is_fine(
+        self, client, auth_headers
+    ):
+        """The check must not turn every un-retire into a 409."""
+        bike = await _create_bike(client, auth_headers, default_sports=["Ride"])
+        await client.patch(
+            f"/api/bikes/{bike['id']}",
+            json={"retired_at": "2026-01-01T00:00:00Z"},
+            headers=auth_headers,
+        )
+        resp = await client.patch(
+            f"/api/bikes/{bike['id']}", json={"retired_at": None}, headers=auth_headers
+        )
+        assert resp.status_code == 200
+        assert resp.json()["default_sports"] == ["Ride"]
+
+    async def test_un_retiring_while_dropping_the_contested_claim_is_fine(
+        self, client, auth_headers
+    ):
+        """The way out of the 409 above, in one request."""
+        old = await _create_bike(
+            client, auth_headers, name="Old gravel", default_sports=["GravelRide"]
+        )
+        await client.patch(
+            f"/api/bikes/{old['id']}",
+            json={"retired_at": "2026-01-01T00:00:00Z"},
+            headers=auth_headers,
+        )
+        await _create_bike(
+            client, auth_headers, name="New gravel", default_sports=["GravelRide"]
+        )
+        resp = await client.patch(
+            f"/api/bikes/{old['id']}",
+            json={"retired_at": None, "default_sports": []},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["default_sports"] == []
+
+    async def test_the_oldest_bike_wins_a_claim_collision(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        """`claim_map`'s tie-break, made observable. The API refuses to create a
+        collision, so this seeds one directly — a database edited by hand should
+        still resolve predictably rather than by whatever order rows come back."""
+        from datetime import datetime, timezone as tz
+
+        for index, name in enumerate(("older", "newer")):
+            session.add(
+                Bike(
+                    id=name,
+                    athlete_id=seeded_athlete.id,
+                    name=name,
+                    default_sports=["Ride"],
+                    created_at=datetime(2026, 1, 1 + index, tzinfo=tz.utc),
+                )
+            )
+        await session.commit()
+        assert (await _ride(client, auth_headers))["bike_id"] == "older"
+
     async def test_retiring_is_reversible(self, client, auth_headers):
         bike = await _create_bike(client, auth_headers)
         await client.patch(
@@ -197,6 +287,33 @@ class TestBikeFields:
         )
         assert resp.status_code == 200
         assert resp.json()["retired_at"] is None
+
+    @pytest.mark.parametrize("body", [{"name": None}, {"riding_position": None}])
+    async def test_an_explicit_null_on_a_required_bike_field_is_a_422(
+        self, client, auth_headers, body
+    ):
+        """Predates this issue (#55), but lifting the course-recon gate makes
+        the endpoint reachable on instances that used to 404 it, so the blast
+        radius grows with this change even though the bug does not."""
+        bike = await _create_bike(client, auth_headers)
+        resp = await client.patch(
+            f"/api/bikes/{bike['id']}", json=body, headers=auth_headers
+        )
+        assert resp.status_code == 422
+
+    @pytest.mark.parametrize(
+        "body", [{"tyre_width_mm": None}, {"odometer_base_km": None}, {"default_sports": None}]
+    )
+    async def test_an_explicit_null_on_a_nullable_bike_field_clears_it(
+        self, client, auth_headers, body
+    ):
+        bike = await _create_bike(
+            client, auth_headers, odometer_base_km=100.0, default_sports=["Ride"]
+        )
+        resp = await client.patch(
+            f"/api/bikes/{bike['id']}", json=body, headers=auth_headers
+        )
+        assert resp.status_code == 200, resp.text
 
     async def test_the_garage_does_not_need_course_recon(self, client, auth_headers):
         """Issue #55 gated bikes behind course recon because a bike was only a
@@ -425,16 +542,99 @@ class TestManualAssignmentIsDurable:
         assert activity.bike_id == gravel["id"]
         assert activity.bike_source == "manual"
 
-    async def test_clearing_it_returns_the_ride_to_unassigned(self, client, auth_headers):
-        """An explicit null means "no bike", which is not the same as "never asked"
-        — both columns go, so automapping is free to fill the gap again."""
+    async def test_clearing_it_records_none_of_mine(self, client, auth_headers):
+        """An explicit null is a *choice* — a rental, a borrowed frame — so it is
+        stamped like any other. `(null, null)` would mean "never asked", which
+        is the predicate automapping reads as free to fill."""
         _road, _gravel, ride = await self._corrected(client, auth_headers)
         resp = await client.patch(
             f"/api/activities/{ride['id']}", json={"bike_id": None}, headers=auth_headers
         )
         assert resp.status_code == 200
         assert resp.json()["bike_id"] is None
-        assert resp.json()["bike_source"] is None
+        assert resp.json()["bike_source"] == "manual"
+
+    async def test_a_cleared_ride_stays_cleared_through_a_reprocess(
+        self, client, auth_headers
+    ):
+        """The correction this feature most easily loses: the ride comes in as
+        `Ride`, the road bike claims it, the athlete says it was a rental — and
+        without the marker the next reprocess puts the road bike straight back
+        with nothing to show anything happened."""
+        _road, _gravel, ride = await self._corrected(client, auth_headers)
+        await client.patch(
+            f"/api/activities/{ride['id']}", json={"bike_id": None}, headers=auth_headers
+        )
+        resp = await client.post(
+            f"/api/activities/{ride['id']}/reprocess", headers=auth_headers
+        )
+        assert resp.status_code == 200
+        assert resp.json()["bike_id"] is None
+        assert resp.json()["bike_source"] == "manual"
+
+    async def test_a_cleared_ride_survives_a_fresh_provider_import(
+        self, client, auth_headers, session, seeded_athlete
+    ):
+        from backend.app.services.provider_sync import _apply_import
+
+        _road, _gravel, ride = await self._corrected(client, auth_headers)
+        await client.patch(
+            f"/api/activities/{ride['id']}", json={"bike_id": None}, headers=auth_headers
+        )
+        activity = (
+            await session.execute(select(Activity).where(Activity.id == ride["id"]))
+        ).scalar_one()
+        await _apply_import(
+            activity,
+            seeded_athlete,
+            session,
+            fields={"sport_type": "Ride", "distance_m": 20_000.0},
+            streams={},
+            weight_log=[],
+            load_duration_s=3600,
+        )
+        await session.commit()
+        await session.refresh(activity)
+        assert activity.bike_id is None
+        assert activity.bike_source == "manual"
+
+    async def test_a_cleared_ride_is_skipped_by_the_history_scan(
+        self, client, auth_headers
+    ):
+        _road, _gravel, ride = await self._corrected(client, auth_headers)
+        await client.patch(
+            f"/api/activities/{ride['id']}", json={"bike_id": None}, headers=auth_headers
+        )
+        resp = await client.post("/api/bikes/assign-history", headers=auth_headers)
+        assert resp.json()["assigned"] == 0
+        after = await _get_activity(client, auth_headers, ride["id"])
+        assert after["bike_id"] is None
+
+    async def test_a_cleared_ride_counts_towards_no_bike(self, client, auth_headers):
+        """`manual` with a null bike must not disturb any total — the filter is
+        on `bike_id`, and there isn't one."""
+        road, _gravel, ride = await self._corrected(client, auth_headers)
+        await client.patch(
+            f"/api/activities/{ride['id']}", json={"bike_id": road["id"]}, headers=auth_headers
+        )
+        assert (await _get_bike(client, auth_headers, road["id"]))["tracked_km"] == 20.0
+        await client.patch(
+            f"/api/activities/{ride['id']}", json={"bike_id": None}, headers=auth_headers
+        )
+        assert (await _get_bike(client, auth_headers, road["id"]))["tracked_km"] == 0.0
+
+    async def test_an_untouched_ride_is_still_free_to_be_assigned(
+        self, client, auth_headers
+    ):
+        """The other half of the distinction: "never asked" must stay fillable,
+        or stamping the clear would have frozen every unassigned ride."""
+        ride = await _ride(client, auth_headers)
+        assert ride["bike_source"] is None
+        bike = await _create_bike(client, auth_headers, default_sports=["Ride"])
+        resp = await client.post(
+            f"/api/activities/{ride['id']}/reprocess", headers=auth_headers
+        )
+        assert resp.json()["bike_id"] == bike["id"]
 
     async def test_a_bike_that_is_not_yours_is_not_assignable(
         self, client, auth_headers, session
@@ -800,6 +1000,63 @@ class TestMaintenance:
             f"/api/bikes/{bike['id']}/maintenance", headers=auth_headers
         )
         assert listed.json() == []
+
+    async def test_a_negative_span_is_unknown_rather_than_a_negative_distance(
+        self, client, auth_headers
+    ):
+        """A backdated entry with a lower reading than the one before it — a
+        typo, or a log entered out of order, both of which a free-form log
+        invites. Nobody has ridden minus 1 200 km on a set of tyres."""
+        bike = await _create_bike(client, auth_headers)
+        await self._entry(
+            client, auth_headers, bike["id"], performed_on="2026-01-01", odometer_km=4200.0
+        )
+        second = await self._entry(
+            client, auth_headers, bike["id"], performed_on="2026-02-01", odometer_km=3000.0
+        )
+        assert second["previous_component_km"] is None
+
+    async def test_readings_ahead_of_the_tracked_distance_do_not_go_negative(
+        self, client, auth_headers
+    ):
+        """The ordinary state before a baseline is set: real odometer readings
+        against a bike openkoutsi has only seen 20 km of."""
+        bike = await _create_bike(client, auth_headers, default_sports=["Ride"])
+        await _ride(client, auth_headers, distance_m=20_000.0)
+        entry = await self._entry(client, auth_headers, bike["id"], odometer_km=3000.0)
+        assert entry["km_since"] is None
+        assert entry["is_current"] is True
+
+    async def test_an_explicit_null_on_a_required_field_is_a_422(
+        self, client, auth_headers
+    ):
+        """Not a 500 over a rolled-back session: the column is NOT NULL, so
+        "unset this" is a request the API does not support and should say so."""
+        bike = await _create_bike(client, auth_headers)
+        entry = await self._entry(client, auth_headers, bike["id"])
+        for body in ({"component": None}, {"performed_on": None}):
+            resp = await client.patch(
+                f"/api/bikes/{bike['id']}/maintenance/{entry['id']}",
+                json=body,
+                headers=auth_headers,
+            )
+            assert resp.status_code == 422, body
+
+    async def test_an_explicit_null_on_an_optional_field_still_clears_it(
+        self, client, auth_headers
+    ):
+        """The guard covers only the NOT NULL columns — clearing a note or a
+        reading has to keep working."""
+        bike = await _create_bike(client, auth_headers)
+        entry = await self._entry(client, auth_headers, bike["id"], note="x")
+        resp = await client.patch(
+            f"/api/bikes/{bike['id']}/maintenance/{entry['id']}",
+            json={"note": None, "odometer_km": None},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["note"] is None
+        assert resp.json()["odometer_km"] is None
 
     async def test_a_component_outside_the_suggested_list_is_accepted(
         self, client, auth_headers

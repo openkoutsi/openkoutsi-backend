@@ -9,9 +9,36 @@ makes those two agree by construction rather than by synchronisation.
 from datetime import date, datetime
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 RidingPosition = Literal["tops", "hoods", "drops", "aero"]
+
+
+def _reject_explicit_null(*fields: str):
+    """Refuse an explicit ``null`` on a column that is NOT NULL.
+
+    A PATCH schema declares every field ``Optional`` so it can be *omitted*,
+    but ``exclude_unset=True`` keeps a value the client actually sent as
+    ``null`` — so it reaches ``setattr`` and dies at flush on the constraint.
+    Nothing on the app handles ``IntegrityError``, so that is an unhandled 500
+    over a rolled-back session, for a request whose intent ("unset this field")
+    the API does not support in the first place.
+
+    A validator turns it into the 422 it always was. Only the NOT NULL columns
+    are listed: ``retired_at``, ``odometer_base_km``, ``tyre_width_mm``,
+    ``default_sports`` and ``note`` are all genuinely nullable, and ``null`` on
+    them is a request to clear — which is exactly how a bike is un-retired.
+    """
+
+    @field_validator(*fields, mode="before")
+    @classmethod
+    def _validate(cls, value, info):
+        if value is None:
+            raise ValueError(f"{info.field_name} cannot be null")
+        return value
+
+    return _validate
+
 
 
 class BikeCreate(BaseModel):
@@ -34,6 +61,7 @@ class BikeUpdate(BaseModel):
     riding_position: Optional[RidingPosition] = None
     odometer_base_km: Optional[float] = Field(default=None, ge=0, le=1_000_000)
     default_sports: Optional[list[str]] = None
+    _no_null = _reject_explicit_null("name", "riding_position")
     # When the bike left the fleet. A retired bike drops out of the pickers but
     # keeps its rides, its distance and its maintenance history — send `null`
     # to bring it back. Deleting is not the same thing and is not a substitute:
@@ -78,6 +106,7 @@ class MaintenanceUpdate(BaseModel):
     component: Optional[str] = Field(default=None, min_length=1, max_length=50)
     odometer_km: Optional[float] = Field(default=None, ge=0, le=1_000_000)
     note: Optional[str] = Field(default=None, max_length=2000)
+    _no_null = _reject_explicit_null("performed_on", "component")
 
 
 class MaintenanceResponse(BaseModel):
@@ -111,6 +140,7 @@ class AccessoryCreate(BaseModel):
 class AccessoryUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=1, max_length=100)
     note: Optional[str] = Field(default=None, max_length=2000)
+    _no_null = _reject_explicit_null("name")
 
 
 class AccessoryResponse(BaseModel):

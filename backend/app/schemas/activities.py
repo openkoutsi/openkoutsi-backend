@@ -75,9 +75,12 @@ class ActivityUpdate(BaseModel):
     label_answers: Optional[dict[str, str]] = None
     # The bike this ride was done on (issue #64). Setting it stamps
     # `bike_source = "manual"`, which is what stops the next reprocess or sync
-    # putting the automatic guess back; passing an explicit `null` clears both
-    # columns back to unassigned, so "no bike" is expressible and is not the
-    # same as "never asked".
+    # putting the automatic guess back.
+    #
+    # An explicit `null` means "none of my bikes" — a rental, a borrowed frame
+    # — and is stamped `manual` just the same, with a null bike. That is what
+    # makes it different from "never asked": unassigned is `(null, null)`,
+    # which automapping treats as free to fill.
     bike_id: Optional[str] = None
 
 
