@@ -166,6 +166,21 @@ class Activity(UserBase):
     # findable for a future re-fit instead of being indistinguishable from a
     # well-supported one. Set even when the fit was rejected.
     cp_fit_points: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Which bike the ride was done on, and who decided that (issue #64). NULL
+    # `bike_source` means unassigned; otherwise "auto" (a `default_sports`
+    # match) or "manual" (the athlete picked it).
+    #
+    # `bike_source` is the load-bearing half. Automapping must never overwrite
+    # a choice made by hand, and without a persisted marker there is no way to
+    # tell a bike the athlete picked from one a rule guessed — so every
+    # reprocess, re-import or edit to what a bike claims would quietly stomp
+    # the correction. It cannot be inferred at read time; it has to be written
+    # down. `services.garage.assign_bike` writes only where this is NULL or
+    # "auto", never over "manual".
+    bike_id: Mapped[Optional[str]] = mapped_column(
+        String, ForeignKey("bikes.id", ondelete="SET NULL"), index=True, nullable=True
+    )
+    bike_source: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     labels: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     # Labels openkoutsi *thinks* apply, kept strictly apart from the ones the
     # athlete has actually applied above (issue #63). Shape:
@@ -713,13 +728,18 @@ class SyncLease(UserBase, LeaseMixin):
 
 
 class Bike(UserBase):
-    """A bike, described only as much as the pacing physics needs (issue #55).
+    """A bike the athlete owns, rides and maintains (issues #55, #64).
 
     Tyre width selects a rolling-resistance coefficient and riding position an
     aerodynamic drag area (both tables live in ``openkoutsi.course``). A row
     per bike rather than fields on the athlete because the inputs change per
     event — the gravel bike for one course, the TT bike for another — and a
     course keeps a reference to the bike it was solved for.
+
+    Issue #64 promoted the row rather than adding a second table beside it: the
+    garage edits the same rows the course bike selector reads, which is what
+    makes "bikes in the garage are entries in the route-analysis picker" true
+    by construction instead of a synchronisation problem.
     """
 
     __tablename__ = "bikes"
@@ -733,6 +753,108 @@ class Bike(UserBase):
     name: Mapped[str] = mapped_column(String, nullable=False)
     tyre_width_mm: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     riding_position: Mapped[str] = mapped_column(String, default="hoods", nullable=False)
+    # Kilometres the bike had ridden *before openkoutsi ever saw it* (issue
+    # #64). Almost every bike added to a garage has history behind it, and
+    # without a baseline every wear figure reads low and every maintenance
+    # interval is wrong. Set by the athlete; never written by the importer, so
+    # a re-import can never move it.
+    odometer_base_km: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Canonical cycling ``sport_type`` values this bike claims, as a JSON list
+    # — the road / gravel / e-bike split that makes automapping possible. A
+    # sport may be claimed by at most one bike per athlete; the API enforces
+    # that, because two bikes claiming `GravelRide` has no correct resolution.
+    default_sports: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    # A sold or scrapped bike. It drops out of the pickers but keeps its rides,
+    # its distance and its maintenance history — deleting would silently
+    # rewrite the athlete's past totals, which is never what "I sold it" means.
+    retired_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )
+
+    maintenance: Mapped[list["BikeMaintenance"]] = relationship(
+        "BikeMaintenance", cascade="all, delete-orphan", lazy="selectin"
+    )
+    accessories: Mapped[list["BikeAccessory"]] = relationship(
+        "BikeAccessory", cascade="all, delete-orphan", lazy="selectin"
+    )
+
+
+class BikeMaintenance(UserBase):
+    """One thing done to a bike, on a date, at an odometer reading (issue #64).
+
+    ``component`` is what makes "how long did these tyres last?" answerable:
+    that question is about *two events of the same kind*, and with free-text
+    notes alone nothing can compute the span. With a component key, component
+    life falls out as the delta in ``odometer_km`` between consecutive entries
+    sharing it. Stored as a plain string rather than an enum so the vocabulary
+    stays open — the same treatment ``Activity.labels`` gets.
+
+    ``odometer_km`` is an **absolute reading**, not an offset from anything. It
+    must not move when history is re-imported, a baseline is corrected or a
+    ride is reassigned to another bike: a maintenance log that rewrites itself
+    is worse than no log at all.
+    """
+
+    __tablename__ = "bike_maintenance"
+
+    #: Suggested vocabulary. Advisory, not validated — see the class docstring.
+    COMPONENTS = (
+        "tyres",
+        "chain",
+        "cassette",
+        "chainrings",
+        "brake_pads",
+        "bottom_bracket",
+        "bearings",
+        "cables",
+        "bar_tape",
+        "service",
+        "other",
+    )
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    bike_id: Mapped[str] = mapped_column(
+        String, ForeignKey("bikes.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    athlete_id: Mapped[str] = mapped_column(
+        String, ForeignKey("athletes.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    performed_on: Mapped[date] = mapped_column(Date, nullable=False)
+    odometer_km: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    component: Mapped[str] = mapped_column(String, nullable=False)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )
+
+
+class BikeAccessory(UserBase):
+    """Something bolted to a bike — a child trailer, a rack, lights (issue #64).
+
+    Deliberately a plain record: no weight, no drag, no coupling to the pacing
+    model. A fitted trailer genuinely changes both mass and CdA, but modelling
+    that means touching ``BikeParams`` in ``openkoutsi.course`` and deciding
+    what happens to already-analysed courses — a separate piece of work with
+    its own correctness questions. Noting that the trailer exists is what this
+    is for.
+    """
+
+    __tablename__ = "bike_accessories"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    bike_id: Mapped[str] = mapped_column(
+        String, ForeignKey("bikes.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    athlete_id: Mapped[str] = mapped_column(
+        String, ForeignKey("athletes.id", ondelete="CASCADE"), index=True, nullable=False
+    )
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now

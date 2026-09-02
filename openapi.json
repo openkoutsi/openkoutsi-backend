@@ -7142,7 +7142,88 @@
         }
       }
     },
+    "/api/bikes/assign-history": {
+      "post": {
+        "tags": [
+          "bikes"
+        ],
+        "summary": "Assign past rides to the bikes that claim their sport",
+        "description": "Walk the back catalogue and attach unassigned rides to a bike.\n\nAdding a bike, or changing what it claims, has to be able to look backwards:\na garage that only counts rides from today onward is empty exactly when the\nathlete first opens it.\n\nDeliberately an explicit request rather than something ``PATCH\n/api/bikes/{id}`` does inline \u2014 this can touch a decade of rides, and doing\nthat inside an edit holds a request worker for the length of the scan.\n\nOnly rides with no bike at all are touched. Anything already assigned, by\nhand or by an earlier automatic pass, is left exactly as it is.\n\n**Personal access token scope:** `bikes:write`",
+        "operationId": "assignBikeHistory",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssignHistoryResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "bikes:write"
+        }
+      }
+    },
     "/api/bikes/{bike_id}": {
+      "get": {
+        "tags": [
+          "bikes"
+        ],
+        "summary": "One bike, with its log and accessories",
+        "description": "\n\n**Personal access token scope:** `bikes:read`",
+        "operationId": "getBike",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "bike_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Bike Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BikeDetailResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "bikes:read"
+        }
+      },
       "patch": {
         "tags": [
           "bikes"
@@ -7208,7 +7289,7 @@
           "bikes"
         ],
         "summary": "Delete a bike",
-        "description": "\n\n**Personal access token scope:** `bikes:write`",
+        "description": "Delete a bike, keeping every ride and course that referenced it.\n\nRetiring is the better answer for an athlete who means \"stop showing me\nthis\" \u2014 a retired bike keeps its distance and its log, and deleting cannot\nbe undone. The UI offers retirement first for that reason.\n\nEvery ``ON DELETE`` clause in this schema documents intent and does not\nexecute: SQLite honours them only with ``PRAGMA foreign_keys`` on, which\nthese connections do not set. So each one is enforced here in Python.\n\n**Personal access token scope:** `bikes:write`",
         "operationId": "deleteBike",
         "security": [
           {
@@ -7223,6 +7304,484 @@
             "schema": {
               "type": "string",
               "title": "Bike Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "bikes:write"
+        }
+      }
+    },
+    "/api/bikes/{bike_id}/maintenance": {
+      "get": {
+        "tags": [
+          "bikes"
+        ],
+        "summary": "A bike's maintenance log",
+        "description": "\n\n**Personal access token scope:** `bikes:read`",
+        "operationId": "listBikeMaintenance",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "bike_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Bike Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MaintenanceResponse"
+                  },
+                  "title": "Response Listbikemaintenance"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "bikes:read"
+        }
+      },
+      "post": {
+        "tags": [
+          "bikes"
+        ],
+        "summary": "Log something done to a bike",
+        "description": "\n\n**Personal access token scope:** `bikes:write`",
+        "operationId": "createBikeMaintenance",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "bike_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Bike Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MaintenanceCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MaintenanceResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "bikes:write"
+        }
+      }
+    },
+    "/api/bikes/{bike_id}/maintenance/{entry_id}": {
+      "patch": {
+        "tags": [
+          "bikes"
+        ],
+        "summary": "Edit a maintenance entry",
+        "description": "\n\n**Personal access token scope:** `bikes:write`",
+        "operationId": "updateBikeMaintenance",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "bike_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Bike Id"
+            }
+          },
+          {
+            "name": "entry_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Entry Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MaintenanceUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MaintenanceResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "bikes:write"
+        }
+      },
+      "delete": {
+        "tags": [
+          "bikes"
+        ],
+        "summary": "Delete a maintenance entry",
+        "description": "\n\n**Personal access token scope:** `bikes:write`",
+        "operationId": "deleteBikeMaintenance",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "bike_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Bike Id"
+            }
+          },
+          {
+            "name": "entry_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Entry Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "bikes:write"
+        }
+      }
+    },
+    "/api/bikes/{bike_id}/accessories": {
+      "get": {
+        "tags": [
+          "bikes"
+        ],
+        "summary": "What is fitted to a bike",
+        "description": "\n\n**Personal access token scope:** `bikes:read`",
+        "operationId": "listBikeAccessories",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "bike_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Bike Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/AccessoryResponse"
+                  },
+                  "title": "Response Listbikeaccessories"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "bikes:read"
+        }
+      },
+      "post": {
+        "tags": [
+          "bikes"
+        ],
+        "summary": "Note something fitted to a bike",
+        "description": "Record an accessory \u2014 a child trailer, a rack, a set of lights.\n\nA plain record on purpose. A trailer genuinely changes mass and drag, but\nfeeding that into the pacing model means touching ``BikeParams`` and\ndeciding what happens to already-analysed courses; that is deferred, and\nnoting the thing exists is what was asked for.\n\n**Personal access token scope:** `bikes:write`",
+        "operationId": "createBikeAccessory",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "bike_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Bike Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccessoryCreate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccessoryResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "bikes:write"
+        }
+      }
+    },
+    "/api/bikes/{bike_id}/accessories/{accessory_id}": {
+      "patch": {
+        "tags": [
+          "bikes"
+        ],
+        "summary": "Edit an accessory",
+        "description": "\n\n**Personal access token scope:** `bikes:write`",
+        "operationId": "updateBikeAccessory",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "bike_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Bike Id"
+            }
+          },
+          {
+            "name": "accessory_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Accessory Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AccessoryUpdate"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccessoryResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "bikes:write"
+        }
+      },
+      "delete": {
+        "tags": [
+          "bikes"
+        ],
+        "summary": "Remove an accessory",
+        "description": "\n\n**Personal access token scope:** `bikes:write`",
+        "operationId": "deleteBikeAccessory",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "bike_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Bike Id"
+            }
+          },
+          {
+            "name": "accessory_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Accessory Id"
             }
           }
         ],
@@ -7774,6 +8333,110 @@
         ],
         "title": "AbsoluteSpec"
       },
+      "AccessoryCreate": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Name"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "title": "AccessoryCreate"
+      },
+      "AccessoryResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "bike_id": {
+            "type": "string",
+            "title": "Bike Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "bike_id",
+          "name",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "AccessoryResponse"
+      },
+      "AccessoryUpdate": {
+        "properties": {
+          "name": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 100,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "type": "object",
+        "title": "AccessoryUpdate"
+      },
       "AccountResponse": {
         "properties": {
           "username": {
@@ -8214,6 +8877,28 @@
               }
             ],
             "title": "Workout Category"
+          },
+          "bike_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bike Id"
+          },
+          "bike_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bike Source"
           },
           "labels": {
             "items": {
@@ -8673,6 +9358,28 @@
             ],
             "title": "Workout Category"
           },
+          "bike_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bike Id"
+          },
+          "bike_source": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bike Source"
+          },
           "labels": {
             "items": {
               "type": "string"
@@ -8870,6 +9577,17 @@
               }
             ],
             "title": "Label Answers"
+          },
+          "bike_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bike Id"
           }
         },
         "type": "object",
@@ -8986,6 +9704,25 @@
         },
         "type": "object",
         "title": "AnalyzeBody"
+      },
+      "AssignHistoryResponse": {
+        "properties": {
+          "scanned": {
+            "type": "integer",
+            "title": "Scanned"
+          },
+          "assigned": {
+            "type": "integer",
+            "title": "Assigned"
+          }
+        },
+        "type": "object",
+        "required": [
+          "scanned",
+          "assigned"
+        ],
+        "title": "AssignHistoryResponse",
+        "description": "What ``POST /api/bikes/assign-history`` did.\n\n``scanned`` counts the unassigned rides looked at, not the whole history:\nanything already carrying a bike is skipped before it is examined, because\nthis pass must never re-home a ride."
       },
       "AthleteResponse": {
         "properties": {
@@ -9298,6 +10035,33 @@
             ],
             "title": "Riding Position",
             "default": "hoods"
+          },
+          "odometer_base_km": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1000000.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Odometer Base Km"
+          },
+          "default_sports": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Sports"
           }
         },
         "type": "object",
@@ -9305,6 +10069,110 @@
           "name"
         ],
         "title": "BikeCreate"
+      },
+      "BikeDetailResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "tyre_width_mm": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tyre Width Mm"
+          },
+          "riding_position": {
+            "type": "string",
+            "title": "Riding Position"
+          },
+          "odometer_base_km": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Odometer Base Km"
+          },
+          "default_sports": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Default Sports",
+            "default": []
+          },
+          "retired_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retired At"
+          },
+          "tracked_km": {
+            "type": "number",
+            "title": "Tracked Km",
+            "default": 0.0
+          },
+          "lifetime_km": {
+            "type": "number",
+            "title": "Lifetime Km",
+            "default": 0.0
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          },
+          "maintenance": {
+            "items": {
+              "$ref": "#/components/schemas/MaintenanceResponse"
+            },
+            "type": "array",
+            "title": "Maintenance",
+            "default": []
+          },
+          "accessories": {
+            "items": {
+              "$ref": "#/components/schemas/AccessoryResponse"
+            },
+            "type": "array",
+            "title": "Accessories",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "riding_position",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "BikeDetailResponse",
+        "description": "One bike with everything hanging off it \u2014 the garage's detail view."
       },
       "BikeResponse": {
         "properties": {
@@ -9330,6 +10198,47 @@
           "riding_position": {
             "type": "string",
             "title": "Riding Position"
+          },
+          "odometer_base_km": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Odometer Base Km"
+          },
+          "default_sports": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Default Sports",
+            "default": []
+          },
+          "retired_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retired At"
+          },
+          "tracked_km": {
+            "type": "number",
+            "title": "Tracked Km",
+            "default": 0.0
+          },
+          "lifetime_km": {
+            "type": "number",
+            "title": "Lifetime Km",
+            "default": 0.0
           },
           "created_at": {
             "type": "string",
@@ -9396,6 +10305,45 @@
               }
             ],
             "title": "Riding Position"
+          },
+          "odometer_base_km": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1000000.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Odometer Base Km"
+          },
+          "default_sports": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Sports"
+          },
+          "retired_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Retired At"
           }
         },
         "type": "object",
@@ -13003,6 +13951,198 @@
           "password"
         ],
         "title": "LoginRequest"
+      },
+      "MaintenanceCreate": {
+        "properties": {
+          "performed_on": {
+            "type": "string",
+            "format": "date",
+            "title": "Performed On"
+          },
+          "component": {
+            "type": "string",
+            "maxLength": 50,
+            "minLength": 1,
+            "title": "Component"
+          },
+          "odometer_km": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1000000.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Odometer Km"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "type": "object",
+        "required": [
+          "performed_on",
+          "component"
+        ],
+        "title": "MaintenanceCreate"
+      },
+      "MaintenanceResponse": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "bike_id": {
+            "type": "string",
+            "title": "Bike Id"
+          },
+          "performed_on": {
+            "type": "string",
+            "format": "date",
+            "title": "Performed On"
+          },
+          "component": {
+            "type": "string",
+            "title": "Component"
+          },
+          "odometer_km": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Odometer Km"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "previous_component_km": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Previous Component Km"
+          },
+          "km_since": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Km Since"
+          },
+          "is_current": {
+            "type": "boolean",
+            "title": "Is Current",
+            "default": false
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Updated At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "bike_id",
+          "performed_on",
+          "component",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "MaintenanceResponse"
+      },
+      "MaintenanceUpdate": {
+        "properties": {
+          "performed_on": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Performed On"
+          },
+          "component": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 50,
+                "minLength": 1
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Component"
+          },
+          "odometer_km": {
+            "anyOf": [
+              {
+                "type": "number",
+                "maximum": 1000000.0,
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Odometer Km"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 2000
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "type": "object",
+        "title": "MaintenanceUpdate"
       },
       "ManualActivityCreate": {
         "properties": {

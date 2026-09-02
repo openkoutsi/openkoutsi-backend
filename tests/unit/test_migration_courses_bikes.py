@@ -35,6 +35,10 @@ MIGRATION = "backend.app.db.migrations.user.versions.025_courses_bikes"
 LATER_MIGRATIONS = [
     "backend.app.db.migrations.user.versions.026_course_target_power",
     "backend.app.db.migrations.user.versions.030_course_surface",
+    # 031 reshapes `bikes` rather than a course table — the garage (issue #64)
+    # gave the same row a baseline odometer, the sports it claims and a
+    # retirement date. It belongs here for the same reason the others do.
+    "backend.app.db.migrations.user.versions.031_garage",
 ]
 
 NEW_TABLES = {"bikes", "courses", "course_tracks", "course_segments"}

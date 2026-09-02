@@ -34,6 +34,7 @@ from backend.app.models.user_orm import (
 )
 from backend.app.services.aerobic_metrics import apply_aerobic_metrics
 from backend.app.services.commute import evaluate_activity
+from backend.app.services.garage import assign_bike
 from backend.app.services.weight import effective_weight_for, load_weight_log, w_per_kg
 from backend.app.services.zone_times import compute_zone_times
 
@@ -153,6 +154,11 @@ async def process_activity_file(
     # #63). It writes a *suggestion*, never the label — see
     # `services.commute` for why those have to stay apart.
     await evaluate_activity(session, athlete, activity)
+
+    # And which bike it was ridden on (issue #64). Unlike the commute
+    # suggestion this one is *applied*, but only over an empty or previously
+    # automatic assignment — never over the athlete's own choice.
+    await assign_bike(session, athlete, activity)
 
     # Every channel is on the one 1 Hz clock the parser resampled onto, gaps as
     # None (issue #76), and ``to_json_stream`` is what keeps a NaN from ever

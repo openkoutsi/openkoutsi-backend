@@ -56,6 +56,7 @@ from backend.app.services.providers.registry import PROVIDERS
 from backend.app.services.weight import effective_weight_for, load_weight_log, w_per_kg
 from backend.app.services.aerobic_metrics import apply_aerobic_metrics
 from backend.app.services.commute import adopt_provider_flag, evaluate_activity
+from backend.app.services.garage import assign_bike
 from openkoutsi.training_math import (
     calculate_load,
     compute_distance_bests,
@@ -794,6 +795,11 @@ async def _apply_import(
     # is handled separately at the point the payload is read — that one is the
     # athlete's own assertion and is applied, not suggested.
     await evaluate_activity(session, athlete, activity)
+
+    # Which bike this was ridden on (issue #64). Applied rather than suggested
+    # — see `services.garage` — and it never overwrites a bike the athlete
+    # picked by hand, so a correction survives a re-sync of the same ride.
+    await assign_bike(session, athlete, activity)
 
     _add_streams(activity, session, streams)
     _add_power_bests(activity, athlete, session, power_data, weight_log)

@@ -428,6 +428,30 @@ This step is only needed when upgrading an existing deployment — new installs 
 > If you are upgrading an instance whose athletes use course recon, flip the
 > switch as part of the deploy rather than after somebody reports a 404.
 
+> **Note:** per-user migration `031_garage` adds five nullable columns —
+> `bikes.odometer_base_km`, `bikes.default_sports`, `bikes.retired_at`,
+> `activities.bike_id` and `activities.bike_source` — plus an index on
+> `activities.bike_id` and two new tables, `bike_maintenance` and
+> `bike_accessories` (issue #64). It adds no rows, deletes none, backfills
+> nothing, and needs no new environment variables. Applied automatically by the
+> entrypoint's per-user migration loop, or by the helper script above. NULL
+> everywhere means "this ride is not on a bike" and "this bike has no starting
+> odometer", both correct for everything that exists when this lands.
+>
+> **No ride is attached to a bike by the upgrade.** Automapping only starts
+> doing anything once an athlete says which sports a bike claims, in
+> **Garage**. From then on new rides are attached as they arrive; the **back
+> catalogue is deliberately not scanned on deploy** — it is an explicit
+> `POST /api/bikes/assign-history` from the garage, because it walks every
+> activity the athlete has and that is their call to make, not a migration's.
+> The same reasoning, and the same shape, as the commute scan above.
+>
+> One **visible behaviour change with no migration behind it**: `/api/bikes` is
+> no longer gated by the course-recon switch. Issue #55 gated it on the
+> reasoning that a bike existed only as a pacing input; the garage made that
+> false, so an instance with course recon off now has a working garage while
+> every `/api/courses` route stays refused exactly as before.
+
 Per-user databases run in **WAL mode**, so `cp user.db` on its own can miss
 committed transactions still sitting in the `-wal` file. Use SQLite's own backup
 command, which checkpoints for you:
