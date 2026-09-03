@@ -31,10 +31,12 @@ whichever pass loses has nothing left to write.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.core.config import settings
 from backend.app.models.registry_orm import User
 
 log = logging.getLogger(__name__)
@@ -74,13 +76,30 @@ async def _settle_user(user_id: str) -> int:
     return settled
 
 
+def _has_database(user_id: str) -> bool:
+    """Whether this user's database file exists yet.
+
+    Self-serve signup writes the registry row and sends the confirmation email;
+    ``_create_user_profile`` — and with it the database — only runs when the link
+    is followed. Every pending or abandoned signup is therefore a live,
+    undeleted user with no file, and there is no column that says so: an invited
+    account never verifies an address either, so ``email_verified_at`` would read
+    as "no database" for exactly the users who have one. The file is the fact.
+
+    Deliberately the same ``settings.user_db_path`` that ``_get_user_engine``
+    resolves, so this cannot decide one thing and the connection another.
+    """
+    return Path(settings.user_db_path(user_id)).exists()
+
+
 async def run_achievements_sweep(registry_session: AsyncSession) -> int:
     """Settle every user's pending recomputes. Returns how many athletes ran.
 
     Deliberately opens every live user's DB rather than keeping a registry-side
     index of who is dirty: the flag belongs with the data it describes, and a
     once-a-day open of each SQLite file is the same cost the migration runner
-    already pays on every boot.
+    already pays on every boot. "Every live user" means every user who has a
+    database — see ``_has_database`` for the ones who don't.
     """
     users = (
         await registry_session.execute(
@@ -90,14 +109,26 @@ async def run_achievements_sweep(registry_session: AsyncSession) -> int:
 
     settled = 0
     for user_id in users:
+        if not _has_database(user_id):
+            # Nothing to settle: no database means no athlete and no activities.
+            # Skipped rather than attempted because `_get_user_engine` creates no
+            # file (issue #102), so opening a session for one of these raises
+            # `unable to open database file` — which the guard below would log as
+            # a full traceback, once per pending signup, every single day, until
+            # the noise buried the genuinely broken database it exists to report.
+            # Building the engine also costs one of its 256 cache slots, evicting
+            # a real user's for an account that has nothing behind it.
+            #
+            # An account that activates between this check and the sweep's next
+            # pass simply waits for that one — and any read of `GET /achievements`
+            # settles it sooner anyway.
+            log.debug("Achievement sweep skipped user %s: no database", user_id)
+            continue
         try:
             settled += await _settle_user(user_id)
         except Exception:
             # One unreadable DB is not a reason to leave every remaining athlete
             # unsettled — and not clearing the flag means the next sweep retries.
-            # This is also what a registered user who has never had a DB looks
-            # like: `_get_user_engine` creates no file, so opening a session for
-            # them raises rather than bringing one into existence (issue #102).
             log.exception("Achievement sweep failed for user %s", user_id)
     return settled
 

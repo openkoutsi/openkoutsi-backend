@@ -9,13 +9,16 @@ when the badge was earned.
 The properties that matter: it settles what is marked, it leaves alone what is
 not, and one broken user database does not cost every other athlete their sweep.
 """
+import logging
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from backend.app.core.config import settings
 from backend.app.models.registry_orm import User
 from backend.app.models.user_orm import AchievementUnlock, Activity
 from backend.app.services import achievements_sweep
@@ -34,7 +37,15 @@ async def sweep_session(registry_engine, registry_session):
 
 @pytest.fixture
 def user_factory(user_engine):
-    """Point the sweep's per-user lookup at this test's in-memory user DB."""
+    """Point the sweep's per-user lookup at this test's in-memory user DB.
+
+    The file is created as well as the patch installed: the sweep decides who to
+    visit by whether a user's database exists on disk, and this user is standing
+    in for one who has been through activation. The session still goes to the
+    in-memory engine; the file only has to be there.
+    """
+    Path(settings.user_db_path(_TEST_USER_ID)).parent.mkdir(parents=True, exist_ok=True)
+    Path(settings.user_db_path(_TEST_USER_ID)).touch()
     factory = async_sessionmaker(user_engine, expire_on_commit=False)
     with patch(
         "backend.app.db.user_session.get_user_session_factory",
@@ -50,6 +61,25 @@ def _no_inbox():
         "backend.app.services.achievements.notify_user", AsyncMock()
     ) as mock:
         yield mock
+
+
+def _give_database(user_id: str) -> None:
+    """Put a file where this user's database goes, so the sweep visits them."""
+    path = Path(settings.user_db_path(user_id))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.touch()
+
+
+def _add_user(sweep_session, user_id: str, username: str | None, **kw) -> None:
+    sweep_session.add(
+        User(
+            id=user_id,
+            username=username,
+            password_hash="x",
+            created_at=datetime.now(timezone.utc),
+            **kw,
+        )
+    )
 
 
 async def _ride(session, athlete, *, day=_TODAY):
@@ -121,24 +151,15 @@ class TestSweep:
     async def test_one_broken_user_db_does_not_stop_the_rest(
         self, sweep_session, session, seeded_athlete, user_factory, _no_inbox
     ):
-        """A user with no database at all looks exactly like this.
-
-        ``_get_user_engine`` creates no file, so opening a session for someone
-        who has none raises rather than bringing one into existence (issue #102).
-        """
+        """A database that exists but will not open costs only its own user."""
         await _ride(session, seeded_athlete)
         seeded_athlete.achievements_dirty_at = datetime.now(timezone.utc)
         await session.commit()
 
-        sweep_session.add(
-            User(
-                id="user-with-no-db",
-                username="ghost",
-                password_hash="x",
-                created_at=datetime.now(timezone.utc),
-            )
-        )
+        _add_user(sweep_session, "user-with-broken-db", "ghost")
         await sweep_session.commit()
+        # Has a file, so the sweep visits it; opening it is what fails.
+        _give_database("user-with-broken-db")
 
         real = achievements_sweep._settle_user
 
@@ -154,6 +175,57 @@ class TestSweep:
         assert settled == 1
         await session.refresh(seeded_athlete)
         assert seeded_athlete.achievements_dirty_at is None
+
+    async def test_a_user_with_no_database_is_skipped_quietly(
+        self, sweep_session, session, seeded_athlete, user_factory, _no_inbox, caplog
+    ):
+        """A pending signup is a live user with no database, not a failure.
+
+        Signup writes the registry row; activation writes the database. Visiting
+        one of these raised ``unable to open database file`` and logged a full
+        traceback for it — every day, for every signup that was never confirmed.
+        """
+        await _ride(session, seeded_athlete)
+        seeded_athlete.achievements_dirty_at = datetime.now(timezone.utc)
+        await session.commit()
+
+        # No `_give_database`: exactly what `POST /auth/signup` leaves behind.
+        _add_user(sweep_session, "pending-signup", None, email="nobody@example.com")
+        await sweep_session.commit()
+
+        with caplog.at_level(logging.DEBUG, logger=achievements_sweep.log.name):
+            settled = await achievements_sweep.run_achievements_sweep(sweep_session)
+
+        # The real user was still swept...
+        assert settled == 1
+        await session.refresh(seeded_athlete)
+        assert seeded_athlete.achievements_dirty_at is None
+
+        # ...and the pending signup was passed over without an error.
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert any(
+            r.levelno == logging.DEBUG and "pending-signup" in r.getMessage()
+            for r in caplog.records
+        )
+
+    async def test_a_user_with_no_database_is_never_opened(
+        self, sweep_session, session, seeded_athlete, user_factory, _no_inbox
+    ):
+        """The skip is what keeps an engine off the 256-slot cache, so it has to
+        happen before ``_settle_user``, not inside its exception handler."""
+        _add_user(sweep_session, "pending-signup", None, email="nobody@example.com")
+        await sweep_session.commit()
+
+        visited: list[str] = []
+
+        async def record(user_id: str) -> int:
+            visited.append(user_id)
+            return 0
+
+        with patch.object(achievements_sweep, "_settle_user", record):
+            await achievements_sweep.run_achievements_sweep(sweep_session)
+
+        assert visited == [_TEST_USER_ID]
 
     async def test_a_deleted_user_is_skipped(
         self, sweep_session, session, seeded_athlete, user_factory, _no_inbox
