@@ -14,12 +14,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # No version pin: "0.6.x" stopped resolving on 2026-08-17 ("No version
-      # found for 0.6.x"), which turned every job red before it installed
-      # anything — main included. The pin bought little, since uv.lock is what
-      # actually fixes the dependency set and `uv sync --frozen` in the
-      # Dockerfile enforces it; the image build already tracks uv:latest, so
-      # this only brings CI in line with it.
+      # No version pin: "0.6.x" stopped resolving on 2026-08-17 and turned every
+      # job red before it installed anything. uv.lock is what fixes the
+      # dependency set, and the image build already tracks uv:latest.
       - name: Install uv
         uses: astral-sh/setup-uv@v4
         with:
@@ -35,19 +32,16 @@ jobs:
         run: uv run pytest tests/ --cov=backend --cov-report=xml --cov-report=term-missing -v
         env:
           SECRET_KEY: "ci-test-secret-key-not-used-in-production-aaaaaaaaaaaaa"
-          # Required since #102 F-08 — an empty key no longer silently disables
-          # field encryption. A throwaway Fernet key, so CI runs the encrypted
-          # column path rather than the plaintext fallback.
+          # Required since #102 F-08. A throwaway Fernet key, so CI runs the
+          # encrypted column path rather than the plaintext fallback.
           ENCRYPTION_KEY: "0xQFqFc2TsglXsh-2Nn0DAclf8Gn6VgGJm1gpMJ53cw="
           # Required since #102 F-10 — the bridges no longer start on "changeme".
           BRIDGE_SECRET: "ci-test-strava-bridge-secret-not-for-production"
           WAHOO_BRIDGE_SECRET: "ci-test-wahoo-bridge-secret-not-for-production"
-          # Measure coverage with sys.monitoring (Python 3.12+) instead of the
-          # default C trace function. Same lines, a fraction of the cost: on a
-          # three-module slice the tracer took the run from 33s to 59s, where
-          # sysmon takes it to 35s. The reported total moves by about a point —
-          # upwards, since sysmon sees a few lines the tracer misses — so this
-          # cannot quietly hide uncovered code.
+          # Coverage via sys.monitoring (Python 3.12+) rather than the default C
+          # trace function: same lines, a fraction of the cost (33s → 35s where
+          # the tracer takes 59s), and the total moves *up* by about a point,
+          # since sysmon sees lines the tracer misses.
           COVERAGE_CORE: sysmon
 
       - name: Upload coverage
@@ -58,9 +52,8 @@ jobs:
           if-no-files-found: ignore
 
       # Feeds the README badge and the per-file report. Deliberately not
-      # `fail_ci_if_error` — a coverage upload is reporting, and a Codecov
-      # outage (or a fork PR, which cannot read the secret) must not turn a
-      # green test run red.
+      # `fail_ci_if_error`: a Codecov outage, or a fork PR that cannot read the
+      # secret, must not turn a green test run red.
       - name: Send coverage to Codecov
         uses: codecov/codecov-action@v5
         with:
