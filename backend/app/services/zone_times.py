@@ -100,22 +100,20 @@ async def weekly_zone_buckets(
 
     ``backfill`` decides what happens to those. True (the default, and what
     ``GET /api/metrics/zones/weekly`` wants) computes them from stored streams
-    using the athlete's *current* zones, freezes them, and commits — mirroring
-    the fitness catch-up flow. False reads only what is already frozen and
-    leaves the count for the caller to report.
+    using the athlete's *current* zones, freezes them and commits. False reads
+    only what is already frozen and leaves the count for the caller.
 
     That switch exists because freezing is not a read. The snapshot is permanent
-    by design, so whichever caller triggers it decides, forever, which zone
-    definitions an old ride is bucketed against — and the MCP tool layer, which
-    a coaching agent may call at any moment on a ``metrics:read`` scope, is
-    exactly the wrong place to be making that decision (issue #42). It also
-    loads ``ActivityStream`` data for every unsnapshotted activity in the window,
-    which is a working set no output bound can constrain.
+    by design, so whichever caller triggers it decides forever which zone
+    definitions an old ride is bucketed against — and the MCP tool layer, which a
+    coaching agent may call at any moment on a ``metrics:read`` scope, is the
+    wrong place for that decision (issue #42). It also loads ``ActivityStream``
+    data for every unsnapshotted activity in the window, a working set no output
+    bound can constrain.
 
-    Lives here rather than in the route because two callers need this answer:
-    that endpoint and the ``get_zone_totals`` tool. Two implementations of
-    "which week does this ride belong to" would eventually disagree about a
-    Sunday-night ride.
+    Lives here rather than in the route because two callers need the answer: that
+    endpoint and the ``get_zone_totals`` tool. Two implementations of "which week
+    does this ride belong to" would eventually disagree about a Sunday-night ride.
     """
     query = select(Activity).where(
         Activity.athlete_id == athlete.id,

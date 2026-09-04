@@ -6,24 +6,23 @@ third party: the coordinates of a stored course go to a container on the same
 box and no further, which is the whole reason the sidecar exists rather than a
 hosted routing API.
 
-Behind an interface on purpose. :class:`SurfaceMatcher` is what the rest of the
-backend depends on, so the engine is swappable and — more usefully — every test
-in the suite runs against a double rather than 15 GB of tiles.
+Behind an interface on purpose: :class:`SurfaceMatcher` is what the rest of the
+backend depends on, so the engine is swappable and every test runs against a
+double rather than 15 GB of tiles.
 
 Three things this module is careful about:
 
-* **Absent is not broken.** With no ``VALHALLA_URL`` configured, or with the
-  sidecar unreachable, :meth:`match` returns ``None`` and the course keeps its
-  Stage 1 analysis. A course without surface data is a complete and useful
-  thing and must never be presented as an error.
-* **A course cannot occupy the sidecar indefinitely.** Point count, chunk
-  count and wall-clock are all bounded; past the budget the remainder is
-  reported as unmatched rather than waited on. A 400 km upload degrades in
-  resolution, not in availability.
+* **Absent is not broken.** With no ``VALHALLA_URL`` configured, or the sidecar
+  unreachable, :meth:`match` returns ``None`` and the course keeps its Stage 1
+  analysis. A course without surface data is complete and useful, never an error.
+* **A course cannot occupy the sidecar indefinitely.** Point count, chunk count
+  and wall-clock are all bounded; past the budget the remainder is reported as
+  unmatched rather than waited on, so a 400 km upload degrades in resolution
+  rather than availability.
 * **The chunk overlap is evidence, not just seam glue.** A point matched in two
   chunks yields two independent answers, and disagreement is the signature of a
-  bad snap — so it downgrades that point's confidence rather than being
-  silently resolved in favour of whichever chunk came last.
+  bad snap — so it downgrades that point's confidence rather than being resolved
+  in favour of whichever chunk came last.
 """
 
 from __future__ import annotations
@@ -192,16 +191,14 @@ class ValhallaSurfaceMatcher:
                     break
                 if seen[i]:
                     # Second opinion on an overlap point. Two chunks that
-                    # disagree mean the snap is not settled, whichever one
-                    # spoke last — but a chunk that snapped *nothing* has not
-                    # disagreed, it has only stayed silent, and silence must
-                    # not discard a good answer. Map matching is least certain
-                    # at the head of a trace, which is exactly what an overlap
-                    # is, so treating None as a contradiction threw away
-                    # CHUNK_OVERLAP points at every boundary — and they landed
-                    # as UNKNOWN, whose Crr is the *pavement* curve, quietly
-                    # re-solving them as the tarmac this feature exists to
-                    # stop assuming.
+                    # disagree mean the snap is not settled, whichever spoke
+                    # last — but a chunk that snapped *nothing* has stayed
+                    # silent, not disagreed, and silence must not discard a good
+                    # answer. Map matching is least certain at the head of a
+                    # trace, which is what an overlap is, so treating None as a
+                    # contradiction threw away CHUNK_OVERLAP points at every
+                    # boundary — landing them as UNKNOWN, whose Crr is the
+                    # *pavement* curve, quietly re-solving them as tarmac.
                     if value is not None and answers[i] != value:
                         disputed[i] = True
                 elif value is not None:

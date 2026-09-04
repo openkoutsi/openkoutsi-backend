@@ -15,13 +15,9 @@ road surface under it, and how much that surface should be trusted:
   different bike or target costs no re-match.
 
 Adds no rows, deletes none, backfills nothing, and needs no new **mandatory**
-environment variables: the sidecar's ``VALHALLA_URL`` is optional and unset by
-default, and with it unset a course simply has no surface data — a complete
-Stage 1 result rather than a failure. NULL everywhere means "never matched",
-which is correct for every course that exists when this lands.
-
-Applied automatically by the entrypoint's per-user migration loop, or by the
-helper script in DEPLOY.md.
+environment variables: ``VALHALLA_URL`` is optional and unset by default, and
+with it unset a course simply has no surface data — a complete Stage 1 result
+rather than a failure. NULL everywhere means "never matched".
 
 Revision ID: 030_course_surface
 Revises: 029_activity_label_suggestions

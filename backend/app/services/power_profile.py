@@ -119,16 +119,15 @@ async def cp_wprime_as_of(
     ``None`` fits the athlete's whole history.
 
     Returns ``(cp, w_prime, n_points)`` where ``n_points`` is how many duration
-    bests the fit had to work with. Returns ``(None, None, n_points)`` when
-    there aren't enough bests to fit **or when the fit is not physiologically
-    plausible** — the OLS intercept is unconstrained, so a rider who only ever
-    rides steady routinely fits a negative or near-zero W'. Rejecting here keeps
-    "no CP → no columns, no stream" as the single failure mode, so the stored
-    columns can never disagree with the presence of the stream.
+    bests the fit had. Returns ``(None, None, n_points)`` when there aren't
+    enough bests **or when the fit is not physiologically plausible** — the OLS
+    intercept is unconstrained, so a rider who only ever rides steady routinely
+    fits a negative or near-zero W'. Rejecting here keeps "no CP → no columns, no
+    stream" as the single failure mode.
 
-    ``n_points`` is returned even on rejection: it is what makes a fit against a
-    nearly-empty profile (a reverse-chronological backlog import) findable after
-    the fact instead of indistinguishable from a well-supported one.
+    ``n_points`` is returned even on rejection, which is what makes a fit against
+    a nearly-empty profile (a reverse-chronological backlog import) findable
+    afterwards rather than indistinguishable from a well-supported one.
     """
     bests = await rank1_bests(
         athlete_id, session, CP_FIT_DURATIONS, until=as_of

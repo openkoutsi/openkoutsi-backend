@@ -7,21 +7,19 @@ on a GPX file without knowing one exists.
 
 Two things a GPX is not:
 
-* **It is not a power file.** Most GPX in the wild is GPS-and-heart-rate, and a
-  fair amount is GPS only. ``calculate_load`` already falls back to heart rate,
-  so such an activity gets a Load; it simply has no weighted power, no power
-  bests and no power zone times. That is the file being honest, not an error.
-* **It does not carry the ride's own summary.** A FIT file states its distance,
-  ascent and timer time in a ``session`` message. GPX states coordinates and
-  nothing else, so distance and elevation gain here are *derived* — see
-  :mod:`openkoutsi.geo` — and duration is elapsed time between the first and
-  last point rather than moving time.
+* **It is not a power file.** Most GPX in the wild is GPS-and-heart-rate or GPS
+  only. ``calculate_load`` falls back to heart rate, so such an activity gets a
+  Load but no weighted power, power bests or power zone times — the file being
+  honest, not an error.
+* **It does not carry the ride's own summary.** A FIT file states distance,
+  ascent and timer time in a ``session`` message; GPX states coordinates, so
+  distance and elevation gain are *derived* (see :mod:`openkoutsi.geo`) and
+  duration is elapsed rather than moving time.
 
-Location never leaves this module through :func:`summarizeWorkout`. The
-coordinates are read, turned into two scalars, and dropped; the ``Profile`` has
-no field that could carry them, so nothing downstream can persist what it never
-receives. :func:`extract_route` is the deliberate, separate exception — see its
-docstring.
+Location never leaves this module through :func:`summarizeWorkout`: the
+coordinates are read, turned into two scalars and dropped, and the ``Profile``
+has no field that could carry them. :func:`extract_route` is the deliberate,
+separate exception — see its docstring.
 """
 from __future__ import annotations
 
@@ -109,23 +107,18 @@ class RoutePoint:
 class Route:
     """A GPX track's geometry — **the one openkoutsi structure that holds location.**
 
-    Produced only by :func:`extract_route`, which a caller has to ask for by
-    name. It exists for the route-analysis work that needs the shape of a ride
-    (gradients, climbs, matching one ride's course against another's), and it is
-    meant to be computed, used, and thrown away inside a single request.
+    Produced only by :func:`extract_route`, which a caller must ask for by name.
+    It exists for route analysis that needs the shape of a ride, and is meant to
+    be computed, used and thrown away inside a single request.
 
-    It must not be written to the database, with one deliberately-decided
-    exception. openkoutsi's stated position is that it stores no location data
-    from *activities*: ``ActivityStream`` has no channel for it, and the
-    ingestion path deliberately goes through :func:`summarizeWorkout`, which
-    cannot return one of these. The exception is a **course** the athlete
-    uploads on purpose for pacing analysis — issue #54 decided that courses
-    are stored (their thinned track in the athlete's own database, the raw GPX
-    encrypted on disk, both covered by the GDPR export and delete), which is
-    what the course tables in the backend persist. Anything beyond that path
-    remains a product decision about the privacy promise — a migration, a
-    consent question and a retention rule — not something to reach for because
-    this type happens to be available.
+    It must not be written to the database, with one exception. openkoutsi stores
+    no location data from *activities*: ``ActivityStream`` has no channel for it
+    and the ingestion path goes through :func:`summarizeWorkout`, which cannot
+    return one of these. The exception is a **course** the athlete uploads on
+    purpose (issue #54: thinned track in their own database, raw GPX encrypted on
+    disk, both in the GDPR export and delete). Anything beyond that path is a
+    product decision about the privacy promise — a migration, a consent question
+    and a retention rule.
     """
 
     points: list[RoutePoint] = field(default_factory=list)
@@ -283,14 +276,12 @@ def _derive(points: list[_Point]) -> tuple[float, dict[int, float]]:
 
     Speed is derived only where the file did not state it. Neither figure is
     computed across a ``<trkseg>`` boundary: a new segment means the device was
-    paused, and the metres between the last fix before the pause and the first
-    after it were not travelled at any speed worth recording.
+    paused, and those metres were not travelled at any speed worth recording.
 
-    A step is counted when :func:`geo.step_is_travel` says the athlete rode it,
-    which for a timestamped point means the implied speed is plausible. The two
-    thresholds below are about the *speed stream* and not about the distance:
-    a point too far from the last one in time gets no speed sample, but the
-    metres between them are still metres.
+    A step counts when :func:`geo.step_is_travel` says the athlete rode it. The
+    two thresholds below are about the *speed stream*, not the distance: a point
+    too far from the last in time gets no speed sample, but the metres between
+    them are still metres.
     """
     distance = 0.0
     derived_speed: dict[int, float] = {}

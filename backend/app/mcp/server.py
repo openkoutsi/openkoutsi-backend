@@ -16,43 +16,39 @@ Batching is refused — it was removed from the protocol in the 2025-06-18 revis
 
 Why the route-policy walk cannot help here, and what replaces it
 ----------------------------------------------------------------
-Every other authenticated endpoint in this API is default-deny for a personal
-access token, because :func:`backend.app.core.scopes.build_access_map` resolves
-each route's declaration at app construction and ``get_current_user`` refuses
-anything absent from the map. This endpoint cannot participate in that, for a
-reason that is a property of the design rather than an oversight: **there is no
-single scope a URL behind nine differently-scoped tools could honestly declare.**
-``metrics:read`` on this path would lock out a token holding only ``plans:read``
-that legitimately wants ``get_plan_status``; declaring nothing would close it to
-tokens entirely. The scope a call needs is a property of the *tool*, and the tool
-name is in the request body.
+Every other authenticated endpoint is default-deny for a personal access token,
+because :func:`backend.app.core.scopes.build_access_map` resolves each route's
+declaration at app construction and ``get_current_user`` refuses anything absent
+from the map. This endpoint cannot participate: **there is no single scope a URL
+behind nine differently-scoped tools could honestly declare.** ``metrics:read``
+here would lock out a token holding only ``plans:read`` that legitimately wants
+``get_plan_status``; declaring nothing would close it to tokens entirely. The
+scope a call needs is a property of the *tool*, named in the request body.
 
-So this route resolves its credential itself, through
+So this route resolves its credential itself through
 :func:`backend.app.core.auth.authenticate_bearer` — which still proves the token
-is well-formed, live, unrevoked and enabled on this instance, and shares that
-code with the ordinary resolver — and then defers every *authorization* decision
-to :func:`backend.app.mcp.dispatch.call_tool`, where the tool's own declared
-scopes are checked. The default-deny lives in
+is well-formed, live, unrevoked and enabled, sharing that code with the ordinary
+resolver — and defers every *authorization* decision to
+:func:`backend.app.mcp.dispatch.call_tool`. The default-deny lives in
 :mod:`backend.app.mcp.registry`: a tool that declares no scopes cannot be
 registered, so it cannot exist to be called.
 
-Two tests hold that in place. ``tests/unit/test_mcp_registry.py`` is the
-registry's equivalent of the route walk. And ``test_pat_scopes.py`` asserts that
-``authenticate_bearer`` has exactly **one** call site — so a second endpoint that
-quietly steps outside the route policy is a test failure rather than a discovery.
+Two tests hold that in place: ``tests/unit/test_mcp_registry.py`` is the
+registry's equivalent of the route walk, and ``test_pat_scopes.py`` asserts that
+``authenticate_bearer`` has exactly **one** call site, so a second endpoint
+stepping outside the route policy is a test failure rather than a discovery.
 
-Registered as an ordinary route rather than a mounted sub-application, which was
-the first shape this took: a ``Mount`` matches only ``/mcp/…``, so bare ``/mcp``
-answered with a 307 to the trailing-slash form, and an MCP client whose HTTP
-layer does not follow redirects on POST would have seen an empty body. The API's
-own convention is no trailing slash on a collection root; this follows it.
+Registered as an ordinary route rather than a mounted sub-application: a
+``Mount`` matches only ``/mcp/…``, so bare ``/mcp`` answered with a 307 to the
+trailing-slash form, and an MCP client whose HTTP layer does not follow redirects
+on POST would have seen an empty body. The API's convention is no trailing slash
+on a collection root.
 
 Exposure
 --------
-Shipping the endpoint is not the same as publishing it. It speaks only to a
-credential this instance issued, so a self-hoster who does not want it reachable
-from outside simply does not route ``/mcp`` through their reverse proxy — the
-same decision they already make for the rest of the API. That narrows the
+Shipping the endpoint is not publishing it. It speaks only to a credential this
+instance issued, so a self-hoster who does not want it reachable from outside
+does not route ``/mcp`` through their reverse proxy. That narrows the
 *interface*, not the exposure: the same data is reachable through the ordinary
 REST routes, and what limits a credential is its scopes.
 """
@@ -218,16 +214,14 @@ def create_mcp_router() -> APIRouter:
             }
         },
     )
-    # The one HTTP-level limit this endpoint needs, and it belongs here rather
-    # than only in the dispatcher: `initialize`, `ping` and *failed*
-    # authentication never reach a tool, and a failed authentication costs two
-    # registry queries and an audit line each time. Brute force is not the
-    # concern — `mint_token` is high-entropy and `verify_secret` is a sha256
-    # compare — but audit-log flooding and registry load from an unauthenticated
-    # caller are. Keyed by `principal_key`, so an authenticated caller is
-    # counted by user and everyone else by address. Every other
-    # credential-accepting router in this API declares a limit; this one no
-    # longer is the exception.
+    # The one HTTP-level limit this endpoint needs, here rather than only in the
+    # dispatcher: `initialize`, `ping` and *failed* authentication never reach a
+    # tool, and a failed authentication costs two registry queries and an audit
+    # line each time. Brute force is not the concern — `mint_token` is
+    # high-entropy and `verify_secret` is a sha256 compare — but audit-log
+    # flooding and registry load from an unauthenticated caller are. Keyed by
+    # `principal_key`, so an authenticated caller is counted by user and everyone
+    # else by address.
     @limiter.limit("120/minute")
     async def rpc(
         request: Request,
@@ -268,19 +262,16 @@ def create_mcp_router() -> APIRouter:
         # ── Notifications ────────────────────────────────────────────────────
         #
         # A JSON-RPC message with no ``id`` is a notification: it expects no
-        # response at all, and the transport spec is explicit that the server
-        # answers 202 with **no body**. Handled here as a class rather than by
-        # name, because the set is open — a client sends
-        # ``notifications/cancelled`` when the user interrupts a tool call, and
-        # matching only ``notifications/initialized`` sent every other one down
-        # the authenticated path to be answered with a 401 error object. Replying
-        # to a notification at all is a protocol violation; replying to it with
-        # an error a stricter client may drop the connection over.
+        # response, and the transport spec is explicit that the server answers
+        # 202 with **no body**. Handled as a class rather than by name because
+        # the set is open — a client sends ``notifications/cancelled`` when the
+        # user interrupts a tool call, and matching only
+        # ``notifications/initialized`` sent every other one down the
+        # authenticated path to be answered with a 401 error object.
         #
-        # Deliberately before the credential check. There is nothing to
-        # authorize: a notification we do not act on reads nothing, changes
-        # nothing and discloses nothing, and the spec requires the same 202
-        # either way.
+        # Deliberately before the credential check: a notification we do not act
+        # on reads nothing, changes nothing and discloses nothing, and the spec
+        # requires the same 202 either way.
         if "id" not in message:
             return Response(status_code=202)
 

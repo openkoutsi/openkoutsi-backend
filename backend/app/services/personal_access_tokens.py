@@ -1,10 +1,9 @@
 """Personal access tokens — minting, parsing and verification (issue #46).
 
-A PAT is opaque and DB-backed rather than a JWT. A long-lived JWT signed with
+A PAT is opaque and DB-backed rather than a JWT: a long-lived JWT signed with
 ``SECRET_KEY`` would need this same lookup table to be revocable, so it would buy
-nothing — and ``SECRET_KEY`` already carries three unrelated purposes (the
-``access`` and ``refresh`` token types and the OAuth ``state`` claim). This adds
-no fourth.
+nothing, and ``SECRET_KEY`` already carries three unrelated purposes (the
+``access`` and ``refresh`` token types and the OAuth ``state`` claim).
 
 Format::
 

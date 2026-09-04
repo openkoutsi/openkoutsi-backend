@@ -1,44 +1,28 @@
 """The agentic coaching loop — Koutsi pulls what it needs (issue #43).
 
-Everywhere else in this codebase an LLM is handed a fixed context blob assembled
-ahead of time: ``_build_status_prompt`` is ~145 lines of string building that
-runs in full whether the answer needs all of it or not, and cannot follow a
-thread — if the form number looks off, it has no way to go and look at the last
-three weeks of rides to say *why*. This module inverts that. It hands the model
-the tool layer from issue #42 and lets it ask.
+Instead of a prompt builder assembling a fixed context blob ahead of time, this
+hands the model the tool layer from issue #42 and lets it ask.
 
-What this is and is not
------------------------
-It is **not** a chat endpoint. Both surfaces it serves — the dashboard's daily
-training-status card and per-activity analysis — are one-shot generations fired
-from a background task with nobody typing, so there is no conversation to store
-and no conversation id to hand out. The message history exists inside one
-``analyze_*_bg`` task and dies with it.
+Serves the daily training-status card and per-activity analysis. Both are
+one-shot generations fired from a background task, so there is no conversation
+to store; the message history lives inside one ``analyze_*_bg`` task. Layered
+*onto* :func:`stream_into_db` rather than beside it — many turns in, one growing
+column out — because a local model may take minutes and a page reload must not
+lose a run.
 
-It is **not** an SSE stream either. openkoutsi persists generations to the DB and
-polls, deliberately: a local model may take minutes, and a page reload must not
-lose a run. So the loop is layered *onto* :func:`stream_into_db` rather than
-beside it — many turns in, one growing column out.
-
-The silent gap
+Progress codes
 --------------
-That polling model is exactly what makes an agent loop awkward here. The first N
-round trips emit no assistant prose at all, just tool calls, so a card that used
-to fill in token by token would instead show a spinner for a long time and then
-dump a finished answer — worse than what it replaced. The loop therefore
-persists **progress** on the same cadence as text, as codes from a fixed
-vocabulary (:data:`PROGRESS_THINKING`, ``tool.<name>``) that the web app
-localises. Codes rather than model-authored sentences because the prompts run in
-fourteen languages while every tool name and description is English, and because
-a code cannot leak tool internals into the card.
+The first rounds emit no prose, only tool calls, so the loop persists
+**progress** on the same cadence as text: codes from a fixed vocabulary
+(:data:`PROGRESS_THINKING`, ``tool.<name>``) that the web app localises. Codes
+rather than model prose because the prompts run in fourteen languages while tool
+names are English, and a code cannot leak tool internals into the card.
 
 Degrading, not failing
 ----------------------
-BYOK is what makes this harder here than in a product that owns its model. Users
-point openkoutsi at whatever OpenAI-compatible server they like, and
-tool-calling support across that population ranges from good, to absent, to
-present-but-wrong. "Smoke-test each provider" is not available to the hoster, so
-every failure mode degrades at runtime, per call, to the blob prompt:
+Under BYOK, tool-calling support across the athlete-chosen provider population
+ranges from good to absent to present-but-wrong, so every failure mode degrades
+at runtime, per call, to the blob prompt:
 
 ============================================  ===========================================
 The provider…                                 …and the run
@@ -54,27 +38,19 @@ fails any other way before prose is written   falls back — 429, 5xx, a dropped
 says our own function schema is invalid       **raises** — that is our bug, not their limit
 ============================================  ===========================================
 
-:exc:`AgenticUnavailable` is the one signal for all of them, and it carries a
-hard rule: it may only be raised *before the first character of prose has been
-yielded*. Once text is out it has been committed to the DB, and a fallback would
-staple a second answer onto the first. :func:`agentic_stream` enforces that
-rather than trusting it — and that invariant is exactly what makes the broad
-"any other failure" rule safe.
+:exc:`AgenticUnavailable` signals all of them, and may only be raised *before the
+first character of prose has been yielded* — once text is committed a fallback
+would staple a second answer onto the first. :func:`agentic_stream` enforces
+that, which is what makes the broad "any other failure" rule safe.
 
-Two budgets stop the gathering, and both route to the same forced final turn:
-the round cap (:data:`MAX_ROUNDS_STATUS` / :data:`MAX_ROUNDS_ACTIVITY`) and the
-run's total tool-result size (:data:`MAX_RUN_RESULT_CHARS`). The second exists
-because the first bounds the wrong quantity — a round may carry any number of
-parallel calls, and it is their *sum*, replayed into every later turn, that
-spends the context window and the money. :data:`MAX_CALLS_PER_TURN` bounds the
-breadth of a single turn for the same reason.
+Two budgets stop the gathering, both routing to the forced final turn: the round
+cap (:data:`MAX_ROUNDS_STATUS` / :data:`MAX_ROUNDS_ACTIVITY`) and the run's total
+tool-result size (:data:`MAX_RUN_RESULT_CHARS`). The second exists because a
+round may carry any number of parallel calls, and it is their *sum*, replayed
+into every later turn, that spends the context window.
 
-The blob builders are not legacy
---------------------------------
-``_build_status_prompt`` and ``_build_prompt`` stay, stay tested, and stay the
-answer for every provider that cannot do this, plus the bulk-import paths where
-five times the calls is a real bill and nobody reads the output one by one. Plan
-for both paths to coexist indefinitely.
+``_build_status_prompt`` and ``_build_prompt`` are not legacy: they stay tested,
+and stay the answer for providers that cannot do this and for bulk imports.
 """
 
 from __future__ import annotations
@@ -120,16 +96,14 @@ BlobStream = Callable[[dict], AsyncIterator[str]]
 
 # ── Progress vocabulary ─────────────────────────────────────────────────────
 #
-# Every value here is a key the web app translates. Two rules keep it a
-# contract rather than a leak: it is closed at the top level (`thinking`,
-# `tool.*`), and a client that meets a `tool.*` code it does not know must fall
-# back to its generic copy. That is what lets a tool be added in #42 without
-# shipping a frontend release in lockstep.
+# Every value here is a key the web app translates. Two rules keep it a contract
+# rather than a leak: it is closed at the top level (`thinking`, `tool.*`), and a
+# client meeting an unknown `tool.*` code falls back to its generic copy — which
+# is what lets a tool be added without a lockstep frontend release.
 
 #: The model is deciding what to look at, before it has asked for anything. Once
 #: a tool has been called the code stays on *that tool* through the turn that
-#: reads its result, because that turn is the slow part and naming what it is
-#: working on is the whole point.
+#: reads its result, since that turn is the slow part.
 PROGRESS_THINKING = "thinking"
 
 #: Prefix for "Koutsi is calling <tool>". The suffix is the registry tool name.
@@ -145,7 +119,7 @@ def progress_vocabulary() -> list[str]:
     """Every progress code this build can emit, for tests and for the docs.
 
     Derived from the registry rather than restated, so a tool added to #42's
-    layer cannot quietly acquire a code nobody translated — the frontend parity
+    layer cannot quietly acquire a code nobody translated; the frontend parity
     test reads this list.
     """
     return [PROGRESS_THINKING] + [progress_code_for_tool(t.name) for t in all_tools()]
@@ -153,46 +127,39 @@ def progress_vocabulary() -> list[str]:
 
 # ── Budgets ─────────────────────────────────────────────────────────────────
 
-#: Tool-calling rounds allowed before the loop forces an answer. The two
-#: surfaces genuinely differ: the status card is a broad question that wants
-#: several lookups (load trend, then the plan, then maybe the power curve to
-#: explain a flat form number), while a single activity is narrow and normally
-#: needs one or two — its own detail, occasionally something to compare against.
-#: Cheap to raise, expensive to have wrong: every round adds a completion *and*
-#: carries every previous tool result in its context.
+#: Tool-calling rounds allowed before the loop forces an answer. The surfaces
+#: genuinely differ: the status card is a broad question wanting several lookups,
+#: while a single activity normally needs one or two. Every round adds a
+#: completion *and* carries every previous tool result in its context.
 MAX_ROUNDS_STATUS = 6
 MAX_ROUNDS_ACTIVITY = 3
 
 #: Tool calls dispatched from any single turn. The round cap bounds *round
-#: trips*, and a round trip may carry any number of parallel calls — so without
-#: this the worst case is not six calls but six times however many the model
-#: emits at once. A model that shotguns the whole registry (the failure the
-#: ``llm-eval`` agentic family exists to detect) would otherwise run 54 calls and
-#: replay every result into every later turn, each of those turns billed.
-#: Anything past this gets a result explaining it was not run, so the model can
-#: ask again rather than reason from a gap it does not know about.
+#: trips*, and a round trip may carry any number of parallel calls, so without
+#: this the worst case is six times however many the model emits at once — a
+#: model that shotguns the whole registry would run 54 calls and replay every
+#: result into every later turn. Anything past this gets a result saying it was
+#: not run, so the model asks again rather than reasoning from a gap.
 MAX_CALLS_PER_TURN = 4
 
 #: Total tool-result characters one run may accumulate. ``MAX_TOOL_RESULT_CHARS``
-#: bounds a single result; nothing bounded their sum, and the sum is what is
-#: replayed into the context of every subsequent turn. Once this is crossed the
-#: loop stops offering tools and goes to the forced final turn — the path that
-#: already exists for the round cap, reached by a different trigger. It is also
-#: the cheapest defence against blowing a small context window, which is a real
-#: risk on the self-hosted models BYOK points at.
+#: bounds a single result; this bounds their sum, which is what gets replayed
+#: into every subsequent turn. Crossing it stops the loop offering tools and goes
+#: to the forced final turn — the round cap's path, reached differently. Also the
+#: cheapest defence against blowing a small self-hosted context window.
 MAX_RUN_RESULT_CHARS = 24_000
 
 #: One tool call may not exceed this. The tools are aggregate reads over one
-#: user's SQLite file, so anything approaching it is a pathological query rather
-#: than a slow one, and a run must not be able to sit on the pending status until
-#: the 30-minute timeout because a single call hung.
+#: user's SQLite file, so anything approaching it is pathological rather than
+#: slow, and a hung call must not pin the run on ``pending`` until the 30-minute
+#: timeout.
 TOOL_TIMEOUT_S = 30.0
 
 #: A tool result longer than this is truncated before it enters the context,
-#: with the marker below. `call_tool` already refuses anything over 64 KiB as a
-#: shaping bug; this is the much tighter bound that matters to a model's context
-#: window, and it is a *truncation* rather than a refusal so the model still sees
-#: the head of the answer and can narrow its next query.
+#: with the marker below. `call_tool` refuses anything over 64 KiB as a shaping
+#: bug; this is the tighter bound that matters to a context window. A
+#: *truncation* rather than a refusal, so the model still sees the head of the
+#: answer and can narrow its next query.
 MAX_TOOL_RESULT_CHARS = 6000
 TRUNCATION_MARKER = (
     "\n\n[… truncated: {omitted} more characters. You are NOT seeing the whole "
@@ -238,10 +205,9 @@ _active_runs = 0
 def _try_claim_slot() -> bool:
     """Take a slot if one is free. Never waits, never raises.
 
-    The check and the claim are one indivisible step by construction: asyncio is
-    cooperative and there is no ``await`` between reading the counter and
-    incrementing it, which is the property the counter exists for (see
-    :data:`_active_runs`). Both acquisition policies below are built on this, so
+    Check and claim are indivisible by construction: asyncio is cooperative and
+    there is no ``await`` between reading the counter and incrementing it (see
+    :data:`_active_runs`). Both acquisition policies below build on this, so
     neither can reintroduce the check-then-acquire gap.
     """
     global _active_runs
@@ -283,26 +249,14 @@ _SLOT_POLL_INTERVAL_S = 0.25
 async def _waited_run_slot(timeout_s: float) -> AsyncIterator[None]:
     """Claim a slot for an interactive run, waiting up to ``timeout_s`` (#44).
 
-    The opposite trade from :func:`_run_slot`, for the opposite situation. That
-    one refuses instantly because a *better answer exists* — the blob prompt —
-    and waiting would only delay it. Chat has no blob prompt, so refusing
-    instantly buys nothing and costs the athlete their question: the four slots
-    are shared with the background training-status runs that fire on dashboard
-    load, and "ask a question just after opening the dashboard" is an ordinary
-    thing to do, not an edge case.
+    The opposite trade from :func:`_run_slot`, which refuses instantly because
+    the blob prompt is a better answer than a wait. Chat has no blob prompt, so
+    it waits instead, visibly: the assistant row sits in ``queued`` until the
+    slot is claimed.
 
-    So an interactive turn waits, and the wait is *visible* — the assistant row
-    sits in ``queued`` until the slot is claimed, which is a state the athlete
-    can read rather than a spinner that means nothing. The bound is what keeps
-    this from becoming the failure mode :func:`_run_slot` was written to avoid.
-
-    Polling rather than an :class:`asyncio.Event` signalled on release: the
-    counter is a plain module global shared by whatever loops this process runs,
-    and an Event is bound to the loop that created it. A quarter-second poll on
-    a path that is idle unless the instance is saturated is not worth the
-    loop-affinity bug that would buy. Waiters are not FIFO — under contention
-    whichever turn next wakes wins — which on a single-athlete instance with
-    four slots is a distinction without a difference.
+    Polls rather than waiting on an :class:`asyncio.Event`, since the counter is
+    a module global while an Event is bound to the loop that created it. Waiters
+    are not FIFO.
     """
     deadline = time.monotonic() + max(0.0, timeout_s)
     while not _try_claim_slot():
@@ -323,18 +277,13 @@ async def _waited_run_slot(timeout_s: float) -> AsyncIterator[None]:
 class AgenticUnavailable(Exception):
     """This run cannot be served agentically; use the blob prompt instead.
 
-    Never surfaced to the athlete **on the surfaces that have a blob prompt**.
-    For them it means "take the other path", and every raise site is a runtime
-    discovery about the provider or the load on this process, not an error in
-    the request.
+    Never surfaced to the athlete on surfaces that have a blob prompt — there it
+    means "take the other path".
 
-    Chat (issue #44) has no other path — the question is arbitrary, so there is
-    no pre-assembled context to fall back to — which is what ``code`` is for.
-    There it is the difference between five quite different causes and one
-    generic apology: "Koutsi is busy finishing your daily check-in, try again in
-    a moment" is a true and actionable sentence, and "something went wrong" is
-    neither. A machine key rather than the message, because the message is a log
-    line and the athlete reads fourteen languages.
+    Chat (issue #44) has no other path, which is what ``code`` is for: it turns
+    five different causes into an actionable sentence rather than one generic
+    apology. A machine key rather than the message, since the athlete reads
+    fourteen languages.
     """
 
     def __init__(self, message: str, *, code: str = CODE_UNAVAILABLE) -> None:
@@ -354,11 +303,9 @@ def tool_definitions(tools: list[Tool]) -> list[dict]:
     """Render registry tools into the OpenAI ``tools`` array.
 
     The schema is the tool's own pydantic arguments model, so what the provider
-    constrains the model to and what
-    :func:`~backend.app.mcp.dispatch.call_tool` validates against are the same
-    object and cannot drift. Names already satisfy the dialect's
-    ``^[a-zA-Z0-9_-]{1,64}$`` by registry rule, so nothing is mapped at this
-    boundary — a mapping is a place for a name to get lost.
+    constrains and what :func:`~backend.app.mcp.dispatch.call_tool` validates
+    cannot drift. Names already satisfy the dialect's ``^[a-zA-Z0-9_-]{1,64}$``
+    by registry rule, so nothing is mapped at this boundary.
     """
     return [
         {
@@ -467,15 +414,12 @@ class _CallAssembler:
 
         Two defences against a provider emitting function calling badly:
 
-        * **A call with no name is dropped.** There is nothing to dispatch and
-          no way to describe the failure back to the model in a way it could act
-          on — it never learns which of its calls vanished.
+        * **A call with no name is dropped.** There is nothing to dispatch, and
+          no way to describe the failure back to the model that it could act on.
         * **Duplicate ids are made unique.** The dialect requires exactly one
-          ``role: "tool"`` message per ``tool_call_id``, and a repeated id would
-          make that impossible to satisfy: two results under one id is a 400 on
-          the next request, and one result for two calls is a different 400. A
-          synthesised suffix keeps the pairing one-to-one, which is the property
-          the provider is actually checking.
+          ``role: "tool"`` message per ``tool_call_id``: two results under one id
+          is a 400 on the next request, and one result for two calls is a
+          different 400. A synthesised suffix keeps the pairing one-to-one.
         """
         calls: list[PendingToolCall] = []
         seen: set[str] = set()
@@ -528,11 +472,10 @@ _COMMIT_AFTER_CHARS = 240
 class AgentRequest:
     """Everything one agentic run needs.
 
-    Deliberately **not** the caller's session. The tools open their own, one per
-    call — see :func:`_dispatch` for why that is worth a connection checkout.
-    ``athlete`` is here only to resolve the athlete's LLM config and opt-in; the
-    copy the tools read is loaded inside their own session from ``user_id``,
-    which is what every check and every audit record keys on anyway.
+    Deliberately **not** the caller's session — the tools open their own, one per
+    call (see :func:`_dispatch`). ``athlete`` is here only to resolve the LLM
+    config and opt-in; the copy the tools read is loaded inside their own session
+    from ``user_id``.
     """
 
     athlete: Athlete
@@ -559,16 +502,13 @@ class AgentRequest:
     #: this loop the one job it already had.
     history: Optional[list[dict]] = None
 
-    #: Is a human waiting on this run? Three behaviours turn on it, and all
-    #: three are cases where the right answer for a card is the wrong one for a
-    #: conversation:
+    #: Is a human waiting on this run? Three behaviours turn on it, each a case
+    #: where the right answer for a card is the wrong one for a conversation:
     #:
     #: * the first turn's prose may be the answer. The card suppresses it,
     #:   correctly — an answer written before looking at anything is guesswork
-    #:   about *this athlete's training*. But "what does TSB actually mean?" is
-    #:   a coaching question with no lookup behind it, and refusing to answer it
-    #:   without calling a tool first would be a worse conversation, not a
-    #:   safer one;
+    #:   about *this athlete's training* — but "what does TSB actually mean?" is
+    #:   a coaching question with no lookup behind it;
     #: * a slot is waited for rather than refused (:func:`_waited_run_slot`);
     #: * failures carry a ``code`` the athlete sees, since there is no blob
     #:   prompt to quietly serve instead.
@@ -581,12 +521,10 @@ class AgentRequest:
 def _final_reminder(format_rule: str) -> dict:
     """The format rule, restated as a system message on the answering turn.
 
-    Models are measurably worse at obeying a leading-format instruction on a turn
-    that follows tool results than on a clean single-shot prompt, and the
-    ``MOOD:`` line is not decoration: ``parseMoodAndParagraphs`` reads it to pick
-    Koutsi's avatar, and the ``llm-eval`` harness asserts on it. Restating it
-    where the model is about to answer costs a few tokens and is the difference
-    between the contract holding and holding usually.
+    Models are measurably worse at obeying a leading-format instruction after
+    tool results, and the ``MOOD:`` line is not decoration:
+    ``parseMoodAndParagraphs`` reads it to pick Koutsi's avatar and the
+    ``llm-eval`` harness asserts on it.
     """
     return {
         # A *user* turn, not a system one, and that is the whole point of the
@@ -609,12 +547,9 @@ def _final_reminder(format_rule: str) -> dict:
 def agentic_enabled(athlete: Any) -> bool:
     """Has this athlete opted into the agentic coach? (issue #43, open question 2)
 
-    Opt-in rather than "on whenever the model supports tools", for the length of
-    time it takes to trust it. The blob prompts are well-tuned after several
-    rounds of prompt work, and the claimed win here — following a thread — is
-    the kind of thing that either shows up in the output or doesn't. An opt-in
-    makes that comparison honest and makes the rollback free: a toggle, not a
-    deploy.
+    Opt-in rather than "on whenever the model supports tools", for as long as it
+    takes to trust it against the well-tuned blob prompts. A toggle makes the
+    comparison honest and the rollback free.
     """
     settings_dict = (getattr(athlete, "app_settings", None) or {}) if athlete is not None else {}
     return bool(settings_dict.get("agentic_koutsi"))
@@ -628,17 +563,13 @@ async def coaching_stream(
 ) -> AsyncIterator[StreamItem]:
     """One stream for a coaching surface: agentic when it can be, blob when not.
 
-    Both analyzers call exactly this, so the fallback policy — and the token
-    arithmetic that goes with it — is written and tested once rather than twice
-    with a subtle difference. ``request`` is ``None`` when the surface is not
-    even attempting the agentic path (the athlete has not opted in, or this is a
-    bulk import); ``blob`` is the single-shot stream factory, called with its own
-    usage dict.
+    Both analyzers call this, so the fallback policy and its token arithmetic are
+    written and tested once. ``request`` is ``None`` when the surface is not
+    attempting the agentic path (no opt-in, or a bulk import); ``blob`` is the
+    single-shot stream factory, called with its own usage dict.
 
-    Whatever happens, ``usage_out`` ends up holding the **whole run's** cost. A
-    fallback after two tool rounds spent real tokens on those rounds, and the
-    hoster paid for them; dropping them because the answer eventually came from
-    the other path would under-report exactly the runs that cost the most.
+    ``usage_out`` always holds the **whole run's** cost — a fallback after two
+    tool rounds spent real tokens on them.
     """
     agent_usage: dict = {}
     blob_usage: dict = {}
@@ -673,10 +604,9 @@ async def coaching_stream(
 def _format_reminder(format_rule: str) -> dict:
     """The format rule alone, for a turn that follows tool results.
 
-    Distinct from :func:`_final_reminder`, which also forbids further tool
-    calls: sending *that* on every turn would end the loop after round one. A
-    user turn for the same reason as the final reminder — a mid-conversation
-    system message is dropped outright by some chat templates.
+    Distinct from :func:`_final_reminder`, which also forbids further tool calls
+    — sending that every turn would end the loop after round one. A user turn,
+    since some chat templates drop a mid-conversation system message.
     """
     return {"role": "user", "content": format_rule}
 
@@ -700,14 +630,14 @@ async def agentic_stream(
 ) -> AsyncIterator[StreamItem]:
     """Run the loop, yielding progress codes and then the answer's prose.
 
-    Drained by :func:`~backend.app.services.llm_streaming.stream_into_db` exactly
-    like a single-shot stream, so the 500 ms commit cadence, the status settling
-    and the usage recording are all unchanged.
+    Drained by :func:`~backend.app.services.llm_streaming.stream_into_db` like a
+    single-shot stream, so the commit cadence, status settling and usage
+    recording are unchanged.
 
-    Raises :exc:`AgenticUnavailable` when the run should be served by the blob
-    prompt instead — but only ever before the first character of prose has been
-    yielded, since after that the fallback would append a second answer to a
-    partially-written first one. The check is enforced below, not assumed.
+    Raises :exc:`AgenticUnavailable` when the run should take the blob prompt
+    instead — only ever before the first character of prose, since after that a
+    fallback would append a second answer to a partial first one. Enforced
+    below, not assumed.
     """
     emitted_any_text = False
     try:
@@ -773,17 +703,17 @@ async def _drive(
     definitions = tool_definitions(tools)
     caller = ToolCaller.internal(request.user_id)
 
-    # Rebuilt on every turn rather than mutated in place, so the instance's
-    # house style (`llm_analysis_context`) is a system message on turn five as
-    # much as on turn one — the hoster's rules are not something three tool
-    # results are allowed to push out of the model's attention.
+    # Rebuilt every turn rather than mutated in place, so the instance's house
+    # style (`llm_analysis_context`) is a system message on turn five as much as
+    # turn one — three tool results do not get to push the hoster's rules out of
+    # the model's attention.
     #
     # A conversational run starts from the stored dialogue (issue #44) with the
-    # new question already at the end of it; every other run starts from the one
-    # prompt its surface built. Copied either way: the tool rounds below append
-    # to this list, and those appends must not reach the caller's list — that is
-    # the trimmed *wire* history, and writing tool traffic back into it is how
-    # the loop's scratch work would end up in the stored transcript.
+    # new question at the end; every other run starts from the one prompt its
+    # surface built. Copied either way: the tool rounds append to this list, and
+    # those appends must not reach the caller's — that is the trimmed *wire*
+    # history, and writing tool traffic into it would put the loop's scratch work
+    # in the stored transcript.
     history: list[dict] = (
         list(request.history)
         if request.history is not None
@@ -813,18 +743,15 @@ async def _drive(
         async for item in _collect(
             _stream_turn(setup.cfg, messages, definitions, run_usage),
             turn,
-            # Turn zero's prose is never the answer *on a card*: it would be one
-            # written without having looked at anything, since the agentic
-            # prompt carries no data of its own. Collect it for the replayed
-            # assistant message, but never emit it.
+            # Turn zero's prose is never the answer *on a card* — it would be
+            # written without having looked at anything — so it is collected for
+            # the replayed assistant message but never emitted.
             #
-            # A conversation is the exception (issue #44). Not every question
-            # has a lookup behind it — "what does TSB actually mean?", "why do
-            # you keep saying my form is negative?" — and there the answer
-            # written straight off is the right one. The preamble guard below
-            # still applies: prose that turns out to precede a tool call is
-            # discarded, so "let me look at your last four weeks…" never lands
-            # in the answer even here.
+            # A conversation is the exception (issue #44): not every question has
+            # a lookup behind it ("what does TSB actually mean?"), and there the
+            # answer written straight off is the right one. The preamble guard
+            # below still applies, so "let me look at your last four weeks…"
+            # never lands in the answer.
             allow_text=rounds > 0 or request.conversational,
         ):
             yield item
@@ -1041,31 +968,26 @@ async def _dispatch(
 
     Never raises. Every failure — bad JSON, an unknown tool, a refusal, a
     timeout, a handler bug — comes back as prose the model reads and can act on,
-    because an exception here would abort the turn and lose the run, while a
-    sentence lets Koutsi try the next thing. That agreement with issue #42's
-    error shaping is the whole reason the tools return
-    *"No activity on 2026-07-14. Nearest rides: …"* instead of a 404.
+    because an exception here would abort the turn and lose the run while a
+    sentence lets Koutsi try the next thing. Same error shaping as issue #42's
+    tools, which is why they answer *"No activity on 2026-07-14. Nearest rides:
+    …"* instead of a 404.
 
     **Each call gets its own session**, opened by ``call_tool``, rather than
-    sharing the run's. Sharing was the cheaper thing — one connection to one
-    SQLite file instead of one per call — and it was wrong, because
-    :data:`TOOL_TIMEOUT_S` cancels a call wherever it happens to be:
+    sharing the run's, because :data:`TOOL_TIMEOUT_S` cancels a call wherever it
+    happens to be:
 
     * a cancellation landing mid-statement invalidates the connection, so every
       later use of the run's session raises ``PendingRollbackError`` — including
       the write of the answer and ``stream_into_db``'s own error handler; and
     * the ``rollback()`` that repairs *that* expires every ORM instance in the
       session, and an expired attribute needs IO to reload, which a plain
-      attribute read cannot do under asyncio (``MissingGreenlet``). The run
-      reads ``athlete`` on every later tool call and the blob fallback reads the
-      analyzer's objects throughout — so the repair broke the degradation path
-      the timeout exists to protect.
+      attribute read cannot do under asyncio (``MissingGreenlet``) — breaking
+      the degradation path the timeout exists to protect.
 
-    A session nobody else holds has neither problem, and has them for no inputs
-    rather than for the ones we thought to handle. The cost is a pooled
-    connection checkout and one ``load_athlete`` per call — at most 24 per run
-    against a local file whose engine is already cached, on a path that also
-    opens a registry session per call for the consent check.
+    A session nobody else holds has neither problem. The cost is a pooled
+    connection checkout and one ``load_athlete`` per call, at most 24 per run
+    against a local file whose engine is already cached.
     """
     started = time.perf_counter()
     arguments, parse_error = call.parse_arguments()

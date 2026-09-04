@@ -1,16 +1,14 @@
 """Personal access tokens — issue, list and revoke (issue #46).
 
-**Session-authenticated only.** The whole router is declared ``pat_forbidden``,
-so a token can never create, list or revoke a token: there is no escalation loop
-and no internal minting path. A PAT's entire value is that a human deliberately
-created it, can see it in this list, and can revoke it — a background task
-minting one for itself, or the server issuing one "on the user's behalf", would
-be a shared service credential wearing a PAT costume.
+**Session-authenticated only.** The whole router is ``pat_forbidden``, so a token
+can never create, list or revoke a token: no escalation loop, no internal minting
+path. A PAT's value is that a human deliberately created it, can see it here and
+can revoke it.
 
-There is no update endpoint either. Name, scopes and expiry are fixed at
-creation; widening a token means revoking it and issuing a new one. That keeps a
-token id a stable, honest answer to "what could this credential do?", instead of
-one whose meaning depends on *when* you ask.
+There is no update endpoint either: name, scopes and expiry are fixed at
+creation, and widening a token means revoking it and issuing a new one. That
+keeps a token id a stable answer to "what could this credential do?" rather than
+one whose meaning depends on when you ask.
 """
 
 from __future__ import annotations

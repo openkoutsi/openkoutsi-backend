@@ -2,14 +2,13 @@
 
 GPX is *made of* coordinates, and openkoutsi stores none: the promise in
 ``openkoutsi-docs/docs/data-and-ai.md`` is that no location data is kept, and
-``scripts/strip_fit_location.py`` exists to hold FIT files to it. The parsers in
+``scripts/strip_fit_location.py`` holds FIT files to it. The parsers in
 :mod:`openkoutsi.gpx` and :mod:`openkoutsi.tcx` therefore read coordinates only
 to produce the two scalars a training file would otherwise carry itself —
-distance and elevation gain — and drop them before anything is returned to a
-caller that could persist it.
+distance and elevation gain — and drop them before returning.
 
-This module is that derivation, kept separate so it is obvious there is exactly
-one place coordinates are consumed and nothing here holds onto them.
+This module is that derivation, kept separate so there is visibly exactly one
+place coordinates are consumed, and nothing here holds onto them.
 """
 from __future__ import annotations
 
@@ -84,21 +83,17 @@ def _valid(point: tuple[float, float] | None) -> bool:
 def step_is_travel(step_m: float, dt_s: float | None) -> bool:
     """Did the athlete ride these metres, or did the receiver jump?
 
-    The one place that decision is made, because getting it wrong is silent in
-    both directions: too permissive and a glitch adds phantom kilometres, too
-    strict and real ones are subtracted from a total nobody can check.
+    The one place that decision is made, because getting it wrong is silent both
+    ways: too permissive adds phantom kilometres, too strict subtracts real ones.
 
-    Where the track carries time, the test is the implied **speed**: a step is
-    travel unless it would have taken more than :data:`MAX_STEP_SPEED_MS`. That
-    is the only test that holds for every recording rate, and recording rate is
-    not something a file has to tell us. A 1 Hz head unit writes a point every
-    few metres; smart recording writes one every few hundred; a route planner
-    exports a vertex per direction change, which on a long straight puts
-    kilometres between consecutive points. All three are the same ride.
+    Where the track carries time, the test is the implied **speed** — travel
+    unless the step would have taken more than :data:`MAX_STEP_SPEED_MS`. That is
+    the only test holding at every recording rate, which a file need not declare:
+    a 1 Hz head unit writes a point every few metres, smart recording every few
+    hundred, a route planner one per direction change.
 
     Where it does not — a course, a route export, a point with no parseable
-    ``<time>`` — there is nothing to compute a speed from and
-    :data:`MAX_STEP_M` is the fallback.
+    ``<time>`` — :data:`MAX_STEP_M` is the fallback.
     """
     if dt_s is not None and dt_s > 0:
         return step_m <= dt_s * MAX_STEP_SPEED_MS
@@ -116,11 +111,11 @@ def cumulative_distance_m(
     dropping out, so index ``i`` of the result still describes point ``i``.
     Steps that are not travel (see :func:`step_is_travel`) are skipped.
 
-    ``elapsed_s``, when given, is seconds from an arbitrary origin for each
-    point — one entry per point, ``None`` where the point had no time. Passing
-    it is what lets the glitch rule be about speed rather than about distance;
-    without it every step falls back to :data:`MAX_STEP_M`, which on a track
-    recorded at anything other than ~1 Hz will throw away real kilometres.
+    ``elapsed_s``, when given, is seconds from an arbitrary origin for each point
+    — one entry per point, ``None`` where the point had no time. Passing it lets
+    the glitch rule be about speed rather than distance; without it every step
+    falls back to :data:`MAX_STEP_M`, which on a track recorded at anything other
+    than ~1 Hz throws away real kilometres.
     """
     if elapsed_s is not None and len(elapsed_s) != len(points):
         raise ValueError("elapsed_s must be the same length as points")
@@ -176,12 +171,11 @@ def smoothed_by_distance(
 ) -> list[float]:
     """Centred moving average over a *distance* window rather than a sample count.
 
-    :func:`_smoothed` averages a fixed number of samples, which is right for a
-    1 Hz activity stream where samples are evenly spaced in time. A course has
-    no clock: its points are spaced by metres, and unevenly, so "fifteen
-    samples" means 100 m on one stretch and 2 km on another. Here the window is
-    ``window_m`` metres of track centred on each point — every value whose
-    distance lies within ``window_m / 2`` of the point's own contributes.
+    :func:`_smoothed` averages a fixed number of samples, right for a 1 Hz
+    activity stream. A course has no clock: its points are spaced by metres, and
+    unevenly, so "fifteen samples" means 100 m on one stretch and 2 km on
+    another. Here the window is ``window_m`` metres of track centred on each
+    point — every value within ``window_m / 2`` of it contributes.
 
     ``distances_m`` must be non-decreasing (a running distance along the track,
     as :func:`cumulative_distance_m` produces) and the same length as
@@ -226,16 +220,14 @@ def elevation_gain_m(
     Two stages, because either alone gets a real ride wrong:
 
     * **Smooth**, to separate terrain from receiver noise by how fast it moves.
-    * **Accumulate with hysteresis**, which needs ``threshold_m`` of rise to
-      *start* counting a climb but then counts every metre of it until an equal
-      descent ends it. Confirming the climb before crediting it is what rejects
-      oscillation; crediting it continuously afterwards is what stops a long
-      drag from losing a slice of itself at every step.
+    * **Accumulate with hysteresis**: ``threshold_m`` of rise is needed to
+      *start* counting a climb, after which every metre counts until an equal
+      descent ends it. Confirming before crediting rejects oscillation;
+      crediting continuously afterwards stops a long drag losing a slice at
+      every step.
 
-    Gaps are skipped rather than interpolated: a channel that stopped recording
-    for a minute contributes the climb either side of the hole and nothing for
-    the hole itself. The smoothing window shrinks for short series so that a
-    handful of samples is not averaged into a flat line.
+    Gaps are skipped rather than interpolated. The smoothing window shrinks for
+    short series so a handful of samples is not averaged into a flat line.
     """
     values = [
         float(v) for v in altitudes if v is not None and math.isfinite(v)

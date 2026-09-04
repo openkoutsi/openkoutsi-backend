@@ -70,35 +70,29 @@ def verify_password(plain: str, hashed: str) -> bool:
     return _bcrypt.checkpw(plain.encode(), hashed.encode())
 
 
-# bcrypt is deliberately slow — at the default cost that is ~0.27 s of pure CPU,
-# and it is CPU held *inside the event loop* when called from an async handler.
-# One login therefore stalls every other request in the process for a quarter of
-# a second, which is a whole-instance latency spike caused by a single user
-# signing in. The work itself is the point and cannot be made cheaper, so it goes
-# to a worker thread instead: `hashpw`/`checkpw` release the GIL, so the loop is
-# genuinely free while they run.
+# bcrypt is deliberately slow — ~0.27 s of pure CPU at the default cost — and
+# from an async handler that CPU is held *inside the event loop*, so one login
+# stalls every other request in the process for a quarter of a second. The work
+# cannot be made cheaper, so it goes to a worker thread: `hashpw`/`checkpw`
+# release the GIL, leaving the loop genuinely free.
 #
-# The synchronous pair above stays. Tests hash directly (`tests/conftest.py`),
-# and so would any script or migration that is not already in an event loop;
-# these wrappers are for the request path, which is where the blocking matters.
+# The synchronous pair above stays for tests (`tests/conftest.py`) and any script
+# or migration not already in an event loop; these wrappers are for the request
+# path, where the blocking matters.
 
 
 @lru_cache(maxsize=1)
 def dummy_password_hash() -> str:
     """A real bcrypt hash to verify against when no account matched.
 
-    Login used to short-circuit — ``user is None or not verify(...)`` — so an
-    unknown identifier skipped bcrypt entirely and answered in milliseconds
-    while a known one paid the full ~270 ms. That difference is a reliable
-    "does this account exist?" oracle, measured at 66× in issue #102 (F-06),
-    and it undoes the work the rest of this surface does to stay quiet: signup
-    and password-reset both return a fixed acknowledgement precisely so a taken
-    address cannot be detected.
+    Login used to short-circuit on ``user is None``, so an unknown identifier
+    skipped bcrypt and answered in milliseconds while a known one paid ~270 ms —
+    a reliable "does this account exist?" oracle, measured at 66× in issue #102
+    (F-06), undoing the fixed acknowledgements signup and password-reset return.
 
-    Hashing a value nobody can supply means the comparison always fails, so
-    this can be verified against safely. Computed on first use rather than at
-    import so it costs nothing at startup and picks up whatever bcrypt cost is
-    configured; cached so it is one hash per process, not one per request.
+    Hashing a value nobody can supply means the comparison always fails, so this
+    is safe to verify against. Computed on first use and cached: one hash per
+    process, picking up whatever bcrypt cost is configured.
     """
     return hash_password(secrets.token_urlsafe(32))
 
@@ -121,11 +115,10 @@ async def verify_password_async(plain: str, hashed: str) -> bool:
 # request compares that stamp against the row, and raising the row's value ends
 # every session the account has open at once.
 #
-# `token_version` is keyword-only and required at both mint sites on purpose:
-# defaulting it would let a call site quietly issue a token stamped 0 for a user
-# whose version has moved on, and the failure — one user unable to stay signed
-# in after a reset — is exactly the kind that surfaces in production rather than
-# in review.
+# `token_version` is keyword-only and required at both mint sites: defaulting it
+# would let a call site quietly issue a token stamped 0 for a user whose version
+# has moved on, and the failure — one user unable to stay signed in after a reset
+# — is the kind that surfaces in production rather than in review.
 
 
 def create_access_token(user_id: str, roles: list[str], *, token_version: int) -> str:
@@ -220,15 +213,12 @@ async def validate_personal_access_token(
     instance, and whose is it? Returns ``(UserContext, token_row)``; every
     failure raises the same opaque 401 and is written to the audit log first.
 
-    Split out from :func:`_resolve_personal_access_token` because there is one
-    other surface that authorizes differently: the MCP server (issue #42) gates
-    on the *tool* named in the request body rather than on the route, since no
-    single declaration on ``POST /mcp`` could be right for nine differently-scoped
-    tools. It therefore never reaches the route-policy map at all. Splitting the
-    policy question off lets it reuse this without becoming a second identity
-    path — the part that decides *who the caller is*, and therefore which
-    database and encryption key their request reaches, stays a single
-    implementation.
+    Split out from :func:`_resolve_personal_access_token` because the MCP server
+    (issue #42) authorizes on the *tool* named in the request body rather than on
+    the route, and so never reaches the route-policy map. Splitting the policy
+    question off lets it reuse this without becoming a second identity path: what
+    decides *who the caller is* — and therefore which database and encryption key
+    they reach — stays one implementation.
     """
     from backend.app.models.registry_orm import InstanceSettings, User
     from backend.app.services import personal_access_tokens as pat
@@ -407,21 +397,16 @@ async def authenticate_bearer(
     """Identity from a bearer value, with **no route policy applied**.
 
     For surfaces that authorize per *operation* rather than per route: the scope
-    an MCP call needs (issue #42) is a property of the tool named in the request
-    body rather than of the URL it arrived at, so ``POST /mcp`` resolves its own
-    credential through this function instead of depending on
-    ``get_current_user``. ``route_requires_auth`` is therefore false for it and
-    ``build_access_map`` never asks it to declare a scope — the walk does
-    enumerate the route, it simply has nothing to say about it.
+    an MCP call needs (issue #42) belongs to the tool named in the request body,
+    so ``POST /mcp`` resolves its own credential here.
 
-    Such a surface must therefore do its own default-deny check — for the tool
-    layer that is ``backend.app.mcp.registry``, where every tool declares its
-    scopes and an undeclared one cannot be registered at all. Which is why this
-    function is allowed exactly one call site, asserted by
+    Such a surface must do its own default-deny check — for the tool layer that
+    is ``backend.app.mcp.registry`` — which is why this function is allowed
+    exactly one call site, asserted by
     ``test_pat_scopes.py::test_only_one_place_steps_outside_the_route_policy``.
 
-    A personal access token still has to be live, unrevoked and enabled here;
-    only the *authorization* question is deferred.
+    A token must still be live, unrevoked and enabled here; only the
+    *authorization* question is deferred.
     """
     from backend.app.services import personal_access_tokens as pat
 

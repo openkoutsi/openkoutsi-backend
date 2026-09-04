@@ -22,25 +22,20 @@ at app construction**, into an endpoint → :class:`PatAccess` map, and
 :func:`backend.app.core.auth.get_current_user` looks the current endpoint up in
 it.
 
-That indirection is not incidental. An earlier version had the dependency
-publish itself on ``request.state`` for the resolver to read back, which is
-correct only while every declaration happens to run before ``get_current_user``
-does — and it silently does not when a route-level dependency (``require_consent``,
-say) resolves ``get_current_user`` as a sub-dependency of its own. FastAPI caches
-that resolution, so the *first* dependency to ask for an identity fixes the
-answer, and a ``pat_forbidden()`` sitting later in the same list never got a
-chance to speak. Resolving statically removes the ordering question entirely:
-declarations are read off ``route.dependant``, where order is unambiguous and
-last-wins.
+That indirection is not incidental. Publishing the declaration on
+``request.state`` for the resolver to read back is correct only while every
+declaration runs before ``get_current_user`` — which it silently does not when a
+route-level dependency (``require_consent``, say) resolves ``get_current_user``
+as a sub-dependency. FastAPI caches that, so the *first* dependency to ask for an
+identity fixes the answer and a later ``pat_forbidden()`` never speaks. Resolving
+statically removes the ordering question entirely.
 
 Deriving the policy from the route rather than from what ran is what makes this
 default-deny: a route with **no** declaration is absent from the map and
-unreachable by a PAT rather than open, so a router added six months from now is
-closed without anybody having to remember this file exists.
+unreachable by a PAT, so a router added later is closed by default.
 
 ``tests/integration/test_pat_scopes.py`` walks ``app.routes`` and fails when an
-authenticated route carries no declaration, which is what turns the convention
-above into a control.
+authenticated route carries no declaration, turning the convention into a control.
 """
 
 from __future__ import annotations
@@ -57,10 +52,9 @@ from fastapi import Depends, Request
 # reference call this?" have the same answer.
 #
 # Two deviations from the sketch in issue #46, both found by walking the routes:
-# `/api/metrics` and `/api/achievements` are *not* purely read-only — the former
-# has the `catch-up` / `recalculate` recompute endpoints, the latter the `seen`
-# marker — so both get a write scope rather than having those endpoints quietly
-# folded into the read one.
+# `/api/metrics` and `/api/achievements` are not purely read-only (the `catch-up`
+# / `recalculate` endpoints and the `seen` marker), so both get a write scope
+# rather than folding those endpoints into the read one.
 
 SCOPES: dict[str, str] = {
     "activities:read": "Read activities, their streams, laps and intervals.",

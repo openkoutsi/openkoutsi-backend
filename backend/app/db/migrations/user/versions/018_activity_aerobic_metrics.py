@@ -2,20 +2,17 @@
 
 Stores the aerobic decoupling figure (or a reason code explaining why one would
 be misleading for this ride) and the CP/W' snapshot the activity's ``w_bal``
-stream was integrated with. The CP/W' pair is frozen at processing time, in the
-same spirit as ``zone_times``, so a ride's W' story doesn't silently change as
-the athlete's power curve moves. ``cp_fit_points`` records how many duration
-bests that fit had available, so rides fit against a nearly-empty profile — what
-a reverse-chronological provider backlog import produces — stay findable for a
-future re-fit.
+stream was integrated with. The CP/W' pair is frozen at processing time, like
+``zone_times``, so a ride's W' story doesn't change as the athlete's power curve
+moves. ``cp_fit_points`` records how many duration bests that fit had, so rides
+fit against a nearly-empty profile — what a reverse-chronological backlog import
+produces — stay findable for a future re-fit.
 
 Efficiency factor and variability index are deliberately *not* stored: both are
 pure ratios of columns already on the row (weighted power / avg HR and weighted
-power / avg power), so they are derived on read instead of denormalised here.
+power / avg power), so they are derived on read.
 
-Idempotent: safe to run against DBs that already have the columns (including
-ones built fresh by SQLAlchemy create_all, which adds them but doesn't stamp
-alembic).
+Idempotent, like every migration in this tree.
 """
 from alembic import op
 import sqlalchemy as sa

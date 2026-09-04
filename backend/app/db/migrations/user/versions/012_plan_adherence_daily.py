@@ -4,8 +4,7 @@ Stores one daily snapshot of a training plan's adherence score per active plan,
 mirroring the ``daily_metrics`` (Fitness/Fatigue/Form) pattern so the adherence
 trend is chartable and survives back-computation.
 
-Idempotent: safe to run against DBs already migrated or created fresh by
-SQLAlchemy create_all (which builds the table but neither stamps alembic).
+Idempotent, like every migration in this tree.
 """
 from alembic import op
 import sqlalchemy as sa

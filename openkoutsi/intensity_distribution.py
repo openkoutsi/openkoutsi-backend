@@ -4,12 +4,11 @@ Weekly time-in-zone answers "what did I do last week". This module answers the
 question periodization is organised around: over a block, did the training come
 out *polarized*, *pyramidal* or *threshold-heavy*?
 
-That question is posed against a three-zone model — below LT1, between LT1 and
-LT2, above LT2 — not the Coggan zones openkoutsi stores. Since zone lists are
-now fixed at seven power / five HR zones (see ``zones.POWER_ZONE_COUNT``), the
-mapping down to three bands is positional rather than inferred: LT1 sits at the
-Z2/Z3 boundary and LT2 at the Z4/Z5 boundary, both taken from the athlete's own
-zones, so no "LT1 is 0.75 × FTP" constant is needed anywhere.
+The question is posed against a three-zone model — below LT1, LT1–LT2, above
+LT2 — not the Coggan zones openkoutsi stores. Zone lists are fixed at seven
+power / five HR zones (``zones.POWER_ZONE_COUNT``), so the mapping is positional:
+LT1 at the Z2/Z3 boundary, LT2 at Z4/Z5, both from the athlete's own zones, so no
+"LT1 is 0.75 × FTP" constant is needed.
 
 Everything here is pure: no DB, no I/O, percentages in and shapes out.
 """
@@ -131,18 +130,16 @@ def bands_from_zone_times(zone_times: Mapping | None, basis: str) -> dict[int, i
     Returns a band → seconds dict with all three bands present (zeroed when the
     snapshot has nothing for this basis).
 
-    Each zone's position comes from the number in its name rather than from its
-    place among the keys present, because a snapshot only carries the zones the
-    ride actually touched. An easy ride that never left Z1–Z3 stores three keys;
-    reading those as a three-zone model would promote Z3 into the top band and
-    report a recovery spin as high intensity.
+    Each zone's position comes from the number in its name, not its place among
+    the keys present: a snapshot carries only the zones the ride touched, so
+    reading an easy ride's three keys as a three-zone model would report a
+    recovery spin as high intensity.
 
     A snapshot carrying any name the mapping can't place returns **all zeros**,
-    which drops the activity out of ``activities_used`` and shows up as honest
-    coverage. Snapshots frozen before zone names were normalised can hold
-    anything the athlete typed, and there is no order to recover from names
-    like ``Recovery, Endurance, Threshold`` — guessing from their position
-    would just be alphabetical order wearing a confident label.
+    dropping the activity out of ``activities_used`` as honest coverage.
+    Snapshots frozen before zone names were normalised can hold anything the
+    athlete typed, and there is no order to recover from ``Recovery, Endurance,
+    Threshold``.
     """
     if basis not in _CANONICAL_COUNTS:
         raise ValueError(f"unknown basis: {basis!r}")
@@ -222,13 +219,12 @@ def classify(low_pct: float, moderate_pct: float, high_pct: float) -> str | None
     3. more above LT2 than between the thresholds → ``polarized``
     4. otherwise → ``pyramidal``
 
-    Rule 2 is deliberately ahead of rule 3: a block with a lot of band 2 *and*
-    a little more band 3 is the grey-zone grind this feature exists to expose,
-    and calling it polarized would bury exactly that. The consequence is that a
-    degenerate all-band-3 block comes out ``polarized``; no label describes that
-    case well, and it is pinned by a test so the behaviour can't drift silently.
+    Rule 2 is deliberately ahead of rule 3: a block with a lot of band 2 and a
+    little more band 3 is the grey-zone grind this feature exposes, which
+    "polarized" would bury. The consequence is that a degenerate all-band-3 block
+    comes out ``polarized``, which a test pins so it can't drift silently.
 
-    These cut-offs are conventions rather than physical constants.
+    These cut-offs are conventions, not physical constants.
     """
     if low_pct + moderate_pct + high_pct <= 0:
         return None

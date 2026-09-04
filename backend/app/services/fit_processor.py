@@ -100,13 +100,12 @@ async def process_activity_file(
     times, and that is a complete import of that file rather than a failure.
 
     Pass ``parsed`` when the caller has already parsed the file (in a thread,
-    for a bulk import) to avoid doing it twice. Otherwise the parse happens
-    here, in a worker thread: it is pure-Python iteration over the whole file
-    — measured at 11.2 s for a 4.8 MB ride, which is under a tenth of the
-    upload limit — and this function is awaited from a ``BackgroundTasks``
-    callback, which Starlette runs on the event loop rather than in a
-    threadpool. Left inline it stalls every other request in the process for
-    the length of the parse (issue #101 §2.2, issue #102 F-05).
+    for a bulk import) to avoid doing it twice. Otherwise the parse happens here
+    in a worker thread: it is pure-Python iteration over the whole file (11.2 s
+    for a 4.8 MB ride, under a tenth of the upload limit), and this function is
+    awaited from a ``BackgroundTasks`` callback that Starlette runs on the event
+    loop rather than in a threadpool — left inline it stalls every other request
+    for the length of the parse (issue #101 §2.2, issue #102 F-05).
     """
     if parsed is not None:
         profile, raw_intervals = parsed

@@ -422,15 +422,14 @@ async def analyze_activity_bg(
 
     ``allow_agentic=False`` forces the single-shot blob prompt whatever the
     athlete opted into (issue #43). The provider-sync paths pass it: a backlog
-    import creates one of these per imported activity, and a few hundred
-    activities at four-to-six calls each is both a real bill and a lot of
-    concurrent loops against one local model that serialises requests — on the
-    one path where nobody reads the output one analysis at a time.
+    import creates one of these per activity, and a few hundred at four-to-six
+    calls each is both a real bill and a lot of concurrent loops against one
+    local model — on the one path where nobody reads the output one at a time.
 
     ``run_id`` is the token this run owns ``analysis*`` by (issue #50). A row
     settled by the sweep or re-triggered by the athlete clears it, and this run
-    then takes its own writes back out rather than committing a finished answer
-    over the one that replaced it. ``None`` keeps the old behaviour.
+    then withdraws its own writes rather than committing a finished answer over
+    the one that replaced it. ``None`` keeps the old behaviour.
     """
 
     async def _clear_pending(recovery_session) -> None:

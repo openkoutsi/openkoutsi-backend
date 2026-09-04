@@ -1,30 +1,19 @@
 """Distribution tools: ``get_intensity_distribution`` and ``get_zone_totals``.
 
-Two views of the same underlying thing at two altitudes. ``get_zone_totals``
-answers "what did the last few weeks hold", week by week, in the athlete's own
-zone names. ``get_intensity_distribution`` collapses a whole block into three
-bands and *names the shape* — polarized, pyramidal, threshold-heavy, or almost
-all easy — which is the level at which a coaching decision is usually made.
+Two views of the same thing at different altitudes. ``get_zone_totals`` answers
+"what did the last few weeks hold", week by week, in the athlete's own zone
+names; ``get_intensity_distribution`` collapses a block into three bands and
+*names the shape*, which is the level a coaching decision is made at.
 
 **Neither writes.** Both underlying paths can freeze missing ``zone_times``
-snapshots on the way through, and both are asked *not* to here. Freezing is
-permanent by design — a snapshot is computed against the athlete's zones as they
-stand at that moment and never revisited — so whichever caller triggers it
-decides forever which zone definitions an old ride is judged by, and "whenever a
-coaching agent happened to ask a question" is the wrong answer to that. It would
-also make ``readOnlyHint`` a lie in the tool descriptor, which is not cosmetic:
-that hint is what an MCP client consults to decide whether a call needs the
-user's approval first. Rides with no snapshot are therefore *reported* rather
-than fixed, which is what this layer does with every other kind of missing
-figure.
+snapshots, and both are asked *not* to here: freezing is permanent, so whichever
+caller triggers it decides forever which zone definitions an old ride is judged
+by, and it would make ``readOnlyHint`` a lie in the tool descriptor. Rides with
+no snapshot are *reported* rather than fixed.
 
-Both carry their caveats in the payload rather than leaving them implicit,
-because both are easy to over-read. A distribution drawn from six rides out of
-forty is not wrong, it is unfounded, so ``coverage`` travels with the numbers. A
-window in which the athlete moved their FTP is one where the band boundaries
-changed underfoot, so that is flagged too. And the time and session methods
-disagree *by design* — warm-ups and coast-downs pull the time method toward
-pyramidal — so the method used is always reported alongside the result.
+Both carry their caveats in the payload: ``coverage`` travels with the numbers,
+a window in which the athlete moved their FTP is flagged, and the method used is
+always reported since the time and session methods disagree by design.
 """
 
 from __future__ import annotations

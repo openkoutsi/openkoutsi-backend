@@ -5,9 +5,7 @@ Load/hours, base Load) as a JSON list, populated at generation time by both the
 rule-based and LLM plan generators. Nullable — older plans return null until
 regenerated.
 
-Idempotent: safe to run against DBs that already have the column (including ones
-built fresh by SQLAlchemy create_all, which adds the column but doesn't stamp
-alembic).
+Idempotent, like every migration in this tree.
 """
 from alembic import op
 import sqlalchemy as sa

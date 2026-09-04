@@ -1,19 +1,15 @@
 """Add import_jobs and ActivitySource.format (issue #36).
 
-Bulk import needs somewhere to report progress from — a Strava export is
-thousands of files and tens of minutes of parsing, so the endpoint returns a job
-id and the client polls it — and somewhere to record which of those files did
-not make it and why.
+Bulk import needs somewhere to report progress from, and to record which files
+did not make it and why: a Strava export is thousands of files and tens of
+minutes of parsing, so the endpoint returns a job id and the client polls it.
 
-``activity_sources.format`` is the other half: originals are now stored in the
-format they arrived in (``fit``, ``gpx`` or ``tcx``) rather than converted, so
-the download and reprocess paths have to know which one they are looking at.
-Existing rows carrying a file are backfilled to ``fit``, which is the only thing
-they could be.
+``activity_sources.format`` is the other half: originals are stored in the format
+they arrived in (``fit``, ``gpx``, ``tcx``) rather than converted, so download and
+reprocess know which they are looking at. Existing rows with a file are
+backfilled to ``fit``, the only thing they could be.
 
-Idempotent, like every migration in this tree: safe to run against DBs already
-migrated or created fresh by SQLAlchemy create_all (which builds the tables but
-neither stamps alembic).
+Idempotent, like every migration in this tree.
 """
 from alembic import op
 import sqlalchemy as sa

@@ -68,18 +68,16 @@ class UserRolesUpdate(BaseModel):
 class UserEmailUpdate(BaseModel):
     """Admin set/clear of a user's address (issue #62).
 
-    ``None`` clears it. The escape hatch for an address its owner can no longer
-    reach — a dead mailbox, or one taken along with the account — for which the
-    only previous remedy was deleting the user and their training data.
+    ``None`` clears it — the escape hatch for an address its owner can no longer
+    reach, for which the only previous remedy was deleting the user and their
+    training data.
 
-    Required, not defaulted, though it stays nullable: with ``= None`` an empty
-    body and a body naming the field wrongly both read as "clear it", and this
-    endpoint's clear is destructive — it drops the login identifier and its
-    verification, ends every session and revokes every token, on an account
-    whose owner is quite possibly already locked out. ``new_email`` is the field
-    name the user-facing change endpoint uses, so that slip is an easy one to
-    make. Dropping the default turns both into a 422 and leaves the deliberate
-    ``{"email": null}`` working.
+    Required, not defaulted, though still nullable: with ``= None`` both an empty
+    body and one misnaming the field would read as "clear it", and this clear is
+    destructive (it drops the login identifier, ends every session and revokes
+    every token). ``new_email`` is what the user-facing endpoint calls it, so the
+    slip is easy to make. No default turns both into a 422 while leaving a
+    deliberate ``{"email": null}`` working.
     """
     email: Optional[EmailStr]
 

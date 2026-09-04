@@ -4,9 +4,7 @@ Revision ID: 001_workout_definitions
 Revises:
 Create Date: 2026-05-06
 
-Idempotent: safe to run against DBs that were created by SQLAlchemy create_all
-after the WorkoutDefinition model was added (which creates the table but does not
-stamp the alembic version or add the FK column to planned_workouts).
+Idempotent, like every migration in this tree.
 """
 from alembic import op
 import sqlalchemy as sa

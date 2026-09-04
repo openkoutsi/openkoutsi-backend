@@ -137,12 +137,12 @@ async def check_llm_access(
     See :class:`LlmAccess` for the modes. Admins are **not** implicitly exempt —
     they can grant themselves an entitlement like anyone else.
 
-    Personal access tokens (issue #46) are denied here whatever the gate says.
-    The endpoints that unconditionally trigger an LLM call are already closed to
-    tokens at the route level; this covers the handful that trigger one only
-    *sometimes* — ``POST /api/plans`` with ``use_llm``, and the auto-refresh
-    inside ``GET /api/athlete/training-status`` — without those routes losing
-    their ordinary, non-spending behaviour for a token.
+    Personal access tokens (issue #46) are denied whatever the gate says. Routes
+    that unconditionally trigger an LLM call are already closed to tokens; this
+    covers the handful that trigger one only *sometimes* (``POST /api/plans``
+    with ``use_llm``, the auto-refresh inside
+    ``GET /api/athlete/training-status``) without losing their ordinary
+    non-spending behaviour for a token.
     """
     if getattr(ctx, "is_pat", False):
         return LlmAccess(False, "none", PAT_LLM_FORBIDDEN)
@@ -237,22 +237,19 @@ def parse_usage(usage: Any) -> tuple[int | None, int | None, int | None]:
 def merge_usage(total: Any, addition: Any) -> dict | None:
     """Add one completion's ``usage`` onto a running total (issue #43).
 
-    A single-shot analysis is one call and one usage object. An agent loop is
-    three to five, each reported independently by the provider, and recording
-    only the last would under-report the run by however many turns it took —
-    the concrete bug the issue names, not a theoretical one. Summing here keeps
-    ``GET /api/admin/llm-usage/summary`` honest without every caller having to
-    remember.
+    An agent loop is three to five calls, each reported independently, so
+    recording only the last under-reports the run. Summing here keeps
+    ``GET /api/admin/llm-usage/summary`` honest.
 
-    Absent parts stay absent rather than becoming zero: a provider that reports
-    no ``completion_tokens`` has told us nothing, and ``0`` is a claim.
+    Absent parts stay absent rather than becoming zero: a provider reporting no
+    ``completion_tokens`` has told us nothing, and ``0`` is a claim.
 
     Each side is normalised **before** the addition, deriving a missing
-    ``total_tokens`` from that side's own parts exactly as :func:`parse_usage`
-    does. Doing it per side rather than once at the end is what makes a run that
-    mixes reporting styles add up: a turn that reported only ``total_tokens: 50``
-    followed by one that reported only ``400 + 300`` cost 750, and reconciling
-    the two afterwards can only see a total of 50 against parts of 700.
+    ``total_tokens`` from that side's own parts as :func:`parse_usage` does.
+    Per side rather than once at the end, which is what makes a run mixing
+    reporting styles add up: a turn reporting only ``total_tokens: 50`` followed
+    by one reporting only ``400 + 300`` cost 750, and reconciling afterwards
+    could only see a total of 50 against parts of 700.
     """
     if not isinstance(addition, dict):
         return total if isinstance(total, dict) else None

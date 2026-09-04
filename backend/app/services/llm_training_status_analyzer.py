@@ -539,16 +539,14 @@ async def analyze_training_status_bg(
             )
 
             def _touch() -> None:
-                # `PENDING_TIMEOUT_MINUTES` compares against this column, and it
-                # was calibrated when the path made exactly one completion. An
-                # agentic run makes up to seven, and `_STREAM_TIMEOUT` is a
-                # *read* timeout — between chunks — so it bounds no turn's total
-                # duration. A slow local model can therefore cross the budget
-                # while perfectly healthy. Touching the timestamp on every
-                # progress commit turns it into "no progress for N minutes"
-                # rather than "started N minutes ago", which is what it should
-                # always have meant. Free: `stream_into_db` commits right after
-                # every callback anyway.
+                # `PENDING_TIMEOUT_MINUTES` compares against this column and was
+                # calibrated when the path made exactly one completion. An agentic
+                # run makes up to seven, and `_STREAM_TIMEOUT` is a *read* timeout
+                # between chunks, so it bounds no turn's total duration — a slow
+                # local model can cross the budget while perfectly healthy.
+                # Touching the timestamp on every progress commit turns it into
+                # "no progress for N minutes" rather than "started N minutes ago".
+                # Free: `stream_into_db` commits right after every callback.
                 athlete.training_status_updated_at = datetime.now(timezone.utc)
 
             def _set_status(text: str) -> None:

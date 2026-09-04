@@ -314,10 +314,9 @@ GOAL_SCENARIOS: dict[str, dict] = {
 #   after an error   does it adjust, or repeat the call that just failed?
 #   the final turn   does `MOOD:` survive a turn that follows tool results?
 #
-# That third one is the reason this family exists. Models are measurably worse
-# at obeying a leading-format instruction after tool results than on a clean
-# single-shot prompt, and the whole avatar contract rests on that line — so the
-# roster needs evidence per model, not an assumption.
+# That third one is the reason this family exists: models are measurably worse at
+# obeying a leading-format instruction after tool results than on a clean
+# single-shot prompt, and the avatar contract rests on that line.
 #
 # The tool results below are hand-written stand-ins shaped like the real tools'
 # output. The *prompts* still come from the real builders, which is the property

@@ -1,11 +1,10 @@
 """Collapse instance LLM single-config into presets; first preset is the default.
 
-The instance LLM configuration becomes purely a list of presets
-(``llm_models``) whose **first entry is the default** selection. Everything is
-defined per-preset: the separate default-model field (``llm_model``), the
-instance-level single connection (``llm_base_url`` / ``llm_api_key_enc``) and
-the global ``llm_extra_headers`` are all removed — they no longer act as
-fallbacks/globals.
+The instance LLM configuration becomes purely a list of presets (``llm_models``)
+whose **first entry is the default**. Everything is defined per-preset: the
+separate default-model field (``llm_model``), the instance-level single
+connection (``llm_base_url`` / ``llm_api_key_enc``) and the global
+``llm_extra_headers`` are all removed as fallbacks.
 
 To preserve existing behaviour the data is migrated forward before the columns
 are dropped:

@@ -1,17 +1,14 @@
 """Resolving the athlete's local timezone — one place, one set of rules.
 
 ``app_settings`` is a free-form JSON dict (``schemas/athlete.py``), so its
-``timezone`` key holds whatever a client sent: a valid IANA name, a typo, or a
-value that isn't a string at all. Every consumer needs the same answer to "what
-is today for this athlete", and needs it to never raise — a bad setting must
-degrade to UTC, not 500 a page.
+``timezone`` key holds whatever a client sent — a valid IANA name, a typo, or a
+non-string. Every consumer needs the same answer to "what is today for this
+athlete", and needs it never to raise: a bad setting degrades to UTC.
 
-Two consumers with different needs, which is why there are two functions:
-
-- the LLM prompts want "now" as a datetime;
-- the achievement rules (issue #33) want the ``ZoneInfo`` itself, to convert each
-  activity's ``start_time`` into a local calendar date. Getting that wrong is
-  visible in the streak numbers, not just in prompt text.
+Two consumers, hence two functions: the LLM prompts want "now" as a datetime, and
+the achievement rules (issue #33) want the ``ZoneInfo`` itself, to convert each
+activity's ``start_time`` into a local calendar date — where getting it wrong
+shows up in the streak numbers.
 """
 
 from __future__ import annotations

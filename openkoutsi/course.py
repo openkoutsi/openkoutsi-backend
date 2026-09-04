@@ -1,10 +1,10 @@
 """Course recon — gradient segmentation and pacing physics for a GPX course (issue #55).
 
-A *course* is a route the athlete is going to ride, uploaded on purpose for
-pacing analysis — as opposed to an activity, which records a ride that already
-happened. The pipeline here turns a parsed :class:`openkoutsi.gpx.Route` into
-a segment table with a power target and predicted split per segment, solved
-from the athlete's own FTP and weight plus a handful of bike parameters:
+A *course* is a route the athlete is going to ride, as opposed to an activity,
+which records one already ridden. The pipeline turns a parsed
+:class:`openkoutsi.gpx.Route` into a segment table with a power target and
+predicted split per segment, solved from the athlete's FTP and weight plus a few
+bike parameters:
 
 1. :func:`thin_track` — reduce the raw track to ~8 m point spacing.
 2. :func:`course_profile` — smooth elevation over a *distance* window and
@@ -18,13 +18,11 @@ from the athlete's own FTP and weight plus a handful of bike parameters:
    requested finish time, refusing (with a reason code, not a number) targets
    that would take more power than a human sustains.
 6. :func:`solve_target_power` — the other inverse: hold a requested *average*
-   power and report the time it produces. Same effort distribution, the other
-   half of the question an athlete actually asks.
+   power and report the time it produces.
 
 Everything here is pure — no DB, no I/O, plain floats in and out. The physics
-carries a **still-air, dry-pavement assumption**: wind is Stage 3 (#57) and
-surface classification is Stage 2 (#56), and until then a plan built from
-these numbers should say so rather than imply a windless day is a prediction.
+carries a **still-air, dry-pavement assumption** (wind is Stage 3, #57; surface
+Stage 2, #56), which a plan built from these numbers must say out loud.
 """
 from __future__ import annotations
 
@@ -187,14 +185,12 @@ class TrackPoint:
 class CourseTrack:
     """The thinned course geometry — **the quarantine type for coordinates.**
 
-    Exists for exactly two consumers: persistence (the course's stored track,
-    per the decision in issue #54) and :func:`course_profile`, which converts
-    it into the coordinate-free profile everything else runs on.
-    :func:`analyze_course` deliberately does not accept one of these, so the
-    analysis, storage-row and prompt pipeline downstream of the single
-    conversion call is typed coordinate-free. Never format one into a string,
-    a prompt, or an API response — ``repr`` shows only the point count on
-    purpose.
+    Two consumers only: persistence (the stored track, per issue #54) and
+    :func:`course_profile`, which converts it into the coordinate-free profile
+    everything else runs on. :func:`analyze_course` deliberately does not accept
+    one, so everything downstream of that single conversion is typed
+    coordinate-free. Never format one into a string, prompt or API response —
+    ``repr`` shows only the point count on purpose.
     """
 
     points: list[TrackPoint] = field(repr=False)
@@ -326,13 +322,12 @@ def thin_track(route: Route, spacing_m: float = THIN_SPACING_M) -> CourseTrack:
     """Reduce a parsed route to roughly ``spacing_m`` point spacing.
 
     Distance accumulates by haversine under the same :func:`geo.step_is_travel`
-    glitch rule the activity path uses, using each point's ``offset_s`` where
-    the route carried times. The first and last points are always
-    kept, and the spacing widens if ``spacing_m`` would produce more than
-    :data:`MAX_THINNED_POINTS` of them. Points missing elevation are filled by linear interpolation over
-    distance between their nearest elevated neighbours (ends take the nearest
-    known value); a route with no elevation at all keeps ``None`` throughout
-    and is rejected later by :func:`course_profile` with a reason code.
+    glitch rule the activity path uses. First and last points are always kept,
+    and the spacing widens if ``spacing_m`` would exceed
+    :data:`MAX_THINNED_POINTS`. Points missing elevation are linearly
+    interpolated over distance between their nearest elevated neighbours (ends
+    take the nearest known value); a route with no elevation at all keeps
+    ``None`` throughout and is rejected by :func:`course_profile`.
     """
     # Measure first, so the spacing can be widened before anything is kept.
     # Deliberately re-derived here rather than read off ``Route.distance_m``:
@@ -482,11 +477,9 @@ def segment_by_gradient(
 
     ``surfaces`` is one class per profile point, already dissolved by
     :func:`openkoutsi.surface.dissolve_runs`. **A merge never crosses a surface
-    boundary.** All the judgement about which boundaries are real — which short
-    runs are match noise and which are a 130 m sector of mud worth keeping —
-    was made there, on severity; this pass only honours the answer. Putting
-    that decision in one place is what stops the gradient floor from quietly
-    swallowing a sector the surface pass went to the trouble of preserving.
+    boundary**: which boundaries are real was decided there, on severity, and
+    this pass only honours the answer — otherwise the gradient floor would
+    swallow a sector the surface pass preserved.
     """
     pts = profile.points
     if len(pts) < 2:
@@ -605,13 +598,12 @@ def solve_speed_ms(
 ) -> float:
     """Steady-state speed for a given power, uncapped.
 
-    Solves ``P·η = v·m·g·(Crr·cosθ + sinθ) + ½·ρ·CdA·v³`` by bisection —
-    matching the house preference for a bracketing method over a continuous
-    optimiser (see the rationale in ``training_math``, which measured and
-    rejected scipy). The demand side is eventually strictly increasing in v,
-    so the bracket [0, 40 m/s] contains exactly one crossing for any P ≥ 0;
-    on a descent, P = 0 yields the still-air terminal velocity. Callers apply
-    :data:`DESCENT_SPEED_CAP_MS` — this function reports the physics.
+    Solves ``P·η = v·m·g·(Crr·cosθ + sinθ) + ½·ρ·CdA·v³`` by bisection, matching
+    the house preference for a bracketing method over a continuous optimiser (see
+    ``training_math``). The demand side is eventually strictly increasing in v,
+    so [0, 40 m/s] contains exactly one crossing for any P ≥ 0; on a descent
+    P = 0 gives the still-air terminal velocity. Callers apply
+    :data:`DESCENT_SPEED_CAP_MS` — this reports the physics.
     """
     theta = math.atan(gradient)
     linear = total_mass_kg * GRAVITY_MS2 * (crr * math.cos(theta) + math.sin(theta))
@@ -798,29 +790,19 @@ def solve_target_power(
 ) -> PacingSolution:
     """Distribute effort around a requested **average** power.
 
-    The mirror image of :func:`solve_target_time`: the athlete fixes the watts
-    and the model reports the finish time, rather than fixing the time and
-    reporting the watts. What is held to the request is the *time-weighted
-    average* over the whole ride — the number on the head unit at the finish —
-    not the power of any one segment. The gradient weighting still spends on
-    the climbs and backs off on the descents, exactly as it does for a time
-    target; asking for 210 W does not mean 210 W everywhere.
+    The mirror image of :func:`solve_target_time`. What is held to the request is
+    the *time-weighted average* over the whole ride, not any one segment's power;
+    the gradient weighting still spends on the climbs.
 
-    Average power rises with the intensity k — every segment's power is linear
-    in k while its duration only shrinks — so the same bisection applies.
+    Average power rises with the intensity k, so the same bisection applies.
     Outside the bracket the request is clamped rather than refused, and
-    ``required_intensity`` always reports what the returned plan actually asks
-    for, so a clamp shows up as a number that differs from the request instead
-    of being silent.
+    ``required_intensity`` always reports what the returned plan asks for, so a
+    clamp shows up as a number differing from the request.
 
-    A power target can never be "faster than physics": it names an effort, and
-    an effort is always rideable — the question is only for how long. So the
-    one refusal it can earn is ``"exceeds_sustainable_power"``, and it is
-    reported **with the splits kept**. That is the deliberate difference from
-    :func:`solve_target_time`, which returns none: an impossible time describes
-    no ride at all, while an unsustainable power describes a ride the model can
-    lay out in full — and the splits are the very thing that shows how long the
-    athlete would be holding it.
+    A power target can never be "faster than physics" — it names an effort, and
+    the only question is for how long — so its one refusal is
+    ``"exceeds_sustainable_power"``, reported **with the splits kept**. Unlike an
+    impossible time, an unsustainable power still describes a rideable plan.
     """
     if not segments or rider.ftp_w <= 0 or target_power_w <= 0:
         return _unsolvable()
@@ -938,25 +920,17 @@ def _resample_profile(points: Sequence[ProfilePoint]) -> list[ProfilePoint]:
     """The chart payload: at most :data:`CHART_PROFILE_MAX_POINTS` samples on an
     **evenly spaced** distance grid, elevation and gradient interpolated.
 
-    Even spacing is a contract, not a detail. A profile chart draws one mark per
-    point and sizes every mark from the *smallest* gap in the series, so an
-    unevenly sampled payload draws a hairline comb — and a payload with two
-    samples at the same distance sizes every mark to zero and draws nothing at
-    all. Both are what the athlete sees: an empty chart with correct axes.
+    Even spacing is a contract. A profile chart sizes every mark from the
+    *smallest* gap in the series, so an unevenly sampled payload draws a hairline
+    comb, and two samples at the same distance size every mark to zero and draw
+    nothing at all.
 
-    Snapping each grid target to the last source point at or below it (what this
-    did before) produces exactly that. It is safe only while the source is dense
-    everywhere: a GPX from a route planner is not — long straights carry a point
-    per kilometre while junctions carry one every few metres — so wherever the
-    track was sparser than the grid, consecutive targets snapped to the *same*
-    point and the payload carried repeated distances.
-
-    Interpolating between the two bracketing samples instead is both uniform and
-    honest: between two real samples the chart draws a straight line either way,
-    so the reconstruction is the one the athlete would have seen, on a grid the
-    chart can actually mark. The grid never carries more samples than the source
-    did — a sparse course stays a sparse course, at its own resolution — and its
-    ends are the source's own first and last points, exactly.
+    Snapping each grid target to the last source point at or below it produces
+    exactly that wherever the track is sparser than the grid — which a route
+    planner's export is, between junctions. Interpolating between the two
+    bracketing samples is uniform and equally honest, since the chart draws a
+    straight line between real samples either way. The grid never carries more
+    samples than the source did, and its ends are the source's own.
     """
     n = min(CHART_PROFILE_MAX_POINTS, len(points))
     if n < 2:

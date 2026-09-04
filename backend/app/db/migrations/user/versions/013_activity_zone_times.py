@@ -4,9 +4,7 @@ Stores each activity's accumulated time-in-zone (power + HR), computed at
 processing time from the athlete's zones as they were then. Frozen once set so
 later zone edits don't rewrite historical weekly zone distributions.
 
-Idempotent: safe to run against DBs that already have the column (including ones
-built fresh by SQLAlchemy create_all, which adds the column but doesn't stamp
-alembic).
+Idempotent, like every migration in this tree.
 """
 from alembic import op
 import sqlalchemy as sa

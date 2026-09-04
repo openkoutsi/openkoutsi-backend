@@ -22,18 +22,16 @@ class Message(UserBase):
     Lives in the per-user DB, so the file itself identifies the recipient — no
     recipient column is needed.
 
-    Text is stored pre-rendered, in `title` and `body`, written by
-    `backend.app.services.message_text` at send time. Messages used to carry
-    only `type` + `data` and be rendered from an i18n template in the web app,
-    which meant a message could never say more than the template the frontend
-    happened to ship — the achievement notification could only count badges, not
-    name them. `locale` records which language the text was rendered in, so
-    translated rendering can be added later without a migration.
+    Text is stored pre-rendered in `title` and `body` by
+    `backend.app.services.message_text` at send time. Rendering from an i18n
+    template in the web app meant a message could never say more than the
+    template the frontend shipped — the achievement notification could count
+    badges but not name them. `locale` records which language the text was
+    rendered in, so translated rendering can be added without a migration.
 
-    `type` and `data` are still stored, but as machine-readable metadata (icon
+    `type` and `data` are still stored, as machine-readable metadata (icon
     selection, deep links, the GDPR export) rather than as the source of the
-    text. All three text columns are nullable because messages written before
-    this change have none.
+    text. All three text columns are nullable, for messages written before this.
     """
 
     __tablename__ = "messages"

@@ -5,10 +5,9 @@ The per-user Alembic env migrates a single database selected by ``USER_ID``.
 With one SQLite file per user, upgrading a deployment means running it once per
 user; this script automates that loop over ``data/users/*/user.db``.
 
-It runs from the container entrypoint, before uvicorn is exec'd: ``set -e``
-plus a non-zero exit is what stops a container serving a schema behind its code,
-checked once at the only moment it can change. So what matters is that it be
-*cheap* rather than elsewhere (issue #50). Two things make it so:
+It runs from the container entrypoint, before uvicorn is exec'd: ``set -e`` plus
+a non-zero exit is what stops a container serving a schema behind its code. So it
+has to be cheap (issue #50), which two things make it:
 
 * **One process, not one per user.** Spawning an interpreter per user cost a
   startup, a ``backend`` import and an ``env.py`` exec each — ~0.89 s, almost
@@ -17,9 +16,9 @@ checked once at the only moment it can change. So what matters is that it be
 * **Users already at head are skipped**, so a deploy shipping no user migration
   is one small read per user.
 
-Not parallelised: the steady state is N cheap reads, and the one deploy that
-does real work is where deterministic ordering and a readable list of failures
-beat wall-clock time. ``--jobs`` is the escape hatch if that changes.
+Not parallelised: the steady state is N cheap reads, and on the one deploy that
+does real work, deterministic ordering and a readable list of failures beat
+wall-clock time. ``--jobs`` is the escape hatch if that changes.
 
 Usage (from repo root):
     uv run python backend/scripts/migrate_user_dbs.py

@@ -1,13 +1,11 @@
 """Aerobic response metrics applied to an activity (issue #37).
 
 Four paths populate an activity from its streams — ``process_fit_file``, the
-reprocess endpoint, and both provider-sync paths (FIT download and the
-stream-based Strava fallback). All of them need the same derivations: the
-decoupling figure (or the reason one would mislead), the CP/W' snapshot, and the
-``w_bal`` stream. This module holds that step once so the four can't drift
-apart, and ``tests/integration/test_writer_paths.py`` asserts the invariant
-across all of them so a fifth path fails loudly rather than silently shipping
-nulls.
+reprocess endpoint, and both provider-sync paths — and all need the same
+derivations: the decoupling figure (or the reason one would mislead), the CP/W'
+snapshot, and the ``w_bal`` stream. Held once here so the four cannot drift, with
+``tests/integration/test_writer_paths.py`` asserting it across all of them so a
+fifth path fails loudly rather than shipping nulls.
 
 Efficiency factor and variability index are not here: they are pure ratios of
 columns already on the row and are derived on read in the response schema, so
@@ -44,11 +42,10 @@ from openkoutsi.training_math import (
 # has fewer readings than elapsed seconds, and a tight bound would quietly remove
 # the feature from anyone who stops at a café.
 #
-# Issue #76 made this exact rather than inferred. It used to compare a dense
-# list's *length* against elapsed seconds, which is the same number for a 1 Hz
-# ride with a dropout and for a low-rate recording — the two were indistinguish-
-# able. Streams now span the full elapsed grid with gaps marked, so the fraction
-# that carries a reading can simply be counted.
+# Issue #76 made this exact rather than inferred: comparing a dense list's
+# *length* against elapsed seconds gives the same number for a 1 Hz ride with a
+# dropout and for a low-rate recording. Streams now span the full elapsed grid
+# with gaps marked, so the fraction carrying a reading can simply be counted.
 MIN_SAMPLE_COVERAGE = 0.5
 
 
@@ -193,22 +190,19 @@ async def refit_cp_snapshots(
     it and excluded from its fit. Every ride in a full-history import therefore
     gets fit against a single ride's efforts and freezes that way (issue #77).
 
-    Running this once the import has finished re-fits those rides against the
-    now-complete bests table. **This is not a restatement of history**: the "as
-    of" restriction still applies per activity, so each ride gets exactly the fit
-    it should have had, rather than one taken with data that hadn't arrived yet.
-    That is the difference between repairing a snapshot and rewriting one — the
-    same line ``backfill_missing_power_best_weights`` draws for bodyweight.
+    Running this once the import finishes re-fits those rides against the
+    now-complete bests table. **Not a restatement of history**: the "as of"
+    restriction still applies per activity, so each ride gets the fit it should
+    have had — the line ``backfill_missing_power_best_weights`` draws for
+    bodyweight.
 
-    Scoped by ``since`` (the earliest activity the import touched) so an ordinary
-    incremental sync re-fits only the days it actually affected. Note that older
-    rides arriving late legitimately change *newer* rides' fits too, which is why
-    the range runs forward from the earliest import rather than covering only the
-    new rows.
+    Scoped by ``since``, the earliest activity the import touched, so an
+    incremental sync re-fits only the days it affected. The range runs *forward*
+    from there because older rides arriving late change newer rides' fits too.
 
-    Walks the history once with a running rank-1 maximum instead of querying per
-    activity, keeping this linear rather than quadratic. Returns the number of
-    activities whose snapshot changed. The caller commits.
+    Walks the history once with a running rank-1 maximum rather than querying per
+    activity. Returns the number of activities whose snapshot changed; the caller
+    commits.
     """
     bests = await cp_fit_bests_ordered(athlete_id, session)
 

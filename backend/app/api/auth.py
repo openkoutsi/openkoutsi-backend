@@ -414,13 +414,11 @@ async def reset_password(
     invalidate_sessions(user)
     # And to any change of address already in flight (issue #62). Revoking the
     # credentials but leaving that armed is not a recovery: an attacker holding
-    # the password can request a move to their own address and confirm the new
-    # side before the victim ever notices, and the old-side approval then sits
-    # live in the victim's inbox for the rest of its 24 hours. The message that
-    # put it there is the one telling them to change their password — and with
-    # no authenticated change-password endpoint, *this* is that flow. So a reset
-    # that spared it would hand the account over on the next curious click, by
-    # way of the very advice meant to prevent it.
+    # the password can request a move to their own address, confirm the new side,
+    # and leave the old-side approval sitting live in the victim's inbox for the
+    # rest of its 24 hours — put there by the message telling them to change
+    # their password, which with no authenticated change-password endpoint is
+    # *this* flow.
     #
     # The invariant: recovering an account withdraws every credential it issued
     # **and** every identity change standing against it.
@@ -667,19 +665,16 @@ async def _dead_signup_stub(
 ) -> User | None:
     """Another account holding this address that never finished signing up.
 
-    A self-serve signup writes the user row *before* the address is confirmed,
-    so an abandoned attempt leaves a row squatting on it with
-    ``email_verified_at`` NULL and a verification token that has long expired.
-    :func:`signup` treats such a row as reusable — it resets the password and
-    mails a fresh link — so refusing to let a change claim the same address
-    would make this flow stricter than the one that created the obstruction, and
-    permanently: nothing expires it, and the uniform acknowledgement means the
-    user sees no reason why their link never arrives. With self-serve signup on,
-    that also makes "sign up as someone and never verify" a way to deny them an
-    address for good.
+    A self-serve signup writes the user row *before* the address is confirmed, so
+    an abandoned attempt leaves a row squatting on it with ``email_verified_at``
+    NULL and an expired verification token. :func:`signup` treats such a row as
+    reusable, so refusing to let a change claim the same address would be
+    stricter than the flow that created the obstruction — permanently, since
+    nothing expires it — and would make "sign up as someone and never verify" a
+    way to deny them an address for good.
 
-    A row still holding a *live* verification token is a signup in progress, not
-    an abandoned one, and keeps the address.
+    A row still holding a *live* verification token is a signup in progress and
+    keeps the address.
     """
     result = await session.execute(
         select(User).where(
@@ -785,12 +780,11 @@ async def change_email(
     (#102, F-06).
 
     Delivery is handed to a background task rather than awaited, which keeps a
-    slow or wedged provider from holding the response open and closes most of
-    the timing gap between the branches that send and the branches that don't.
-    What remains is a database commit, not a network round trip. Note this is
-    narrower than uniform: ``signup`` and ``request_password_reset`` have the
-    same shape and are deliberately left alone here rather than widening a
-    security fix into endpoints it wasn't otherwise touching.
+    slow provider from holding the response open and closes most of the timing
+    gap between the branches that send and those that don't; what remains is a
+    database commit, not a network round trip. Narrower than uniform: ``signup``
+    and ``request_password_reset`` share the shape and are deliberately left
+    alone here.
     """
     if not provider.is_configured:
         # No way to confirm the new address, so no honest way to offer the

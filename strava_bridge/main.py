@@ -54,17 +54,15 @@ class Settings(BaseSettings):
 
     # Off until Strava supports webhook signatures officially. Strava documents
     # the hub.challenge subscription handshake and nothing else: no signing
-    # secret, no header name, and no statement of which bytes are signed. An
-    # `X-Hub-Signature-256` verified against the client secret is a guess at an
-    # undocumented feature, and a guess that fails closed rejects the real
-    # events too — Strava sends no such header today, so every delivery was
-    # answered with 401 and webhooks did not work at all.
+    # secret, no header name, no statement of which bytes are signed. Verifying
+    # `X-Hub-Signature-256` against the client secret is a guess at an
+    # undocumented feature, and one that fails closed rejects the real events
+    # too — Strava sends no such header, so every delivery got a 401.
     #
     # The verification is kept below rather than deleted. Set
-    # STRAVA_VERIFY_WEBHOOK_SIGNATURE=true to require the header again once
-    # Strava documents the header, the secret, and the exact validation
-    # sequence — and check that what they document is what is implemented here
-    # before trusting it.
+    # STRAVA_VERIFY_WEBHOOK_SIGNATURE=true to require the header once Strava
+    # documents it, the secret and the exact validation sequence — and check
+    # what they document matches what is implemented here first.
     strava_verify_webhook_signature: bool = False
 
     # Ceiling on unclaimed events. The queue had none: every accepted event is
@@ -238,16 +236,14 @@ async def _pending_count(session) -> int:
 def _secret_equals(supplied: str, expected: str) -> bool:
     """Compare two secrets in constant time.
 
-    `!=` returns as soon as two bytes differ, so how long the comparison takes
-    is a function of how much of the secret the caller guessed right (issue
-    #102, F-09). Remote timing attacks over HTTP are impractical in most
-    conditions, so this is hygiene rather than a hole — but the webhook token
-    below already does it properly, and one of the two being careful is worse
-    than neither, because it reads as a decision.
+    `!=` returns as soon as two bytes differ, so the comparison time is a
+    function of how much of the secret the caller guessed right (issue #102,
+    F-09). Hygiene rather than a hole over HTTP, but the webhook token below
+    already does it properly and one of the two being careful reads as a
+    decision.
 
     Encoded first: compare_digest raises TypeError on a str holding non-ASCII,
-    and `supplied` is whatever the caller sent, so comparing strs would make
-    this a 500 generator instead.
+    and `supplied` is whatever the caller sent.
     """
     return hmac.compare_digest(
         supplied.encode("utf-8", errors="replace"),
@@ -267,14 +263,12 @@ def _verify_hmac_256(body: bytes, signature_header: str | None) -> bool:
 
     Only reached when STRAVA_VERIFY_WEBHOOK_SIGNATURE is on, which is not the
     default: Strava documents no webhook signing, so requiring a signature it
-    never sends rejects every real event. See the setting for why.
+    never sends rejects every real event.
 
-    Returns True only when the secret is configured, the header is present,
-    and it matches the HMAC of the body. Every other case is False: this
-    endpoint is on a public HTTPS URL (Strava requires one), so an absent
-    header is an unauthenticated caller who simply chose not to send one,
-    not a quirk to accommodate. An unconfigured secret means no request can
-    be authenticated at all, so none is accepted.
+    True only when the secret is configured, the header is present, and it
+    matches the HMAC of the body. Every other case is False — this endpoint is on
+    a public HTTPS URL, so an absent header is an unauthenticated caller, and an
+    unconfigured secret means nothing can be authenticated at all.
     """
     if not settings.strava_client_secret or not signature_header:
         return False
@@ -319,15 +313,14 @@ async def receive_webhook(request: Request):
     """
     Receive a Strava webhook event and store it in the queue.
 
-    Unauthenticated by default, because Strava does not sign its webhooks and
-    does not document a way to authenticate them. What is left standing in
-    place of a signature: only `object_type == "activity"` events are queued;
-    the main app drops any event whose `owner_id` is not a connected athlete;
-    and for the ones it keeps it re-fetches the activity from Strava's own API,
-    so a forged payload cannot inject data, only ask for a sync of the real
-    thing. `max_queue_events` bounds what a flood can cost. That is thinner
-    than a verified signature and is the reason the check is kept rather than
-    deleted — see STRAVA_VERIFY_WEBHOOK_SIGNATURE.
+    Unauthenticated by default, because Strava neither signs its webhooks nor
+    documents a way to authenticate them. Standing in place of a signature: only
+    `object_type == "activity"` events are queued; the main app drops any event
+    whose `owner_id` is not a connected athlete; and it re-fetches the activity
+    from Strava's own API, so a forged payload can only ask for a sync of the
+    real thing. `max_queue_events` bounds what a flood costs. Thinner than a
+    verified signature, which is why the check is kept — see
+    STRAVA_VERIFY_WEBHOOK_SIGNATURE.
     """
     body = await request.body()
 
@@ -549,13 +542,13 @@ async def ack_event(event_id: str, request: Request):
 async def nack_event(event_id: str, request: Request):
     """Known failure: return the event to the queue, after a backoff.
 
-    The backoff is what makes the attempt budget mean anything. Releasing
+    The backoff is what makes the attempt budget mean anything: releasing
     immediately put the event back on the next poll, so five attempts spanned
-    four minutes — shorter than the provider incidents and expired tokens it
-    exists for. Doubling from two seconds spreads them over about half an hour.
+    four minutes — shorter than the provider incidents it exists for. Doubling
+    from two seconds spreads them over about half an hour.
 
-    No new column: a future `claim_expires_at` with `claim_token` cleared
-    already reads as "not deliverable yet" to the claim query.
+    No new column: a future `claim_expires_at` with `claim_token` cleared already
+    reads as "not deliverable yet" to the claim query.
     """
     _require_bearer(request)
     token = _required_claim_token(request)

@@ -18,12 +18,10 @@ column they write; everything between is this module:
 
 The agent loop (issue #43) is layered *on* this rather than beside it:
 :mod:`backend.app.services.llm_agent` drives many turns through
-:func:`stream_completion_events` and yields the same chunks into the same
-:func:`stream_into_db`, interleaved with :class:`AgentProgress` markers. That is
-deliberate — the DB-backed-streaming-plus-polling design exists so a local model
-taking several minutes never dies on a request timeout and a page reload never
-loses a generation, and an agentic run needs both of those properties more than
-a single-shot one does, not less.
+:func:`stream_completion_events` into the same :func:`stream_into_db`,
+interleaved with :class:`AgentProgress` markers. The DB-backed
+streaming-plus-polling design exists so a slow local model never dies on a
+request timeout and a page reload never loses a generation.
 
 Lives apart from ``llm_client`` because it needs ``llm_access`` (usage
 recording), which imports ``llm_client`` in turn.
@@ -179,23 +177,20 @@ async def stream_completion_events(
 ) -> AsyncIterator[Union[TextDelta, ToolCallDelta]]:
     """Stream one chat completion, yielding text and tool-call deltas.
 
-    The transport, and only the transport: no config resolution, no message
-    building, no reassembly. ``messages`` is sent verbatim, which is what lets
-    the agent loop replay a growing conversation — including the instance's
-    house-style system message — on every turn.
+    The transport and only the transport: no config resolution, no message
+    building, no reassembly. ``messages`` is sent verbatim, which lets the agent
+    loop replay a growing conversation on every turn.
 
     ``tools`` and ``tool_choice`` are sent only when given, so a provider that
-    has never heard of function calling sees exactly the request it saw before
-    issue #43. A provider that rejects the ``tools`` *param* raises
-    :class:`httpx.HTTPStatusError`, which
+    has never heard of function calling sees the pre-#43 request. One that
+    rejects the ``tools`` *param* raises :class:`httpx.HTTPStatusError`, which
     :func:`~backend.app.services.llm_client.is_tool_calling_unsupported_error`
-    recognises so the caller can drop back to the blob prompt.
+    recognises.
 
-    When ``usage_out`` is provided, the trailing
-    ``stream_options.include_usage`` chunk lands in it under ``"usage"``. Within
-    one call the last non-null wins; summing *across* calls is the agent loop's
-    job (:func:`~backend.app.services.llm_access.merge_usage`), because the
-    provider reports each completion independently and a run makes several.
+    With ``usage_out``, the trailing ``stream_options.include_usage`` chunk lands
+    under ``"usage"`` — last non-null wins within one call. Summing across calls
+    is the agent loop's job
+    (:func:`~backend.app.services.llm_access.merge_usage`).
     """
     url = f"{cfg.base_url.rstrip('/')}/chat/completions"
     check_url_safe(url)
@@ -305,22 +300,19 @@ async def stream_chat_completion(
 ) -> AsyncIterator[str]:
     """Yield assistant text chunks from an athlete-facing streaming completion.
 
-    Resolves the athlete's effective LLM config in the usual priority order:
-    their own BYOK server if configured, else their selected instance preset
+    Resolves the athlete's effective LLM config: their own BYOK server if
+    configured, else their selected instance preset
     (``app_settings["llm_model"]``), else the instance default (first preset).
-    The instance's ``llm_analysis_context`` — the hoster's house style — is
-    injected as a second system message when set.
+    The instance's ``llm_analysis_context`` is injected as a second system
+    message when set.
 
-    When ``usage_out`` is provided it is populated with ``{"cfg", "usage"}`` so
-    the caller can record instance-paid token usage (issue #9). ``usage`` is the
-    trailing ``stream_options.include_usage`` chunk, and stays absent when the
-    upstream omits it. BYOK calls resolve to ``source == "user"`` and are skipped
-    by usage recording (the hoster pays nothing for them).
+    ``usage_out``, when given, is populated with ``{"cfg", "usage"}`` so the
+    caller can record instance-paid usage (issue #9); it stays absent when the
+    upstream omits the trailing chunk. BYOK calls resolve to ``source == "user"``
+    and are skipped by usage recording.
 
-    This is the **non-agentic path** — the hand-built blob prompt in one shot. It
-    is not legacy: it stays the answer for every provider that cannot do tool
-    calling, which under BYOK is a population the hoster does not control (issue
-    #43), and for the bulk-import paths where nobody reads the output one by one.
+    The **non-agentic path** — the blob prompt in one shot, and not legacy: it
+    stays the answer for providers that cannot call tools and for bulk imports.
     """
     setup = await resolve_stream_setup(athlete, user_id, usage_out=usage_out)
     messages = setup.system_messages(system_prompt)
@@ -347,29 +339,22 @@ async def stream_into_db(
 ) -> None:
     """Drain a chat-completion stream into the DB, settling the status either way.
 
-    ``make_stream`` is handed the ``usage_out`` dict to pass down to
-    :func:`stream_chat_completion`; the token usage it collects is recorded on
-    the way out whether the stream succeeded, failed, or produced nothing. An
-    agentic run makes several calls and sums them into that one dict
-    (:func:`~backend.app.services.llm_access.merge_usage`), so what is recorded
-    here is the cost of the whole run rather than of its last turn — the
-    difference between an honest admin usage summary and one under-reporting by
-    four to six times.
+    ``make_stream`` is handed ``usage_out`` to pass down to
+    :func:`stream_chat_completion`; the usage it collects is recorded on the way
+    out whether the stream succeeded, failed or produced nothing. An agentic run
+    sums several calls into that one dict
+    (:func:`~backend.app.services.llm_access.merge_usage`), so the whole run's
+    cost is recorded rather than its last turn's.
 
-    The callbacks own the persistence: ``on_progress`` writes the partial text
-    (committed every ~500 ms so a mid-generation poll shows real progress),
-    ``on_done`` writes the final text and flips the status, and ``on_error``
-    marks the failure. Each is followed by a commit here, so none of them should
-    commit itself. ``label`` names the work in the log lines.
+    The callbacks own the persistence: ``on_progress`` writes partial text
+    (committed every ~500 ms so a mid-generation poll shows progress),
+    ``on_done`` writes the final text and flips the status, ``on_error`` marks
+    the failure. Each is followed by a commit here, so none should commit itself.
 
-    ``on_step`` (issue #43) receives progress *codes* when the stream yields
-    :class:`AgentProgress` markers — an agentic run's first rounds are tool calls
-    that produce no prose at all, and without this the card would sit on a
-    spinner throughout them. Steps are committed as they arrive rather than on
-    the 500 ms text cadence: there are a handful per run, and their whole purpose
-    is to be visible to the next poll. A ``None`` code clears the step, which is
-    what the loop sends the moment real prose starts, so the finished card looks
-    exactly as it did before any of this existed.
+    ``on_step`` (issue #43) receives progress *codes* from
+    :class:`AgentProgress` markers, committed as they arrive rather than on the
+    500 ms text cadence. A ``None`` code clears the step, which the loop sends
+    the moment real prose starts.
     """
     usage_out: dict = {}
     started = time.monotonic()
@@ -426,11 +411,10 @@ async def failure_recovery(
 ):
     """Clear a stuck ``pending`` when the failure landed outside the drain loop.
 
-    :func:`stream_into_db` settles the status itself, but it can only do that
-    once it is running: if opening the session — or one of the context queries
-    ahead of it — is what failed, nothing has cleared the ``pending`` the API
-    wrote, and the user watches a spinner forever. A *fresh* session is opened
-    here because the original one may be exactly what went wrong.
+    :func:`stream_into_db` settles the status itself, but only once running: if
+    opening the session — or a context query ahead of it — is what failed,
+    nothing clears the ``pending`` the API wrote. A *fresh* session is opened
+    here because the original may be exactly what went wrong.
     """
     try:
         yield

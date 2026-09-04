@@ -5,9 +5,7 @@ other one streams into a column on ``athletes`` and forgets the message list it
 built. See ``backend.app.models.chat_orm`` for why tool calls and results are
 deliberately not among the things stored.
 
-Idempotent, like every migration in this tree: safe to run against DBs already
-migrated or created fresh by SQLAlchemy create_all (which builds the tables but
-neither stamps alembic).
+Idempotent, like every migration in this tree.
 """
 from alembic import op
 import sqlalchemy as sa

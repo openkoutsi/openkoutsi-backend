@@ -29,26 +29,24 @@ def _validate_zone_list(
 ):
     """Enforce the fixed zone model on write (issue #38).
 
-    Zone lists used to be free-form: any length, any names. Anything built on
-    top of them then had to guess what a given zone meant, which is what made
-    the three-band intensity mapping hard. They are now fixed at
+    Zone lists used to be free-form — any length, any names — so anything built
+    on top had to guess what a given zone meant. They are now fixed at
     ``POWER_ZONE_COUNT`` / ``HR_ZONE_COUNT`` entries, ascending, contiguous and
     non-overlapping.
 
-    **Names are normalised, not validated.** The invariant this feature rests on
-    is positional: zone *i* is a specific physiological band, and the thing that
-    carries that position to every reader is the name, because ``time_in_zones``
-    keys the frozen snapshot by it. Leaving names free-form while validating
-    count and ordering enforced everything except the one field that mattered —
-    a natural list like ``Recovery, Endurance, Tempo, …`` passed validation and
-    then mis-mapped, and ``Sweet Spot 88-94%`` parsed as zone 88. Overwriting
-    the name makes the invariant true by construction instead of by hope, and
-    repairs existing athletes the next time they save.
+    **Names are normalised, not validated.** The invariant is positional: zone
+    *i* is a specific physiological band, and what carries that position to every
+    reader is the name, since ``time_in_zones`` keys the frozen snapshot by it.
+    Validating count and ordering while leaving names free-form enforced
+    everything except the field that mattered — ``Recovery, Endurance, Tempo, …``
+    passed and then mis-mapped, and ``Sweet Spot 88-94%`` parsed as zone 88.
+    Overwriting the name makes the invariant true by construction, and repairs
+    existing athletes the next time they save.
 
     The ordering checks used to live only in ``Zones.validate()``, which runs
-    lazily from ``time_in_zones``. A malformed list saved through the API
-    therefore passed here and blew up much later, while processing an activity.
-    Validating on the way in turns that into a 422 at the point of the mistake.
+    lazily from ``time_in_zones``, so a malformed list saved through the API blew
+    up much later while processing an activity. Validating on the way in turns
+    that into a 422 at the point of the mistake.
     """
     if zones is None:
         return None

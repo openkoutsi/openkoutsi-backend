@@ -1,31 +1,27 @@
 """Daily catch-up for athletes with a pending achievement recompute (issue #69).
 
-The write paths mark ``athletes.achievements_dirty_at`` and return; something has
-to settle it. ``GET /achievements`` does, on every read — but an athlete who
-uploads from a head unit and doesn't open the app would otherwise have the inbox
-message about their new badges wait until they did, and arrive dated whenever
-that happened to be rather than near when the badge was actually earned.
+The write paths mark ``athletes.achievements_dirty_at`` and return, and
+``GET /achievements`` settles it on every read — but an athlete who uploads from a
+head unit without opening the app would have their new-badge message wait until
+they did, dated whenever that happened.
 
 So this sweep settles what the reads haven't. It is the only consumer that gates
-on the flag: the reads cannot, because the achievements response needs progress
-and streaks whatever the flag says, so they reconcile unconditionally anyway.
-That is also why the flag is cheap to be approximate about — see the race note on
-``achievements.recompute_achievements``.
+on the flag (the reads cannot, since the response needs progress and streaks
+whatever the flag says), which is why the flag is cheap to be approximate about —
+see the race note on ``achievements.recompute_achievements``.
 
 The flag lives in each *per-user* DB while the user list lives in the *registry*,
 so the sweep reads registry rows and then opens the affected users' sessions,
-exactly as :mod:`backend.app.services.pat_expiry` already does. It runs as a
-periodic task in ``lifespan`` beside that sweep and the bridge pollers — the
-existing pattern for background work here, and why this needs no scheduler
+exactly as :mod:`backend.app.services.pat_expiry` does. It runs as a periodic task
+in ``lifespan`` beside that sweep and the bridge pollers, so it needs no scheduler
 dependency.
 
 Idempotence comes from the flag, not the schedule: ``recompute_achievements``
-clears it in the same commit as the rows it writes, and a reconcile over
-unchanged data inserts nothing, so a sweep that runs twice — or that missed a day
-— announces nothing twice. Running concurrently with a ``GET /achievements`` on
-the same athlete contends for that user DB's single write lock; the engine sets a
-30 s busy timeout, so that is a wait rather than a correctness problem, and
-whichever pass loses has nothing left to write.
+clears it in the same commit as the rows it writes, and a reconcile over unchanged
+data inserts nothing, so a sweep that runs twice — or missed a day — announces
+nothing twice. Contending with a concurrent ``GET /achievements`` on the same
+athlete is a wait on that user DB's write lock (30 s busy timeout), not a
+correctness problem: whichever pass loses has nothing left to write.
 """
 
 from __future__ import annotations
@@ -112,16 +108,14 @@ async def run_achievements_sweep(registry_session: AsyncSession) -> int:
         if not _has_database(user_id):
             # Nothing to settle: no database means no athlete and no activities.
             # Skipped rather than attempted because `_get_user_engine` creates no
-            # file (issue #102), so opening a session for one of these raises
-            # `unable to open database file` — which the guard below would log as
-            # a full traceback, once per pending signup, every single day, until
-            # the noise buried the genuinely broken database it exists to report.
-            # Building the engine also costs one of its 256 cache slots, evicting
-            # a real user's for an account that has nothing behind it.
+            # file (issue #102), so opening a session raises `unable to open
+            # database file` — which the guard below would log as a full
+            # traceback once per pending signup every day, burying the genuinely
+            # broken database it exists to report. Building the engine also costs
+            # one of its 256 cache slots.
             #
-            # An account that activates between this check and the sweep's next
-            # pass simply waits for that one — and any read of `GET /achievements`
-            # settles it sooner anyway.
+            # An account activating between this check and the sweep's next pass
+            # waits for that one, and any `GET /achievements` settles it sooner.
             log.debug("Achievement sweep skipped user %s: no database", user_id)
             continue
         try:

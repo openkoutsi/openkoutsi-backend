@@ -25,18 +25,16 @@ router = APIRouter(prefix="/public", tags=["public"])
 # Every other credential-accepting router declares a limit; this one — the only
 # unauthenticated router — declared none (issue #102, F-14). The numbers are
 # deliberately generous: F-03 already removed the expensive part of the avatar
-# route (it no longer creates a directory and three files per request), so what
-# is left to bound is ordinary request volume and `instance-info` touching the
-# registry on every call.
+# route, so what is left to bound is ordinary request volume and `instance-info`
+# touching the registry on every call.
 #
 # Note what the key is. `core.limiter` falls back to the remote address for
 # unauthenticated traffic, and uvicorn only honours `X-Forwarded-For` from
-# addresses in `FORWARDED_ALLOW_IPS`, which defaults to 127.0.0.1 — so behind a
-# reverse proxy on a container network, *every* caller looks like the proxy and
-# these become one instance-wide bucket rather than a per-client one. That is
-# why they are set far above any plausible real usage, and why DEPLOY.md now
-# covers both `FORWARDED_ALLOW_IPS` and an nginx `limit_req`: per-IP limiting
-# belongs at the proxy when there is one in front.
+# addresses in `FORWARDED_ALLOW_IPS` (default 127.0.0.1) — so behind a reverse
+# proxy on a container network *every* caller looks like the proxy and these
+# become one instance-wide bucket. Hence limits far above plausible real usage,
+# and why DEPLOY.md covers both `FORWARDED_ALLOW_IPS` and an nginx `limit_req`:
+# per-IP limiting belongs at the proxy when there is one in front.
 _INSTANCE_INFO_LIMIT = "120/minute"
 _AVATAR_LIMIT = "300/minute"
 

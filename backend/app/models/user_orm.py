@@ -170,13 +170,11 @@ class Activity(UserBase):
     # `bike_source` means unassigned; otherwise "auto" (a `default_sports`
     # match) or "manual" (the athlete picked it).
     #
-    # `bike_source` is the load-bearing half. Automapping must never overwrite
-    # a choice made by hand, and without a persisted marker there is no way to
-    # tell a bike the athlete picked from one a rule guessed — so every
-    # reprocess, re-import or edit to what a bike claims would quietly stomp
-    # the correction. It cannot be inferred at read time; it has to be written
-    # down. `services.garage.assign_bike` writes only where this is NULL or
-    # "auto", never over "manual".
+    # `bike_source` is the load-bearing half: automapping must never overwrite a
+    # hand-made choice, and without a persisted marker there is no telling a bike
+    # the athlete picked from one a rule guessed, so every reprocess or re-import
+    # would stomp the correction. `services.garage.assign_bike` writes only where
+    # this is NULL or "auto".
     bike_id: Mapped[Optional[str]] = mapped_column(
         String, ForeignKey("bikes.id", ondelete="SET NULL"), index=True, nullable=True
     )
@@ -186,16 +184,15 @@ class Activity(UserBase):
     # athlete has actually applied above (issue #63). Shape:
     # {"commute": {"state": "pending"|"accepted"|"dismissed", "source": ..., "at": ...}}
     #
-    # A separate column rather than an early write into `labels`, for two
-    # reasons that are not just tidiness. The `commuter` badge counts *labelled*
-    # activities (`services.achievements`), so applying a guess mints tiers the
-    # athlete never claimed; and the RPE queue excludes commute-labelled rides,
-    # so writing the label early would delete the ride from the very prompt
-    # where the athlete would have confirmed it.
+    # A separate column rather than an early write into `labels`: the `commuter`
+    # badge counts *labelled* activities (`services.achievements`), so applying a
+    # guess mints tiers the athlete never claimed, and the RPE queue excludes
+    # commute-labelled rides, so writing the label early would delete the ride
+    # from the prompt where the athlete would have confirmed it.
     #
     # Persisted rather than derived on read because a dismissal has to be
-    # durable: a suggestion recomputed on every read and re-offered after the
-    # athlete said no is worse than not having the feature at all.
+    # durable: re-offering a suggestion after the athlete said no is worse than
+    # not having the feature.
     label_suggestions: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # Rate of Perceived Exertion (RPE): athlete's subjective 1–10 effort score
@@ -428,21 +425,18 @@ class PlanAdherenceDaily(UserBase):
 class AchievementUnlock(UserBase):
     """One earned achievement tier (issue #33).
 
-    Unlocks are *derived state*, like ``DailyMetric`` and ``PlanAdherenceDaily``:
-    the recompute in ``backend.app.services.achievements`` treats this table as a
-    projection of the athlete's current data and rewrites it in place, so a
-    deleted activity can revoke a tier rather than leaving a badge the data no
-    longer supports.
+    *Derived state*, like ``DailyMetric`` and ``PlanAdherenceDaily``: the
+    recompute rewrites this table in place as a projection of the athlete's
+    current data, so a deleted activity can revoke a tier.
 
-    The two timestamps do different jobs. ``achieved_on`` is derived from the
-    history — the day the criterion was actually first met — so back-filling an
-    old ride moves it *earlier* instead of re-dating the unlock to today.
-    ``created_at`` is wall-clock and only says when we first noticed, which is
-    what the "new" marker and the inbox notification key off.
+    ``achieved_on`` is derived from the history — the day the criterion was first
+    met — so back-filling an old ride moves it *earlier*. ``created_at`` is
+    wall-clock and says only when we noticed, which is what the "new" marker and
+    the inbox notification key off.
 
-    The catalogue itself lives in code (``openkoutsi.achievements``), not in
-    rows: ``achievement_id`` is a stable machine key whose display name is an
-    i18n string in the web app, so no user-facing prose is stored here.
+    The catalogue lives in code (``openkoutsi.achievements``), so
+    ``achievement_id`` is a machine key whose display name is an i18n string in
+    the web app and no user-facing prose is stored here.
     """
 
     __tablename__ = "achievement_unlocks"
@@ -655,16 +649,12 @@ class WahooWorkoutUpload(UserBase):
 class ImportJob(UserBase):
     """One bulk import of activity files — an archive, or a pile of them (issue #36).
 
-    Bulk import is a different interaction from the single-file upload, not a
-    louder version of it. A Strava export is thousands of files and tens of
-    minutes of parsing, which is not a request a browser can hold open, so the
-    job is a resource: the endpoint creates one, hands back its id, and the
-    client polls it.
+    A Strava export is thousands of files and tens of minutes of parsing, which
+    no browser can hold a request open for, so the job is a resource: the
+    endpoint creates one, hands back its id, and the client polls it.
 
-    ``results`` is the part that makes a finished job useful. "847 of 900
-    imported" says nothing an athlete can act on; the per-file list says *which*
-    53 did not and why, so a corrupt export or an unsupported format is a thing
-    they can see rather than a number they have to trust.
+    ``results`` is what makes a finished job useful — "847 of 900 imported" says
+    nothing an athlete can act on, the per-file list says *which* 53 did not.
     """
 
     __tablename__ = "import_jobs"
@@ -713,15 +703,13 @@ class ImportJob(UserBase):
 class SyncLease(UserBase, LeaseMixin):
     """Cross-process mutual exclusion for this user's write paths (issue #50).
 
-    One row per named section. Today the only name in use is
-    ``activity-create:{athlete_id}``, which serialises the ±5-minute duplicate
-    check against the insert that follows it: without something at this level,
-    the only guard is an ``asyncio.Lock``, and an ``asyncio.Lock`` is a statement
-    about one event loop rather than about the database it is protecting.
+    One row per named section. The only name in use is
+    ``activity-create:{athlete_id}``, serialising the ±5-minute duplicate check
+    against the insert that follows — otherwise the only guard is an
+    ``asyncio.Lock``, a statement about one event loop rather than the database.
 
-    It lives in the per-user DB rather than the registry because that is the file
-    the writes it guards land in — a lease is only meaningful to writers holding
-    the same database open.
+    In the per-user DB rather than the registry, because that is the file the
+    guarded writes land in.
     """
 
     __tablename__ = "sync_leases"
@@ -730,16 +718,13 @@ class SyncLease(UserBase, LeaseMixin):
 class Bike(UserBase):
     """A bike the athlete owns, rides and maintains (issues #55, #64).
 
-    Tyre width selects a rolling-resistance coefficient and riding position an
-    aerodynamic drag area (both tables live in ``openkoutsi.course``). A row
-    per bike rather than fields on the athlete because the inputs change per
-    event — the gravel bike for one course, the TT bike for another — and a
-    course keeps a reference to the bike it was solved for.
+    Tyre width selects a rolling-resistance coefficient and riding position a
+    drag area (both tabulated in ``openkoutsi.course``). A row per bike rather
+    than fields on the athlete, because the inputs change per event and a course
+    keeps a reference to the bike it was solved for.
 
-    Issue #64 promoted the row rather than adding a second table beside it: the
-    garage edits the same rows the course bike selector reads, which is what
-    makes "bikes in the garage are entries in the route-analysis picker" true
-    by construction instead of a synchronisation problem.
+    Issue #64 promoted this row rather than adding a second table, so "bikes in
+    the garage are entries in the route-analysis picker" holds by construction.
     """
 
     __tablename__ = "bikes"
@@ -786,17 +771,13 @@ class Bike(UserBase):
 class BikeMaintenance(UserBase):
     """One thing done to a bike, on a date, at an odometer reading (issue #64).
 
-    ``component`` is what makes "how long did these tyres last?" answerable:
-    that question is about *two events of the same kind*, and with free-text
-    notes alone nothing can compute the span. With a component key, component
-    life falls out as the delta in ``odometer_km`` between consecutive entries
-    sharing it. Stored as a plain string rather than an enum so the vocabulary
-    stays open — the same treatment ``Activity.labels`` gets.
+    ``component`` makes "how long did these tyres last?" answerable: component
+    life is the delta in ``odometer_km`` between consecutive entries sharing it.
+    A plain string rather than an enum, like ``Activity.labels``.
 
-    ``odometer_km`` is an **absolute reading**, not an offset from anything. It
-    must not move when history is re-imported, a baseline is corrected or a
-    ride is reassigned to another bike: a maintenance log that rewrites itself
-    is worse than no log at all.
+    ``odometer_km`` is an **absolute reading**, not an offset, and must not move
+    when history is re-imported, a baseline corrected or a ride reassigned: a
+    maintenance log that rewrites itself is worse than no log.
     """
 
     __tablename__ = "bike_maintenance"
@@ -864,16 +845,14 @@ class BikeAccessory(UserBase):
 class Course(UserBase):
     """An uploaded course and everything derived from it (issue #55).
 
-    The sanctioned persistence of route data, per the Stage 0 decision in
-    issue #54: the raw GPX sits encrypted on disk under an *opaque storage
-    key* (a bare filename resolved against the user's upload directory at read
-    time — never an absolute path, see issue #51), the thinned track lives in
-    ``course_tracks``, and this row carries only coordinate-free metadata,
-    inputs, the chart profile and the pacing outcome.
+    The sanctioned persistence of route data (issue #54): the raw GPX encrypted
+    on disk under an *opaque storage key* — a bare filename resolved against the
+    user's upload directory at read time, never an absolute path (issue #51) —
+    the thinned track in ``course_tracks``, and this row carrying only
+    coordinate-free metadata, inputs, chart profile and pacing outcome.
 
-    The ``plan_*`` columns copy ``Goal.guidance*`` exactly — streamed coach
-    prose, a status, and a timestamp for pending-timeout recovery — so the
-    same stranded-run settlement applies at boot.
+    The ``plan_*`` columns copy ``Goal.guidance*`` exactly, so the same
+    stranded-run settlement applies at boot.
     """
 
     __tablename__ = "courses"
@@ -992,13 +971,12 @@ class Course(UserBase):
 class CourseTrack(UserBase):
     """The thinned track of a course — the one table that holds coordinates.
 
-    One row per course, the points as a JSON series (the ``ActivityStream``
-    pattern) rather than a row per point: ``[[lat, lon, elevation_m,
-    distance_m], …]`` at ~8 m spacing. Loaded only by re-analysis and by the
-    surface matcher (issue #56) — never serialized into an API
-    response, an MCP result, or an LLM prompt. Deliberately its own table so
-    that reading a course, listing courses and building the plan prompt touch
-    rows with nothing location-shaped in them.
+    One row per course, points as a JSON series (the ``ActivityStream`` pattern):
+    ``[[lat, lon, elevation_m, distance_m], …]`` at ~8 m spacing. Loaded only by
+    re-analysis and the surface matcher (issue #56), never serialized into an API
+    response, MCP result or LLM prompt. Its own table so that reading a course,
+    listing courses and building the plan prompt touch rows with nothing
+    location-shaped in them.
     """
 
     __tablename__ = "course_tracks"
@@ -1011,12 +989,11 @@ class CourseTrack(UserBase):
     # ``[[raw_value, confidence], …]``, aligned to ``points``.
     #
     # Only the raw value and its confidence are stored — the class, and every
-    # dissolving decision made from it, are re-derived on read. That way tuning
-    # a threshold later re-reads correctly from what is already on disk instead
-    # of needing every stored course re-matched. It lives on this table because
-    # it is the same length as the track and, like the track, is loaded only by
-    # re-analysis: listing courses and building the plan prompt must keep
-    # touching rows with nothing per-point in them.
+    # dissolving decision made from it, are re-derived on read, so tuning a
+    # threshold later re-reads correctly from what is already on disk. It lives
+    # on this table because it is the same length as the track and, like the
+    # track, is loaded only by re-analysis: listing courses and building the plan
+    # prompt must keep touching rows with nothing per-point in them.
     surfaces: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     surface_matched_at: Mapped[Optional[datetime]] = mapped_column(
         DateTime(timezone=True), nullable=True

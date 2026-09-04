@@ -7,12 +7,11 @@ weight on or before that activity's date.  This module is the single source of
 truth for that lookup, plus a pass that fills in a power best's weight when it
 was stored without one.
 
-Weight on a power best is a **snapshot**, not a derived value: it is captured
-when the activity is processed and is never rewritten afterwards.  A new weigh-in
-therefore only applies to activities from that day onward — an older activity
-keeps whatever the athlete weighed at the time, or no weight at all if none was
-logged back then.  (Same reasoning as the frozen ``Activity.zone_times``: editing
-today's profile must not silently rewrite the history of past rides.)
+Weight on a power best is a **snapshot**, captured when the activity is processed
+and never rewritten. A new weigh-in therefore applies only from that day onward —
+an older activity keeps whatever the athlete weighed at the time, or no weight at
+all. (Same reasoning as the frozen ``Activity.zone_times``: editing today's
+profile must not silently rewrite past rides.)
 """
 from __future__ import annotations
 

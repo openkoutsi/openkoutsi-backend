@@ -1,13 +1,11 @@
 """Human-readable copy for inbox messages.
 
 Inbox messages carry their own ``title`` and ``body``, rendered here at write
-time and stored on the row. That is deliberately different from how the
-achievements *page* works: the catalogue served by ``GET /api/achievements``
-stays free of display text (see ``openkoutsi.achievements``), and the web app
-localises it from the achievement id. Messages cannot work that way — a message
-type that says something new would need a matching i18n template shipped in the
-web app before it could say anything at all, which is why the achievement
-notification could only ever interpolate a count.
+time and stored on the row — deliberately unlike the achievements *page*, whose
+catalogue stays free of display text (see ``openkoutsi.achievements``) and is
+localised by the web app from the achievement id. Messages cannot work that way:
+a message type saying something new would need a matching i18n template shipped
+in the web app before it could say anything at all.
 
 So this module is the one place inbox copy lives. Adding a message type means
 adding a branch here and nothing else.

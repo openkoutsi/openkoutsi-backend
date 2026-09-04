@@ -7,16 +7,14 @@ standard library's default posture:
 
 * **No document type declaration, ever.** Every classic XML attack on a parser
   needs a DTD: external entities to read files off the server or make it fetch
-  URLs, and internal entity nesting for the exponential expansion known as the
-  billion laughs. ``xml.etree.ElementTree`` does not resolve *external* entities,
-  but it does expand internal ones, and neither hardening depends on which
-  parser accelerator is compiled in if the declaration is simply refused before
-  parsing starts. :func:`iter_elements` rejects any document carrying one.
-* **Bounded memory.** A three-hour ride is tens of thousands of track points.
-  Building the whole tree to then walk it costs an order of magnitude more than
-  the samples are worth, so this yields one element at a time and unlinks each
-  from its parent as it goes — a file's peak cost is a single track point, not
-  the file.
+  URLs, and internal entity nesting for the billion-laughs expansion.
+  ``xml.etree.ElementTree`` does not resolve *external* entities but does expand
+  internal ones, and refusing the declaration before parsing starts is
+  independent of which parser accelerator is compiled in. :func:`iter_elements`
+  rejects any document carrying one.
+* **Bounded memory.** A three-hour ride is tens of thousands of track points, so
+  this yields one element at a time and unlinks each from its parent as it goes
+  — a file's peak cost is a single track point, not the file.
 
 Namespaces are stripped rather than matched: GPX 1.0, GPX 1.1, TCX and every
 vendor extension disagree about the namespace URI and agree about the tag name,
@@ -64,23 +62,21 @@ def read_bytes(fileish: Fileish) -> bytes:
     return bytes(data)
 
 
-# Encodings this module cannot scan, because the prolog walk below compares
-# bytes against ASCII literals and a wide encoding's `<!DOCTYPE` is not those
-# bytes. Each is recognised either by its byte-order mark or, for the BOM-less
-# case, by what `<?` looks like once padded with NULs.
+# Encodings this module cannot scan, because the prolog walk below compares bytes
+# against ASCII literals and a wide encoding's `<!DOCTYPE` is not those bytes.
 #
-# Refusing them is not a limitation worth engineering around: the XML spec
-# requires a conforming processor to support UTF-16, but no device or exporter
-# in the wild writes a UTF-16 GPX or TCX, and accepting one would mean carrying
-# an encoding matrix through the one check that must not have holes in it.
-# Encodings this module cannot scan, in the order they must be tested — the
-# wider forms first, since a UTF-32 document also matches the UTF-16 pattern.
+# Refusing them is not worth engineering around: the XML spec requires a
+# conforming processor to support UTF-16, but no device or exporter in the wild
+# writes a UTF-16 GPX or TCX, and accepting one would mean carrying an encoding
+# matrix through the one check that must not have holes in it.
+# The same encodings, in the order they must be tested — the wider forms first,
+# since a UTF-32 document also matches the UTF-16 pattern.
 #
-# The BOM-less entries key on the first ``<`` rather than on ``<?``: an XML
-# declaration is *optional*, so a document may open with ``<!DOCTYPE`` and
-# nothing else, and matching only ``<?`` left exactly that shape unscanned. What
-# is not optional is that the first markup character is ``<``, so a NUL
-# immediately either side of it is conclusive whatever follows.
+# The BOM-less entries key on the first ``<`` rather than on ``<?``, because an
+# XML declaration is *optional*: a document may open with ``<!DOCTYPE`` and
+# nothing else, which matching only ``<?`` left unscanned. What is not optional
+# is that the first markup character is ``<``, so a NUL immediately either side
+# of it is conclusive.
 _UNSCANNABLE_PREFIXES: tuple[tuple[bytes, str], ...] = (
     (b"\xff\xfe\x00\x00", "UTF-32 (little-endian)"),
     (b"\x00\x00\xfe\xff", "UTF-32 (big-endian)"),
@@ -97,17 +93,16 @@ _UNSCANNABLE_PREFIXES: tuple[tuple[bytes, str], ...] = (
 def reject_doctype(data: bytes) -> None:
     """Raise if the document declares a DTD, or is in an encoding we cannot scan.
 
-    Walks the prolog rather than searching the whole file for ``<!DOCTYPE``:
-    the string can legitimately appear inside a track name, and a declaration
-    can only appear before the root element, so the precise check is also the
-    cheap one.
+    Walks the prolog rather than searching the whole file for ``<!DOCTYPE``: the
+    string can legitimately appear inside a track name, and a declaration can
+    only appear before the root element, so the precise check is also the cheap
+    one.
 
-    The walk is byte-oriented, which is only sound for an ASCII-compatible
-    encoding. A UTF-16 document spells its markup ``3C 00 21 00 44 00 …``, so
-    every literal below silently fails to match and the scan reports a clean
-    prolog on a document carrying a DTD — the guarantee has to be one cheap
-    check with no holes, so such documents are refused outright rather than
-    scanned through a decoder.
+    The walk is byte-oriented, sound only for an ASCII-compatible encoding — a
+    UTF-16 document spells its markup ``3C 00 21 00 …``, so every literal below
+    fails to match and the scan would report a clean prolog on a document
+    carrying a DTD. Such documents are refused outright rather than scanned
+    through a decoder.
     """
     for prefix, encoding in _UNSCANNABLE_PREFIXES:
         if data.startswith(prefix):
@@ -167,20 +162,17 @@ def iter_elements(data: bytes, wanted: frozenset[str]) -> Iterator[ET.Element]:
     Two kinds of element are unlinked as the parse goes, so the tree never grows
     past what is still needed:
 
-    * A **wanted** element, once the consumer has seen it. Consumers must
-      therefore read what they need from an element before asking for the next.
+    * A **wanted** element, once the consumer has seen it — so consumers must
+      read what they need before asking for the next.
     * An **unwanted** element that closes while no wanted element is open. A
-      wanted element's descendants have to survive until it is yielded — the GPX
-      parser reads ``<name>`` and ``<type>`` off a closed ``<trk>``, and the TCX
-      parser walks a ``<Trackpoint>``'s children — but everything outside them
-      is finished with the moment it closes, and holding onto it was letting a
-      file of elements this parser does not want cost several times its own size
-      in resident tree.
+      wanted element's descendants must survive until it is yielded (the GPX
+      parser reads ``<name>`` off a closed ``<trk>``; the TCX parser walks a
+      ``<Trackpoint>``'s children).
 
-    The bound is therefore "the open elements plus the subtree under the
-    outermost wanted one", which for a GPX or TCX activity is a track point. A
-    file with a wanted element wrapping the whole document is still held whole;
-    no format read here is shaped that way.
+    The bound is the open elements plus the subtree under the outermost wanted
+    one — for a GPX or TCX activity, a track point. A wanted element wrapping the
+    whole document would still be held whole; no format read here is shaped that
+    way.
     """
     reject_doctype(data)
 

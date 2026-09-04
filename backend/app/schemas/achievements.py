@@ -67,8 +67,7 @@ class AchievementsResponse(BaseModel):
     # achievement_id → the value the tiers are compared against, in the
     # definition's unit. Render as "{progress} / {next locked tier}".
     #
-    # It is *not* clamped to the next tier, so three exceptions are worth knowing
-    # about before rendering:
+    # Not clamped to the next tier, so three exceptions matter when rendering:
     #   - `plan_flawless` counts flawless plans against a single tier of 1, so it
     #     can read 3 against a maximum of 1. Only render progress toward a tier
     #     that is still locked and the case disappears.

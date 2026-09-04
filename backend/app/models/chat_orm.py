@@ -1,9 +1,9 @@
 """Stored conversations with Koutsi (issue #44).
 
-The first LLM surface in openkoutsi with anything to persist. Every other one is
-a *generation*: ``analyze_training_status_bg`` builds a prompt, streams one
-answer into a column on ``athletes``, and the message list it built dies with the
-task. A dialogue has to survive the turn that produced it, so it gets tables.
+The first LLM surface with anything to persist. Every other one is a
+*generation*: ``analyze_training_status_bg`` builds a prompt, streams one answer
+into a column on ``athletes``, and the message list dies with the task. A
+dialogue has to survive the turn that produced it, so it gets tables.
 
 Per-user DB, following the ``Message`` precedent in :mod:`.message_orm`: the
 database file identifies the owner, so there is no owner column and no
@@ -13,27 +13,19 @@ a predicate.
 What is stored, and what is deliberately not
 --------------------------------------------
 Only the dialogue — the athlete's turns and Koutsi's prose. **Tool calls and
-their results are not persisted**, though replaying them was the obvious design
-and the issue left room for it. Three reasons, in order of weight:
+their results are not persisted**, for three reasons in order of weight:
 
-1. They are almost all of the context. A single ``list_recent_activities`` result
-   dwarfs the sentence that prompted it, and replaying every past result into
-   every later turn is what would overflow a small model's window — the
-   context-growth problem issue #44 predicted, created almost entirely by
-   storing the one thing that does not need storing.
-2. They go stale. A tool result from Tuesday describes Tuesday. Re-running the
-   tool on Friday's turn is not merely cheaper than replaying it, it is *more
-   correct*, and the tools are read-only so there is nothing to be idempotent
-   about.
-3. They are evidence, not dialogue. The athlete asked a question and Koutsi
-   answered; the lookups in between are working, and the GDPR export is more
-   honest for containing the conversation rather than the machinery.
+1. They are almost all of the context; replaying every past result into every
+   later turn would overflow a small model's window.
+2. They go stale. Re-running a read-only tool on a later turn is not merely
+   cheaper than replaying Tuesday's answer, it is *more correct*.
+3. They are evidence, not dialogue, and the GDPR export is more honest for
+   containing the conversation rather than the machinery.
 
-``tool_names`` keeps only the names, in call order, so the thread can show each
-lookup where it happened — drawn from the same vocabulary as issue #43's progress
-codes. It is written through on every step rather than only when the turn
-settles, because a turn that is still gathering is exactly when that record is
-worth showing.
+``tool_names`` keeps only the names in call order, from the same vocabulary as
+issue #43's progress codes, so the thread can show each lookup where it happened.
+Written through on every step rather than when the turn settles, since a turn
+still gathering is when that record is worth showing.
 """
 
 import uuid

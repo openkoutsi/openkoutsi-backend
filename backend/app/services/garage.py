@@ -5,24 +5,18 @@ Two jobs, both about ``Activity.bike_id``:
 * **Automapping.** A bike claims a set of cycling ``sport_type`` values in
   ``Bike.default_sports``; a ride whose sport is claimed gets that bike. Run
   from every path that creates or reprocesses an activity.
-* **Distance.** ``tracked_km`` is what openkoutsi actually observed —
-  ``SUM(distance_m)`` over the rides assigned to a bike — and ``lifetime_km``
-  adds the athlete's own ``odometer_base_km`` on top. Both derived on read, so
-  reassigning a ride or fixing a baseline is immediately correct everywhere
-  with no denormalised counter to drift.
+* **Distance.** ``tracked_km`` is what openkoutsi observed — ``SUM(distance_m)``
+  over the rides assigned to a bike — and ``lifetime_km`` adds the athlete's own
+  ``odometer_base_km``. Both derived on read, so reassigning a ride or fixing a
+  baseline is immediately correct everywhere.
 
-**Applied, not suggested** — the opposite of :mod:`services.commute`, and
-deliberately so. A bike assignment mints no achievements (no badge counts
-bikes), removes nothing from any prompt (unlike a commute label, which hides a
-ride from the RPE queue), and the feature's entire value *is* the total: a
-per-bike distance counting only individually-confirmed rides is a chore, not a
-garage. It is also trivially correctable in place, which is what the athlete
-asked for.
+**Applied, not suggested** — deliberately the opposite of
+:mod:`services.commute`. A bike assignment mints no achievements and hides
+nothing from a prompt, and the feature's value *is* the total.
 
-The safety property #63 needed is still needed here; it is carried by
-``Activity.bike_source`` instead of by a suggestion state. :func:`assign_bike`
-writes only where that column is NULL or ``"auto"`` and never touches
-``"manual"``. That is the invariant this module exists to hold.
+The safety property #63 needed is carried by ``Activity.bike_source``:
+:func:`assign_bike` writes only where that column is NULL or ``"auto"`` and never
+touches ``"manual"``. That is the invariant this module holds.
 """
 from __future__ import annotations
 
@@ -68,19 +62,14 @@ class SportClaimError(ValueError):
 def normalise_default_sports(raw: Optional[Iterable[str]]) -> Optional[list[str]]:
     """Canonical, de-duplicated cycling sport types, or None for "claims nothing".
 
-    Input is normalised through :func:`canonical_sport_type`, so ``gravel_ride``
-    and ``GravelRide`` land on the same key rather than becoming two claims that
-    never both match. Anything outside the cycling set is rejected: a bike that
-    claims ``Run`` would silently never match, which is a worse outcome than a
-    422 the athlete can read.
+    Normalised through :func:`canonical_sport_type`, so ``gravel_ride`` and
+    ``GravelRide`` land on the same key. Anything outside the cycling set is
+    rejected: a bike claiming ``Run`` would silently never match, which is worse
+    than a 422 the athlete can read.
 
-    An empty list normalises to ``None`` — the column means "claims nothing"
-    either way, and keeping one spelling of that keeps the API's answers stable.
-
-    The result needs no length cap: it holds only distinct members of
-    :data:`CYCLING_SPORT_TYPES`, so it is bounded by that vocabulary however
-    long the input is. That matters because this list reaches a per-athlete map
-    rebuilt on every ingest.
+    An empty list normalises to ``None``; one spelling of "claims nothing" keeps
+    the API's answers stable. No length cap is needed, since the result holds
+    only distinct members of :data:`CYCLING_SPORT_TYPES`.
     """
     if raw is None:
         return None
@@ -108,14 +97,13 @@ async def check_sport_claims(
 ) -> None:
     """Raise if another of the athlete's bikes already claims one of ``sports``.
 
-    A sport may be claimed by **at most one bike per athlete**. Two bikes
-    claiming ``GravelRide`` has no correct resolution — picking one is being
-    wrong half the time — so the second claim is refused, naming the bike that
-    already holds it.
+    A sport may be claimed by **at most one bike per athlete** — two bikes
+    claiming ``GravelRide`` has no correct resolution — so the second claim is
+    refused, naming the bike that holds it.
 
-    Retired bikes are not counted. Retiring the gravel bike and buying another
-    is the ordinary case, and a claim held by a bike that no longer gets ridden
-    would block the replacement for no benefit.
+    Retired bikes are not counted: retiring one and buying another is the
+    ordinary case, and a claim held by a bike nobody rides would block the
+    replacement.
     """
     if not sports:
         return
@@ -188,8 +176,7 @@ def assign(
     Does **not** commit — the caller owns the transaction, because every ingest
     path already has one open.
 
-    Four outcomes, and each of the three that are not "assign it" is a case
-    this feature goes quietly wrong without:
+    Four outcomes:
 
     - ``bike_source == "manual"`` — untouched, always. The athlete's correction
       has to survive a reprocess, a re-sync and an edit to what a bike claims.
@@ -199,9 +186,7 @@ def assign(
       ``"auto"``.
     - the sport is claimed by nobody — left NULL if it was NULL. An existing
       ``"auto"`` assignment is withdrawn, so narrowing what a bike claims takes
-      its rides back, *unless* the bike it points at is retired: a retired bike
-      keeps its history, which is the entire difference between retiring and
-      deleting.
+      its rides back — *unless* that bike is retired, which keeps its history.
     """
     if activity.bike_source == SOURCE_MANUAL:
         return None
@@ -229,12 +214,10 @@ async def assign_bike(
     """:func:`assign` for a single freshly-ingested or reprocessed activity.
 
     The hook every ingest path calls — provider sync, file processing, the
-    manual-activity endpoint and reprocess. Missing any one of them produces the
-    worst bug available here: a garage whose totals are right for rides that
-    arrived one way and quietly short for rides that arrived another.
+    manual-activity endpoint and reprocess. Missing one gives a garage whose
+    totals are right for rides that arrived one way and short for another.
 
-    Cheap when no bike claims anything, which is the common case, so it is safe
-    to call unconditionally.
+    Cheap when no bike claims anything, so safe to call unconditionally.
     """
     fleet = await _fleet(session, athlete)
     claims = _claims(fleet)
@@ -247,18 +230,12 @@ async def assign_bike(
 async def assign_history(session: AsyncSession, athlete) -> dict:
     """Look at the whole back catalogue and assign what the claims cover.
 
-    The answer to a history that predates the garage: adding a bike, or changing
-    what it claims, has to be able to look backwards, or a garage is empty
-    exactly when it matters most.
-
-    Only rows with ``bike_source IS NULL`` are touched. A ride already assigned
-    — by hand or by an earlier automatic pass — is left exactly as it is, so
-    this can never stomp a correction and never silently re-home a ride.
+    Only rows with ``bike_source IS NULL`` are touched, so this can never stomp a
+    correction or silently re-home a ride.
 
     An explicit request rather than something ``PATCH /api/bikes/{id}`` does
-    inline: this walks the athlete's entire history, and doing that inside an
-    edit holds a request worker for the length of the scan. Same precedent, and
-    the same batching, as ``commute.scan_history``.
+    inline, since it walks the athlete's entire history. Same precedent and
+    batching as ``commute.scan_history``.
     """
     claims = await claim_map(session, athlete)
     if not claims:
@@ -322,11 +299,9 @@ def lifetime_km(bike: Bike, tracked: float) -> float:
 def maintenance_order(entry) -> tuple:
     """Sort key for a maintenance log: by date, then by when it was recorded.
 
-    ``performed_on`` is a date, so two things done on the same day tie. Falling
-    back to ``created_at`` keeps the order the athlete entered them in, which is
-    the only other information available about which came first — and component
-    life is a difference between *consecutive* entries, so an unstable order
-    would make the numbers move between reads.
+    ``performed_on`` is a date, so same-day entries tie; ``created_at`` breaks
+    it by entry order. Component life is a difference between *consecutive*
+    entries, so an unstable order would make the numbers move between reads.
     """
     return (entry.performed_on, entry.created_at, entry.id)
 
@@ -334,17 +309,13 @@ def maintenance_order(entry) -> tuple:
 def _span(km: float) -> Optional[float]:
     """A distance, or ``None`` where the arithmetic came out impossible.
 
-    Both spans below are differences between readings that nothing forces into
-    order. ``km_since`` goes negative whenever the athlete's odometer readings
-    run ahead of the distance openkoutsi has tracked — the ordinary state
-    before ``odometer_base_km`` is set — and ``previous_component_km`` goes
-    negative on any backdated entry carrying a lower reading than the one
-    before it, which a free-form log invites.
+    Both spans are differences between readings nothing forces into order.
+    ``km_since`` goes negative when the athlete's odometer runs ahead of the
+    tracked distance (ordinary before ``odometer_base_km`` is set), and
+    ``previous_component_km`` on any backdated entry with a lower reading.
 
-    Neither is a distance anything can render: nobody has ridden −2 980 km
-    since fitting a tyre. This module already answers "unknown" rather than
-    "zero" for a missing reading, and an impossible span earns the same answer
-    — the alternative is a confident number that is wrong.
+    Neither is a renderable distance, so an impossible span answers "unknown",
+    as a missing reading already does.
     """
     return km if km >= 0 else None
 
@@ -352,20 +323,17 @@ def _span(km: float) -> Optional[float]:
 def component_spans(entries: list, lifetime: Optional[float]) -> dict[str, dict]:
     """Per-entry component life, keyed by entry id.
 
-    Two numbers, and they answer different questions:
+    Two numbers answering different questions:
 
     - ``previous_component_km`` — how far the part replaced *at this entry* had
-      run: the difference in ``odometer_km`` from the previous entry with the
-      same ``component``. ``None`` when either reading is missing (the span is
-      genuinely unknown, which is not the same as zero) or when nothing of that
+      run: the ``odometer_km`` difference from the previous entry with the same
+      ``component``. ``None`` when either reading is missing or nothing of that
       component came before.
     - ``km_since`` — how far the bike has run since this entry. On the newest
-      entry for a component that is the open-ended case the athlete actually
-      wants: the current tyres, fitted at 4 200 km, on a bike now at 6 000, have
-      done 1 800.
+      entry for a component this is the open-ended case: tyres fitted at
+      4 200 km on a bike now at 6 000 have done 1 800.
 
-    ``is_current`` marks that newest entry per component, so a client can show
-    the running figure without re-deriving which row it belongs to.
+    ``is_current`` marks that newest entry per component.
     """
     ordered = sorted(entries, key=maintenance_order)
     previous: dict[str, object] = {}

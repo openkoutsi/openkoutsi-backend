@@ -17,34 +17,24 @@ Why this needs its own default-deny check
 -----------------------------------------
 Personal access tokens (#46) are default-deny because
 :func:`backend.app.core.scopes.build_access_map` walks ``app.routes`` and a route
-that declared nothing is simply absent from the map, so ``get_current_user``
-refuses it. That walk has nothing to say about the tools here, for a precise
-reason: ``POST /mcp`` resolves its own credential rather than depending on
-``get_current_user``, so ``route_requires_auth`` is false for it and the walk
-never asks it to declare anything. (It *is* an ordinary route and the walk does
-enumerate it — ``test_pat_scopes.py::test_the_mcp_endpoint_is_outside_this_walk_by_design``
-pins exactly that shape.)
+that declared nothing is absent from the map. That walk has nothing to say about
+the tools here, since ``POST /mcp`` resolves its own credential rather than
+depending on ``get_current_user`` — there is no honest declaration to make when
+the scope a call needs belongs to the tool named in the request body, not the
+URL. (``test_pat_scopes.py::test_the_mcp_endpoint_is_outside_this_walk_by_design``
+pins that shape.)
 
-It resolves its own credential because there is no honest declaration to make:
-the scope a call needs is a property of the tool named in the request body, not
-of the URL. One declaration on that path would have to be right for nine
-differently-scoped tools at once, and a tool added later would inherit whatever
-it said, silently.
+So the registry enforces the same property at *registration* rather than call
+time: :func:`tool` raises unless the declaration names at least one scope, every
+scope is in the shared vocabulary, and every one is a **read** scope. A tool that
+forgot to declare cannot be registered, so it cannot exist to be called.
+``tests/unit/test_mcp_registry.py`` asserts the same over whatever registered.
 
-So the registry enforces the same property at its own layer, and does it at
-*registration* rather than at call time: :func:`tool` raises unless the
-declaration names at least one scope, every scope is in the shared vocabulary,
-and every one of them is a **read** scope. A tool that forgot to declare cannot
-be registered, so it cannot exist to be called. ``tests/unit/test_mcp_registry.py``
-asserts the same properties over whatever ended up registered, which is what
-turns "the decorator would have caught it" into a standing guarantee.
-
-Scopes are an **AND**: the caller must hold all of them. That is what lets
-``get_training_status`` report Fitness/Fatigue/Form *and* the FTP and experience
-level needed to interpret them — it asks for ``metrics:read`` and ``athlete:read``
-together rather than quietly serving profile data under a metrics grant. No
-``mcp:*`` scope exists, deliberately: a scope named after the transport would
-tell the person ticking the box nothing about what it hands over.
+Scopes are an **AND**: the caller must hold all of them, which lets
+``get_training_status`` report Fitness/Fatigue/Form *and* the FTP needed to
+interpret them rather than serving profile data under a metrics grant. No
+``mcp:*`` scope exists — a scope named after the transport would tell the person
+ticking the box nothing about what it hands over.
 """
 
 from __future__ import annotations

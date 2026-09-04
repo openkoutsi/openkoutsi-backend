@@ -1,18 +1,16 @@
 """Add run tokens to the three LLM surfaces that lacked one (issue #50).
 
-``courses.plan_run_id`` already did this: it identifies the run that owns the
-columns beside it, so a run whose token no longer matches discards its own
-writes rather than putting a stale answer back on the row. The training status,
-goal guidance and activity analysis had no equivalent — and a ``pending`` row
-that a read has settled is re-triggerable while its original run may still be
-alive and merely slow.
+``courses.plan_run_id`` already did this: it identifies the run owning the
+columns beside it, so a run whose token no longer matches discards its own writes
+rather than putting a stale answer back. Training status, goal guidance and
+activity analysis had no equivalent, and a ``pending`` row a read has settled is
+re-triggerable while its original run may still be alive and merely slow.
 
 Nullable and un-backfilled: a pre-existing row carries ``NULL``, which
 ``run_is_current`` reads as the old behaviour, so nothing in flight across the
 upgrade is discarded.
 
-Idempotent, like every migration here — safe against DBs that already have the
-columns, including ones built by ``create_all`` with no alembic stamp.
+Idempotent, like every migration in this tree.
 """
 from alembic import op
 import sqlalchemy as sa

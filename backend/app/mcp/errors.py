@@ -8,13 +8,13 @@ to be *read* — what was asked for, why it isn't there, and where to look inste
     and 2026-07-16 (threshold, 1 h 12).
 
 These are returned as tool *results* with ``isError`` set, never raised out of
-the transport. An exception would abort the model's turn; a result lets it read
-the sentence and try the next thing — which is the whole point of a tool loop.
+the transport: an exception would abort the model's turn, while a result lets it
+read the sentence and try the next thing.
 
-The one deliberate exception is :class:`ToolAccessError`, which reports a
-missing scope. That is also returned as a result rather than raised, so the
-model can say "your token can't see plans" instead of the client dying, but it
-is a distinct type so the audit log can tell a refusal from a miss.
+:class:`ToolAccessError`, which reports a missing scope, is also returned as a
+result rather than raised, so the model can say "your token can't see plans"
+instead of the client dying — but it is a distinct type so the audit log can tell
+a refusal from a miss.
 """
 
 from __future__ import annotations

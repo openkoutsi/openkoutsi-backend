@@ -8,40 +8,26 @@ can observe — the row is the only record — so it is inferred from a clock, a
 this module owns both halves of that inference:
 
 * :func:`pending_timed_out` — the shared age check the routers apply on read.
-  One constant for all three, where there used to be two copies of it and, for
-  the activity analysis, no check at all.
 * :func:`settle_stranded_runs` — the startup sweep. Nothing that writes a
   ``pending`` status survives its process: the auto-analyse paths run under
-  ``asyncio.create_task`` (cancelled at loop shutdown) and ``trigger_analysis``
-  under ``BackgroundTasks`` (waited on only up to uvicorn's graceful-shutdown
-  timeout). An ordinary redeploy is therefore enough to strand whatever was in
-  flight, and :func:`~backend.app.services.llm_streaming.failure_recovery`
-  cannot help: ``except Exception`` does not catch the ``CancelledError`` that
-  kills those tasks, and nothing runs at all once the process is gone.
+  ``asyncio.create_task`` and ``trigger_analysis`` under ``BackgroundTasks``, so
+  an ordinary redeploy strands whatever was in flight, and
+  :func:`~backend.app.services.llm_streaming.failure_recovery` cannot help
+  (``except Exception`` does not catch ``CancelledError``).
 
-  The sweep used to settle **every** ``pending`` row it found, on the premise
-  that a row in that state at boot belonged to a process that was gone. That
-  premise holds only while exactly one process exists (issue #50). Behind a
-  proxy a rolling redeploy overlaps two, and the one booting would settle the
-  live runs of the one still serving — the worst regression a naive scale-out
-  would introduce, and reachable today without any replicas at all.
+  It settles only the runs whose heartbeat has run down, not every ``pending``
+  row: a rolling redeploy overlaps two processes (issue #50), and the one
+  booting would otherwise settle the other's live runs. The cost is that a run
+  killed by a restart waits out the remainder of ``PENDING_TIMEOUT_MINUTES``,
+  settled by the read that discovers it.
 
-  So the sweep asks the same question the routers ask: has the heartbeat run
-  down? A row still being written to belongs to *somebody*, and this process not
-  knowing who is not evidence that nobody does. The cost is that a run killed by
-  a restart now waits out the remainder of its budget instead of being released
-  at boot — bounded by ``PENDING_TIMEOUT_MINUTES``, and settled by the read that
-  discovers it rather than left stuck, because every surface carries that check
-  on its read path.
+For the activity analysis, being stranded was terminal: ``trigger_analysis``
+early-returns ``{"status": "pending"}`` for that state, so the activity could
+never be analysed again by any route.
 
-The activity analysis is the one where being stranded was terminal rather than
-merely ugly: ``trigger_analysis`` early-returns ``{"status": "pending"}`` for
-exactly that state, so before this the affected activity could never be analysed
-again, by any route.
-
-Both halves are needed. The sweep catches what a restart stranded but cannot see
-a task that dies inside a live process; the age check catches that but only once
-the budget has run down.
+Both halves are needed: the sweep catches what a restart stranded but not a task
+dying inside a live process; the age check catches that, once the budget runs
+down.
 """
 
 from __future__ import annotations
@@ -59,15 +45,13 @@ from backend.app.core.config import settings
 log = logging.getLogger(__name__)
 
 #: How long a run may go without visible progress before a reader declares it
-#: dead. This is an *inactivity* budget, not a duration budget: every surface
-#: touches its timestamp on each progress commit (issue #91), so a healthy run
-#: refreshes it every ~500 ms while prose is arriving and on every tool step in
-#: between. That is what makes 15 minutes safe where the old 30 was not — the
-#: transport's own read timeout (``llm_streaming._STREAM_TIMEOUT``, 300 s
-#: between chunks) fails a genuinely silent stream first, so this only has to
-#: cover the case where the process died without anyone raising, and it can be
-#: tight enough that a stuck run is recoverable in minutes rather than half an
-#: hour.
+#: dead. An *inactivity* budget, not a duration budget: every surface touches its
+#: timestamp on each progress commit (issue #91), so a healthy run refreshes it
+#: every ~500 ms while prose arrives and on every tool step between. That is what
+#: makes 15 minutes safe where the old 30 was not — the transport's own read
+#: timeout (``llm_streaming._STREAM_TIMEOUT``, 300 s between chunks) fails a
+#: genuinely silent stream first, so this only covers a process that died without
+#: raising.
 PENDING_TIMEOUT_MINUTES = 15
 
 

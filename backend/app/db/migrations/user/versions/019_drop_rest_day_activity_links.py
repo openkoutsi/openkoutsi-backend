@@ -7,29 +7,25 @@ a rest day is the loosest target a plan can offer: ``sports_match`` accepts
 make both threshold gates pass unconditionally. Any session ridden on a rest day
 was therefore linked to it on ingest.
 
-Nothing surfaced the link — the dashboard calendar skips rest rows, adherence
-scoring skips rest rows, and the activity itself shows no plan linkage — but it
-still occupied the activity's one allowed link, so linking that activity to the
-session it actually completed failed with "already linked to another planned
-workout" and nothing visible to unlink.
+Nothing surfaced the link — the dashboard calendar, adherence scoring and the
+activity itself all skip rest rows — but it still occupied the activity's one
+allowed link, so linking that activity to the session it actually completed
+failed with "already linked to another planned workout" and nothing to unlink.
 
 The matcher no longer produces these; this clears the ones already written.
 Deleting them changes no adherence score or achievement: ``score_plan`` excludes
-rest days from both the numerator and the denominator, so these links never
-contributed anything.
+rest days from both numerator and denominator.
 
-Scope is deliberately narrower than ``is_rest_workout``. That helper also treats
-an *untyped* row as a rest day, but an untyped row can carry a real prescription
-— the LLM generator passes the model's ``workout_type`` through verbatim, and
+Scope is deliberately narrower than ``is_rest_workout``, which also treats an
+*untyped* row as a rest day. An untyped row can carry a real prescription — the
+LLM generator passes ``workout_type`` through verbatim and
 ``PlannedWorkoutUpdate`` accepts ``""`` — and the manual link endpoint has never
-refused a rest day, so such a link may have been made on purpose. An untyped row
-is therefore only cleared when it prescribes nothing, which is what a genuine
-``plan_builder._rest_day`` looks like. The matcher declining to *create* a link
-is cheap to be liberal about; deleting one already in the database is not.
+refused a rest day, so such a link may have been deliberate. An untyped row is
+therefore cleared only when it prescribes nothing, which is what a genuine
+``plan_builder._rest_day`` looks like.
 
 Every deleted row is copied to ``planned_workout_activities_dropped_019`` first
-and the count is logged, so a mistake in the predicate is recoverable by hand
-rather than only discoverable from a user report.
+and the count is logged, so a mistake in the predicate is recoverable by hand.
 
 Idempotent: a plain DELETE over a predicate, safe to re-run and safe on a DB
 built fresh by SQLAlchemy create_all (which has the table but no rows to clear).

@@ -4,14 +4,13 @@ One place to ask "does this instance offer X", so a capability can be refused
 everywhere it is reachable rather than only at the HTTP route that happens to
 be the front door today.
 
-That distinction is the whole point, and the codebase already has the lesson
-written down twice. ``allow_personal_access_tokens`` is checked inside
-``validate_personal_access_token`` rather than only in ``api/tokens``, because
-a check on the issuance route would have left ``/mcp`` wide open; and
-``allow_mcp_server`` is checked before the handshake rather than per tool, so a
-disabled server never reports itself as present. Course recon gets the same
-treatment: the switch refuses the *capability* — every course and bike
-endpoint, the background matcher, the plan generator — not the entry point.
+The codebase has the lesson twice already: ``allow_personal_access_tokens`` is
+checked inside ``validate_personal_access_token`` rather than only in
+``api/tokens``, because a check on the issuance route would have left ``/mcp``
+open; and ``allow_mcp_server`` is checked before the handshake rather than per
+tool. Course recon gets the same treatment — the switch refuses the *capability*
+(every course and bike endpoint, the background matcher, the plan generator), not
+the entry point.
 """
 
 from __future__ import annotations

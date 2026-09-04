@@ -1,31 +1,25 @@
 """Running a bulk import of activity files (issue #36).
 
 The single-file upload is an interaction: pick a ride, wait a moment, see it.
-Bulk import is a *job*, and the difference is not size but shape — a Strava
-export is thousands of files and tens of minutes of parsing, which no browser
-should be asked to hold a connection open for. So the endpoint stages the upload,
-creates an ``ImportJob`` row, and this module works through it in the background
-while the client polls the job.
+Bulk import is a *job* — a Strava export is thousands of files and tens of minutes
+of parsing, which no browser should hold a connection open for. The endpoint
+stages the upload, creates an ``ImportJob`` row, and this module works through it
+in the background while the client polls.
 
 Three things here are not just "the upload path in a loop":
 
-**One file's failure is not the job's.** Every file gets a row in the job's
-result list — imported, skipped as a duplicate, or failed with a reason — and the
-loop continues. A corrupt file in an export of nine hundred should cost the
-athlete that one ride, and should tell them which one.
+**One file's failure is not the job's.** Every file gets a result row — imported,
+skipped as a duplicate, or failed with a reason — and the loop continues.
 
-**Duplicates are expected, not exceptional.** A Strava export can contain the
-same ride as FIT *and* TCX *and* GPX, so deduplication happens within the batch
-before anything is written, keeping the richest copy. Re-importing an archive
-after a partial failure then skips everything already present and says so, rather
-than failing.
+**Duplicates are expected.** A Strava export can hold one ride as FIT *and* TCX
+*and* GPX, so deduplication happens within the batch before anything is written,
+keeping the richest copy. Re-importing after a partial failure skips what is
+already present and says so.
 
 **The expensive work happens once, at the end.** ``recalculate_from`` over three
-years of history, run nine hundred times, is quadratic and pointless: the metrics
-and plan adherence are recomputed a single time once every file has landed, and
-the achievements are marked for the next reconcile to settle. Either way the
-import earns one inbox message about the badges it unlocked rather than a wall of
-them, since a recompute announces its whole batch together.
+years of history run nine hundred times is quadratic and pointless, so metrics
+and plan adherence are recomputed once every file has landed and achievements are
+marked for the next reconcile.
 """
 from __future__ import annotations
 
@@ -81,13 +75,12 @@ _PROGRESS_EVERY = 25
 #: How long a `running` job may go without touching its row before another
 #: import may start anyway.
 #:
-#: The endpoint refuses a second import while one is in flight, which is right
-#: — but a job whose process died cannot clear its own status, and without this
-#: that athlete could never import anything again. A healthy job commits at
-#: least every :data:`_PROGRESS_EVERY` files, and the longest gap between
-#: commits is the single end-of-job recalculation, so an hour is far outside
-#: anything a live job does. Same shape as `stranded_runs.pending_timed_out`:
-#: a crash-recovery bound, not a timeout.
+#: The endpoint refuses a second import while one is in flight, but a job whose
+#: process died cannot clear its own status — without this that athlete could
+#: never import again. A healthy job commits at least every
+#: :data:`_PROGRESS_EVERY` files, and the longest gap is the single end-of-job
+#: recalculation, so an hour is far outside anything a live job does. Same shape
+#: as `stranded_runs.pending_timed_out`: a crash-recovery bound, not a timeout.
 STALE_JOB_AFTER = timedelta(hours=1)
 
 
@@ -163,17 +156,17 @@ def _start_times(candidates: list[ExpandedFile]) -> list[datetime | None]:
 def deduplicate_batch(candidates: list[_Candidate]) -> None:
     """Collapse files that describe the same ride, keeping the richest format.
 
-    An export that holds one ride as ``.fit``, ``.tcx`` and ``.gpx`` should
-    produce one activity, and it should be the FIT — it has power, laps and the
-    device's own totals, where the GPX has coordinates and a heart rate.
+    An export holding one ride as ``.fit``, ``.tcx`` and ``.gpx`` should produce
+    one activity, and it should be the FIT: power, laps and the device's own
+    totals, where the GPX has coordinates and a heart rate.
 
-    Mutates the candidates in place: the losers get ``duplicate_of`` set to the
-    filename that won, because "skipped, the same ride is in the archive as
-    FIT" is a result worth showing rather than a file silently vanishing.
+    Mutates the candidates in place — losers get ``duplicate_of`` set to the
+    filename that won, so a skip is a result worth showing rather than a file
+    silently vanishing.
 
-    Grouping walks the batch in time order and opens a new group whenever a file
+    Grouping walks the batch in time order, opening a new group whenever a file
     starts more than :data:`DUPLICATE_WINDOW` after the one that opened the
-    current group — the same window the rest of the ingest paths use.
+    current group.
     """
     timed = sorted(
         (c for c in candidates if c.start_time is not None),
@@ -375,16 +368,13 @@ async def _import_one(
 async def _finalise(job: ImportJob, session, athlete_id: str, earliest: date | None) -> None:
     """The once-per-job work: metrics, adherence, achievements.
 
-    Deliberately outside the per-file loop. ``recalculate_from`` walks every day
-    from its start date to today, so calling it per activity over a multi-year
-    import is quadratic in the size of the import — and the answer it produces
-    on the way is thrown away by the next call anyway.
+    Deliberately outside the per-file loop: ``recalculate_from`` walks every day
+    from its start date to today, so calling it per activity is quadratic in the
+    size of the import, and each answer is thrown away by the next call.
 
-    Achievements are only *marked* here (issue #69). This job was already the one
-    caller doing the reconcile once rather than per file, so it was never the
-    quadratic case — but a multi-year import is exactly where that single pass is
-    most expensive, and there is nothing to be gained by paying for it inline
-    when the athlete's next read settles it anyway.
+    Achievements are only *marked* here (issue #69). A multi-year import is where
+    that single reconcile pass is most expensive, and the athlete's next read
+    settles it anyway.
     """
     if earliest is None:
         return

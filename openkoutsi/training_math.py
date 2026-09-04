@@ -1,12 +1,10 @@
 """
 Shared training load calculations — peak power, weighted power, Load, distance bests.
 
-The per-second stream math is vectorised with numpy.  Public functions still
-take any sequence (``np.asarray`` at the top) and hand back plain Python floats
-and lists, so callers can keep passing the ``list[float]`` they read out of
-``ActivityStream.data`` and persist the results straight back as JSON — an
-``np.float64`` reaching the ORM would fail at the JSON encoder rather than at
-the call site.
+The per-second stream math is vectorised with numpy.  Public functions take any
+sequence (``np.asarray`` at the top) and return plain Python floats and lists, so
+results from ``ActivityStream.data`` persist straight back as JSON — an
+``np.float64`` reaching the ORM fails at the JSON encoder, not the call site.
 """
 
 import math
@@ -45,11 +43,9 @@ def peak_average_power(
     One prefix sum serves every window, so each duration costs a single
     vectorised subtraction rather than a pass over the stream.
 
-    Gaps are dropped rather than counted as zero watts, so the window closes
-    over the samples that exist.  That is what this saw before the streams
-    carried gaps, when a dropout silently shortened the list — a best is a claim
-    about the rider, and a power meter that missed a second is not evidence the
-    rider stopped pedalling.
+    Gaps are dropped rather than counted as zero watts: a best is a claim about
+    the rider, and a power meter that missed a second is not evidence the rider
+    stopped pedalling.
     """
     return _peak_from_prefix(_prefix_sum(streams.present(stream)), duration_s)
 
@@ -112,12 +108,10 @@ def estimate_cp_wprime(bests: dict[int, float]) -> tuple[float | None, float | N
 #
 # Each model predicts mean power P(t) for an effort of ``t`` seconds and is fit
 # to the athlete's rank-1 best power per duration (same input as the CP fit
-# above).  The two nonlinear models (3-parameter CP and exponential) are fit by
-# evaluating the single nonlinear parameter over a dense grid and solving the
-# remaining parameters in closed form by ordinary least squares — the whole grid
-# as one vectorised matrix solve, see ``_ols_grid``.
-#
-# A continuous optimiser (scipy) was measured against this and rejected: it
+# above).  The two nonlinear models (3-parameter CP and exponential) evaluate
+# their single nonlinear parameter over a dense grid and solve the rest in closed
+# form by ordinary least squares, the whole grid as one vectorised matrix solve
+# (``_ols_grid``).  A continuous optimiser (scipy) was measured and rejected: it
 # improves the fit by 0.0001 %, runs 3× slower on ~10 points, and its bounded
 # solvers manufacture an answer where the grid correctly returns None.
 #
@@ -374,10 +368,9 @@ def best_time_for_distance(
 
     Returns None if the total distance in the stream is less than distance_m.
 
-    Unlike the power bests, a gap counts as a second at zero speed rather than
-    being dropped.  The answer here is a *time*, so the seconds have to be real:
-    closing the window over a dropout would stitch the metres either side of it
-    together and report a fastest kilometre that was never ridden.
+    Unlike the power bests, a gap counts as a second at zero speed: the answer is
+    a *time*, so the seconds must be real — closing the window over a dropout
+    would report a fastest kilometre that was never ridden.
     """
     return _fastest_window(_prefix_sum(streams.filled(speed_stream)), distance_m)
 
@@ -421,11 +414,9 @@ def compute_torque_stream(
     negative (coasting / no pedalling).  Returns an empty list if either input
     is empty.
 
-    This is a *paired* metric, so it reads the grid as it stands: a second where
-    either channel has a gap yields a gap, because there is no torque to state
-    without both halves of the product.  Both inputs are grid-length now, so the
-    ``min`` below is a formality — kept because streams stored before issue #76
-    can still differ in length.
+    A *paired* metric, so it reads the grid as it stands: a second where either
+    channel has a gap yields a gap.  Both inputs are grid-length now, so the
+    ``min`` below is a formality kept for streams stored before issue #76.
     """
     n = min(len(power), len(cadence))
     if n == 0:
@@ -518,15 +509,13 @@ def aerobic_decoupling(
     to the shorter one; on an odd number of samples the middle sample is
     dropped so both halves stay the same length.
 
-    This is the metric issue #76 was written for: it multiplies power against
-    the heart rate at the *same index*, so it is only meaningful because the
-    streams now share a clock.  Within each half the two channels are summarised
-    over the samples they actually have, so a gap costs a second of evidence
-    rather than pairing a wattage against somebody else's heartbeat.
+    Pairs power against the heart rate at the *same index*, so it is meaningful
+    only because the streams share a clock (issue #76).  Within each half the
+    channels are summarised over the samples they have, so a gap costs a second
+    of evidence rather than pairing a wattage against the wrong heartbeat.
 
-    Returns None if either half has no usable power or heart rate.  This is raw
-    math with no validity checks — see `decoupling_unavailable_reason` for
-    whether the answer is meaningful at all.
+    Returns None if either half has no usable power or heart rate.  Raw math with
+    no validity checks — see `decoupling_unavailable_reason`.
     """
     watts = streams.as_array(power)
     beats = streams.as_array(heartrate)
@@ -579,16 +568,13 @@ DECOUPLING_MAX_HALF_POWER_DELTA = 0.10
 # channels over the seconds carrying the better-covered one: below this
 # fraction, the two are describing different parts of the ride.
 #
-# This used to compare the two streams' *lengths*, because the parser appended
-# each channel independently and a strap dropout shifted heart rate against
-# power rather than leaving a gap — a length difference was the only symptom
-# available. It caught one large dropout and missed the case that motivated
-# issue #76: two channels each dropping a similar number of records at different
-# points in the ride, ending up near-identical in length while being internally
-# misaligned. Now that the streams share a clock, the overlap can just be
-# counted, and the same threshold covers both symptoms — including on streams
-# stored before #76, where a short channel has no gaps to count and simply
-# contributes nothing past where it stops.
+# This used to compare the two streams' *lengths*, which was the only symptom
+# available before the streams shared a clock — and it missed the case that
+# motivated issue #76: two channels each dropping a similar number of records at
+# different points, ending up near-identical in length while internally
+# misaligned. The overlap can now just be counted, and the same threshold covers
+# both symptoms, including on pre-#76 streams where a short channel has no gaps
+# and simply contributes nothing past where it stops.
 DECOUPLING_MIN_PAIRED_COVERAGE = 0.95
 
 # Smallest first-half ratio, relative to the larger of the two halves, that the
@@ -620,9 +606,8 @@ def decoupling_unavailable_reason(
     Why a decoupling figure would be misleading for this activity, or None if
     it is worth computing.
 
-    Presenting a decoupling number for a hard interval session is worse than
-    showing nothing, so the caller stores NULL and surfaces the reason instead
-    of a figure the athlete would over-read.  Reason codes are stable strings
+    A decoupling number for a hard interval session is worse than none, so the
+    caller stores NULL and surfaces the reason.  Reason codes are stable strings
     the API and web app key their explanations off:
 
     ``no_power``, ``no_hr``, ``stream_mismatch``, ``too_short``,
@@ -737,20 +722,17 @@ def w_bal_stream(
     curve built on a guessed W' would be fiction.
 
     **Requires a 1 Hz power stream.** The arithmetic is joules per *sample* and
-    only equals joules per second at one sample per second. Since issue #76 the
-    parser guarantees that — index ``i`` is second ``i`` — so this is now exact
-    rather than assumed. It is still not self-checking: a stream from somewhere
-    other than ``openkoutsi.streams`` (a pre-#76 row, a provider that skipped
-    the resampler) can still be at another rate, and the caller is responsible
-    for deciding whether the sampling supports the integration — see
+    only equals joules per second at one sample per second, which the parser has
+    guaranteed since issue #76. It is not self-checking, though: a stream from
+    somewhere other than ``openkoutsi.streams`` (a pre-#76 row, a provider that
+    skipped the resampler) can be at another rate, and deciding whether the
+    sampling supports the integration is the caller's job — see
     ``services.aerobic_metrics._sampling_supports_integration``.
 
-    Gaps count as seconds at zero watts, i.e. as recovery. This is the *time*
-    reading of a gap rather than the *sample* one: the integration is over the
-    clock, so a second with no reading has to be a second, and a rider who was
-    not measurably above CP was not spending W'. A stream gappy enough for that
-    to distort the curve should have been rejected by the caller's coverage
-    check before reaching here.
+    Gaps count as seconds at zero watts, i.e. as recovery — the *time* reading of
+    a gap rather than the *sample* one, since the integration is over the clock.
+    A stream gappy enough for that to distort the curve should have been rejected
+    by the caller's coverage check before reaching here.
     """
     if not power or not cp_wprime_plausible(cp, w_prime):
         return []

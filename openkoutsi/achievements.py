@@ -1,10 +1,9 @@
 """Achievement catalogue and streak math (issue #33).
 
-The catalogue lives here as *data*, in the spirit of the hard-coded constants in
-:mod:`openkoutsi.plan_adherence`: an achievement is an id, a category and an
+The catalogue lives here as *data*: an achievement is an id, a category and an
 ascending list of tiers. There are deliberately **no human-readable strings** —
-names and descriptions are i18n keys resolved by the frontend, so adding a new
-achievement never means putting English in the database.
+names and descriptions are i18n keys resolved by the frontend — so adding one
+never means putting English in the database.
 
 Only *unlocks* are persisted. Everything here is pure (dates and primitive
 numbers in, tier→date maps out); the DB orchestration lives in
@@ -15,10 +14,10 @@ Two rules shape the design:
 1. **Weekly granularity, never daily.** A streak is a run of consecutive
    Monday-based weeks. Daily streaks are deliberately not offered — forcing a
    ride every single day over long periods is not a healthy thing to reward.
-2. **Achievements are earned by history, not by when we happened to compute
-   them.** Every helper returns the date the criterion was *actually* first met,
-   derived from the data, so back-filling an old ride moves the unlock date
-   earlier instead of stamping it with today.
+2. **Achievements are earned by history, not by when they were computed.** Every
+   helper returns the date the criterion was *actually* first met, so
+   back-filling an old ride moves the unlock date earlier instead of stamping it
+   with today.
 """
 
 from __future__ import annotations
@@ -50,18 +49,15 @@ class AchievementDef:
     ``metres``, ``load``, ``percent``, ``weeks``, ``months``) so the frontend can
     format them without a lookup table of its own.
 
-    ``requires`` names a data dependency the athlete may simply never have —
-    elevation is FIT-only, Load needs a power meter or HR. Badges whose
-    requirement is unmet are hidden rather than shown permanently locked, so a
-    heart-rate-only rider isn't taunted by a wall of unreachable tiers.
+    ``requires`` names a data dependency the athlete may never have — elevation is
+    FIT-only, Load needs power or HR. Badges whose requirement is unmet are hidden
+    rather than shown permanently locked.
 
-    ``threshold``/``threshold_unit`` describe what makes a single *period*
-    qualify for a streak — 5 hours a week, 100 km a week — as opposed to
-    ``tiers``, which count the qualifying periods. They are set from the
-    ``STREAK_*`` constants below rather than retyped, and served over the API so
-    the UI can say "Train 5 hours or more each week" without keeping its own
-    copy of the number. Without that, changing a constant would silently leave
-    the app telling athletes a rule the engine no longer enforces.
+    ``threshold``/``threshold_unit`` say what makes a single *period* qualify for
+    a streak (5 hours a week, 100 km a week), as opposed to ``tiers``, which count
+    the qualifying periods. Set from the ``STREAK_*`` constants rather than
+    retyped, and served over the API so the UI has no copy of the number that a
+    constant change would silently invalidate.
     """
 
     id: str

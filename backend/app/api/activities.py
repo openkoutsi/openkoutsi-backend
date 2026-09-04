@@ -410,12 +410,11 @@ async def upload_activity(
 
     # ── Find-or-create under the same two guards every other writer uses ─────
     #
-    # This path went without a guard for as long as it was the only interactive
-    # writer. It is not: a Wahoo webhook or a Strava backfill landing while an
-    # athlete uploads the same ride would have both writers see an empty window
-    # and each create an activity. The window here is one request rather than
-    # the tens of minutes a bulk import holds it open, which is why this was the
-    # last of the original three to be closed rather than the first.
+    # A Wahoo webhook or Strava backfill landing while an athlete uploads the
+    # same ride would have both writers see an empty window and each create an
+    # activity. The window here is one request rather than the tens of minutes a
+    # bulk import holds it open, which is why this was the last of the original
+    # three to be closed.
     #
     # Both branches below commit inside the block, which is the invariant the
     # guard requires.
@@ -509,12 +508,11 @@ async def import_activities(
     background and the client polls `GET /activities/imports/{id}`.
 
     **On the rate limit.** The single-file upload is limited to 30/hour, which
-    is what makes importing a history one file at a time impossible. The limit
-    here is on *jobs* rather than files, because a job is the unit of work an
-    athlete actually asks for; one job may legitimately carry three thousand
-    files. A second job while one is still running is refused (409) rather than
-    queued — two imports writing to one SQLite database interleave badly, and
-    the athlete has no reason to want it.
+    is what makes importing a history one file at a time impossible. This limit
+    is on *jobs* rather than files, since a job is the unit of work an athlete
+    asks for and may legitimately carry three thousand files. A second job while
+    one is running is refused (409) rather than queued — two imports writing to
+    one SQLite database interleave badly.
     """
     ctx, session, athlete = ctx_athlete
 
@@ -845,11 +843,10 @@ async def get_rpe_queue(ctx_athlete=Depends(get_ctx_session_athlete)):
     nag.
 
     A ride with a *pending* commute suggestion is deliberately still in the
-    queue (issue #63). The prompt is where the athlete answers it — the client
-    reads ``label_suggestions`` off each item and pre-ticks its "This was a
-    commute" box — so filtering suggested rides out here would remove them from
-    the one surface that asks. Only an answered suggestion, which by then has
-    applied the label, takes a ride out.
+    queue (issue #63): the prompt is where the athlete answers it, with the
+    client reading ``label_suggestions`` off each item to pre-tick its "This was
+    a commute" box. Only an answered suggestion, which by then has applied the
+    label, takes a ride out.
 
     The cursor is stored in ``app_settings.rpe_head``. On the very first call
     (cursor unset) it is pinned to the athlete's most recent activity so the

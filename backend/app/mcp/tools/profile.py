@@ -1,35 +1,25 @@
 """``get_athlete_profile`` — who the athlete is, not what they did (issue #42).
 
-Every other tool here answers a question about training that happened: rides,
-load, plans, goals, time in zone. This one answers the question those answers
-are read *against*.
-
-Two gaps make it worth its own call rather than more fields bolted onto
-``get_training_status``.
+Every other tool answers a question about training that happened. This one
+answers the question those answers are read *against*, and earns its own call
+over more fields on ``get_training_status`` for two things:
 
 **The zone boundaries.** ``get_zone_totals`` and ``get_intensity_distribution``
-report time spent in Z1…Z7, and until now nothing said what Z4 *is* for this
-athlete. A model handed "4 h 12 in Z2" and no boundaries either says nothing
-useful about it or invents the wattage — and an invented threshold is worse than
-a refusal, because everything downstream inherits it.
+report time in Z1…Z7, and nothing else says what Z4 *is* for this athlete. A
+model handed "4 h 12 in Z2" and no boundaries either says nothing useful or
+invents the wattage, which everything downstream then inherits.
 
-**The constraints.** How many hours a week the athlete actually has, and how
-they have asked to be spoken to, are facts a coach uses in every answer and that
-no amount of activity data reveals.
+**The constraints.** How many hours a week the athlete has, and how they asked to
+be spoken to, are facts no activity data reveals.
 
-What this tool is deliberately **not** is a profile dump. ``athlete:export`` is
-excluded from the callable scopes (:mod:`backend.app.mcp.registry`) precisely
-because returning the whole record in one call is the opposite of task-shaped,
-and this tool must not become that by another door. So: no name, no date of
-birth (an age in years is what a coach uses, and it is far less identifying),
-no avatar, no FTP-test or weight history, no feature toggles, and none of the
-BYOK model configuration. Nothing here is data the athlete would be surprised to
-find had travelled to the assistant they connected.
+Deliberately **not** a profile dump: ``athlete:export`` is excluded from the
+callable scopes (:mod:`backend.app.mcp.registry`), and this tool must not become
+it by another door — no name, no date of birth (an age in years is what a coach
+uses), no avatar, no FTP-test or weight history, no feature toggles, none of the
+BYOK model configuration.
 
 The five physiology fields overlap ``get_training_status``'s ``athlete`` block,
-which stays as it is: a Form number returned without its frame invites the model
-to invent the frame, and one round trip is cheaper than making it ask twice for
-the numbers it always needs.
+which stays: one round trip is cheaper than making the model ask twice.
 """
 
 from __future__ import annotations
