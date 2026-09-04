@@ -1,17 +1,12 @@
 #!/bin/sh
-# Container entrypoint: bring the database schema up to date, then serve.
-#
-# This moves the schema upgrades that the old SSH deploy ran on the box
-# (scripts/deploy-backend.sh) into container startup, so a freshly pulled image
-# is self-applying. Both the registry and per-user databases follow the app's
-# "create_all on startup + incremental Alembic" model, so:
-#   * Fresh volume  — the app's create_all (registry init / first user.db) builds
-#     the current schema on startup; here we only STAMP the registry at head so
-#     future migrations track from a known baseline.
-#   * Existing volume — the registry already carries an alembic_version, so we
-#     apply any pending migrations, then run the per-user migration loop.
-# Paths resolve from DATA_DIR (see config / alembic env), so this operates on the
-# mounted data volume.
+# Container entrypoint: bring the database schema up to date, then serve, so a
+# freshly pulled image is self-applying. Both databases follow the app's
+# "create_all on startup + incremental Alembic" model:
+#   * Fresh volume    — create_all builds the current schema, so we only STAMP
+#     the registry at head to give future migrations a baseline.
+#   * Existing volume — the registry carries an alembic_version, so apply
+#     pending migrations, then run the per-user migration loop.
+# Paths resolve from DATA_DIR, so this operates on the mounted data volume.
 set -e
 
 DATA_DIR="${DATA_DIR:-data}"
