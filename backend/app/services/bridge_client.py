@@ -5,13 +5,12 @@ identically, so the client lives here once rather than twice in `api/`.
 
 Claim-then-ack, not process-then-claim: the old order re-served an event whose
 consumer died mid-import, and claiming first would have turned that duplicate
-into a *loss* — the import is idempotent by `(provider, external_id)`, but the
-LLM analysis it triggers is not. So the claim carries a deadline instead, and an
-unacked event becomes deliverable again when it expires.
+into a *loss* — the import is idempotent by `(provider, external_id)`, the LLM
+analysis it triggers is not. So the claim carries a deadline, and an unacked
+event becomes deliverable again when it expires.
 
-The 404 fallback covers the deploy window where a new backend meets an old
-bridge that has no `/events/claim` — Compose recreates the three images in its
-own order. Deletable a release after both bridges have shipped.
+The 404 fallback covers the deploy window where a new backend meets an old bridge
+with no `/events/claim`. Deletable a release after both bridges have shipped.
 """
 
 from __future__ import annotations

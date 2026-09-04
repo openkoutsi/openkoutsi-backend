@@ -1,20 +1,16 @@
 """The shared limiter.
 
-Keyed by *principal* rather than purely by address (issue #46). A personal access
-token makes a per-principal key both necessary — one script hammering from one
-address is not one anonymous visitor — and finally possible, because an
-authenticated request carries a stable identity in a way an IP never did.
+Keyed by *principal* rather than purely by address (issue #46): one script
+hammering from one address is not one anonymous visitor, and an authenticated
+request carries a stable identity in a way an IP never did.
 
-The principal is the **user**, not the token. Keying on the token id would be
-better for observability, but a user may mint tokens freely and each new one
-would be a fresh bucket, so the effective limit would be multiplicative in a
-number nothing caps — inverting the intent above the moment a script holds two
-credentials. The token id is still recorded on ``request.state`` (and in the
-audit log), which is where per-token attribution belongs.
+The principal is the **user**, not the token — a user may mint tokens freely, and
+each new one would be a fresh bucket, making the limit multiplicative in a number
+nothing caps. The token id is still on ``request.state`` and in the audit log,
+which is where per-token attribution belongs.
 
-Unauthenticated traffic is unaffected: with no token in play the key falls back
-to the remote address, so the limits protecting login, signup and password reset
-behave exactly as before.
+Unauthenticated traffic falls back to the remote address, so the limits
+protecting login, signup and password reset behave as before.
 """
 
 from slowapi import Limiter
@@ -29,15 +25,13 @@ def principal_key(request: Request) -> str:
     — the personal-access-token path and the session-JWT path — which run as
     dependencies and therefore before the endpoint the limiter wraps.
 
-    Session requests were originally left on the address key, which was the
-    right call when the only per-principal limits protected token traffic. Chat
-    (issue #44) is what makes it wrong: it is athlete-triggered, expensive, and
-    closed to tokens, so an address key would rate-limit a household behind one
-    NAT as a single user while leaving an actual user free to open two browsers.
+    Session requests were originally left on the address key, which chat
+    (issue #44) makes wrong: it is athlete-triggered, expensive and closed to
+    tokens, so an address key would limit a household behind one NAT as a single
+    user while leaving an actual user free to open two browsers.
 
-    ``pat_user_id`` stays readable as a fallback: it is the attribute the audit
-    log and per-token attribution use, and reading it here keeps the key stable
-    for anything that sets it directly.
+    ``pat_user_id`` stays readable as a fallback, since it is the attribute the
+    audit log and per-token attribution use.
     """
     user_id = getattr(request.state, "principal_user_id", None) or getattr(
         request.state, "pat_user_id", None
@@ -47,14 +41,13 @@ def principal_key(request: Request) -> str:
     return get_remote_address(request)
 
 
-# `key_style="endpoint"` scopes each limit to the *route*, not to the request
-# path. slowapi defaults to "url", which means the substituted path — so on any
-# route with a path parameter, every distinct value got its own bucket and the
-# limit never fired. That silently applied to the admin password-reset mint,
-# both chat write routes, and the public avatar route added for issue #102's
-# F-14, whose whole point is bounding requests for arbitrary user ids.
+# `key_style="endpoint"` scopes each limit to the *route*, not the request path.
+# slowapi defaults to "url" — the substituted path — so on any route with a path
+# parameter every distinct value got its own bucket and the limit never fired.
+# That silently applied to the admin password-reset mint, both chat write routes,
+# and the public avatar route added for issue #102's F-14, whose whole point is
+# bounding requests for arbitrary user ids.
 #
-# Per-route is what every one of those limits reads as meaning: a cap on how
-# often *this caller* may call *this endpoint*, not how often they may call it
-# with one particular id.
+# Per-route is what those limits read as meaning: a cap on how often *this
+# caller* may call *this endpoint*, not with one particular id.
 limiter = Limiter(key_func=principal_key, key_style="endpoint")

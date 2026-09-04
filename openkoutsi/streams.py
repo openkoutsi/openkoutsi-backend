@@ -5,40 +5,30 @@ seconds and index ``i`` is second ``i`` counted from the first record. Each
 element is a float, or ``None`` (``NaN`` once it reaches numpy) meaning *this
 channel had no sample at this second*.
 
-That contract did not used to hold. ``fit.summarizeWorkout`` built each channel
-by appending one sample per ``record`` frame that happened to carry that field,
-never consulting the timestamp, so the channels were index-aligned only while
-every channel appeared in every record. A heart-rate strap dropping ``n``
-records did not leave a hole in the HR list — it shifted every later HR sample
-``n`` positions *earlier* relative to power. The lists stayed dense and merely
-ended up different lengths, which is why nothing ever looked broken.
+That contract did not used to hold: ``fit.summarizeWorkout`` appended one sample
+per ``record`` frame carrying that field, never consulting the timestamp, so a
+heart-rate strap dropping ``n`` records shifted every later HR sample ``n``
+positions *earlier* relative to power. The lists stayed dense and merely ended up
+different lengths, which is why nothing looked broken.
 
-Every metric that pairs two channels at the same index depends on this module
-now doing what the old code assumed: aerobic decoupling multiplies power against
-the heart rate recorded at the same moment, ``compute_interval_stats`` slices
-``data[start_offset_s:end]`` as though the index were a clock, and
-``w_bal_stream``'s joules-per-sample arithmetic is only joules-per-second at
-exactly 1 Hz.
+Every metric pairing two channels at the same index depends on this: aerobic
+decoupling multiplies power against the heart rate at the same moment,
+``compute_interval_stats`` slices ``data[start_offset_s:end]`` as though the
+index were a clock, and ``w_bal_stream``'s joules-per-sample arithmetic is
+joules-per-second only at 1 Hz.
 
 Two rules the rest of the codebase is written against:
 
 * **A gap is not a zero.** Zero watts is coasting; a gap is the absence of a
-  measurement. Nothing here fills one in — no interpolation, no carry-forward,
-  not even across a single dropped sample — because a reconstruction that looks
-  like data is exactly what issue #76 is about removing.
-* **Consumers choose how to read a gap, and the choice is not uniform.**
-  Aggregates that don't care about alignment (average power, the power bests,
-  time-in-zone) read *present samples only*, which is byte-for-byte what they
-  saw before this module existed. Metrics that are about the clock (distance
-  bests, W' balance) read the grid with gaps as zero, because a fastest-1 km
-  measured across a dropout is a fake PR. :func:`present` and :func:`filled`
-  are the two sides of that split.
+  measurement. Nothing here fills one in — no interpolation, no carry-forward.
+* **Consumers choose how to read a gap.** Aggregates that don't care about
+  alignment (average power, power bests, time-in-zone) read *present samples
+  only*; metrics about the clock (distance bests, W' balance) read the grid with
+  gaps as zero, since a fastest-1 km measured across a dropout is a fake PR.
+  :func:`present` and :func:`filled` are the two sides of that split.
 
-Streams stored before this existed are dense with no gaps, so every helper here
-and every consumer downstream reads them exactly as it always did. There is no
-migration and nothing rewrites an activity's streams after ingestion, so those
-rides keep the old convention for good — which is why "handles both shapes" is a
-permanent requirement of everything downstream rather than a transitional one.
+Streams stored before this are dense with no gaps and nothing rewrites them, so
+"handles both shapes" is a permanent requirement downstream.
 """
 from __future__ import annotations
 
@@ -97,18 +87,13 @@ def second_offsets(
 def resample_1hz(channels: dict[str, Samples], length: int) -> dict[str, list[float | None]]:
     """Scatter each channel's ``(second, value)`` pairs onto a shared 1 Hz grid.
 
-    Every returned channel has exactly ``length`` elements, so the channels are
-    aligned by construction rather than by the coincidence of every record
-    carrying every field. Seconds no sample landed on stay ``None``.
+    Every returned channel has exactly ``length`` elements, so channels are
+    aligned by construction. Seconds no sample landed on stay ``None``; where
+    several records share a second the last wins.
 
-    Where several records share a second — a device recording at 2 Hz, or a
-    duplicate frame — the last one wins, matching the "most recent reading"
-    semantics a sensor has anyway.
-
-    Channels with no samples at all come back as ``[]`` rather than a grid of
-    ``None``: a ride with no power meter has *no power stream*, which is a
-    different statement from a power stream that is entirely gaps, and callers
-    key "did this activity record power" off the empty list.
+    Channels with no samples come back as ``[]`` rather than a grid of ``None``:
+    a ride with no power meter has *no power stream*, which differs from one that
+    is entirely gaps, and callers key "did this record power" off the empty list.
     """
     out: dict[str, list[float | None]] = {}
     for name, samples in channels.items():
@@ -132,14 +117,12 @@ def resample_from_time_stream(
     """Put provider-supplied parallel arrays onto the same grid as a FIT file.
 
     Strava hands back one array per channel plus a ``time`` array of second
-    offsets, all indexed together. That is internally consistent but it is not
-    the contract the rest of openkoutsi is written against: the arrays are only
-    1 Hz when the ride was recorded that way, so index ``i`` is not second ``i``
-    and the same pairing bugs are available. Running them through here makes the
-    provider path and the FIT path produce the same shape.
+    offsets, indexed together — internally consistent, but only 1 Hz when the
+    ride was recorded that way, so index ``i`` is not second ``i`` and the same
+    pairing bugs are available. This makes the provider and FIT paths agree.
 
-    A channel shorter than ``time_offsets`` contributes only the samples it has;
-    a channel that is empty stays empty (see :func:`resample_1hz`).
+    A channel shorter than ``time_offsets`` contributes only what it has; an
+    empty one stays empty (see :func:`resample_1hz`).
     """
     if not len(time_offsets):
         return {name: [float(v) for v in values] for name, values in channels.items()}

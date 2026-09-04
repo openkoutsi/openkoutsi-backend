@@ -7,12 +7,10 @@ only once every required side has been stamped, so an unconfirmed request never
 touches the login identifier.
 
 Both sides are required because this codebase has no authenticated
-change-password endpoint: passwords are set through reset tokens, which are
-mailed to ``users.email``. That makes the address the account's only self-serve
-root of trust. A one-sided change would let anyone holding just the password
-relocate that channel and then take the account permanently via "forgot
-password"; requiring the outgoing mailbox costs an attacker exactly what taking
-the account over already costs, so the feature adds no new leverage.
+change-password endpoint: passwords are set through reset tokens mailed to
+``users.email``, which makes the address the account's only self-serve root of
+trust. A one-sided change would let anyone holding just the password relocate
+that channel and take the account permanently via "forgot password".
 
 ``old_token_hash`` is nullable: an invite-created account has no address yet, so
 a first set has nothing to authorise against and the new side alone completes

@@ -90,17 +90,15 @@ def _looks_encrypted(value: str) -> bool:
 def _decrypt_column(fernet, value: str, *, column: str) -> str | None:
     """Decrypt one column value, or report that it cannot be read.
 
-    Returns ``None`` rather than raising when a genuine ciphertext will not
-    open. Raising would abort the whole result set, so one unreadable row would
-    take down every query that touched the table — including the ones an
-    operator needs to diagnose it. ``None`` is a value these columns already
-    hold and callers already handle (`conn.access_token or ""`), and the
-    provider write-back only happens after a *successful* call, so nothing
-    overwrites the ciphertext on the strength of it.
+    Returns ``None`` rather than raising when a genuine ciphertext will not open:
+    raising aborts the whole result set, so one unreadable row would take down
+    every query touching the table, including the ones needed to diagnose it.
+    ``None`` is a value these columns already hold and callers already handle,
+    and the provider write-back only happens after a *successful* call.
 
-    What it must never do is return the ciphertext. That was the finding: the
-    raw column came back looking like a live token, went to the provider as a
-    bearer credential, and failed there with an error about the wrong thing.
+    What it must never do is return the ciphertext — which came back looking like
+    a live token, went to the provider as a bearer credential, and failed there
+    with an error about the wrong thing.
     """
     from cryptography.fernet import InvalidToken
 

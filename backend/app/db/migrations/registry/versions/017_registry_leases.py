@@ -8,8 +8,7 @@ each time. That is the assumption `DEPLOY.md` names in requiring one process.
 runs the instance's background work is nobody's user-level decision. The
 registry is the database every process opens.
 
-Idempotent, like every migration here — safe against DBs already migrated or
-built by ``create_all`` with no alembic stamp.
+Idempotent, like every migration in this tree.
 """
 from alembic import op
 import sqlalchemy as sa

@@ -17,17 +17,15 @@ RidingPosition = Literal["tops", "hoods", "drops", "aero"]
 def _reject_explicit_null(*fields: str):
     """Refuse an explicit ``null`` on a column that is NOT NULL.
 
-    A PATCH schema declares every field ``Optional`` so it can be *omitted*,
-    but ``exclude_unset=True`` keeps a value the client actually sent as
-    ``null`` — so it reaches ``setattr`` and dies at flush on the constraint.
-    Nothing on the app handles ``IntegrityError``, so that is an unhandled 500
-    over a rolled-back session, for a request whose intent ("unset this field")
-    the API does not support in the first place.
+    A PATCH schema declares every field ``Optional`` so it can be *omitted*, but
+    ``exclude_unset=True`` keeps a value the client actually sent as ``null``, so
+    it reaches ``setattr`` and dies at flush on the constraint — an unhandled 500
+    over a rolled-back session, for an intent the API does not support anyway.
 
-    A validator turns it into the 422 it always was. Only the NOT NULL columns
+    A validator turns that into the 422 it always was. Only the NOT NULL columns
     are listed: ``retired_at``, ``odometer_base_km``, ``tyre_width_mm``,
-    ``default_sports`` and ``note`` are all genuinely nullable, and ``null`` on
-    them is a request to clear — which is exactly how a bike is un-retired.
+    ``default_sports`` and ``note`` are genuinely nullable, and ``null`` on them
+    is a request to clear — which is how a bike is un-retired.
     """
 
     @field_validator(*fields, mode="before")

@@ -4,16 +4,14 @@ Two phases, because a matched surface is a **different analysis**, not an
 annotation: it moves segment boundaries and it changes rolling resistance, so
 the segment table has to be rebuilt rather than decorated.
 
-1. The upload (and every re-analysis) returns a Stage 1 result synchronously,
-   exactly as before. Latency character preserved: a course that would have
-   taken 300 ms still does, and an instance without a sidecar never waits.
-2. This runs afterwards, on its own session — match the stored track, store
-   what the matcher said, then re-solve and replace the segments.
+1. The upload (and every re-analysis) returns a Stage 1 result synchronously, so
+   an instance without a sidecar never waits.
+2. This runs afterwards on its own session — match the stored track, store what
+   the matcher said, then re-solve and replace the segments.
 
 Because phase 2 works from the *stored* track, matching a new course and
-enriching one uploaded years ago are the same function. That is most of the
-value of turning the sidecar on: an instance that enables it later can pick up
-every course it already holds, with no re-upload.
+enriching one uploaded years ago are the same function, so enabling the sidecar
+later picks up every course already held.
 
 The status columns copy ``plan_*`` exactly, run token included, so
 ``stranded_runs`` settles a match a redeploy interrupted instead of leaving a
@@ -62,15 +60,14 @@ UNAVAILABLE = "unavailable"
 #: Matches in flight in this process.
 #:
 #: A plain counter rather than an :class:`asyncio.Semaphore`, for the reason
-#: ``llm_agent._active_runs`` sets out: the one thing this guard must never do
-#: is *wait*, and waiting is a semaphore's whole purpose. Testing ``.locked()``
-#: before ``async with`` looks non-blocking and is not. asyncio is cooperative
-#: and there is no ``await`` between reading this and incrementing it, so the
-#: check and the claim are one indivisible step.
+#: ``llm_agent._active_runs`` sets out: this guard must never *wait*, which is a
+#: semaphore's whole purpose, and testing ``.locked()`` before ``async with``
+#: only looks non-blocking. asyncio is cooperative and there is no ``await``
+#: between reading this and incrementing it, so check and claim are indivisible.
 #:
-#: It bounds two things at once: how much of the athlete's small connection
-#: pool the optional background pass can occupy, and how many simultaneous
-#: requests are aimed at a sidecar that is one container on a two-core box.
+#: It bounds two things: how much of the athlete's small connection pool the
+#: optional background pass can occupy, and how many simultaneous requests are
+#: aimed at a sidecar that is one container on a two-core box.
 _active_matches = 0
 MAX_CONCURRENT_MATCHES = 2
 

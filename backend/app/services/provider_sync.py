@@ -84,20 +84,19 @@ _NOTFETCHED = object()
 _ACTIVITY_LEASE_TTL = timedelta(minutes=5)
 _ACTIVITY_LEASE_WAIT = 60.0
 
-# Per-(user_id, athlete_id) lock that serialises the dedup-window-query +
-# create/attach operation. Prevents the race condition where two concurrent
-# syncs both see "no existing activity" and each create a new one for the
-# same real-world workout.
+# Per-(user_id, athlete_id) lock serialising the dedup-window query and the
+# create/attach that follows, so two concurrent syncs cannot both see "no
+# existing activity" and each create a row for the same real-world workout.
 #
-# This is the *in-process* half of that guard; the durable half is the
-# `SyncLease` taken inside it (issue #50). Keeping both is deliberate: this one
-# is free and settles the common case without touching the database, and the
-# lease is what makes the guarantee true beyond one event loop.
+# The *in-process* half of that guard; the durable half is the `SyncLease` taken
+# inside it (issue #50). Both are deliberate: this one is free and settles the
+# common case without touching the database, and the lease makes the guarantee
+# true beyond one event loop.
 #
-# Bounded, because it is keyed by athlete and never had an eviction path: on a
-# long-lived process syncing many users it only grew. Entries are dropped oldest
-# first and *only while unheld* — evicting a held lock would hand the same
-# athlete two different locks and silently undo the mutual exclusion.
+# Bounded, because keyed by athlete with no eviction path it only grew on a
+# long-lived process. Entries are dropped oldest first and *only while unheld* —
+# evicting a held lock would hand the same athlete two locks and silently undo
+# the mutual exclusion.
 _MAX_ACTIVITY_LOCKS = 256
 
 # The loop is cached alongside each lock because an `asyncio.Lock` is meaningful
@@ -148,28 +147,25 @@ async def activity_create_guard(
     webhook and a Strava sync firing within milliseconds — and without this both
     callers see an empty ±5-minute window and each create the same activity.
 
-    **Two guards, not one** (issue #50). The ``asyncio.Lock`` settles the common
-    case without touching the database, but it only speaks for this event loop;
-    the ``SyncLease`` inside it repeats the same exclusion in a place every
-    writer of this database can see. The lock is the fast path, the lease is the
-    guarantee — defence in depth rather than either one alone.
+    **Two guards, not one** (issue #50): the ``asyncio.Lock`` is the fast path,
+    settling the common case without touching the database but speaking only for
+    this event loop; the ``SyncLease`` inside it is the guarantee, visible to
+    every writer of this database.
 
     **The invariant every caller owes this guard:** the new ``Activity`` row must
-    be *committed* before the block exits. A flush is not sufficient — under
-    SQLite's WAL isolation a caller that takes the lease next still sees an empty
-    window until the write is committed, which is the duplicate this exists to
-    prevent.
+    be *committed* before the block exits. A flush is not enough — under WAL
+    isolation the next caller to take the lease still sees an empty window until
+    the commit.
 
-    ``leases.hold`` owns the session's transaction boundaries for the duration,
-    so do not carry unrelated uncommitted work across this block. In exchange, a
-    block that raises is rolled back before the lease is released — which is what
-    keeps a failed attach path from publishing its own deletions.
+    ``leases.hold`` owns the session's transaction boundaries, so do not carry
+    unrelated uncommitted work across this block. A block that raises is rolled
+    back before the lease is released, which keeps a failed attach path from
+    publishing its own deletions.
 
-    Known exposure, unchanged by this refactor: the Wahoo and provider-sync
-    attach paths download a FIT inside the block, so a pathologically slow CDN
-    can outlast ``_ACTIVITY_LEASE_TTL`` and hand the same lease to a second
-    caller. Hoisting the prefetch out would reorder the priority decision that
-    depends on it, so it is left as a follow-up rather than fixed here.
+    Known exposure: the Wahoo and provider-sync attach paths download a FIT
+    inside the block, so a pathologically slow CDN can outlast
+    ``_ACTIVITY_LEASE_TTL``. Hoisting the prefetch out would reorder the priority
+    decision that depends on it, so it is a follow-up.
     """
     async with (
         _get_activity_lock(user_id, athlete_id),
@@ -317,21 +313,17 @@ async def _await_rotation(conn: ProviderConnection, session: AsyncSession) -> No
 async def ensure_fresh_token(conn: ProviderConnection, session: AsyncSession) -> str:
     """Refresh the access token if it will expire soon. Returns current token.
 
-    At most one caller rotates at a time. The others wait for it and return the
-    token it stored, rather than presenting a refresh token the provider has
-    already revoked — Wahoo revokes on rotation (see ``_REFRESH_LOOKAHEAD``
-    above), so a lost race used to cost the user their connection permanently
-    (issue #50).
+    At most one caller rotates at a time; the others wait and return the token it
+    stored, rather than presenting a refresh token the provider has already
+    revoked. Wahoo revokes on rotation, so a lost race used to cost the user
+    their connection permanently (issue #50).
 
-    Waiting is not the same as giving up. If the winner's attempt fails it
-    releases the claim, and a caller that was already waiting takes its own turn
-    rather than returning a token it can see is expiring — otherwise one
-    transient 5xx would take down every caller queued behind it, which is worse
-    than the independent attempts this replaced.
+    Waiting is not giving up: if the winner's attempt fails it releases the claim
+    and a waiting caller takes its own turn, so one transient 5xx cannot take
+    down everyone queued behind it.
 
-    The one path that still returns a token known to be stale is
-    ``_await_rotation`` timing out; it logs, and the caller then fails at the
-    provider exactly as it did before this existed.
+    The one path that still returns a known-stale token is ``_await_rotation``
+    timing out; it logs, and the caller fails at the provider.
     """
     if not _needs_refresh(conn):
         return conn.access_token or ""
@@ -427,14 +419,10 @@ async def sync_provider_activities(
         repopulate the Activity if the new source has higher priority.
       - Otherwise → create a new Activity + ActivitySource.
 
-    ``access_token`` is the caller's to supply, and required. ``session`` here is
+    ``access_token`` is the caller's to supply, and required: ``session`` here is
     the **per-user** database — every model this function touches belongs to it —
-    while ``connection`` is a registry row. Refreshing a token therefore needs a
-    session this function does not have, so it used to accept ``None`` and call
-    :func:`ensure_fresh_token` with the wrong session: harmless while that only
-    mutated the ORM object, a ``no such table: provider_connections`` now that it
-    claims the rotation with a real statement. Every caller already passes a
-    token; the signature now says so.
+    while ``connection`` is a registry row, so refreshing a token needs a session
+    this function does not have.
 
     Returns (count_created_or_updated, earliest_start_date).
     """
@@ -1080,18 +1068,16 @@ async def rebuild_intervals(
     """Give this activity its interval breakdown, from recorded laps or an auto-split.
 
     ``fileish`` is anything the format's ``extractIntervals`` accepts — a path, a
-    file object, or ``None`` when there is no original file to read. A file with
-    no usable lap records (or no file at all) falls back to fixed-length
-    auto-splits sized by the ride duration, so every processed activity ends up
-    with a breakdown.
+    file object, or ``None``. With no usable lap records (or no file) it falls
+    back to fixed-length auto-splits sized by the ride duration, so every
+    processed activity gets a breakdown.
 
-    ``fmt`` names which parser to read the laps with (issue #36). GPX has no lap
-    concept and always auto-splits; TCX carries the athlete's own splits, same as
-    FIT.
+    ``fmt`` names the parser to read laps with (issue #36): GPX has no lap concept
+    and always auto-splits; TCX carries the athlete's own splits like FIT.
 
-    ``replace=True`` clears the existing rows first, for the reprocess and
-    attach-a-FIT paths that run against an activity which already has intervals;
-    the import path is populating a fresh one and leaves it off.
+    ``replace=True`` clears existing rows first, for the reprocess and
+    attach-a-FIT paths; the import path populates a fresh activity and leaves it
+    off.
     """
     if replace:
         await session.execute(

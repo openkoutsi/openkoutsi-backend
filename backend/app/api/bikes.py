@@ -1,21 +1,17 @@
 """The garage — bikes an athlete owns, rides and maintains (issues #55, #64).
 
-One record with two readers. A bike started as the small equipment concept the
-pacing model needs (tyre width → rolling resistance, riding position → drag
-area, both tabulated in ``openkoutsi.course``); issue #64 gave the same row a
-baseline odometer, the sports it claims, a retirement date, a maintenance log
-and a list of what is bolted to it. The garage edits exactly the rows the
-route-analysis bike selector lists, so "bikes in the garage are entries in the
-course picker" holds by construction — which is the thing a second
-``garage_bikes`` table would have broken on day one.
+One record with two readers. A bike started as the equipment concept the pacing
+model needs (tyre width → Crr, riding position → CdA, tabulated in
+``openkoutsi.course``); issue #64 gave the same row a baseline odometer, the
+sports it claims, a retirement date, a maintenance log and its accessories. The
+garage edits exactly the rows the route-analysis bike selector lists, which a
+second ``garage_bikes`` table would have broken.
 
 Distance is **derived on read**, never stored: ``tracked_km`` is a ``SUM`` over
-the rides assigned to the bike and ``lifetime_km`` adds the athlete's own
-baseline. Reassigning a ride or correcting a baseline is therefore immediately
-right everywhere, with no counter to drift.
+the bike's rides and ``lifetime_km`` adds the athlete's baseline, so reassigning
+a ride or correcting a baseline is immediately right everywhere.
 
-No pagination anywhere here — a person owns a handful of bikes, and a
-maintenance log is a page of a notebook, not a history of one.
+No pagination here — a person owns a handful of bikes.
 """
 import uuid
 from typing import Optional

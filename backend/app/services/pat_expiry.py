@@ -1,22 +1,19 @@
 """Daily expiry sweep for personal access tokens (issue #46).
 
-A one-year ceiling without warnings just relocates the outage. A token that dies
-silently takes a nightly backup or a head-unit sync with it, and the first the
-user hears of it is a broken integration weeks later. So this sweep warns at
-seven days, again at one day, and once more when the token has actually run out.
+A one-year ceiling without warnings just relocates the outage: a token dying
+silently takes a nightly backup or head-unit sync with it, and the user hears
+about it weeks later. So this warns at seven days, one day, and once the token has
+run out.
 
 **Each stage fires exactly once.** ``personal_access_tokens.last_expiry_notice``
-records the stage already sent, so a sweep running daily — or twice after a
-restart — does not re-notify. Without that column this would be a daily nag,
-which is worse than silence.
+records the stage already sent, so a daily sweep — or two after a restart — does
+not re-notify.
 
-Tokens live in the *registry* DB and the inbox in each *per-user* DB, so the
-sweep reads registry rows and then opens the affected users' sessions, exactly as
-:mod:`backend.app.services.notifications` already does. It runs as a periodic
-task in ``lifespan`` beside the Strava and Wahoo bridge pollers — the existing
-pattern for background work here, and why this needs no scheduler dependency. It
-inherits their single-process assumption: two app processes would double-notify,
-and ``last_expiry_notice`` is the mitigation.
+Tokens live in the *registry* DB and the inbox in each *per-user* DB, so the sweep
+reads registry rows and then opens the affected users' sessions, as
+:mod:`backend.app.services.notifications` does. A periodic task in ``lifespan``
+beside the bridge pollers, inheriting their single-process assumption:
+``last_expiry_notice`` is what mitigates two processes double-notifying.
 """
 
 from __future__ import annotations

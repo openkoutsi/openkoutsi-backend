@@ -9,8 +9,7 @@ first met) while ``created_at`` records when we first noticed; the recompute
 rewrites this table in place, so a tier can also be revoked when the underlying
 data goes away.
 
-Idempotent: safe to run against DBs already migrated or created fresh by
-SQLAlchemy create_all (which builds the table but neither stamps alembic).
+Idempotent, like every migration in this tree.
 """
 from alembic import op
 import sqlalchemy as sa

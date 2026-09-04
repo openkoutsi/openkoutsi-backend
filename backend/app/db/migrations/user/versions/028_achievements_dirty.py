@@ -1,18 +1,15 @@
 """Add ``athletes.achievements_dirty_at`` (issue #69).
 
 ``recompute_achievements`` re-reads the athlete's entire activity history plus
-every training plan on every call, and it used to run inline on every ingest
-event — so importing a season was N events × O(N) activities, for a result only
-the last pass kept. This column is what breaks that: a write path stamps it and
-returns, and the next achievements read (or the daily sweep) does the one
-reconcile that settles them all.
+every plan on every call, and used to run inline on every ingest event — so
+importing a season was N events × O(N) activities. A write path now stamps this
+column and returns, and the next achievements read or the daily sweep does the
+one reconcile that settles them all.
 
-Nullable and un-backfilled on purpose: NULL means "no recompute is owed", which
-is exactly right for every existing athlete, because the code this replaces
-recomputed eagerly. Nothing needs a backfill.
+Nullable and un-backfilled: NULL means "no recompute is owed", correct for every
+existing athlete because the code this replaces recomputed eagerly.
 
-Idempotent: safe to run against DBs that already have the column (including ones
-built fresh by SQLAlchemy create_all, which adds it but doesn't stamp alembic).
+Idempotent, like every migration in this tree.
 """
 from alembic import op
 import sqlalchemy as sa

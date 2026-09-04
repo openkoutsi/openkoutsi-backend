@@ -1,21 +1,15 @@
 """Activity tools: ``list_recent_activities``, ``find_activity``, ``get_activity_detail``.
 
-Three tools rather than one, because they answer three different questions and a
-single ``get_activities(**everything)`` would make the model guess which shape it
-was going to get back.
+Three tools rather than one, since a single ``get_activities(**everything)``
+would make the model guess which shape it was going to get back.
 
-The hard constraint here is size. A three-hour ride at 1 Hz carries roughly
-eleven thousand samples *per stream*, and the platform stores several; none of
-that ever leaves this module. What a coach reads off a ride — how long, how hard,
-how it was paced, whether the aerobic signal held up — is a few dozen numbers,
-and those are computed on the way out. ``get_activity_detail`` goes furthest and
-still returns intervals, time-in-zone and the per-ride power bests, all of which
-are already aggregates in the database.
+The hard constraint is size: a three-hour ride at 1 Hz carries ~11 000 samples
+*per stream*, and none of that leaves this module. What a coach reads off a ride
+is a few dozen numbers, computed on the way out; ``get_activity_detail`` goes
+furthest and still returns only intervals, time-in-zone and per-ride power bests.
 
-Location data is stripped by policy: no tool here returns coordinates, and none
-of these models has a field that could carry one. Where a ride was is not
-something a coaching model needs, and it is the single most sensitive thing in
-the record.
+Location is stripped by policy: no tool here returns coordinates, and none of
+these models has a field that could carry one.
 """
 
 from __future__ import annotations
@@ -292,11 +286,9 @@ def _like_literal(text: str) -> str:
     """Escape LIKE's wildcards so a substring search is one.
 
     ``%`` and ``_`` are wildcards, so an unescaped ``name_contains="_intervals"``
-    also matches ``4x8 intervals`` and ``"100%"`` matches anything starting
-    ``100``. The field's own description promises a plain case-insensitive
-    substring match, and that is what the model will believe it got — the same
-    failure ``ToolArgs(extra="forbid")`` exists to prevent, where more rows come
-    back than were asked for and get reported as a filtered answer.
+    also matches ``4x8 intervals``. The field's description promises a plain
+    case-insensitive substring match, and that is what the model will believe it
+    got — the same failure ``ToolArgs(extra="forbid")`` prevents.
 
     The backslash goes first, or it would escape the escapes added after it.
     """

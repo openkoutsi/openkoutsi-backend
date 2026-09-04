@@ -96,21 +96,15 @@ the per-user migration loop (`backend/scripts/migrate_user_dbs.py`) against the
 mounted data volume before exec'ing uvicorn. No manual migration step is needed
 when rolling out a new image.
 
-**It is fail-closed, and that is the point of doing it here.** The entrypoint
-runs under `set -e` and the migration script exits non-zero if any user's
-database could not be upgraded, so a container whose schema is behind its code
-never starts serving. The check happens once, at the only moment the answer can
-change — which is why this stays in the entrypoint rather than moving to a
-separate init step that would need a runtime guard to rebuild the same
-guarantee.
+**Fail-closed.** The entrypoint runs under `set -e` and the migration script exits
+non-zero if any user's database could not be upgraded, so a container whose schema is
+behind its code never starts serving.
 
-**The loop is cheap, and stays cheap as users grow.** It runs Alembic in-process
-rather than spawning an interpreter per user, and skips any database whose
-recorded revision already matches head. A deploy that ships no user migration
-therefore costs one small read per user rather than a process start each — the
-difference between roughly 0.9 s and roughly 3 ms per user. Databases created
-after this shipped are stamped at head by `init_user_db`, so a new account is
-skipped on the next deploy instead of replaying the whole migration history.
+**Cheap, and stays cheap as users grow.** The loop runs Alembic in-process rather than
+spawning an interpreter per user, and skips any database whose recorded revision
+already matches head — roughly 3 ms rather than 0.9 s per user on a deploy that ships
+no user migration. New databases are stamped at head by `init_user_db`, so a new
+account is skipped on the next deploy instead of replaying the whole history.
 
 ### Build/run an image locally
 
@@ -165,9 +159,8 @@ API_URL=https://api.your-domain
 ACCESS_TOKEN_EXPIRE_MINUTES=60
 REFRESH_TOKEN_EXPIRE_DAYS=30
 
-# REQUIRED. Encryption for stored OAuth tokens, FIT files and instance/user LLM
-# API keys. The backend refuses to start without it, because an empty key used
-# to mean "store Strava and Wahoo tokens as plaintext" and said nothing.
+# REQUIRED. Encrypts stored OAuth tokens, FIT files and instance/user LLM API
+# keys. The backend refuses to start without it.
 ENCRYPTION_KEY=<fernet-key>        # python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 
 # Accept plaintext provider tokens instead of setting a key. For development
@@ -175,11 +168,11 @@ ENCRYPTION_KEY=<fernet-key>        # python -c "from cryptography.fernet import 
 # on anything holding real accounts.
 ALLOW_PLAINTEXT_SECRETS=false
 
-# Set when running behind a reverse proxy. uvicorn only honours X-Forwarded-For
-# from addresses listed here (default 127.0.0.1), and on a container network the
-# proxy is not on loopback — so without it every caller looks like the proxy and
-# the API's per-IP rate limits become one instance-wide bucket. Give it the
-# address or CIDR nginx connects from.
+# Set when running behind a reverse proxy: the address or CIDR nginx connects
+# from. uvicorn only honours X-Forwarded-For from addresses listed here (default
+# 127.0.0.1), and on a container network the proxy is not on loopback — without
+# it every caller looks like the proxy and the per-IP rate limits collapse into
+# one instance-wide bucket.
 FORWARDED_ALLOW_IPS=
 
 # Strava (see "Strava Bridge" section)
@@ -196,15 +189,16 @@ WAHOO_BRIDGE_SECRET=               # shared secret — must match WAHOO_BRIDGE_S
 
 # Road surface classification (optional, issue #56) — a Valhalla sidecar you run
 # yourself, reachable only from inside the deployment. Leave unset and a course
-# is solved as dry pavement, which the written plan says out loud; the feature
-# is absent, not broken. Tiles are built and shipped by hand — see the
-# openkoutsi-ops repository. Course recon itself is gated separately by the
-# `allow_course_recon` instance setting, which defaults **off** (below).
+# is solved as dry pavement, which the written plan says out loud: absent, not
+# broken. Tiles are built and shipped by hand — see the openkoutsi-ops
+# repository. Course recon itself is gated by `allow_course_recon`, default
+# **off** (below).
 VALHALLA_URL=                      # e.g. http://valhalla:8002
 
 # Email (optional) — all email goes through the swappable email module
 # (backend/app/services/email/). Leave unset to keep email disabled; features
 # that need it stay unavailable rather than erroring.
+
 EMAIL_PROVIDER=lettermint          # provider selection; "lettermint" or "euromail"
 EMAIL_FROM=                        # sender address for outbound transactional mail
 LETTERMINT_API_KEY=                # Lettermint API token (outbound sending)
@@ -218,30 +212,25 @@ EUROMAIL_WEBHOOK_SECRET=           # verifies inbound EuroMail webhooks (used by
 LLM_ALLOWED_SERVERS=               # e.g. http://localhost:11434/v1,https://api.openai.com/v1
 
 # Required for a SELF-HOSTED model. The LLM base URL is user-supplied, so URLs
-# resolving to loopback (127.x, ::1), RFC 1918 / ULA / CGNAT ranges or 0.0.0.0/8
-# are refused by default — otherwise any user can point the backend at whatever
-# else runs on this host or its network and read the reply. Set this to true if
-# your model runs on localhost (Ollama) or on the LAN. Cloud metadata ranges
-# (169.254.x, fe80::/10) stay blocked either way. Requests refused by this
-# return 403 naming this variable.
+# resolving to loopback (127.x, ::1), RFC 1918 / ULA / CGNAT or 0.0.0.0/8 are
+# refused by default — otherwise any user could point the backend at whatever
+# else runs on this host or its network and read the reply. Set true if your
+# model runs on localhost (Ollama) or the LAN. Cloud metadata ranges (169.254.x,
+# fe80::/10) stay blocked either way. Refusals return 403 naming this variable.
 LLM_ALLOW_PRIVATE_NETWORKS=false
 
 # Optional: how many agentic Koutsi runs may be in flight at once in this
-# process. An agent loop is 3–5 completions instead of one, so a handful of
-# concurrent runs against a local model that serialises requests becomes a queue
-# nobody is watching. A run that can't get a slot immediately falls back to the
-# single-shot prompt rather than waiting — a worse answer now beats a spinner
-# until the 30-minute pending timeout. Default 4; lower it to 1–2 for a single
-# local GPU, raise it for a hosted provider.
+# process. An agent loop is 3–5 completions instead of one, so concurrent runs
+# against a local model that serialises requests become an unwatched queue. A run
+# that can't get a slot falls back to the single-shot prompt rather than waiting.
+# Default 4; lower to 1–2 for a single local GPU, raise for a hosted provider.
 AGENT_MAX_CONCURRENT_RUNS=4
 
 # Conversational Koutsi (issue #44). Chat is the first LLM surface the *athlete*
-# can trigger arbitrarily often, and every turn is a full agent run rather than
-# one completion — so it carries its own bounds instead of relying on "one ride,
-# one analysis". Unlike a background run it has no single-shot prompt to fall
-# back to, so a turn that can't get one of the AGENT_MAX_CONCURRENT_RUNS slots
-# waits (visibly, as a "queued" state) rather than being refused; the wait is
-# bounded so it can't become an endless spinner.
+# can trigger arbitrarily often, and every turn is a full agent run, so it
+# carries its own bounds. It has no single-shot prompt to fall back to, so a turn
+# that can't get one of the AGENT_MAX_CONCURRENT_RUNS slots waits — visibly, as a
+# "queued" state, bounded by CHAT_QUEUE_WAIT_SECONDS — rather than being refused.
 CHAT_QUEUE_WAIT_SECONDS=45
 CHAT_MAX_ROUNDS=4
 CHAT_MAX_TURNS_PER_DAY=50
@@ -249,13 +238,12 @@ CHAT_MAX_TURNS_PER_CONVERSATION=40
 CHAT_MAX_MESSAGE_CHARS=4000
 CHAT_HISTORY_CHARS=12000
 # Minutes without progress before a chat turn is declared dead. Much shorter
-# than the daily card's 30: that runs with nobody watching, this has someone
-# waiting on it.
+# than the daily card's 30, since someone is waiting on this one.
 CHAT_STUCK_MINUTES=10
 
-# Privacy policy (GDPR). The consent screen links to this URL. It defaults to
-# the canonical koutsi.dev policy; if you self-host you are your own data
-# controller and should point this at your own privacy policy.
+# Privacy policy (GDPR). The consent screen links to this URL. Defaults to the
+# canonical koutsi.dev policy; if you self-host you are your own data controller
+# and should point this at your own.
 PRIVACY_POLICY_URL=https://koutsi.dev/privacy
 ```
 
@@ -279,15 +267,13 @@ uv run alembic -c backend/alembic-registry.ini upgrade head
 
 Container deployments do this automatically — see *Migrations on start* above.
 
-> **Note:** the latest registry migration `012_personal_access_tokens` adds the
-> `personal_access_tokens` table and the `instance_settings.allow_personal_access_tokens`
-> column. That column defaults to **1 (on)**, including for existing rows: a PAT
-> grants strictly less than the session its owner already holds, and defaulting it
-> off would mean the feature silently works nowhere until an admin performs an
-> action nobody told them about. If you would rather not have long-lived
-> credentials on your box, turn it off explicitly — see
-> [ADMIN.md](ADMIN.md), *Personal access tokens*. No new environment variables are
-> required.
+> **Note:** registry migration `012_personal_access_tokens` adds the
+> `personal_access_tokens` table and the
+> `instance_settings.allow_personal_access_tokens` column, which defaults to
+> **1 (on)** including for existing rows — a PAT grants strictly less than the
+> session its owner already holds. To disallow long-lived credentials, turn it off
+> explicitly: see [ADMIN.md](ADMIN.md), *Personal access tokens*. No new
+> environment variables are required.
 
 ### Migrating existing user databases
 
@@ -305,23 +291,25 @@ the migration for each):
 uv run python backend/scripts/migrate_user_dbs.py        # add --dry-run to preview
 ```
 
-This step is only needed when upgrading an existing deployment — new installs handle schema creation automatically on first startup.
+This step is only needed when upgrading an existing deployment — new installs handle
+schema creation automatically on first startup.
 
-> **Note:** the latest per-user migration `019_drop_rest_day_activity_links`
-> **deletes rows** — the only per-user migration so far that does. It removes
-> `planned_workout_activities` rows whose planned workout is a rest day, which
-> earlier versions created by auto-matching activities onto rest days. Those
-> links were invisible in the UI but blocked the activity from being linked to
-> the session it actually completed. Deleting them changes no adherence score or
-> achievement (rest days are excluded from scoring either way), and nothing else
-> references the rows, so no recompute is needed afterwards. It is applied
-> automatically by the entrypoint's per-user migration loop (or the helper script
-> above); no new environment variables are required.
+Every per-user migration noted below is applied automatically by the entrypoint's
+migration loop, or by the helper script above.
+
+> **Note:** per-user migration `019_drop_rest_day_activity_links` **deletes rows**
+> — the only per-user migration so far that does. It removes
+> `planned_workout_activities` rows whose planned workout is a rest day, created by
+> earlier versions auto-matching activities onto rest days: invisible in the UI, but
+> blocking the activity from being linked to the session it actually completed. No
+> adherence score or achievement changes (rest days are excluded from scoring either
+> way) and nothing else references the rows, so no recompute is needed. No new
+> environment variables.
 >
-> Every deleted row is copied to `planned_workout_activities_dropped_019` in the
-> same user DB first, and the number removed is logged. `downgrade()`
-> deliberately restores nothing — putting the links back would put the bug back —
-> but the snapshot means a restore stays possible:
+> Every deleted row is copied to `planned_workout_activities_dropped_019` in the same
+> user DB first, and the number removed is logged. `downgrade()` deliberately restores
+> nothing — putting the links back would put the bug back — but the snapshot keeps a
+> restore possible:
 >
 > ```bash
 > sqlite3 data/users/<user-uuid>/user.db \
@@ -329,81 +317,61 @@ This step is only needed when upgrading an existing deployment — new installs 
 > ```
 
 > **Note:** per-user migration `021_activity_analysis_updated_at` adds a nullable
-> `activities.analysis_updated_at` column — the clock a stuck `pending` analysis
-> is aged out against, which that surface previously had no equivalent of. It
-> adds no rows, deletes none, backfills nothing (a row stranded before the column
-> existed reads as timed out, which is the right answer for it), and needs no new
-> environment variables. Applied automatically by the entrypoint's per-user
-> migration loop, or by the helper script above.
+> `activities.analysis_updated_at` column — the clock a stuck `pending` analysis is
+> aged out against. No rows added or deleted, nothing backfilled (a row stranded
+> before the column existed reads as timed out, which is right for it), no new
+> environment variables.
 >
 > Related runtime behaviour, needing no configuration: on startup the API settles
-> every `pending` LLM run left behind by the previous process — training status,
-> goal guidance and activity analysis — before it accepts its first request.
-> Nothing that writes a `pending` status survives a restart, so those rows are
-> dead by definition, and an activity left in one could never be re-analysed.
-> Expect a `Settled N LLM run(s) stranded by the last shutdown` line after a
-> redeploy that interrupted a generation. The sweep walks `data/users/*/user.db`
-> and inherits the same single-process assumption as the bridge pollers.
+> every `pending` LLM run left behind by the previous process — training status, goal
+> guidance and activity analysis — before accepting its first request. Expect a
+> `Settled N LLM run(s) stranded by the last shutdown` line after a redeploy that
+> interrupted a generation. The sweep walks `data/users/*/user.db`.
 
 > **Note:** per-user migration `028_achievements_dirty` adds a nullable
-> `athletes.achievements_dirty_at` column. It adds no rows, deletes none,
-> backfills nothing, and needs no new environment variables. Applied
-> automatically by the entrypoint's per-user migration loop, or by the helper
-> script above. **No recompute is required afterwards**: NULL means "no
-> achievement recompute is owed", which is correct for every existing athlete
-> because the code this replaces reconciled eagerly on every write.
+> `athletes.achievements_dirty_at` column. No rows added or deleted, nothing
+> backfilled, no new environment variables. **No recompute is required
+> afterwards**: NULL means "no achievement recompute is owed", correct for every
+> existing athlete because the code this replaces reconciled eagerly on every write.
 >
 > Related runtime behaviour, needing no configuration: achievement unlocks are no
-> longer reconciled inline on every upload, edit and sync. Those paths now stamp
-> this column and return; the reconcile — which re-reads the athlete's entire
-> history and every plan, and so made importing a season quadratic — runs on the
-> next `GET /api/achievements`, on the daily first read of
-> `GET /api/athlete/training-status`, during a data export, or in a new daily
-> background sweep for an athlete who reads none of those. The visible change is
-> that the inbox message announcing new badges arrives on the athlete's next app
-> load rather than at upload time; the badges themselves are identical, since
-> unlocks are a pure function of the data. Expect an occasional
+> longer reconciled inline on every upload, edit and sync. Those paths stamp this
+> column and return; the reconcile runs on the next `GET /api/achievements`, the daily
+> first read of `GET /api/athlete/training-status`, a data export, or a daily
+> background sweep. The visible change is that the inbox message announcing new badges
+> arrives on the athlete's next app load rather than at upload time; the badges
+> themselves are identical. Expect an occasional
 > `Achievement sweep settled N athlete(s)` line.
 
 > **Note:** per-user migration `029_activity_label_suggestions` adds a nullable
-> `activities.label_suggestions` column, holding the commute labels openkoutsi
-> has *proposed* but the athlete has not yet confirmed (issue #63). It adds no
-> rows, deletes none, backfills nothing, and needs no new environment variables.
-> Applied automatically by the entrypoint's per-user migration loop, or by the
-> helper script above. NULL means "nothing has been suggested for this activity",
-> which is correct for every activity that exists when this lands.
+> `activities.label_suggestions` column, holding the commute labels openkoutsi has
+> *proposed* but the athlete has not confirmed (issue #63). No rows added or deleted,
+> nothing backfilled, no new environment variables.
 >
 > **Nothing is labelled by the upgrade.** The column is kept strictly apart from
-> `activities.labels`, which stays exactly as the athlete left it, so no
-> `commuter` badge tier and no RPE-prompt queue changes as a result of deploying
-> this. Detection only starts producing anything once an athlete writes a rule in
-> **Settings → Commute detection**; an athlete with no rules sees no change at
-> all.
+> `activities.labels`, which stays as the athlete left it, so no `commuter` badge tier
+> and no RPE-prompt queue changes. Detection produces nothing until an athlete writes
+> a rule in **Settings → Commute detection**.
 >
 > Related runtime behaviour, needing no configuration: new activities are checked
-> against the athlete's rules as they arrive, and Strava's own `commute` flag —
-> which the sync previously read past — now applies the label directly, since it
-> is the athlete's own assertion rather than a heuristic. The **back catalogue is
-> deliberately not scanned on deploy**: it is an explicit
-> `POST /api/activities/commute/scan` from the settings screen, because it walks
-> every activity the athlete has and that is their call to make, not a
-> migration's.
+> against the athlete's rules as they arrive, and Strava's own `commute` flag — which
+> the sync previously read past — now applies the label directly, since it is the
+> athlete's own assertion rather than a heuristic. The **back catalogue is deliberately
+> not scanned on deploy**: it is an explicit `POST /api/activities/commute/scan` from
+> the settings screen, since it walks every activity the athlete has.
 
 ### Backing up before a migration
 
-> **Note:** per-user migration `030_course_surface` adds ten nullable columns
-> across `course_segments`, `courses` and `course_tracks` — the road surface
-> under a course, how much it should be trusted, and the rolling resistance
-> each segment was solved with (issue #56). It adds no rows, deletes none,
-> backfills nothing, and needs no new **mandatory** environment variables.
-> Applied automatically by the entrypoint's per-user migration loop, or by the
-> helper script above. NULL everywhere means "nobody has looked at the road
-> under this course", which is the correct — and the only honest — answer for
-> every course that exists when this lands.
+> **Note:** per-user migration `030_course_surface` adds ten nullable columns across
+> `course_segments`, `courses` and `course_tracks` — the road surface under a course,
+> how much it should be trusted, and the rolling resistance each segment was solved
+> with (issue #56). No rows added or deleted, nothing backfilled, no new **mandatory**
+> environment variables. NULL everywhere means "nobody has looked at the road under
+> this course".
 >
-> Nothing is re-analysed by the upgrade. A stored course keeps the numbers it
-> had; it gains a surface only when a match is run for it, and on an instance
-> with no sidecar configured it never is.
+> Nothing is re-analysed by the upgrade. A stored course keeps the numbers it had; it
+> gains a surface only when a match is run for it, and on an instance with no sidecar
+> configured it never is.
 
 > ⚠️ **Note:** registry migration `018_course_recon_toggle` adds
 > `instance_settings.allow_course_recon` — boolean, non-null, **default false**
@@ -413,44 +381,36 @@ This step is only needed when upgrading an existing deployment — new installs 
 > **Settings → Allow course recon** (or by `PATCH /api/admin/settings`, see
 > [ADMIN.md](ADMIN.md)).
 >
-> **This is deliberate, and nothing is deleted.** Every stored course, its
-> segments and its uploaded GPX stay exactly where they are, remain in the data
-> export the whole time — the export is deliberately outside the switch — and
-> come back untouched when it is flipped. The default is off because the half
-> of the feature that distinguishes it, classifying the road surface under a
-> course, map-matches against OpenStreetMap through a Valhalla sidecar the
-> self-hoster builds tiles for themselves; an instance that has made no
-> decision about that has not implicitly said yes. Unlike the per-user
-> migrations this one runs on the **registry** chain
-> (`alembic -c backend/alembic-registry.ini upgrade head`), which the
-> entrypoint applies automatically.
+> **Nothing is deleted.** Every stored course, its segments and its uploaded GPX stay
+> where they are, remain in the data export throughout (the export is deliberately
+> outside the switch), and come back untouched when it is flipped. The default is off
+> because the half of the feature that distinguishes it map-matches against
+> OpenStreetMap through a Valhalla sidecar the self-hoster builds tiles for. Unlike the
+> per-user migrations this one runs on the **registry** chain
+> (`alembic -c backend/alembic-registry.ini upgrade head`), applied automatically by
+> the entrypoint.
 >
-> If you are upgrading an instance whose athletes use course recon, flip the
-> switch as part of the deploy rather than after somebody reports a 404.
+> If you are upgrading an instance whose athletes use course recon, flip the switch as
+> part of the deploy rather than after somebody reports a 404.
 
 > **Note:** per-user migration `031_garage` adds five nullable columns —
 > `bikes.odometer_base_km`, `bikes.default_sports`, `bikes.retired_at`,
 > `activities.bike_id` and `activities.bike_source` — plus an index on
-> `activities.bike_id` and two new tables, `bike_maintenance` and
-> `bike_accessories` (issue #64). It adds no rows, deletes none, backfills
-> nothing, and needs no new environment variables. Applied automatically by the
-> entrypoint's per-user migration loop, or by the helper script above. NULL
-> everywhere means "this ride is not on a bike" and "this bike has no starting
-> odometer", both correct for everything that exists when this lands.
+> `activities.bike_id` and two new tables, `bike_maintenance` and `bike_accessories`
+> (issue #64). No rows added or deleted, nothing backfilled, no new environment
+> variables. NULL everywhere means "this ride is not on a bike" and "this bike has no
+> starting odometer".
 >
-> **No ride is attached to a bike by the upgrade.** Automapping only starts
-> doing anything once an athlete says which sports a bike claims, in
-> **Garage**. From then on new rides are attached as they arrive; the **back
-> catalogue is deliberately not scanned on deploy** — it is an explicit
-> `POST /api/bikes/assign-history` from the garage, because it walks every
-> activity the athlete has and that is their call to make, not a migration's.
-> The same reasoning, and the same shape, as the commute scan above.
+> **No ride is attached to a bike by the upgrade.** Automapping starts only once an
+> athlete says which sports a bike claims, in **Garage**. From then on new rides are
+> attached as they arrive; the **back catalogue is deliberately not scanned on deploy**
+> — it is an explicit `POST /api/bikes/assign-history` from the garage, the same shape
+> as the commute scan above.
 >
-> One **visible behaviour change with no migration behind it**: `/api/bikes` is
-> no longer gated by the course-recon switch. Issue #55 gated it on the
-> reasoning that a bike existed only as a pacing input; the garage made that
-> false, so an instance with course recon off now has a working garage while
-> every `/api/courses` route stays refused exactly as before.
+> One **visible behaviour change with no migration behind it**: `/api/bikes` is no
+> longer gated by the course-recon switch, since a bike is no longer only a pacing
+> input. An instance with course recon off now has a working garage while every
+> `/api/courses` route stays refused exactly as before.
 
 Per-user databases run in **WAL mode**, so `cp user.db` on its own can miss
 committed transactions still sitting in the `-wal` file. Use SQLite's own backup
@@ -499,21 +459,17 @@ uv run uvicorn backend.main:app --host 0.0.0.0 --port 8000
 **Run exactly one process — no `--workers`, no gunicorn.** The backend is
 single-process by design, and several things depend on that:
 
-- The **bridge pollers**, the **token-expiry sweep** and the **achievement
-  sweep** now run under a single claim on the registry (`registry_leases`, name
-  `background-work`), so only one process runs them at a time and a second stands
-  by. The event protocol
-  underneath carries a deadline too: a consumer claims a batch, processes it and
-  acks what succeeded, and an unacked claim becomes deliverable again once it
-  expires. Two processes therefore no longer drain the same events.
-- The **stranded-run sweep** settles `pending` LLM rows at startup (the
-  `Settled N LLM run(s) stranded by the last shutdown` behaviour noted under
-  *Migrating existing user databases* above). It no longer settles them all: a
-  row whose heartbeat is still being touched belongs to somebody, so only the
-  ones whose inactivity budget has run down are released. That makes a rolling
-  restart safe — the process starting no longer errors the live runs of the one
-  still serving — but it is a bound, not an identity: a second process that
-  stays up past the budget will still settle runs it does not own.
+- The **bridge pollers**, the **token-expiry sweep** and the **achievement sweep**
+  run under a single claim on the registry (`registry_leases`, name
+  `background-work`), so only one process runs them at a time and a second stands by.
+  The event protocol underneath carries a deadline too: a consumer claims a batch,
+  processes it and acks what succeeded, and an unacked claim becomes deliverable again
+  once it expires.
+- The **stranded-run sweep** settles `pending` LLM rows at startup (see *Migrating
+  existing user databases* above). It releases only the rows whose inactivity budget
+  has run down, which makes a rolling restart safe — but that is a bound, not an
+  identity: a second process staying up past the budget will still settle runs it does
+  not own.
 - **`AGENT_MAX_CONCURRENT_RUNS`** is an in-process counter, so N processes allow
   N times the concurrency you configured against your LLM.
 - **Rate limits** (login, password reset, chat, uploads, bulk import, MCP) are
@@ -522,26 +478,21 @@ single-process by design, and several things depend on that:
   defence, not just a looser quota.
 - **The one-import-at-a-time check** (`POST /api/activities/import` refuses a
   second job while one is pending or running) is a query against the per-user
-  database rather than in-process state, so it does hold between processes. A
-  job whose process died cannot clear its own status, so the check is a
-  *staleness* question: a row untouched for an hour no longer blocks a new
-  import. A healthy job commits its progress every 25 files, so that bound is
-  far outside anything a live import does — it is crash recovery, not a
-  timeout, and it means a killed import never locks an athlete out permanently.
+  database rather than in-process state, so it holds between processes. A job whose
+  process died cannot clear its own status, so the check is a *staleness* question: a
+  row untouched for an hour no longer blocks a new import. A healthy job commits
+  progress every 25 files, well inside that bound — it is crash recovery, not a
+  timeout.
 
-Two things that used to be on this list no longer are. **Duplicate activity
-creation** and **OAuth token rotation** are now guarded in the database rather
-than in memory — a lease row and a claimed column respectively — so both hold
-between processes. They are listed here because they were fixed for what they do
-on *one* box: each was a live race between two concurrent syncs inside a single
-process, not a multi-replica hypothetical.
+No longer on this list: **duplicate activity creation** and **OAuth token rotation**
+are guarded in the database rather than in memory — a lease row and a claimed column
+respectively — so both hold between processes.
 
-**Deploying the bridges.** The backend and the two bridges are separate images
-and the deploy recreates only what changed, so a new backend can briefly meet an
-old bridge. It handles that: it probes `POST /events/claim` once per bridge URL
-and falls back to the pre-#50 fetch-then-claim flow on a 404, logging a warning
-naming the bridge. Redeploy the bridges and the warning stops. The fallback can
-be removed a release after both have shipped.
+**Deploying the bridges.** The backend and the two bridges are separate images and the
+deploy recreates only what changed, so a new backend can briefly meet an old bridge. It
+probes `POST /events/claim` once per bridge URL and falls back to the pre-#50
+fetch-then-claim flow on a 404, logging a warning naming the bridge. Redeploy the
+bridges and the warning stops.
 
 The container image already runs one process — its entrypoint execs a single
 uvicorn worker. Give the box more CPU/RAM rather than more processes; see
@@ -563,10 +514,9 @@ configured below. Nothing in this repository serves frontend assets.
 
 ```nginx
 # Per-IP bucket for the unauthenticated endpoints. The API rate-limits them
-# itself, but it keys on the address it *sees* — which is this proxy, unless
-# FORWARDED_ALLOW_IPS is set (see below). Doing it here as well means the limit
-# is per client whichever way that is configured, and it costs nginx far less
-# to refuse a flood than it costs the API.
+# itself, but keys on the address it *sees* — this proxy, unless
+# FORWARDED_ALLOW_IPS is set (below). Doing it here too makes the limit per
+# client either way, and nginx refuses a flood far more cheaply than the API.
 limit_req_zone $binary_remote_addr zone=okpublic:10m rate=10r/s;
 
 # API
@@ -615,14 +565,11 @@ the archive beside it, and removes the whole directory when the job ends —
 whatever the outcome. A directory left behind by a process that died is swept up
 when that athlete next starts an import.
 
-The limits are **per job**, and one job is one athlete: an import may expand to
-at most 4 GB across at most 20 000 files, with each file capped at 50 MB
-(`backend/app/services/activity_archive.py`). There is no *global* bound, so on
-a shared instance the worst case is that ceiling times the number of athletes
-importing at once — one import at a time per athlete is enforced, several
-athletes at once is not. On a single-user deployment this is not worth thinking
-about; on a shared one, size the volume for a few concurrent imports rather than
-for one, or lower `MAX_TOTAL_BYTES`.
+The limits are **per job**, and one job is one athlete: an import may expand to at
+most 4 GB across at most 20 000 files, each capped at 50 MB
+(`backend/app/services/activity_archive.py`). There is no *global* bound — one import
+at a time per athlete is enforced, several athletes at once is not — so on a shared
+instance size the volume for a few concurrent imports, or lower `MAX_TOTAL_BYTES`.
 
 Running out of disk mid-expansion fails the job with "Ran out of disk space
 while unpacking the import" rather than reporting every remaining file as
@@ -631,10 +578,10 @@ individually corrupt.
 ### Exposing (or not exposing) the MCP endpoint
 
 `POST /mcp` is the Model Context Protocol tool server (see the README). It ships
-**enabled**, and whether it is available is an instance setting rather than a
-proxy rule, so the decision lives somewhere the admin console can show you — the
-**Allow the MCP server** switch under Settings, next to the personal-access-token
-one. Over the API it is the same field:
+**enabled**, and availability is an instance setting rather than a proxy rule, so the
+decision lives where the admin console can show it — the **Allow the MCP server**
+switch under Settings, next to the personal-access-token one. Over the API it is the
+same field:
 
 ```bash
 # Turn it off for the whole instance
@@ -644,24 +591,22 @@ curl -X PATCH https://api.your-domain/api/admin/settings \
   -d '{"allow_mcp_server": false}'
 ```
 
-Off refuses the endpoint outright — handshake included — with a 404 saying so,
-rather than letting a client connect to a server that will decline every useful
-call. It is the same shape as `allow_personal_access_tokens`, and for the same
-reason: "an AI client may talk to my training data" is a decision a self-hoster
-makes once, for the box, not per token.
+Off refuses the endpoint outright — handshake included — with a 404, rather than
+letting a client connect to a server that will decline every useful call. Same shape as
+`allow_personal_access_tokens`: "an AI client may talk to my training data" is a
+decision a self-hoster makes once for the box, not per token.
 
-Denying `/mcp` at the proxy still works and is a reasonable belt-and-braces
-measure if you also want it unreachable from outside:
+Denying `/mcp` at the proxy also works, as belt and braces if you want it unreachable
+from outside:
 
 ```nginx
 location = /mcp { return 404; }
 ```
 
-Either way, note what this does and does not narrow. The MCP endpoint answers
-only to a credential this instance already issued, and the same underlying data
-is reachable through the ordinary REST routes with the same token. Turning it off
-removes an *interface*, not an exposure — what limits what a credential can see
-is its scopes.
+Note what this does and does not narrow. The endpoint answers only to a credential this
+instance already issued, and the same data is reachable through the ordinary REST
+routes with the same token. Turning it off removes an *interface*, not an exposure —
+what limits a credential is its scopes.
 
 ---
 
@@ -680,10 +625,10 @@ Create `strava_bridge/.env`:
 
 ```env
 BRIDGE_SECRET=<same random string as BRIDGE_SECRET in main .env>   # python -c "import secrets; print(secrets.token_hex(32))"
-# ^ REQUIRED and at least 32 characters. The bridge refuses to start on the old
-#   "changeme" placeholder or anything shorter: it sits on a public HTTPS URL,
-#   so an unconfigured one hands its event queue to whoever finds it — and on
-#   this bridge the same value is the hub.verify_token below.
+# ^ REQUIRED and at least 32 characters; the bridge refuses to start on the old
+#   "changeme" placeholder or anything shorter. It sits on a public HTTPS URL, so
+#   an unconfigured one hands its event queue to whoever finds it — and here the
+#   same value is the hub.verify_token below.
 STRAVA_VERIFY_WEBHOOK_SIGNATURE=false  # optional; see "Webhook authentication" below.
 STRAVA_CLIENT_SECRET=              # only used when the line above is true
 MAX_QUEUE_EVENTS=10000             # optional; ceiling on unclaimed events. Past it
@@ -695,13 +640,11 @@ DATABASE_PATH=bridge.db
 
 ### Webhook authentication
 
-**`POST /webhook` is unauthenticated.** Strava's webhook documentation covers
-the `hub.challenge` subscription handshake and nothing else: there is no
-documented signing secret, no documented header, and no statement of which
-bytes would be signed. The bridge used to verify an `X-Hub-Signature-256`
-against `STRAVA_CLIENT_SECRET` and fail closed when it was missing — but Strava
-sends no such header, so every real delivery was answered with `401` and
-webhooks did not work at all.
+**`POST /webhook` is unauthenticated.** Strava's webhook documentation covers the
+`hub.challenge` subscription handshake and nothing else: no documented signing secret,
+no documented header, no statement of which bytes would be signed. The bridge used to
+verify an `X-Hub-Signature-256` against `STRAVA_CLIENT_SECRET` and fail closed when it
+was missing — but Strava sends no such header, so every real delivery got a `401`.
 
 What stands in place of a signature:
 
@@ -714,13 +657,12 @@ What stands in place of a signature:
 - `MAX_QUEUE_EVENTS` bounds what a flood of forged events can cost (`503` past
   the ceiling).
 
-That is thinner than a verified signature, so the check is kept rather than
-deleted. Set `STRAVA_VERIFY_WEBHOOK_SIGNATURE=true` — with `STRAVA_CLIENT_SECRET`
-set to the same value the Strava app uses — to require the header again once
-Strava documents webhook signing and the validation sequence; check that what
-they document matches the implementation before turning it on. With
-verification on and no client secret set, the bridge fails closed: `POST
-/webhook` answers `403` to every request and warns at startup.
+That is thinner than a verified signature, so the check is kept rather than deleted.
+Set `STRAVA_VERIFY_WEBHOOK_SIGNATURE=true` — with `STRAVA_CLIENT_SECRET` set to the
+same value the Strava app uses — to require the header again once Strava documents
+webhook signing; check that what they document matches the implementation first. With
+verification on and no client secret set, the bridge fails closed: `POST /webhook`
+answers `403` to every request and warns at startup.
 
 ### Run
 
@@ -784,7 +726,14 @@ Set the webhook token to the same value as `WAHOO_WEBHOOK_TOKEN` in `wahoo_bridg
 
 ### Pushing workouts and plans to Wahoo
 
-Sending structured workouts to Wahoo (the single-workout "Send to Wahoo" action in the Workouts tab) requires the OAuth scopes `plans_read`, `plans_write`, and `workouts_write`. These are requested automatically; users who connected Wahoo before this feature shipped must reconnect to grant them. The plan-level "Generate workouts" action synthesizes structured workouts server-side via an OpenAI-compatible LLM, so a base URL must be reachable from the backend (resolved from the athlete's own BYOK config, else the instance's default preset); it does not upload anything itself — the generated workouts are uploaded to Wahoo individually from the Workouts tab.
+The single-workout "Send to Wahoo" action in the Workouts tab requires the OAuth
+scopes `plans_read`, `plans_write` and `workouts_write`. These are requested
+automatically; users who connected Wahoo before this feature shipped must reconnect to
+grant them. The plan-level "Generate workouts" action synthesizes workouts server-side
+via an OpenAI-compatible LLM, so a base URL must be reachable from the backend
+(resolved from the athlete's BYOK config, else the instance's default preset). It
+uploads nothing itself — generated workouts go to Wahoo individually from the Workouts
+tab.
 
 ---
 
@@ -818,9 +767,8 @@ on every push to `main` and on every pull request:
 - **`main` / `workflow_dispatch`:** images are built and **pushed to GHCR** as
   `latest` + `sha-<shortsha>`.
 
-It logs in to GHCR with the built-in `GITHUB_TOKEN` (`packages: write`), so no
-SSH key or VPS secret is stored in the repository — the old SSH `deploy-backend`
-workflow has been removed. The VM picks up the new `latest` images via the
+It logs in to GHCR with the built-in `GITHUB_TOKEN` (`packages: write`), so no SSH key
+or VPS secret is stored in the repository. The VM picks up new `latest` images via the
 polling timer in the [openkoutsi-ops](https://github.com/openkoutsi/openkoutsi-ops)
 repository.
 

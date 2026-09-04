@@ -6,10 +6,9 @@ stops at today. This module runs the very same pure function
 ``PlannedWorkout.target_load``, answering "will I be fresh on race day?" and
 "is this plan ramping too fast?" before the athlete rides it.
 
-Nothing is persisted. A forecast is only ever as good as the plan it was derived
-from, so a cached one would need the same self-healing treatment
-``plan_adherence_daily`` needed; recomputing it is a few hundred iterations of a
-two-line recurrence, so it is computed on read instead.
+Nothing is persisted: a cached forecast would need the same self-healing
+treatment ``plan_adherence_daily`` needed, and recomputing is a few hundred
+iterations of a two-line recurrence.
 """
 
 from __future__ import annotations
@@ -70,18 +69,16 @@ async def planned_load_by_date(
     """Prescribed Load per calendar date over ``[from_date, to_date]``.
 
     ``PlannedWorkout`` stores ``week_number`` + ``day_of_week`` rather than a
-    date, so each workout is placed via :func:`workout_date` relative to its
-    plan's ``start_date``. Plans with no ``start_date`` can't be placed on a
-    calendar and are skipped; archived plans are excluded by the status filter.
+    date, so each is placed via :func:`workout_date` relative to its plan's
+    ``start_date``. Plans without one cannot be placed and are skipped; archived
+    plans are excluded by the status filter.
 
-    Creating a plan only archives *overlapping* active plans, so several
-    non-overlapping plans can be active at once and two can both contribute
-    around a boundary — loads are therefore **summed** across plans rather than
-    one plan being picked.
+    Creating a plan only archives *overlapping* active ones, so two can
+    contribute around a boundary — loads are **summed** across plans.
 
-    A workout with no ``target_load`` contributes nothing: the projection never
-    invents load it wasn't given. Dates with no entry are treated as ``0.0`` by
-    ``compute_daily_metrics``, so rest days decay instead of being skipped.
+    A workout with no ``target_load`` contributes nothing. Dates with no entry
+    are ``0.0`` to ``compute_daily_metrics``, so rest days decay rather than
+    being skipped.
     """
     result = await session.execute(
         select(TrainingPlan)
@@ -123,16 +120,14 @@ async def forecast_fitness(
 ) -> list[dict]:
     """Project Fitness/Fatigue/Form over the next ``days`` days.
 
-    The series covers ``[today + 1, today + days]`` — today's ``DailyMetric``
-    already reflects completed activities, so the measured history stays
-    authoritative for everything up to and including today and the two series
-    never overlap.
+    Covers ``[today + 1, today + days]``: today's ``DailyMetric`` already
+    reflects completed activities, so measured history stays authoritative up to
+    today and the two series never overlap.
 
     Projection continues past the end of the plan with zero load rather than
-    stopping there: the decaying tail is what detraining looks like, and it
-    keeps the chart from ending abruptly mid-taper.
+    stopping — the decaying tail is what detraining looks like.
 
-    Pure read — callers wanting the seed caught up to today should run
+    Pure read; callers wanting the seed caught up to today should run
     ``catch_up_metrics`` first, as the endpoint does.
 
     Returns the same per-day dicts as :func:`compute_daily_metrics`

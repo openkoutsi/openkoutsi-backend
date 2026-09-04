@@ -5,13 +5,11 @@ prompt keyed on ``vars.family`` yields exactly the right matrix: each test row
 (``{family, scenario}``) renders through the matching backend builder and no
 other. The returned value is an OpenAI-style ``[system, user]`` chat array.
 
-The ``plan`` and ``workout`` families expect a JSON object back, so for those we
-return promptfoo's ``{"prompt": ..., "config": ...}`` shape and pin
-``response_format`` to a JSON *schema* derived from a pydantic class that matches
-what the backend parser accepts (see ``prompts/schemas.py``). The provider then
-constrains the model to emit JSON of exactly that shape, which is what those
-families' objective asserts parse. The prose families (``activity``, ``status``)
-return the plain chat array unchanged.
+The ``plan`` and ``workout`` families expect JSON back, so those return
+promptfoo's ``{"prompt": ..., "config": ...}`` shape with ``response_format``
+pinned to a JSON *schema* derived from a pydantic class matching what the backend
+parser accepts (``prompts/schemas.py``). The prose families (``activity``,
+``status``) return the plain chat array unchanged.
 
 Referenced from ``promptfooconfig.yaml`` as ``file://prompts/build.py:build``.
 """
@@ -93,18 +91,17 @@ def _chat(scenario: dict) -> dict:
     """One chat turn, with the stored dialogue replayed as the loop would.
 
     The system prompt comes from ``llm_chat.build_chat_system_prompt``, so the
-    four-band scope policy graded here is byte-identical to the one production
-    sends — which is the entire point: a prompt edit that weakens the medical
-    band should move these scores rather than being paraphrased into staleness.
+    four-band scope policy graded here is byte-identical to production's — a
+    prompt edit weakening the medical band should move these scores rather than
+    being paraphrased into staleness.
 
-    Tools are offered, because a chat turn always has them and refusing to
-    answer a medical question is a *different* behaviour when the model could
-    have gone and looked first. The history carries no tool results: chat stores
-    dialogue only (see ``models.chat_orm``), so this is the real shape.
+    Tools are offered, because a chat turn always has them and refusing a medical
+    question is *different* behaviour when the model could have looked first. The
+    history carries no tool results, since chat stores dialogue only.
 
-    ``now`` is passed explicitly rather than left to the builder's UTC fallback:
-    the fallback is ``datetime.now()``, and a prompt whose text changes every run
-    is one promptfoo cannot cache and whose score diffs are noise.
+    ``now`` is passed explicitly rather than left to the builder's
+    ``datetime.now()`` fallback: a prompt whose text changes every run is one
+    promptfoo cannot cache, and whose score diffs are noise.
     """
     system = chat_svc.build_chat_system_prompt(
         scenario.get("locale"), scenario.get("coaching_style"), scenario.get("now", CHAT_NOW)

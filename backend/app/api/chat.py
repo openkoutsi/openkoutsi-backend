@@ -197,17 +197,15 @@ async def _start_turn(
 ) -> ChatMessage:
     """Write the question and its answer-to-be, then spawn the run.
 
-    Both rows are committed before the task starts. The assistant row exists in
-    ``queued`` from the first moment precisely so the athlete's next poll shows
-    the question *and* something happening under it, whether or not an agent
-    slot was free — the wait is a state, not a gap.
+    Both rows are committed before the task starts, and the assistant row exists
+    in ``queued`` from the first moment so the athlete's next poll shows the
+    question *and* something happening under it — the wait is a state, not a gap.
 
-    The one-turn-at-a-time check below is **best effort, not an invariant**: the
-    read and the insert are separated by awaits with no uniqueness constraint
-    underneath, so two simultaneous posts to the same conversation could both
-    pass it. The web app disables the composer while a turn is live, so this is
-    not reachable by accident, and the blast radius is one athlete's own thread —
-    but do not build anything on it holding absolutely.
+    The one-turn-at-a-time check below is **best effort, not an invariant**: read
+    and insert are separated by awaits with no uniqueness constraint, so two
+    simultaneous posts could both pass it. The web app disables the composer
+    while a turn is live and the blast radius is one athlete's own thread, but do
+    not build on it holding absolutely.
     """
     existing = await _messages_of(session, conversation.id)
     if any(
@@ -390,18 +388,15 @@ async def delete_conversation(
 ):
     """Remove a conversation and everything said in it.
 
-    The messages are deleted explicitly rather than left to the foreign key:
+    Messages are deleted explicitly rather than left to the foreign key:
     ``PRAGMA foreign_keys`` is off on these connections, so ``ON DELETE CASCADE``
-    is documentation rather than behaviour, and relying on it here would orphan
-    every row of a thread an athlete believed they had deleted — health-adjacent
-    free text they wrote about their own body.
+    is documentation rather than behaviour, and relying on it would orphan every
+    row of a thread the athlete believed they had deleted.
 
-    A live turn is **not** a reason to refuse. This is a privacy action, and the
-    confirm dialog says the whole thread goes; making the athlete wait out an
-    answer they no longer want — possibly minutes on a slow local model — would
-    be the wrong trade. The run notices on its next progress marker that its row
-    has gone (``llm_chat._still_ours``), stands down and releases its slot,
-    rather than finishing and writing into rows that no longer exist.
+    A live turn is **not** a reason to refuse — this is a privacy action, and
+    making the athlete wait out an answer they no longer want would be the wrong
+    trade. The run notices on its next progress marker that its row has gone
+    (``llm_chat._still_ours``), stands down and releases its slot.
     """
     _, session = ctx_session
     conversation = await _get_conversation(conversation_id, session)
@@ -462,25 +457,19 @@ async def retry_message(
 ):
     """Run a failed turn again **in place**, rather than asking anew.
 
-    The obvious client-side retry — re-post the same text — is wrong in three
-    ways at once, and they compound on exactly the setup most likely to need a
-    retry (a local model that is flaky or not running). The athlete's question
-    appears in the thread twice, verbatim, right after something has visibly
-    gone wrong; the second attempt spends another turn of the daily budget; and
-    the replayed history ends with the same question adjacent to itself, which
-    several chat templates either reject or silently merge.
+    The obvious client-side retry — re-post the same text — is wrong three ways:
+    the question appears in the thread twice right after something visibly went
+    wrong, the second attempt spends another turn of the daily budget, and the
+    replayed history ends with the same question adjacent to itself, which
+    several chat templates reject or silently merge.
 
     Re-running the existing row avoids all three: one question, one answer slot,
     one charge. The failed row goes back to ``queued`` and the same background
-    task picks it up, so the client polls exactly as it did the first time.
+    task picks it up.
 
-    Any failed row in the thread may be retried, not only the newest. That is
-    safe because the run builds its history from the messages *before* the row it
-    is answering (see ``llm_chat.run_chat_turn_bg``) rather than from everything
-    else in the thread — so an older retry gets the question it is actually
-    answering and nothing from after it. The web app only ever offers the newest,
-    but this endpoint does not lean on that: two client-side guards are not where
-    a server-side invariant belongs.
+    Any failed row may be retried, not only the newest, because the run builds
+    its history from the messages *before* the row it is answering (see
+    ``llm_chat.run_chat_turn_bg``).
     """
     ctx, session = ctx_session
     athlete = await _athlete(session)

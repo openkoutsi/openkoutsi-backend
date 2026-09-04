@@ -9,15 +9,12 @@ carry a *progress code* from a fixed vocabulary (``thinking``,
 cadence as the text so a mid-run poll shows real movement.
 
 Separate columns rather than a structured envelope inside ``training_status`` /
-``analysis`` on purpose: the frontend parses those as raw prose
-(``parseMoodAndParagraphs``), and the activity page, the dashboard card and the
-goal-guidance card all share that parser. A new column keeps that contract
-untouched. Both are cleared once the prose starts, so a settled row looks
-exactly as it did before this migration.
+``analysis``, because the frontend parses those as raw prose
+(``parseMoodAndParagraphs``) and the activity page, dashboard card and
+goal-guidance card share that parser. Both are cleared once the prose starts, so
+a settled row looks exactly as it did before this migration.
 
-Idempotent: safe to run against DBs that already have the columns (including
-ones built fresh by SQLAlchemy create_all, which adds them but doesn't stamp
-alembic).
+Idempotent, like every migration in this tree.
 """
 from alembic import op
 import sqlalchemy as sa

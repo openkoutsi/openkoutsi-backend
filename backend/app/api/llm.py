@@ -19,47 +19,41 @@ medical-boundary guardrails.
 Security model
 --------------
 Users configure their own LLM endpoint (base URL, model, API key) in
-Settings → AI / LLM.  The API key is encrypted server-side with AES-256
-(Fernet) using a per-user HKDF-derived key — see file_encryption.py.  It is
-stored in ``athlete.app_settings['llm_api_key_enc']`` and is **never**
-returned to the browser after being saved.
-
-When an LLM call is needed the server decrypts the key in-memory, adds it to
-the outbound request headers, and calls the user's configured endpoint
-server-to-server.  The key therefore never reaches the frontend, and
-mixed-content (HTTP ↔ HTTPS) restrictions in the browser do not apply.
+Settings → AI / LLM.  The API key is encrypted server-side with AES-256 (Fernet)
+using a per-user HKDF-derived key (see file_encryption.py), stored in
+``athlete.app_settings['llm_api_key_enc']`` and **never** returned to the browser
+after being saved.  The server decrypts it in memory for each call and reaches
+the endpoint server-to-server, so the key never touches the frontend and
+mixed-content restrictions do not apply.
 
 SSRF mitigations
 ----------------
-Because any authenticated user can set an arbitrary base URL, the server could
-be used as a proxy to reach internal services.  The connection probes below —
-and every outbound call made by the feature services — apply these defences:
+Any authenticated user can set an arbitrary base URL, so the server could be used
+as a proxy to reach internal services.  The probes below — and every outbound
+call the feature services make — apply these defences:
 
 1. Only ``http://`` and ``https://`` schemes are accepted.
-2. The hostname is resolved before the request is made, and **every** address
-   the resolver returns is checked — not just the first, or a name answering
-   with both a public and a loopback address would be judged on whichever came
-   back first.  Link-local, metadata and multicast ranges are always refused.
-   Loopback and private RFC-1918 / RFC-4193 / CGNAT ranges are refused too
-   unless ``LLM_ALLOW_PRIVATE_NETWORKS=true``, which is the switch a
-   self-hoster running Ollama on localhost or a LAN box turns on.  That switch
-   does not re-open the metadata ranges.
-3. HTTP redirects are disabled so a redirect cannot bounce the server from a
-   safe public host to an internal address.  A redirect that was followed would
-   re-enter the guard anyway.
-4. The connection is made to the pre-resolved IP rather than handing the
-   hostname back to httpx, which would resolve it a second time and let a
-   short-TTL record answer differently — see ``core/ssrf.py``.  The Host header
-   and TLS certificate verification still use the original hostname.
+2. The hostname is resolved first and **every** address the resolver returns is
+   checked, not just the first — a name answering with both a public and a
+   loopback address would otherwise be judged on whichever came back first.
+   Link-local, metadata and multicast ranges are always refused; loopback and
+   private RFC-1918 / RFC-4193 / CGNAT ranges too, unless
+   ``LLM_ALLOW_PRIVATE_NETWORKS=true`` (the switch for Ollama on localhost or a
+   LAN box), which does not re-open the metadata ranges.
+3. HTTP redirects are disabled, so a redirect cannot bounce the server from a
+   safe public host to an internal address.
+4. The connection is made to the pre-resolved IP rather than handing the hostname
+   back to httpx, which would resolve it again and let a short-TTL record answer
+   differently — see ``core/ssrf.py``.  The Host header and TLS verification
+   still use the original hostname.
 5. A failing upstream's response body is echoed back only on the admin probe,
-   where the URL comes from saved instance config.  On the BYOK probe the
-   caller chooses the URL, so echoing the body would turn the endpoint into a
-   read primitive for anything the backend can reach.  It is logged instead.
+   where the URL comes from saved instance config.  On the BYOK probe the caller
+   chooses the URL, so echoing the body would make the endpoint a read primitive
+   for anything the backend can reach; it is logged instead.
 
 Note: a single layer of DNS-based SSRF protection is not proof against all
-DNS-rebinding attacks.  If your deployment is multi-tenant and users are not
-fully trusted, consider restricting who can save an LLM base URL (e.g. admin
-only) via an out-of-band policy.
+DNS-rebinding attacks.  On a multi-tenant deployment with untrusted users,
+consider restricting who can save an LLM base URL via an out-of-band policy.
 """
 
 from __future__ import annotations

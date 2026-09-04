@@ -10,14 +10,14 @@ downloaded from somewhere else:
 
 * **Nothing is extracted to a name the archive chose.** Every member is written
   to a generated filename in the job's own directory, so a ``../../etc`` entry
-  has nowhere to go. Entry names are *also* validated and rejected, because a
+  has nowhere to go. Entry names are *also* validated and rejected, since a
   malicious name is worth reporting rather than merely defusing.
 * **Every size is a budget, not a promise.** A zip's stated uncompressed size is
-  a number the archive author wrote, so it is used only as a cheap pre-check;
-  the real limit is enforced while reading, against a running total shared by
-  every member and every nesting level. That is what makes a zip bomb a failed
-  import instead of a full disk.
-* **Nesting is bounded.** Archives inside archives are walked, to a depth, so a
+  a number the archive author wrote, so it is only a cheap pre-check; the real
+  limit is enforced while reading, against a running total shared by every
+  member and nesting level. That makes a zip bomb a failed import, not a full
+  disk.
+* **Nesting is bounded.** Archives inside archives are walked to a depth, so a
   zip quine terminates.
 
 The 50 MB request cap the single-file upload relies on is *compressed* size and

@@ -48,18 +48,17 @@ async def first_run_setup(
     user_id = str(uuid.uuid4())
     password_hash = await hash_password_async(body.admin_password)
 
-    # Check and insert in one statement. Counting first and inserting after
-    # leaves an `await` between the two — and the hash above is a quarter of a
-    # second of it — so two requests arriving before either commits both saw
-    # zero users and both created an administrator (issue #102, F-13). This
-    # endpoint is unauthenticated by definition, and the window is open on a
-    # freshly deployed instance, which is exactly when an admin is about to
-    # make this request themselves.
+    # Check and insert in one statement. Counting first leaves an `await`
+    # between the two — the hash above is a quarter of a second of it — so two
+    # requests arriving before either commits both saw zero users and both
+    # created an administrator (issue #102, F-13). The endpoint is
+    # unauthenticated by definition, and the window is open on a freshly deployed
+    # instance, exactly when an admin is about to make this request.
     #
-    # `INSERT ... SELECT ... WHERE NOT EXISTS` moves the check inside the
-    # write, where the database settles it: the second writer inserts nothing
-    # and says so in its row count. A lease would also serialise this, but a
-    # statement the database cannot interleave needs no TTL to be right.
+    # `INSERT ... SELECT ... WHERE NOT EXISTS` moves the check inside the write,
+    # where the database settles it: the second writer inserts nothing and says
+    # so in its row count. A lease would serialise this too, but a statement the
+    # database cannot interleave needs no TTL to be right.
     claimed = await session.execute(
         insert(User).from_select(
             ["id", "username", "password_hash", "roles", "created_at", "token_version"],

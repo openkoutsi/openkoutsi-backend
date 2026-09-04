@@ -2,14 +2,12 @@
 
 Load and Form describe a state; a goal is what makes that state good or bad news.
 Fitness sliding in October is a problem before a November event and exactly right
-after one, and the only way for a model to tell those apart is to know the goal
-and its date.
+after one, and only the goal and its date tell those apart.
 
-So this tool leads with the arithmetic that distinguishes them: days remaining,
-progress against target, and whether the deadline has already gone by. A goal
-whose date has passed while still marked active is reported as overdue rather
-than quietly listed as active — that is usually a goal the athlete forgot to
-close, and saying so is more useful than treating it as live.
+So this leads with the arithmetic that distinguishes them: days remaining,
+progress against target, and whether the deadline has gone by. A goal whose date
+has passed while still marked active is reported as overdue — usually one the
+athlete forgot to close.
 """
 
 from __future__ import annotations

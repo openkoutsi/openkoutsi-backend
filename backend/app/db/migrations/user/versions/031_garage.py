@@ -4,36 +4,29 @@ Promotes an existing record rather than adding a parallel one. ``bikes`` was
 built by issue #55 as the small equipment concept the pacing physics reads;
 this gives it the things a garage needs and links rides to it:
 
-* ``bikes`` — ``odometer_base_km`` (kilometres ridden before openkoutsi saw
-  the bike, so wear figures are not systematically low), ``default_sports``
-  (which ``sport_type`` values the bike claims, for automapping) and
-  ``retired_at`` (a sold bike leaves the pickers but keeps its history —
-  deleting would rewrite the athlete's past totals).
-* ``activities`` — ``bike_id`` and ``bike_source``. The index on ``bike_id``
-  is not optional: every lifetime-distance figure in the garage is a ``SUM``
-  filtered on it. ``bike_source`` records *who* chose the bike ("auto" or
-  "manual"), which is what stops automapping overwriting a hand correction.
-* ``bike_maintenance`` — one row per thing done, keyed by a ``component``
-  string so component life is the delta between consecutive entries sharing
-  it; ``odometer_km`` is an absolute reading and never moves.
-* ``bike_accessories`` — a plain record of what is bolted on. No mass, no
-  drag, no coupling to the pacing model (that is deferred, deliberately).
+* ``bikes`` — ``odometer_base_km`` (kilometres ridden before openkoutsi saw the
+  bike), ``default_sports`` (the ``sport_type`` values it claims, for
+  automapping) and ``retired_at`` (a sold bike leaves the pickers but keeps its
+  history).
+* ``activities`` — ``bike_id`` and ``bike_source``. The index on ``bike_id`` is
+  not optional: every lifetime-distance figure is a ``SUM`` filtered on it.
+  ``bike_source`` records *who* chose the bike, which stops automapping
+  overwriting a hand correction.
+* ``bike_maintenance`` — one row per thing done, keyed by ``component`` so
+  component life is the delta between consecutive entries sharing it;
+  ``odometer_km`` is an absolute reading and never moves.
+* ``bike_accessories`` — what is bolted on. No mass, no drag, no coupling to the
+  pacing model.
 
-Foreign keys: ``activities.bike_id`` is SET NULL, the two new tables CASCADE
-from their bike. As everywhere else in this tree those clauses **document
-intent and do not execute** — SQLite only honours them with ``PRAGMA
-foreign_keys`` on, which these connections do not set — so ``api/bikes.py``
-enforces them explicitly on delete, exactly as it already does for
-``Course.bike_id``.
+Foreign keys: ``activities.bike_id`` is SET NULL, the two new tables CASCADE from
+their bike. As everywhere in this tree those clauses **document intent and do not
+execute** (SQLite honours them only with ``PRAGMA foreign_keys`` on, which these
+connections do not set), so ``api/bikes.py`` enforces them explicitly on delete.
 
-Adds no rows and backfills nothing: every column lands NULL, which reads as
-"no bike assigned" and "no baseline", both correct for everything that exists
-when this arrives. Assigning history is an explicit athlete request
-(``POST /api/bikes/assign-history``), never a migration.
+Adds no rows and backfills nothing: every column lands NULL. Assigning history is
+an explicit athlete request (``POST /api/bikes/assign-history``).
 
-Idempotent, like every migration in this tree: safe against databases already
-migrated and against ones built fresh by SQLAlchemy ``create_all``, which
-creates the tables but never stamps alembic.
+Idempotent, like every migration in this tree.
 
 Revision ID: 031_garage
 Revises: 030_course_surface

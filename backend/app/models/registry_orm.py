@@ -112,29 +112,24 @@ class EmailChangeToken(RegistryBase):
     the address being claimed, one to the address being left. Neither alone moves
     anything — ``users.email`` changes only once every required side is stamped.
 
-    **Why both.** This codebase has no authenticated change-password endpoint: the
-    only way to set a password on an existing account is a reset token, and those
-    are mailed to ``users.email``. That makes the address the account's sole
-    self-serve root of trust, so a one-sided change would let anyone holding just
-    the password relocate the recovery channel and then lock the owner out via
-    "forgot password" — turning a password leak from recoverable into permanent.
-    Requiring the old mailbox costs an attacker exactly what taking the account
-    over already costs them, so the feature stops being an escalation.
+    **Why both.** There is no authenticated change-password endpoint here: a
+    password is set through a reset token mailed to ``users.email``, making the
+    address the account's sole self-serve root of trust. A one-sided change would
+    let a password holder relocate the recovery channel and lock the owner out
+    via "forgot password".
 
-    ``old_token_hash`` is NULL when the account has no address yet (invite-created
-    accounts setting a first one). There is nothing to authorise against in that
-    case, so the new side alone completes it; an admin clearing the address is what
-    makes a malicious first set undoable.
+    ``old_token_hash`` is NULL when the account has no address yet, so the new
+    side alone completes a first set; an admin clearing the address is what makes
+    a malicious one undoable.
 
-    It is a separate table from :class:`EmailVerificationToken` because
-    :func:`signup` marks *every* unused verification token a user holds as spent
-    before issuing a fresh one; a pending change sharing that table would be
-    silently voided by an unrelated signup retry.
+    Separate from :class:`EmailVerificationToken` because :func:`signup` marks
+    *every* unused verification token a user holds as spent before issuing a
+    fresh one, so a pending change sharing that table would be voided by an
+    unrelated signup retry.
 
-    ``new_email`` carries no unique constraint. Two users may have a pending change
-    to the same address at once — nothing has been claimed until one of them
-    finishes, and the loser is turned away at that point by the unique index on
-    ``users.email``.
+    ``new_email`` carries no unique constraint: two users may have a pending
+    change to the same address, and the unique index on ``users.email`` decides
+    it when one of them finishes.
     """
 
     __tablename__ = "email_change_tokens"
@@ -193,17 +188,15 @@ class PersonalAccessToken(RegistryBase):
     * **It is revocable, and revocation is the point.** ``revoked_at`` is the
       first server-side kill switch for an outstanding credential in this
       codebase; nothing else here can be withdrawn before its own expiry.
-    * **Dead rows are kept.** Expiry and revocation end a token's ability to
-      authenticate, nothing more. The audit log stores token ids, so deleting
-      rows would turn historical entries into unresolvable identifiers at exactly
-      the moment somebody is reconstructing what a leaked credential did — and
-      keeping ``token_hash`` means a presented-but-revoked token is still
-      *recognisable*, so "someone is using a credential we withdrew" stays
-      distinguishable from "someone is guessing".
+    * **Dead rows are kept.** The audit log stores token ids, so deleting rows
+      would turn historical entries into unresolvable identifiers exactly when
+      somebody is reconstructing what a leaked credential did; keeping
+      ``token_hash`` also keeps "using a credential we withdrew" distinguishable
+      from "guessing".
 
-    ``scopes`` is a JSON-encoded list drawn from
+    ``scopes`` is a JSON-encoded list from
     :data:`backend.app.core.scopes.SCOPES`. It, ``name`` and ``expires_at`` are
-    fixed at creation: there is no update endpoint, because an editable token
+    fixed at creation — there is no update endpoint, because an editable token
     makes its own audit trail ambiguous.
     """
 
@@ -326,20 +319,17 @@ class InstanceSettings(RegistryBase):
     allow_mcp_server: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default="1"
     )
-    # Course recon (issue #56). Defaults **off**, breaking the convention the
-    # two switches above set, and deliberately: unlike them it gates a feature
-    # whose useful half needs infrastructure that is not there. Surface
-    # classification map-matches against OSM through a Valhalla sidecar the
-    # self-hoster runs, builds tiles for, and refreshes themselves — measured
-    # at over 5 GB of peak RAM to build, against a default box with 2 GB — so
-    # the honest default for an instance that has made no such decision is
-    # "not offered" rather than "offered and quietly degraded".
+    # Course recon (issue #56). Defaults **off**, unlike the two switches above,
+    # because it gates a feature whose useful half needs infrastructure that may
+    # not be there: surface classification map-matches against OSM through a
+    # Valhalla sidecar the self-hoster runs and builds tiles for (over 5 GB peak
+    # RAM to build, against a default box with 2 GB). The honest default for an
+    # instance that has made no such decision is "not offered".
     #
-    # Off refuses the *capability*: every course and bike endpoint, the
-    # background matcher and the plan generator, not merely the entry point.
-    # It does not refuse the data export — a right to your own data is not a
-    # feature an instance toggles — and it deletes nothing, so turning it back
-    # on returns every stored course intact.
+    # Off refuses the *capability* — every course and bike endpoint, the
+    # background matcher and the plan generator — not merely the entry point. It
+    # does not refuse the data export, and deletes nothing, so turning it back on
+    # returns every stored course intact.
     allow_course_recon: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="0"
     )

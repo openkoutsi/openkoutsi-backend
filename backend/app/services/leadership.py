@@ -6,15 +6,15 @@ analysed and billed twice.
 
 The claim is taken per cycle rather than held as a term of office: a lease needs
 a deadline to survive a dead holder, and no sane deadline spans the expiry
-sweep's 24 hours. A process that loses a tick just skips it.
+sweep's 24 hours. A process losing a tick just skips it.
 
 Renewal is still needed *within* a cycle (a bridge poll can be a hundred FIT
-downloads), so the deadline is short and pushed out on its own task — a slow
-drain cannot starve its own renewal.
+downloads), so the deadline is short and pushed out on its own task.
 
-Losing the lease mid-cycle cancels the work rather than finishing it: another
-process may already be draining the same queue. Safe on all three — a bridge
-event is not acked until processed, and the expiry sweep commits per token.
+Losing the lease mid-cycle cancels the work rather than finishing it, since
+another process may already be draining the same queue. Safe on all three: a
+bridge event is not acked until processed, and the expiry sweep commits per
+token.
 """
 
 from __future__ import annotations

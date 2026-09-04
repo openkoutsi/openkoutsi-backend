@@ -191,19 +191,16 @@ async def update_user_email(
 ):
     """Set or clear the address on an account, as a recovery action.
 
-    The escape hatch for an address its owner can no longer reach. Users change
-    their own address themselves, and that flow requires approval from both the
-    old mailbox and the new one — which is what stops a password-holder
-    relocating the account's password-reset target. That guarantee is also what
-    leaves somebody whose old mailbox is gone with nowhere to go, and until this
-    existed the only remedy was deleting the account and every activity in it.
+    The escape hatch for an address its owner can no longer reach. The
+    self-serve flow requires approval from both the old mailbox and the new one,
+    which is what stops a password-holder relocating the account's password-reset
+    target — and also what strands somebody whose old mailbox is gone.
 
-    Because it is a recovery action, it assumes the account may be in the wrong
-    hands: it withdraws every session and personal access token, so whoever is
-    signed in right now is signed out, and voids any change already in flight.
-    An admin setting an address is vouching for it, so it lands verified — no
-    confirmation mail, which is the point when the mailbox being replaced is
-    unreachable.
+    Being a recovery action, it assumes the account may be in the wrong hands: it
+    withdraws every session and personal access token, and voids any change in
+    flight. An admin setting an address is vouching for it, so it lands verified,
+    with no confirmation mail — which is the point when the mailbox being
+    replaced is unreachable.
     """
     result = await session.execute(
         select(User).where(User.id == user_id, User.deleted_at.is_(None))
@@ -724,16 +721,14 @@ async def llm_usage_summary(
 
 # ── Personal access tokens (instance admin, issue #46) ──────────────────────
 #
-# Narrow on purpose, and it follows from the audit log rather than being a
-# separate ambition: once rate limits and audit records are keyed by token id,
-# an admin investigating a runaway integration is staring at a token id with no
-# proportionate way to act on it — the instance switch takes down every user and
-# deleting the account is absurd.
+# Narrow on purpose, and it follows from the audit log: once rate limits and
+# audit records are keyed by token id, an admin investigating a runaway
+# integration is staring at a token id with no proportionate way to act on it —
+# the instance switch takes down every user, and deleting the account is absurd.
 #
-# This is not a new capability. On a self-hosted instance the admin holds
-# ENCRYPTION_KEY and root on the box; they can already open registry.db and
-# delete the row. The endpoint moves that action out of a shell and into the
-# audit log, and tells the user it happened.
+# Not a new capability: a self-hosted admin holds ENCRYPTION_KEY and root, and
+# can already open registry.db and delete the row. The endpoint moves that out of
+# a shell and into the audit log, and tells the user it happened.
 
 
 @router.get("/users/{user_id}/tokens",

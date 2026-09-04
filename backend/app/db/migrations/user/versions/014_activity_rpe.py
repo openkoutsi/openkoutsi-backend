@@ -3,9 +3,7 @@
 Stores the athlete's subjective Rate of Perceived Exertion (a 1–10 effort
 score) for a ride. Nullable until the athlete rates the activity.
 
-Idempotent: safe to run against DBs that already have the column (including ones
-built fresh by SQLAlchemy create_all, which adds the column but doesn't stamp
-alembic).
+Idempotent, like every migration in this tree.
 """
 from alembic import op
 import sqlalchemy as sa

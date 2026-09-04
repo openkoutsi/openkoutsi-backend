@@ -6,18 +6,15 @@ can carry one tool call or, over a long-lived agent turn, dozens. Counting
 requests would let a client take the whole database a page at a time inside a
 single POST.
 
-Deliberately **not applied to the in-process agent**. Its calls are already
-bounded by the LLM loop that issues them and by the entitlement gate in front of
-that loop (issue #43); throttling them would only make the server slower at work
-the user is already paying for, and a limit that fires mid-turn would leave the
-model reasoning from a partial picture — worse than either finishing or not
-starting.
+Deliberately **not applied to the in-process agent**: its calls are already
+bounded by the LLM loop that issues them and the entitlement gate in front of it
+(issue #43), and a limit firing mid-turn would leave the model reasoning from a
+partial picture — worse than either finishing or not starting.
 
 A fixed window rather than a token bucket: the failure this defends against is a
-script in a loop, which a window catches just as well, and the window's whole
-state is one integer per active user. It inherits the pollers' single-process
-assumption — a multi-worker deployment gets the limit per worker, which is the
-same caveat the expiry sweeper already carries.
+script in a loop, which a window catches just as well, and its whole state is one
+integer per active user. It inherits the pollers' single-process assumption — a
+multi-worker deployment gets the limit per worker.
 """
 
 from __future__ import annotations

@@ -1,12 +1,11 @@
 """Courses — upload a GPX course, get a segment table and a pacing plan (issue #55).
 
 Processing is synchronous: parse + thin + smooth + segment + solve is pure
-arithmetic in the low hundreds of milliseconds for a typical course, so the
-POST returns the finished analysis and errors are immediate 400/422s rather
-than a job to poll. The CPU-bound work still runs off the event loop via
-``asyncio.to_thread``. The LLM-written plan is the opposite: always
-asynchronous, copying the goal-guidance shape exactly (trigger → pending →
-poll, stranded runs settled at boot).
+arithmetic in the low hundreds of milliseconds, so the POST returns the finished
+analysis and errors are immediate 400/422s. The CPU-bound work still runs off the
+event loop via ``asyncio.to_thread``. The LLM-written plan is the opposite —
+always asynchronous, copying the goal-guidance shape (trigger → pending → poll,
+stranded runs settled at boot).
 
 No response in this module carries a coordinate. The stored track and the
 encrypted GPX exist for re-analysis, Stage 2 and the GDPR export — not for

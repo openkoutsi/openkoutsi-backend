@@ -1,18 +1,14 @@
 """Add ``activities.analysis_updated_at`` (issue #91).
 
-The training-status and goal-guidance surfaces both carry a timestamp their
-routers age a stuck ``pending`` against; the activity analysis carried the
-status and the prose but no clock, so there was nothing to check even if someone
-wanted to. Since ``trigger_analysis`` early-returns for ``pending``, a row whose
-process died mid-run left that activity permanently un-analysable — this column
-is what makes it recoverable without a restart.
+Training status and goal guidance both carry a timestamp their routers age a
+stuck ``pending`` against; the activity analysis had the status and the prose but
+no clock. Since ``trigger_analysis`` early-returns for ``pending``, a row whose
+process died mid-run left that activity permanently un-analysable.
 
-Nullable and un-backfilled on purpose: a pre-existing ``pending`` row genuinely
-has no known last-progress time, and the age check treats a NULL as immediately
-timed out, which is exactly right for a row stranded before this existed.
+Nullable and un-backfilled: a pre-existing ``pending`` row has no known
+last-progress time, and the age check treats NULL as immediately timed out.
 
-Idempotent: safe to run against DBs that already have the column (including ones
-built fresh by SQLAlchemy create_all, which adds it but doesn't stamp alembic).
+Idempotent, like every migration in this tree.
 """
 from alembic import op
 import sqlalchemy as sa

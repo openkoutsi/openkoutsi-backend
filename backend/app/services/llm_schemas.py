@@ -1,19 +1,17 @@
 """Pydantic output schemas for the JSON generators, as provider ``response_format``.
 
-The training-plan generator (``llm_plan_generator``) and the structured-workout
-synthesizer (``llm_workout_generator``) both return a JSON object that a backend
-parser accepts. Instead of only *asking* the model for "a JSON object", we hand
-the provider a JSON *schema* derived from a pydantic class, so a model that
-supports structured outputs is constrained to the exact shape the app parses.
+The training-plan and structured-workout generators both return a JSON object a
+backend parser accepts. Rather than only *asking* for "a JSON object", the
+provider is handed a JSON *schema* derived from a pydantic class, constraining a
+model that supports structured outputs to the exact shape the app parses.
 
-This module is the single source of truth for those schemas: the runtime
-generators build their ``response_format`` from it, and the offline eval harness
+The single source of truth for those schemas: the runtime generators build their
+``response_format`` from it and the offline eval harness
 (``llm-eval/prompts/schemas.py``) re-exports it, so the two never drift.
 
 Reusing the backend's schemas
 -----------------------------
-Where the backend already models a shape, we import it rather than restate it, so
-these stay in lock-step with production:
+Where the backend already models a shape it is imported rather than restated:
 
 * ``WorkoutOutput.steps`` reuses the canonical :class:`WorkoutStep`. The canonical
   ``RepeatBlock`` / ``WorkoutStepOrRepeat`` (and ``WorkoutDefinitionCreate.steps``)
@@ -29,9 +27,8 @@ these stay in lock-step with production:
 Strict structured outputs accept only a subset of JSON Schema (no recursion, no
 numeric/length bounds, ``additionalProperties: false`` with every property
 required, ``anyOf`` rather than ``oneOf``). :func:`response_format` post-processes
-pydantic's schema into that subset — the validation bounds still live on the
-classes (and in the backend parsers) even though they're stripped from the wire
-schema.
+pydantic's schema into that subset; the validation bounds still live on the
+classes and in the backend parsers.
 """
 from __future__ import annotations
 

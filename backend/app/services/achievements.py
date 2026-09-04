@@ -9,25 +9,20 @@ orchestration:
 - reconcile that against the stored ``achievement_unlocks`` rows.
 
 The reconcile is a full rewrite, not an append: rows are inserted, re-dated or
-**deleted** so the table always matches the data, exactly like
+**deleted** so the table always matches the data, as
 ``metrics_engine.catch_up_metrics`` and ``plan_adherence.catch_up_adherence``
-self-heal their snapshots. Deleting an activity can therefore revoke a tier —
-that is the deliberate trade for never showing a badge the history no longer
-supports.
+self-heal their snapshots. Deleting an activity can therefore revoke a tier.
 
-Unlike those two, there is no incremental path here: every reconcile costs the
-athlete's lifetime history. So the split is *when*, not *how much* (issue #69):
+Unlike those two there is no incremental path — every reconcile costs the
+athlete's lifetime history — so the split is *when*, not *how much* (issue #69):
 
-- **write paths mark**, with :func:`mark_achievements_dirty` — one indexed row
-  write, O(1) in history, so importing a season is N cheap marks rather than N
-  full scans,
+- **write paths mark**, with :func:`mark_achievements_dirty`: one indexed row
+  write, O(1) in history, so importing a season is N cheap marks;
 - **reads and the daily sweep settle**, with :func:`recompute_achievements` —
-  ``GET /achievements`` (which reconciles on every read anyway),
-  ``GET /athlete/training-status`` on its daily first-read cadence, and
-  ``achievements_sweep`` for an athlete who reads neither.
+  ``GET /achievements``, ``GET /athlete/training-status`` on its daily
+  first-read cadence, and ``achievements_sweep`` for an athlete reading neither.
 
-Deferring costs nothing but latency: unlocks are a pure function of the data, so
-a late reconcile writes exactly the rows an eager one would have.
+Deferring costs only latency: unlocks are a pure function of the data.
 """
 
 from __future__ import annotations
@@ -345,9 +340,8 @@ async def _compute_plan_rules(
 
     Completion is deliberately **date-and-content based, not status based**:
     ``plan.status`` is never read. A plan counts once its end date has passed and
-    at least one of its sessions was actually done. Archiving is how the app
-    makes room for an overlapping plan, not a statement about whether the work
-    happened — a block you rode and then archived is still a block you rode.
+    at least one session was done — archiving makes room for an overlapping plan
+    rather than saying whether the work happened.
     """
     result = await session.execute(
         select(TrainingPlan)
@@ -467,12 +461,9 @@ async def recompute_achievements(
     Pass *athlete* when the caller already has the row.
 
     Settles ``achievements_dirty_at`` (issue #69). A write landing *during* the
-    compute is cleared without having been seen, which is benign only because no
-    reader gates on the flag: ``GET /achievements`` reconciles unconditionally —
-    it has to, since the response needs progress and streaks whatever the flag
-    says — so the next read picks that write up regardless. **That is a
-    precondition for anyone adding a gated consumer**: gate on the flag and this
-    race starts dropping unlocks until something else recomputes.
+    compute is cleared unseen, benign only because no reader gates on the flag.
+    **A precondition for any gated consumer**: gate on it and this race starts
+    dropping unlocks until something else recomputes.
     """
     if athlete is None:
         athlete = (
@@ -570,36 +561,24 @@ async def _clear_dirty(athlete: Athlete, session: AsyncSession) -> None:
 async def mark_achievements_dirty(athlete_id: str, session: AsyncSession) -> None:
     """Record that a recompute is owed, without doing it (issue #69).
 
-    This is what every write path calls instead of reconciling inline. The
-    reconcile re-reads the athlete's whole activity history and every plan, so
-    running it per ingest event made importing a season quadratic — N events each
-    paying O(N), for a result only the last pass kept. Stamping one column costs
-    the same whether the athlete has ten activities or ten thousand.
+    What every write path calls instead of reconciling inline: the reconcile
+    re-reads the whole activity history and every plan, so running it per ingest
+    event made importing a season quadratic. Nothing is lost by deferring, and
+    ``_notify`` still emits a single message for the batch.
 
-    Nothing is lost by deferring: unlocks are a pure function of the data, so the
-    reconcile that eventually runs produces exactly the rows an eager one would
-    have, and ``_notify`` still emits a single message for the batch.
+    Deliberately does **not** check ``gamification_enabled``: the flag says a
+    recompute is *owed*, not that one will produce badges.
+    ``recompute_achievements`` clears the mark for an opted-out athlete.
 
-    Deliberately does **not** check ``gamification_enabled``. The flag claims a
-    recompute is *owed*, not that one will produce badges, and keeping it to a
-    single unconditional rule — every write marks — is worth more than the sweep
-    pass it saves: ``recompute_achievements`` clears the mark for an opted-out
-    athlete rather than leaving it pinned.
+    Loads the row rather than issuing a bulk ``UPDATE``, which would leave an
+    ``Athlete`` in this session holding the stale value — and since the settle
+    reads that attribute to decide whether to clear, a mark and a settle sharing
+    one session would pin the athlete in the sweep forever.
 
-    Loads the row rather than issuing a bulk ``UPDATE``. A bulk update writes the
-    column but leaves an ``Athlete`` already in this session holding the stale
-    value, and the settle decides whether to clear by reading that attribute — so
-    a mark and a settle sharing one session would leave the flag set on disk with
-    nothing left to clear it, pinning the athlete in the sweep forever. This is a
-    primary-key fetch that usually hits the identity map, and the cost this
-    function exists to avoid is the history scan, not one indexed row.
-
-    Same failure isolation as :func:`recompute_achievements_safe`, and for the
-    same reason: achievements are a nice-to-have on top of an upload, and the
-    caller carries on using this session, so a failure has to be rolled back
-    rather than merely swallowed or the caller's next statement raises
-    ``PendingRollbackError``. Same precondition too — every call site commits its
-    own work first, so the rollback can only ever discard this mark.
+    Same failure isolation as :func:`recompute_achievements_safe`: a failure must
+    be rolled back, not merely swallowed, or the caller's next statement raises
+    ``PendingRollbackError``. Every call site commits its own work first, so the
+    rollback can only discard this mark.
     """
     try:
         athlete = await session.get(Athlete, athlete_id)
@@ -620,21 +599,14 @@ async def mark_achievements_dirty(athlete_id: str, session: AsyncSession) -> Non
 async def _notify(athlete: Athlete, created: list[AchievementUnlock]) -> None:
     """Put one inbox message in front of the athlete for a batch of unlocks.
 
-    One message per *recompute*, not per tier: importing a season of history at
-    once can earn a dozen tiers, and a dozen separate messages would read as
-    spam. The whole batch is passed through, so the message can name every badge
-    earned rather than just counting them — ``notify_user`` renders the text via
-    ``message_text``.
+    One message per *recompute*, not per tier, since importing a season can earn
+    a dozen. The whole batch is passed through so the message names every badge.
 
-    Deduplication is structural rather than flag-based: a recompute over
-    unchanged data inserts nothing, so there is nothing to announce. The one case
-    that does re-announce is a genuine revoke-then-re-earn — delete the ride that
-    earned a badge and upload it again and the badge is announced afresh. That is
-    an accepted consequence of unlocks being a pure function of the data, and it
-    takes a deliberate act by the athlete to trigger.
+    Deduplication is structural: a recompute over unchanged data inserts nothing.
+    A genuine revoke-then-re-earn does re-announce.
 
     Runs on its own session so a delivery failure cannot leave the caller's
-    session dirty; ``notify_user`` writes to the same per-user DB.
+    session dirty.
     """
     try:
         # Sorted so a message lists badges in the same order every time, however
@@ -657,17 +629,16 @@ async def recompute_achievements_safe(athlete_id: str, session: AsyncSession) ->
     """Fire-and-forget wrapper for the ingest paths.
 
     Achievements are a nice-to-have on top of an upload; a failure here must
-    never fail the upload itself or block a sync.
+    never fail the upload or block a sync.
 
-    Swallowing the exception is not enough for that, because the caller carries
-    on using this same session: a failure part-way through leaves the reconcile's
-    pending adds and deletes in the identity map (which the caller's next commit
-    would then persist), and a failure *during* commit leaves the session needing
-    a rollback, so the caller's next statement raises ``PendingRollbackError``.
-    Rolling back here is what actually isolates the caller.
+    Swallowing the exception is not enough, because the caller carries on using
+    this session: a part-way failure leaves the reconcile's pending adds and
+    deletes in the identity map for the caller's next commit to persist, and a
+    failure during commit leaves the session needing a rollback. Rolling back
+    here is what isolates the caller.
 
-    Precondition: every call site commits its own work before calling this, so
-    the rollback can only ever discard achievement state.
+    Precondition: every call site commits its own work first, so the rollback can
+    only discard achievement state.
     """
     try:
         await recompute_achievements(athlete_id, session)

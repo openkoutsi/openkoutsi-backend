@@ -1,43 +1,37 @@
 """Running one tool, with every check applied (issue #42).
 
 :func:`call_tool` is the only way a tool ever runs. Both consumers — the internal
-agent and the MCP transport — arrive here, which is what makes "the two doors
-reach the same tools through the same checks" a fact about the code rather than
-a hope.
+agent and the MCP transport — arrive here, which makes "the two doors reach the
+same tools through the same checks" a fact about the code.
 
-The order matters, and each step is here rather than in the tools for a reason:
+The order matters, and each step is here rather than in the tools:
 
 1. **Resolve the tool.** Unknown names get a result naming the real ones, so a
-   model that hallucinated a tool can recover in one turn instead of retrying.
-2. **Check the rate limit** — for external callers only; see
-   :mod:`backend.app.mcp.limits`. Before the refusals below rather than after,
-   so the calls that *cannot* succeed are the ones it counts.
+   model that hallucinated one can recover in a turn.
+2. **Check the rate limit** — external callers only (:mod:`backend.app.mcp.limits`).
+   Before the refusals below, so calls that *cannot* succeed are counted.
 3. **Check scopes.** Default-deny: the tool declares what it needs
-   (:mod:`backend.app.mcp.registry`) and a credential either holds all of it or
-   is refused. A session credential carries ``scopes is None`` — full access,
-   the same meaning it has everywhere else in this codebase.
-4. **Check consent.** ``require_consent`` guards the *ingestion* paths; reading
-   health data back out through a tool is the same processing, so the same gate
-   applies per invocation.
+   (:mod:`backend.app.mcp.registry`) and a credential holds all of it or is
+   refused. A session credential carries ``scopes is None`` — full access.
+4. **Check consent.** Reading health data back out through a tool is the same
+   processing ``require_consent`` guards on ingestion.
 5. **Validate arguments** against the tool's pydantic model, turning a schema
    violation into a sentence rather than a stack trace.
 6. **Establish the per-user context** — ``open_user_session`` sets the encryption
    context and opens *that user's* database, then ``load_athlete`` finds their
-   profile in it. Isolation here is physical, so this is the step that must never
-   be reimplemented per tool, and it is why :class:`ToolRun` hands the handler a
-   session it did not open.
+   profile. Isolation here is physical, so this must never be reimplemented per
+   tool, which is why :class:`ToolRun` hands the handler a session it did not
+   open.
 7. **Run, size-check and record.** Every invocation is audited with caller, tool,
    arguments, duration and outcome.
 
-A handler that raises :class:`~backend.app.mcp.errors.ToolError` produces an
-error *result*; anything else escaping a handler is a bug, and is logged as one
-and returned as a generic failure rather than propagated into the model's turn.
+A handler raising :class:`~backend.app.mcp.errors.ToolError` produces an error
+*result*; anything else escaping a handler is logged as a bug and returned as a
+generic failure rather than propagated into the model's turn.
 
-Note what :class:`ToolCaller` does **not** carry: roles. There is no ``is_admin``
-to consult, so no tool can widen what it returns for an administrator, and the
-admin-data exclusion the issue asks for is structural rather than a rule someone
-has to remember. Administrative data lives in the registry database, which no
-tool opens at all.
+:class:`ToolCaller` deliberately carries no roles: with no ``is_admin`` to
+consult, no tool can widen what it returns for an administrator. Administrative
+data lives in the registry database, which no tool opens at all.
 """
 
 from __future__ import annotations
@@ -193,22 +187,18 @@ async def call_tool(
     """Run one tool for one caller. Never raises for an ordinary failure.
 
     ``session``/``athlete`` may be supplied by a caller that already holds the
-    user's session (the agent inside a request, the tests); when they are not,
-    this opens the user's own encrypted database and finds their athlete in it.
-    Passing someone else's session is not a hole this can close — it is the
-    caller's job to hand over the session belonging to ``caller.user_id``, which
-    is precisely why the default is to open it here from the caller's own id.
+    user's session (the agent inside a request, the tests); otherwise this opens
+    the user's own encrypted database. Handing over the session belonging to
+    ``caller.user_id`` is the caller's job, which is why the default is to open
+    it here from the caller's own id.
 
-    ``registry_session`` is used only for the consent check; omitted, one is
-    opened and closed around that check.
+    ``registry_session`` is used only for the consent check.
 
-    ``today`` is the calendar date the tools reckon from — "this week", "the
-    last 28 days", "days remaining". It matters because *the athlete's* date is
-    not the server's: six tools key off it, and the ones that do are exactly the
-    date-boundary-sensitive ones, where being a day out turns "not due yet" into
-    "missed". A caller that knows the athlete's timezone should pass their local
-    date; omitted, it falls back to the process's own, which is what an external
-    MCP client gets until it can say otherwise.
+    ``today`` is the calendar date the tools reckon from. *The athlete's* date is
+    not the server's, and the six tools keying off it are the
+    date-boundary-sensitive ones where being a day out turns "not due yet" into
+    "missed". Callers that know the athlete's timezone should pass their local
+    date; omitted, it falls back to the process's own.
     """
     started = time.perf_counter()
     arguments = arguments or {}

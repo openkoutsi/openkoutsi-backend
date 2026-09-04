@@ -58,10 +58,9 @@ def _safe(value: Optional[str]) -> str:
     the module docstring above deliberately keeps supporting.
 
     Control characters are replaced rather than stripped, so a forgery attempt
-    stays visible in the record instead of being silently tidied into something
-    that reads as ordinary. The structured ``extra`` fields are unaffected: a
-    JSON formatter escapes them correctly, and truncating there would lose data
-    an operator may need.
+    stays visible instead of being tidied into something that reads as ordinary.
+    The structured ``extra`` fields are unaffected: a JSON formatter escapes them
+    correctly, and truncating there would lose data an operator may need.
     """
     if not value:
         return "-"

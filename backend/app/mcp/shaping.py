@@ -1,12 +1,10 @@
 """Response shaping for the tool layer (issue #42).
 
-A tool result is read by a model with a finite context window, and the platform's
-underlying data is not shaped for that at all: a three-hour ride carries eleven
-thousand samples per stream, and handing over even one of those streams would
-spend the entire budget on numbers no model can reason about anyway. So the rule
-here is that **tools return computed aggregates, never raw series**, and the
-helpers in this module are what makes that convenient enough to be the path of
-least resistance.
+A tool result is read by a model with a finite context window, and the underlying
+data is not shaped for that: a three-hour ride carries eleven thousand samples
+per stream, and handing over even one would spend the whole budget on numbers no
+model can reason about. So **tools return computed aggregates, never raw
+series**, and these helpers make that the path of least resistance.
 
 Three conventions the tools follow throughout:
 

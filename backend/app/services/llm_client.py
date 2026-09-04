@@ -15,9 +15,8 @@ No-mixing rule (BYOK)
 As soon as the athlete configures their *own* base URL (the single
 ``llm_base_url`` field, or an athlete-level preset with a ``base_url``),
 resolution uses **only** athlete-level values (model, key, headers) — instance
-presets, the instance API key and instance headers are ignored entirely. This
-guarantees the instance's (or the hoster's) API key can never be sent to a
-user-chosen server. The resulting :class:`ResolvedLlm` carries a
+presets, key and headers are ignored entirely, so the hoster's API key can never
+be sent to a user-chosen server. The resulting :class:`ResolvedLlm` carries a
 ``source``/``key_source`` signal so callers (and issue #9's gating) can tell
 where the config came from.
 """
@@ -201,23 +200,19 @@ def resolve_llm(
 ) -> ResolvedLlm:
     """Resolve one outbound LLM request from the configured presets.
 
-    Every connection lives in a *preset* (an ``llm_models`` entry) — its own
-    base URL, upstream model id, API key, headers and body params. There are no
-    instance-level single-config or env-var fallbacks: the config is entirely
-    the athlete's and the instance's preset lists. The selected preset is chosen
-    by name: ``requested_model`` (a per-request override) → the athlete's saved
-    ``llm_model`` → the **first preset in the list** (the default; athlete
-    presets take precedence over instance presets).
+    Every connection lives in a *preset* (an ``llm_models`` entry): base URL,
+    model id, API key, headers and body params, with no instance-level
+    single-config or env-var fallbacks. The preset is chosen by name —
+    ``requested_model`` → the athlete's saved ``llm_model`` → the **first preset
+    in the list**, athlete presets taking precedence over instance ones.
 
-    **No-mixing rule (BYOK):** if the athlete configured their own base URL
-    (the single ``llm_base_url`` field, or a selected athlete-level preset with
-    a ``base_url``), only athlete-level values are used — instance presets, the
-    instance key and instance headers are all ignored, so the instance key can
-    never leak to a user-chosen server.
+    **No-mixing rule (BYOK):** if the athlete configured their own base URL, only
+    athlete-level values are used, so the instance key can never leak to a
+    user-chosen server.
 
-    ``base_url`` / ``model`` may be empty strings when nothing is configured —
-    callers validate and surface an error. The returned :class:`ResolvedLlm`
-    records ``source``/``key_source``.
+    ``base_url`` / ``model`` may be empty when nothing is configured — callers
+    validate and surface an error. :class:`ResolvedLlm` records
+    ``source``/``key_source``.
     """
     from ..core.file_encryption import decrypt_instance_secret, decrypt_secret
 
@@ -435,12 +430,10 @@ def is_our_tool_schema_error(exc: httpx.HTTPStatusError) -> bool:
     """Is ``exc`` the provider telling us *our* function schema is invalid?
 
     The complement of :func:`is_tool_calling_unsupported_error`, split out
-    because the agent loop needs to act on it rather than merely not-match it:
-    every other upstream failure degrades to the single-shot prompt, and this
-    one must not. Tool schemas come from the registry's own pydantic models, so
-    this is a regression in one of them — hiding it behind a quietly worse
-    answer for every athlete on every provider is the failure mode the whole
-    "don't swallow an invalid schema" rule exists to prevent.
+    because the agent loop must act on it rather than merely not-match it: every
+    other upstream failure degrades to the single-shot prompt, and this must not.
+    Tool schemas come from the registry's own pydantic models, so this is a
+    regression in one of them.
     """
     resp = getattr(exc, "response", None)
     if resp is None or getattr(resp, "status_code", None) not in (400, 422):
@@ -452,15 +445,13 @@ def is_our_tool_schema_error(exc: httpx.HTTPStatusError) -> bool:
 def is_tool_calling_unsupported_error(exc: httpx.HTTPStatusError) -> bool:
     """Is ``exc`` an upstream rejection of the ``tools`` *param*? (issue #43)
 
-    The tool-calling twin of :func:`is_response_format_unsupported_error`, and
-    deliberately the same shape: a 400/422 whose body names the parameter means
-    the provider cannot do function calling, so the caller should drop ``tools``
-    and fall back to the hand-built blob prompt.
+    The tool-calling twin of :func:`is_response_format_unsupported_error`: a
+    400/422 whose body names the parameter means the provider cannot do function
+    calling, so the caller drops ``tools`` and falls back to the blob prompt.
 
-    Returns ``False`` for an "invalid function schema" body for the same reason
-    the structured-output check refuses an "invalid schema" one: that is a
-    regression in a tool's own arguments model, and it must surface as an error
-    rather than quietly degrade every athlete to the non-agentic path.
+    Returns ``False`` for an "invalid function schema" body — that is a
+    regression in a tool's arguments model, and must surface as an error rather
+    than degrade every athlete to the non-agentic path.
     """
     resp = getattr(exc, "response", None)
     if resp is None or getattr(resp, "status_code", None) not in (400, 422):
@@ -494,16 +485,15 @@ def resolve_llm_config(
     Wraps :func:`resolve_llm` and applies the use-time policy shared by the chat
     proxy and the plan/workout generators:
 
-    * ``allow_instance_fallback=False`` (hook for #9): when the user has no own
-      config, raise ``LlmConfigError("instance_fallback_disabled")`` instead of
-      falling back to the instance/env config.
+    * ``allow_instance_fallback=False`` (hook for #9): a user with no own config
+      raises ``LlmConfigError("instance_fallback_disabled")``.
     * no resolvable base URL → ``LlmConfigError("no_base_url")``.
-    * a base URL but no model → ``LlmConfigError("no_model")`` (so a BYOK user who
-      forgot the model gets a clear 400 instead of an opaque upstream 502).
-    * when the base URL is user-chosen (``source == "user"``) and an allow-list
-      is configured, the URL must be on it, else
-      ``LlmConfigError("server_not_allowed")``. The allow-list only ever
-      restricts BYOK URLs; admin/instance config is not filtered.
+    * a base URL but no model → ``LlmConfigError("no_model")``, so a BYOK user who
+      forgot the model gets a clear 400 rather than an opaque upstream 502.
+    * a user-chosen base URL (``source == "user"``) must be on
+      ``LLM_ALLOWED_SERVERS`` when one is configured, else
+      ``LlmConfigError("server_not_allowed")``. The allow-list only restricts
+      BYOK URLs.
     """
     cfg = resolve_llm(
         instance=instance,
@@ -556,16 +546,13 @@ async def call_llm(
 ) -> tuple[str, dict[str, Any] | None]:
     """Call the OpenAI-compatible chat completions endpoint.
 
-    Returns ``(text, usage)`` where ``usage`` is the response's ``usage`` object
-    (``{"prompt_tokens", "completion_tokens", "total_tokens"}``) or ``None`` when
-    the upstream omits it. ``call_llm`` stays transport-only — the caller decides
-    whether to record the usage (issue #9), since only instance-paid calls count.
+    Returns ``(text, usage)``, where ``usage`` is the response's ``usage`` object
+    or ``None`` when the upstream omits it. Transport-only: the caller decides
+    whether to record it (issue #9), since only instance-paid calls count.
 
-    When ``response_format`` is given (a provider-side ``{"type": "json_schema",
-    …}`` block), it is sent as a core payload field so a provider that supports
-    structured outputs is constrained to that schema. It is kept distinct from the
-    free-form ``extra_body`` so a caller's auto-fallback can drop just this field
-    and re-issue the call when a provider rejects it.
+    ``response_format`` (a provider-side ``{"type": "json_schema", …}`` block) is
+    sent as a core payload field, kept distinct from the free-form ``extra_body``
+    so an auto-fallback can drop just this field and re-issue the call.
     """
     headers: dict[str, str] = {"Content-Type": "application/json"}
     if api_key:

@@ -1,32 +1,29 @@
 """Conversational Koutsi — the athlete asks, and Koutsi goes and looks (#44).
 
-Every other LLM surface in openkoutsi is a *generation*: the backend picks the
-question, builds the prompt, and prints one answer. This is the first one where
-the athlete picks the question, and that single change is what everything below
-is about.
+Every other LLM surface is a *generation*: the backend picks the question, builds
+the prompt, and prints one answer. This is the first one where the athlete picks
+the question, and that change is what everything below is about.
 
 Server-built, always
 --------------------
 The messages sent to the model are assembled here and never accepted from the
-client. The removed ``POST /api/llm/chat`` proxy (issue #45) did the opposite —
-it forwarded a client-supplied ``messages`` array — which meant the caller
-controlled the system prompt, and therefore that every guardrail in it was
-removable by anyone holding an access token, which is every user. The scope
+client. The removed ``POST /api/llm/chat`` proxy (issue #45) forwarded a
+client-supplied ``messages`` array, which put the system prompt — and so every
+guardrail in it — under the control of anyone holding an access token. The scope
 policy below is only worth writing because the client cannot reach it.
 
 Scope, and the four bands
 -------------------------
-An open text box removes the bound that every other surface has by construction:
-there is no way to ask ``_build_status_prompt()`` to write you a shell script.
-:data:`_SCOPE_POLICY` is what replaces it, and the medical band is the one that
-matters. openkoutsi holds heart rate, weight, RPE and sleep-adjacent context, so
-a model that has just been shown a weight log will answer a question about rapid
-weight loss with total confidence — and some of those questions are
-eating-disorder-adjacent or cardiac.
+An open text box removes the bound every other surface has by construction:
+nobody can ask ``_build_status_prompt()`` for a shell script. :data:`_SCOPE_POLICY`
+replaces it, and the medical band matters most — openkoutsi holds heart rate,
+weight, RPE and sleep-adjacent context, so a model just shown a weight log will
+answer a question about rapid weight loss with total confidence, and some of
+those questions are eating-disorder-adjacent or cardiac.
 
 The band that gets missed is the *other* failure: refusing "what should I eat on
-a four-hour ride?" is not a safe default, it is a broken coach. Refusal theatre
-is a bug here, and the guardrail tests assert both directions.
+a four-hour ride?" is a broken coach, not a safe default. The guardrail tests
+assert both directions.
 
 A system prompt is a first line, not a boundary. The layers under it:
 
@@ -36,26 +33,24 @@ A system prompt is a first line, not a boundary. The layers under it:
   where issue #43 measured leading-format rules degrade;
 * history is **trimmed** rather than grown without bound, so the system message
   never drifts arbitrarily far from the generation point;
-* and with BYOK there is a ceiling we cannot raise. A user pointing openkoutsi at
-  their own local model can make it say anything; we enforce where we own the
-  request and the docs say plainly that the rest is theirs to own.
+* and BYOK is a ceiling we cannot raise: a user pointing openkoutsi at their own
+  local model can make it say anything. We enforce where we own the request, and
+  the docs say plainly that the rest is theirs.
 
 Knowing what day it is
 ----------------------
-Every other surface hands the model a brief the backend wrote, and puts the date
-in it. Chat's last message is the athlete's own question, so
-:data:`_CHAT_TIME_CONTEXT` puts the clock in the system prompt instead — "how did
-today's session go?" and "should I move tomorrow's ride?" are ordinary questions
-here, and a model guessing the date answers them about the wrong day. It is the
-athlete's local now, the same instant whose ``date()`` becomes
-``AgentRequest.today``, so the model and its tools cannot disagree about which
-day "today" is.
+Every other surface hands the model a backend-written brief with the date in it.
+Chat's last message is the athlete's own question, so :data:`_CHAT_TIME_CONTEXT`
+puts the clock in the system prompt instead — "how did today's session go?" is an
+ordinary question here, and a model guessing the date answers it about the wrong
+day. It is the athlete's local now, the same instant whose ``date()`` becomes
+``AgentRequest.today``, so the model and its tools cannot disagree.
 
 Storage is dialogue only
 ------------------------
-See :mod:`..models.chat_orm` for why tool calls and results are not persisted.
-The short version: they are most of the bytes, they go stale, and re-running a
-read-only tool on a later turn is *more* correct than replaying its old answer.
+See :mod:`..models.chat_orm` for why tool calls and results are not persisted:
+they are most of the bytes, they go stale, and re-running a read-only tool on a
+later turn is *more* correct than replaying its old answer.
 """
 
 from __future__ import annotations
@@ -181,18 +176,14 @@ than trusting your own earlier summary.\
 
 #: What "today" means, for the one surface where the athlete gets to say it.
 #:
-#: Every other prompt states the date in a brief the backend writes —
-#: ``_build_agentic_user_prompt`` puts it there for exactly this reason. Chat has
-#: no brief: the last user message is the athlete's own question, so the system
-#: prompt is the only place left. Leaving it out is not a neutral omission here.
-#: "How did today's session go?" and "should I move tomorrow's ride?" are
-#: ordinary questions on this surface, and a model guessing the date answers them
-#: about the wrong day — confidently, since nothing in the tool results
-#: contradicts it.
+#: Every other prompt states the date in a brief the backend writes. Chat has no
+#: brief — the last user message is the athlete's own question — so the system
+#: prompt is the only place left, and leaving it out is not neutral here: "how did
+#: today's session go?" is an ordinary question on this surface, and a model
+#: guessing the date answers it about the wrong day, confidently.
 #:
-#: The neighbouring dates are spelled out rather than left as arithmetic. It is a
-#: few tokens to buy past the one calculation models reliably get wrong, and
-#: "yesterday" is the commonest word in the questions this exists for.
+#: The neighbouring dates are spelled out rather than left as arithmetic: a few
+#: tokens to buy past the one calculation models reliably get wrong.
 _CHAT_TIME_CONTEXT = """\
 Right now it is {time} on {weekday} {today} ({tz}), in the athlete's own \
 timezone. Anchor every relative date in their question to that: "today" is \
@@ -260,20 +251,14 @@ def build_chat_system_prompt(
 ) -> str:
     """The whole server-side system prompt for one chat turn.
 
-    Order is deliberate: who Koutsi is, then what is in and out of scope, then
-    when *now* is, then how to go and get the facts, then the output contract.
-    The scope policy sits high because it is the part that has to survive twenty
-    turns of history; the clock sits directly under it because resolving
-    "yesterday's session" into a date is the first half of deciding what to look
-    up, and :func:`_decorate` appends the athlete's chosen coaching style and
-    language exactly as it does for every other surface — a chat answer should
-    sound like the daily card, and be in the same language.
+    Order is deliberate: who Koutsi is, what is in and out of scope, when *now*
+    is, how to get the facts, then the output contract. The scope policy sits
+    high because it must survive twenty turns of history. :func:`_decorate`
+    appends the athlete's coaching style and language.
 
-    ``now`` is the athlete's local time and every production caller passes it.
-    The UTC fallback is for callers with no athlete to hand (the ``llm-eval``
-    harness, tests): a prompt whose date is right but whose zone is the server's
-    is a much smaller error than a prompt with no date at all, which is the bug
-    this argument exists to fix.
+    ``now`` is the athlete's local time and every production caller passes it;
+    the UTC fallback is for callers with no athlete to hand (``llm-eval``,
+    tests).
     """
     return _decorate(
         f"{_CHAT_GUIDANCE}\n\n{_SCOPE_POLICY}\n\n"
@@ -292,30 +277,17 @@ def build_wire_history(
 ) -> list[dict]:
     """The stored dialogue, trimmed, as chat-completion messages.
 
-    **Complete turns are the unit**, not individual rows, and that is what keeps
-    the result strictly alternating. Filtering rows independently — every user
-    row, only ``complete`` assistant rows — is the obvious implementation and
-    produces a malformed conversation the moment a turn fails, which is exactly
-    the event this feature makes ordinary: two adjacent user messages, or the
-    same question twice after a retry, or a window that opens on an assistant
-    turn once trimming bites.
+    **Complete turns are the unit**, not individual rows, which keeps the result
+    strictly alternating. Filtering rows independently produces a malformed
+    conversation the moment a turn fails, and several common Jinja chat templates
+    reject non-alternating roles or silently merge them — precisely the BYOK
+    local-model setups this module accommodates.
 
-    That matters more here than the shape suggests. Everything leaves through
-    the OpenAI chat-completions dialect, but the servers behind it are not
-    uniformly permissive: several common Jinja chat templates either reject
-    non-alternating roles or silently merge them, and those are precisely the
-    BYOK local-model setups this module exists to accommodate. It would have
-    broken first on the request right after a failure — the retry.
-
-    So a user turn is replayed only with the completed answer it received. One
-    whose answer failed is **dropped**, which is also closer to the truth: Koutsi
-    never saw it, and leaving it dangling invites the model to answer the old
-    question instead of the new one.
+    So a user turn is replayed only with the completed answer it received; one
+    whose answer failed is **dropped**, since Koutsi never saw it.
 
     The newest question is always kept, truncated if it alone would blow the
-    budget, so a turn can never be trimmed down to nothing. The API caps a single
-    message at ``chat_max_message_chars`` so that stays a backstop rather than a
-    routine event.
+    budget, so a turn can never be trimmed to nothing.
     """
     budget = budget_chars if budget_chars is not None else settings.chat_history_chars
 
@@ -383,11 +355,10 @@ def conversation_title(first_message: str, *, limit: int = 60) -> str:
 #:
 #: ``busy`` means no agent slot came free and ``tools_unsupported`` means the run
 #: was refused before any request was built; ``unreachable`` got as far as a
-#: connection attempt that failed. Charging a turn for these would be charging
-#: the athlete for openkoutsi's own unavailability — and it compounds, because
-#: the web app offers a retry on exactly these codes, so a local model that is
-#: simply not running could otherwise eat a day's allowance without a single
-#: request reaching anything.
+#: failed connection attempt. Charging for these would charge the athlete for
+#: openkoutsi's own unavailability, and it compounds: the web app offers a retry
+#: on exactly these codes, so a local model that is simply not running could eat
+#: a day's allowance without a single request reaching anything.
 #:
 #: ``upstream`` and ``no_answer`` are *not* here: those reached a provider and
 #: spent tokens, which somebody paid for.
@@ -444,23 +415,17 @@ async def settle_stuck_turns(session: AsyncSession, *, now: datetime) -> int:
     """Fail any chat turn that has stopped making progress.
 
     ``stream_into_db`` settles its own row and ``failure_recovery`` covers a
-    failure just outside it, but neither survives the process being restarted
-    mid-turn — and a queued or pending row from a previous life would otherwise
-    poll forever. Called on the thread read, which is the only moment anyone
-    cares.
+    failure just outside it, but neither survives a restart mid-turn. Called on
+    the thread read, the only moment anyone cares.
 
     The clock is ``updated_at``, touched on every progress commit, so this means
-    "no progress for N minutes" and not "started N minutes ago" — the distinction
-    issue #91 had to introduce for the daily card, and for the same reason: an
-    agent run against a slow local model is many completions and must not be
-    declared dead while it is healthy.
+    "no progress for N minutes" rather than "started N minutes ago" — an agent
+    run against a slow local model must not be declared dead while healthy
+    (issue #91).
 
-    This runs in the *reader's* session and cannot cancel anything, so on its own
-    it would only be an opinion: a merely-slow run would carry on and overwrite
-    the failure with an answer the athlete had already been told was not coming.
-    :func:`_still_ours` is the other half — the run re-reads this column at every
-    progress marker and stands down when it finds it has been overruled, which is
-    what makes the settle stick and stops two runs sharing one thread.
+    Runs in the *reader's* session and cannot cancel anything, so on its own it
+    is only an opinion; :func:`_still_ours` is the other half, letting the run
+    stand down when overruled.
     """
     cutoff = chat_stuck_cutoff(now)
     result = await session.execute(
@@ -485,12 +450,10 @@ async def settle_stuck_turns(session: AsyncSession, *, now: datetime) -> int:
 class ChatTurnAbandoned(Exception):
     """This run no longer owns its row, so it should stop and let go of its slot.
 
-    Two things cause it, and they want the same response. The athlete deleted
-    the conversation — in which case there is nowhere for the answer to land and
-    continuing would keep a slot and keep paying a provider for it — or
-    :func:`settle_stuck_turns` declared the run dead while it was merely slow, in
-    which case the athlete has already been shown a failure and may have acted
-    on it.
+    Two causes, one response: the athlete deleted the conversation, so there is
+    nowhere for the answer to land; or :func:`settle_stuck_turns` declared the
+    run dead while it was merely slow, so the athlete has already been shown a
+    failure.
     """
 
 
@@ -498,13 +461,9 @@ async def _still_ours(session: AsyncSession, message_id: str) -> bool:
     """Is this run still the one writing to its row?
 
     Deliberately a **column** select rather than an entity load: the run's
-    session already holds the row in its identity map with
-    ``expire_on_commit=False``, so an entity query would hand back the cached
-    copy and answer the wrong question. This one goes to the file, which is where
-    the reader's session committed.
-
-    Cheap enough to do per progress marker — a handful per run, against a local
-    SQLite file, next to completions taking seconds each.
+    session holds the row in its identity map with ``expire_on_commit=False``, so
+    an entity query would hand back the cached copy. This goes to the file, where
+    the reader's session committed. Cheap enough per progress marker.
     """
     result = await session.execute(
         select(ChatMessage.status).where(ChatMessage.id == message_id)
@@ -524,17 +483,14 @@ async def _turn_stream(
 ) -> AsyncIterator:
     """``agentic_stream``, with the failure reason kept for the athlete.
 
-    The one adaptation chat needs over the two card surfaces. They wrap the loop
-    in ``coaching_stream``, which swallows :exc:`AgenticUnavailable` and quietly
-    serves the blob prompt instead; there is no blob prompt for an arbitrary
-    question, so the exception is the answer here and its ``code`` is what turns
-    it into a sentence the athlete can act on. Re-raised either way, so
-    ``stream_into_db`` settles the row exactly as it does for any other failure.
+    The one adaptation chat needs over the card surfaces, which wrap the loop in
+    ``coaching_stream`` and let it swallow :exc:`AgenticUnavailable` for the blob
+    prompt. There is no blob prompt for an arbitrary question, so the exception
+    *is* the answer and its ``code`` becomes a sentence the athlete can act on.
 
-    Also the run's one chance to notice it has been overruled. The check rides on
-    progress markers rather than on a timer: they are the loop's own heartbeat,
-    there are a handful per run, and each one is a natural place to stop before
-    committing to another round of paid work.
+    Also the run's chance to notice it has been overruled. The check rides on
+    progress markers — the loop's own heartbeat, and a natural place to stop
+    before committing to another round of paid work.
     """
     checked_prose = False
     try:
@@ -618,14 +574,10 @@ async def run_chat_turn_bg(
             today = now.date()
 
             # Everything *before* the row being written, not merely everything
-            # other than it. The two are the same thing for a fresh question,
-            # which is why the difference stayed invisible until retries existed:
-            # a retried row need not be last, and "all but this one" then feeds
-            # the model messages from after the question it is answering — and
-            # loses that question entirely, since the pairing rule gives its
-            # answer slot away to a later turn. The result was a completed
-            # exchange with nothing pending, which the model would dutifully
-            # continue and we would store as the answer.
+            # other than it. The two coincide for a fresh question, which hid the
+            # difference until retries existed: a retried row need not be last, so
+            # "all but this one" feeds the model messages from *after* the
+            # question it is answering, and loses that question entirely.
             #
             # Sliced by position rather than by ``created_at``: ``_start_turn``
             # stamps a question and its answer-to-be with the same instant, so a
@@ -676,13 +628,11 @@ async def run_chat_turn_bg(
                     # transcript of the progress line.
                     if not tool_names or tool_names[-1] != name:
                         tool_names.append(name)
-                    # Written through on every step rather than only at the end.
-                    # The thread shows each lookup where it happened, in front of
-                    # the answer it fed, so a turn still gathering has to be able
-                    # to show the steps already behind it — otherwise the
-                    # timeline stays empty for the whole slow part and then three
-                    # steps appear at once, with the answer, having apparently
-                    # taken no time at all.
+                    # Written through on every step rather than at the end: the
+                    # thread shows each lookup where it happened, so a turn still
+                    # gathering must be able to show the steps behind it —
+                    # otherwise the timeline is empty for the whole slow part and
+                    # then three steps appear at once with the answer.
                     #
                     # Copied on assignment: handing SQLAlchemy the same list
                     # object back is no net change to flush, so the row would sit

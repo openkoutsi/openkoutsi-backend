@@ -14,7 +14,7 @@ the layout:
   directory at read time. Never an absolute path in the database — issue #51
   exists to purge those, and a new blob type must not add a third one.
 * **Persistence** — writing an analysis onto a ``Course`` row, replacing its
-  segments wholesale and clearing any written plan, which is stale the moment
+  segments wholesale and clearing any written plan, which goes stale the moment
   the segment table it reasoned over changes.
 """
 from __future__ import annotations

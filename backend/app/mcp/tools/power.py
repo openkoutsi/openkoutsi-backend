@@ -1,19 +1,16 @@
 """``get_power_profile`` — what the athlete can actually produce (issue #42).
 
-The power curve is the athlete's capability, as opposed to Fitness/Fatigue, which
-is their recent *behaviour*. A model prescribing intervals needs the first: "four
-by eight minutes at threshold" is a different session for someone whose 8-minute
-best is 290 W than for someone whose is 420 W.
+The power curve is capability, where Fitness/Fatigue is recent *behaviour*, and a
+model prescribing intervals needs the first: "4×8 min at threshold" is a
+different session for an 8-minute best of 290 W than for 420 W.
 
-Returned as the single best effort per standard duration rather than the API's
-top three. Ranks two and three answer "was this a fluke", which is a question
-about the chart; a coach asking what the athlete can do wants one number per
-duration, and cutting the other two thirds is what keeps this inside the size
-budget alongside the FTP estimates.
+The single best effort per standard duration, not the API's top three — ranks two
+and three answer "was this a fluke", a question about the chart — which is what
+keeps this inside the size budget alongside the FTP estimates.
 
-Asks for ``athlete:read`` as well as ``metrics:read`` because the profile FTP —
-the number every zone and every intensity figure on the platform is computed
-against — is athlete data, not a derived metric.
+Asks for ``athlete:read`` as well as ``metrics:read`` because the profile FTP,
+which every zone and intensity figure is computed against, is athlete data rather
+than a derived metric.
 """
 
 from __future__ import annotations

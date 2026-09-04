@@ -12,13 +12,12 @@ session was *for*. Session counting takes each ride whole by its workout
 category, which is how the polarization literature counts. Both ship; the
 answer is only meaningful with the method stated next to it.
 
-``compute_intensity_distribution`` **never writes**. It is called from request
-handlers and from two LLM paths, and one of those (``regenerate_plan`` →
-``generate_plan_weeks_llm``) runs on a session carrying flushed-but-uncommitted
-deletions of a plan's workouts, deliberately left uncommitted so an LLM failure
-rolls them back. A commit in here would make them permanent before the LLM was
-even called and strip the plan unrecoverably. Backfilling snapshots is a
-separate, explicit call that only the endpoint makes.
+``compute_intensity_distribution`` **never writes**. One of its LLM callers
+(``regenerate_plan`` → ``generate_plan_weeks_llm``) runs on a session carrying
+flushed-but-uncommitted deletions of a plan's workouts, left uncommitted so an
+LLM failure rolls them back; a commit here would make them permanent before the
+LLM was even called. Backfilling snapshots is a separate, explicit call that only
+the endpoint makes.
 """
 from datetime import date, datetime, time, timedelta
 from typing import Optional, Sequence
@@ -99,31 +98,29 @@ def _zone_definitions_changed(
     """Whether the zone definitions moved inside the window.
 
     ``zone_times`` is frozen at processing time using the zones in effect then
-    (issue #27), which is exactly right for a weekly chart but means a 12-week
-    aggregate can mix snapshots taken under different FTPs. Nothing records
-    which FTP a given snapshot used, so this detects the two things that *are*
-    observable:
+    (issue #27) — right for a weekly chart, but it means a 12-week aggregate can
+    mix snapshots taken under different FTPs. Nothing records which FTP a given
+    snapshot used, so this detects the two things that *are* observable:
 
     * the recorded FTP *changing value* inside the window — power zones are
-      pinned to it, so the boundaries moved with it. It has to be a change in
-      value: every profile save that includes an FTP appends a test entry, so
-      the mere presence of one means nothing;
+      pinned to it, so the boundaries moved with it. A change in value, not the
+      mere presence of a test entry: every profile save including an FTP appends
+      one;
     * the same zone number carrying different names in different snapshots,
-      which means the zone list itself was replaced.
+      meaning the zone list itself was replaced.
 
     Names are compared per zone number rather than as whole key sets, because a
-    snapshot only holds the zones its ride touched: an easy ride and a hard one
-    under identical zones legitimately have different keys, and treating that
-    as a change would raise the warning on almost every window.
+    snapshot only holds the zones its ride touched — an easy ride and a hard one
+    under identical zones legitimately have different keys.
 
     A pure boundary change that kept the names is not detectable from the
-    snapshots alone; that is what the FTP-test signal is for. The flag is
-    therefore a "treat this as approximate" hint, not a proof of consistency.
+    snapshots alone; that is what the FTP-test signal is for. The flag is a
+    "treat this as approximate" hint, not a proof of consistency.
 
-    Returns ``False`` outright when there is no basis — session counting reads
-    ``workout_category`` and never touches a zone boundary, so no change to the
-    definitions can affect that number. Warning about it there would tell the
-    athlete (and the LLM) to distrust a figure the change cannot have moved.
+    Returns ``False`` outright when there is no basis: session counting reads
+    ``workout_category`` and never touches a zone boundary, so warning there
+    would tell the athlete (and the LLM) to distrust a figure the change cannot
+    have moved.
     """
     if basis is None:
         return False

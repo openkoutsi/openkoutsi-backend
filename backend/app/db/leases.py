@@ -1,28 +1,24 @@
 """Named, expiring leases held in a database row (issue #50).
 
-An ``asyncio.Lock`` coordinates tasks within one event loop and nothing else. For
-the places where that is the *only* guard on a write, the guarantee is therefore
-exactly as strong as "there is one process", which is an assumption the
-deployment makes today and would like to stop making. A lease moves the decision
-into the database, so it holds between processes as well as between tasks.
+An ``asyncio.Lock`` coordinates tasks within one event loop and nothing else, so
+where it is the *only* guard on a write the guarantee is exactly as strong as
+"there is one process". A lease moves the decision into the database, so it holds
+between processes as well as between tasks.
 
 The mechanics are a conditional ``UPDATE``: a caller may take a lease only when
 nobody holds it or the holder's deadline has passed, and the database — not the
-caller — decides who won by whether the statement matched a row.
+caller — decides who won, by whether the statement matched a row.
 
 **Every lease expires.** A holder that dies mid-section cannot release, so
-without a deadline the first crash would wedge that lease forever. The deadline
-is therefore a crash-recovery bound rather than a timeout, and it must be
-comfortably longer than the section it protects: expiring under a holder that is
-merely slow hands the same lease to two callers, which is the failure the lease
-exists to prevent.
+without a deadline the first crash would wedge the lease forever. It is a
+crash-recovery bound rather than a timeout, and must be comfortably longer than
+the section it protects: expiring under a merely slow holder hands the same lease
+to two callers.
 
-Generic over the *model*, so one implementation serves both databases — the
-per-user DB (activity creation) and, in future, the registry (leader election for
-the background pollers). Not generic over the *dialect*: the claim-on-first-use
-insert is ``sqlalchemy.dialects.sqlite``'s ``ON CONFLICT DO NOTHING``. Every
-database in this application is SQLite, so that costs nothing today; it is
-recorded here so the reuse above is not mistaken for portability.
+Generic over the *model*, so one implementation serves the per-user DB (activity
+creation) and the registry (leader election). Not generic over the *dialect* —
+the claim-on-first-use insert is ``sqlalchemy.dialects.sqlite``'s ``ON CONFLICT
+DO NOTHING`` — so the reuse above is not portability.
 """
 
 from __future__ import annotations
@@ -161,21 +157,19 @@ async def renew(
 ) -> bool:
     """Push a held lease's deadline out. Returns whether we still held it.
 
-    :func:`acquire` cannot do this: it mints a fresh token and its ``WHERE``
-    only matches a row that is free or expired, so a holder calling it would
-    either fail or come back with a *different* token. Renewal is the same
-    conditional-``UPDATE`` idiom pointed at the row we already own.
+    :func:`acquire` cannot do this: it mints a fresh token and only matches a row
+    that is free or expired, so a holder calling it would fail or come back with
+    a *different* token. Renewal is the same conditional ``UPDATE`` pointed at
+    the row we already own.
 
-    **A ``False`` return is the loss signal and is authoritative.** It means the
-    deadline lapsed and somebody else took the lease, or the row is gone — and a
-    caller that keeps working through it is exactly the second writer the lease
-    exists to prevent.
+    **A ``False`` return is the loss signal and is authoritative** — the deadline
+    lapsed and somebody else took the lease, or the row is gone, and a caller
+    working through it is the second writer the lease exists to prevent.
 
-    This is what lets a lease outlive the section it guards without making the
-    deadline long. A holder that dies must free the lease by expiry within
-    something like seconds, and that bound is incompatible with holding it
-    across a cycle measured in hours — unless the deadline is pushed out while
-    the holder is demonstrably alive, which is this.
+    This is what lets a lease outlive its section without a long deadline: a dead
+    holder must free it within seconds, which is incompatible with a cycle
+    measured in hours unless the deadline is pushed out while the holder is
+    demonstrably alive.
     """
     now = datetime.now(timezone.utc)
     result = await session.execute(
@@ -200,19 +194,15 @@ async def hold(
     """Hold a lease for the duration of the block.
 
     Yields the holder token, or ``None`` when the lease could not be taken in
-    time. A caller that gets ``None`` still runs: this is a guard on a race, not
-    an admission gate, and refusing to import an activity because a lease was
-    busy would turn a rare duplicate into a routine failure. The warning is what
-    makes the degraded case visible.
+    time. A caller that gets ``None`` still runs: this guards a race, it is not an
+    admission gate, and refusing an import because a lease was busy would turn a
+    rare duplicate into a routine failure. The warning makes that visible.
 
-    **This owns the session's transaction boundaries.** Taking and releasing a
-    lease both have to be visible to other connections, so both commit — and
-    ``commit`` flushes first. A block that raises therefore gets an explicit
-    rollback before the release, because otherwise the act of tidying up after a
-    failure would publish the very work the failure should have discarded: on the
-    attach path in ``provider_sync`` that is a flushed ``ActivitySource`` and the
-    deletion of every stream and best belonging to the activity. Do not carry
-    unrelated uncommitted work across this block.
+    **This owns the session's transaction boundaries.** Taking and releasing must
+    both be visible to other connections, so both commit — and ``commit`` flushes
+    first. A block that raises gets an explicit rollback before the release, or
+    tidying up after a failure would publish the work the failure should have
+    discarded. Do not carry unrelated uncommitted work across this block.
     """
     token = await acquire(session, model, name, ttl=ttl, wait=wait)
     if token is None:

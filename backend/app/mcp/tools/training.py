@@ -1,25 +1,19 @@
 """``get_training_status`` — where the athlete stands on a given day (issue #42).
 
-The one tool a coaching turn almost always starts from, and the reason the tool
-layer exists at all: the daily-feedback prompt builder currently assembles this
-same picture ahead of time and hopes it guessed right. Here the model asks, gets
-the numbers *and the context needed to read them*, and decides for itself what
-to look at next.
+The tool a coaching turn almost always starts from, and the reason the tool layer
+exists: the daily-feedback prompt builder assembles this same picture ahead of
+time and hopes it guessed right, where here the model asks and decides what to
+look at next.
 
-That context is why this tool asks for ``athlete:read`` alongside
-``metrics:read``. A Form of -18 means one thing for a first-season rider and
-another for someone with an FTP of 340 W and a decade behind them, and a tool
-that returned the number without the frame would be inviting the model to invent
-the frame.
+That context is why this asks for ``athlete:read`` alongside ``metrics:read``: a
+Form of -18 means one thing for a first-season rider and another for someone with
+an FTP of 340 W, and returning the number without the frame invites the model to
+invent one.
 
-``as_of`` (issue #48) moves the whole picture back in time. Everything here was
-anchored to today, which answers "where am I" but not "where was I" — and the
-second question is the one a coach reaches for constantly: what shape was the
-athlete in before last year's event, how loaded were they when the block
-started, is this build steeper than the last one. The data to answer it was
-already stored; only the anchor was hard-coded. Anchoring **every** figure on the
-same date is the part that matters: a form number from June beside a volume
-total from today would be a comparison the model could not see was invalid.
+``as_of`` (issue #48) moves the whole picture back in time, so "where was I" is
+answerable as well as "where am I". Anchoring **every** figure on the same date
+is the part that matters — a form number from June beside a volume total from
+today would be a comparison the model could not see was invalid.
 """
 
 from __future__ import annotations

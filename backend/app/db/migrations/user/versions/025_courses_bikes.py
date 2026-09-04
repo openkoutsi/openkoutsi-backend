@@ -1,22 +1,19 @@
 """Add bikes, courses, course_tracks and course_segments (issue #55).
 
-Course recon stores an uploaded GPX course per the Stage 0 decision (issue
-#54): the raw file encrypted on disk under an opaque storage key, the thinned
-track as a JSON series in ``course_tracks``, and only coordinate-free derived
-data everywhere else — ``courses`` carries the metadata, inputs, chart profile
-and pacing outcome, ``course_segments`` the per-segment physics. ``bikes`` is
-the small equipment concept the physics needs (tyre width → Crr, riding
-position → CdA), a table rather than athlete fields because the bike changes
-per event.
+Course recon stores an uploaded GPX course per the Stage 0 decision (issue #54):
+the raw file encrypted on disk under an opaque storage key, the thinned track as
+a JSON series in ``course_tracks``, and only coordinate-free derived data
+elsewhere — ``courses`` carries the metadata, inputs, chart profile and pacing
+outcome, ``course_segments`` the per-segment physics. ``bikes`` is the equipment
+concept the physics needs (tyre width → Crr, riding position → CdA), a table
+rather than athlete fields because the bike changes per event.
 
 Foreign keys from ``courses`` to ``goals`` and ``bikes`` are SET NULL —
 deleting either must never destroy a course. Note SQLite only honours those
 clauses when ``PRAGMA foreign_keys`` is on, which these connections do not
 set, so the API deletes enforce them explicitly; the clauses document intent.
 
-Idempotent, like every migration in this tree: safe to run against DBs already
-migrated or created fresh by SQLAlchemy create_all (which builds the tables but
-neither stamps alembic).
+Idempotent, like every migration in this tree.
 """
 from alembic import op
 import sqlalchemy as sa

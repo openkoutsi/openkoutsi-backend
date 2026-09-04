@@ -151,19 +151,18 @@ def check_url_safe(url: str) -> tuple[str, int]:
 class _PinnedTransport(httpx.AsyncHTTPTransport):
     """Transport that connects only to an address :func:`check_url_safe` vetted.
 
-    Checking a URL and then handing the *hostname* to httpx resolves it a
-    second time, and an attacker-controlled record with a short TTL can answer
-    differently on that second lookup — the check says 1.2.3.4, the connection
-    goes to 127.0.0.1. So the request is rewritten to the vetted IP, with the
-    Host header and the TLS SNI (and therefore certificate verification) left
-    on the original hostname.
+    Checking a URL and then handing the *hostname* to httpx resolves it a second
+    time, and a short-TTL attacker-controlled record can answer differently: the
+    check says 1.2.3.4, the connection goes to 127.0.0.1. So the request is
+    rewritten to the vetted IP, with the Host header and TLS SNI (and therefore
+    certificate verification) left on the original hostname.
 
     Redirects re-enter the transport as fresh requests, so a 302 into a blocked
     range is caught the same way.
 
-    Note that passing an explicit transport opts out of httpx's environment
-    proxy autodetection. That is deliberate: a proxy would do its own name
-    resolution and the pinning would mean nothing.
+    Passing an explicit transport opts out of httpx's environment proxy
+    autodetection — deliberately, since a proxy would resolve the name itself and
+    the pinning would mean nothing.
     """
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:

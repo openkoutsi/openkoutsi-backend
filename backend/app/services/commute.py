@@ -6,16 +6,15 @@ timezone to convert into, and what a suggestion means once it is written down.
 
 **Suggestions are not labels.** ``Activity.labels`` is athlete-owned data; this
 writes to ``Activity.label_suggestions`` instead and waits to be confirmed. Two
-concrete consequences drive that split rather than mere caution:
+concrete consequences drive that split:
 
 - the ``commuter`` badge counts labelled activities
   (:mod:`backend.app.services.achievements`), so auto-applying would mint tiers
   off a heuristic;
 - the RPE queue *excludes* commute-labelled rides
-  (``api/activities.get_rpe_queue``), so writing the label early would remove
-  the ride from the very prompt where the athlete would have seen and confirmed
-  it. Leaving it as a suggestion is what lets the prompt show up with the box
-  already ticked.
+  (``api/activities.get_rpe_queue``), so writing the label early would remove the
+  ride from the prompt where the athlete would have confirmed it. As a suggestion
+  it reaches that prompt with the box already ticked.
 
 The one thing applied without asking is a provider's own flag: Strava's
 ``commute`` boolean is the athlete's assertion, not our guess.
@@ -170,12 +169,10 @@ def _as_utc(dt: Optional[datetime]) -> Optional[datetime]:
 
     ``Activity.start_time`` is declared ``DateTime(timezone=True)``, but SQLite
     has no timezone type and returns a **naive** datetime holding the UTC
-    instant. Left as-is, a naive stamp reaches the matcher's conversion and is
-    treated as already-local, so 05:30 UTC would be tested against a 06:30–08:30
-    *local* window as though it were half past five in the morning — and every
-    commute outside UTC would go undetected.
+    instant. Left as-is it reaches the matcher's conversion and is treated as
+    already-local, so every commute outside UTC would go undetected.
 
-    Same rule, for the same reason, as ``services.achievements._local_day``.
+    Same rule as ``services.achievements._local_day``.
     """
     if dt is None:
         return None
@@ -208,14 +205,13 @@ def evaluate(
     changed. Does **not** commit — the caller owns the transaction, because every
     ingest path already has one open.
 
-    Three things stop a suggestion being written, and all three are deliberate:
+    Three things stop a suggestion being written:
 
-    - the athlete has already answered (``accepted``/``dismissed``). This is what
-      makes a dismissal survive a reprocess.
-    - the label is already applied, by hand or by a provider. Nothing to suggest.
-    - no rule matches. An existing *pending* suggestion is then withdrawn, which
-      is what makes re-evaluation after a rule edit do the right thing when the
-      rule was narrowed.
+    - the athlete has already answered (``accepted``/``dismissed``), which is what
+      makes a dismissal survive a reprocess;
+    - the label is already applied, by hand or by a provider — nothing to suggest;
+    - no rule matches, in which case an existing *pending* suggestion is
+      withdrawn, so narrowing a rule takes its suggestions back.
 
     ``force`` overrides only the first of those, and exists for the history scan,
     where the athlete has explicitly asked for a fresh look.
@@ -267,14 +263,13 @@ async def evaluate_activity(session: AsyncSession, athlete, activity: Activity) 
 def adopt_provider_flag(activity: Activity, is_commute: Optional[bool]) -> bool:
     """Take a provider's own commute flag at face value.
 
-    Strava's activity payload carries a ``commute`` boolean the athlete set
-    themselves. That is not a guess we are making, so unlike a rule match it is
-    **applied**, not suggested — with the suggestion recorded as ``accepted`` so
-    the surfaces that show provenance can say where the label came from.
+    Strava's payload carries a ``commute`` boolean the athlete set themselves —
+    not a guess we are making — so unlike a rule match it is **applied**, with
+    the suggestion recorded as ``accepted`` so provenance surfaces can say where
+    the label came from.
 
-    A false flag is not treated as a denial: an athlete who never uses Strava's
-    checkbox would otherwise have every rule-based suggestion overruled by a
-    default. Only a true flag carries information.
+    A false flag is not a denial: an athlete who never uses Strava's checkbox
+    would otherwise have every rule-based suggestion overruled by a default.
     """
     if is_commute is not True:
         return False
@@ -289,13 +284,13 @@ def adopt_provider_flag(activity: Activity, is_commute: Optional[bool]) -> bool:
 async def reevaluate_pending(session: AsyncSession, athlete) -> int:
     """Re-run the rules over everything not yet answered, after a rule change.
 
-    Issue #63 settled that editing a rule re-evaluates rather than freezing what
-    already fired: a narrowed rule should withdraw the suggestions it no longer
-    stands behind, and a widened one should pick up what it now covers.
+    Editing a rule re-evaluates rather than freezing what already fired
+    (issue #63): a narrowed rule withdraws suggestions it no longer stands
+    behind, a widened one picks up what it now covers.
 
-    Only ``pending`` and unsuggested activities are touched — an answered
-    suggestion stays answered, so this can never resurrect a dismissal or undo
-    an acceptance. Returns the number of activities whose state changed.
+    Only ``pending`` and unsuggested activities are touched, so this can never
+    resurrect a dismissal or undo an acceptance. Returns the number of
+    activities whose state changed.
     """
     rules = rules_for(athlete)
     tz = athlete_zone(athlete)
@@ -421,18 +416,16 @@ async def labelled_samples(session: AsyncSession, athlete) -> list[RideSample]:
 async def rule_feedback(session: AsyncSession, athlete) -> dict:
     """What the athlete's answers say about their rules being wrong.
 
-    Two signals, both read straight off the suggestion column rather than kept
-    as counters — ``source`` already records which rule fired, so there is
-    nothing to keep in sync and nothing to drift:
+    Two signals, read straight off the suggestion column rather than kept as
+    counters — ``source`` already records which rule fired, so nothing can drift:
 
-    - **too narrow**: rides the athlete labelled by hand that no rule matched.
-      The ones that missed a single criterion name which bound to widen; a ride
-      failing several is simply a different ride.
+    - **too narrow**: rides labelled by hand that no rule matched. Ones missing a
+      single criterion name which bound to widen; a ride failing several is a
+      different ride.
     - **too wide**: rules whose suggestions keep being dismissed.
 
-    Reported, never applied. Silently widening a rule each time its output is
-    accepted is a feedback loop with no brake, and the athlete is the one who
-    knows whether the 9 km ride was the commute or the long way round.
+    Reported, never applied: silently widening a rule when its output is accepted
+    is a feedback loop with no brake.
     """
     rules = rules_for(athlete)
     tz = athlete_zone(athlete)

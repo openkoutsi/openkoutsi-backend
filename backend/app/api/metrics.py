@@ -140,15 +140,14 @@ async def get_fitness_forecast(
 ):
     """Project Fitness/Fatigue/Form forward from the athlete's planned workouts.
 
-    Covers ``[today + 1, today + days]``. The projection itself is never stored,
-    so it always reflects the plans as they stand right now. Kept separate from
-    ``GET /metrics/fitness`` so the historical contract is untouched and the
-    caller decides whether to concatenate the two series.
+    Covers ``[today + 1, today + days]``. Never stored, so it always reflects
+    the plans as they stand. Separate from ``GET /metrics/fitness`` so the
+    historical contract is untouched and the caller decides whether to
+    concatenate the two series.
 
-    Metrics are caught up first, exactly as the dashboard does via
-    ``POST /metrics/catch-up``, so the projection is always seeded from today
-    rather than from whatever the last stored day happened to be. Without it the
-    answer would depend on whether the client had hit catch-up beforehand.
+    Metrics are caught up first, as the dashboard does via
+    ``POST /metrics/catch-up``, so the projection is seeded from today rather
+    than from whatever the last stored day happened to be.
     """
     ctx, session, athlete = ctx_athlete
 
@@ -179,16 +178,14 @@ async def get_efficiency_trend(
     ride, oldest first — the trend that shows aerobic progress a rising Fitness
     number alone doesn't.
 
-    Restricted to cycling rides of at least 20 minutes that have both weighted
-    power and average heart rate, and that were steady enough for the number to
-    mean something: the same "not an interval session" test the decoupling gate
-    uses (variability index at or below 1.10, and not categorized as VO2max,
-    anaerobic or sprint work). Each ride's decoupling figure rides along when it
-    has one.
+    Restricted to cycling rides of at least 20 minutes with both weighted power
+    and average heart rate, steady enough for the number to mean something — the
+    same "not an interval session" test the decoupling gate uses (variability
+    index ≤ 1.10, not VO2max/anaerobic/sprint). Each ride's decoupling figure
+    rides along when it has one.
 
-    Computed on read from stored columns — nothing extra is persisted, so the
-    trend covers the athlete's whole history immediately. Capped at the most
-    recent 1000 qualifying rides.
+    Computed on read from stored columns, so the trend covers the whole history
+    immediately. Capped at the most recent 1000 qualifying rides.
     """
     ctx, session, athlete = ctx_athlete
 

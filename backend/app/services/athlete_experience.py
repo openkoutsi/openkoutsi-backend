@@ -1,13 +1,11 @@
 """Shared helpers for the athlete's self-reported profile settings (issue #32).
 
 ``app_settings`` is a free-form JSON dict — the athlete API validates
-``experience_level`` on write but not ``coaching_style``, and nothing validates
-either one retroactively when the vocabulary changes. So every consumer needs
-the same answer to "what did they actually say", and needs a stale or bogus
-stored value to read as *absent* rather than being passed on to a prompt or a
-tool result.
+``experience_level`` on write but not ``coaching_style``, and nothing revalidates
+either when the vocabulary changes. So a stale or bogus stored value must read as
+*absent* rather than reaching a prompt or a tool result.
 
-This module is the single source of truth for those vocabularies:
+The single source of truth for those vocabularies:
 
 - ``experience_level`` — stored on ``app_settings["experience_level"]`` (#18),
   imported by the athlete API for write-validation and by the prompt builders.

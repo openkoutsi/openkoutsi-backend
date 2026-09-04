@@ -17,8 +17,8 @@ dispatch below a lookup rather than a branch:
     Device-recorded laps, or ``[]`` when the format has no such concept and the
     caller should auto-split.
 
-What the formats do *not* share is how much they carry. A FIT file states its
-own distance, ascent and timer time and usually carries power; a GPX states
+What the formats do *not* share is how much they carry: a FIT file states its
+own distance, ascent and timer time and usually carries power, while a GPX states
 coordinates and often nothing else. :func:`format_capabilities` is the honest
 summary of that, for a UI that would otherwise present "no power data" as a
 failed import.

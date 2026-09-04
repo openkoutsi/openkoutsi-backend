@@ -35,10 +35,10 @@ un-verifiable.
 
 ### Which addresses are confirmed
 
-Step 2 above writes the account row *before* the address is confirmed, so a
-signup nobody finished leaves a row behind. It cannot sign in — login by email
-requires the address to be verified — but it is listed like any other account,
-and the console is the only place that difference is visible.
+Step 2 above writes the account row *before* the address is confirmed, so a signup
+nobody finished leaves a row behind. It cannot sign in — login by email requires a
+verified address — but it is listed like any other account, and the console is the only
+place that difference shows.
 
 The **Users** tab shows it under each account: **Confirmed** (hover for the date)
 or **Not confirmed**. Accounts with no address at all show neither, because there
@@ -55,11 +55,10 @@ curl https://api.your-domain/api/admin/users \
 Read the two fields together: `email_verified_at: null` on an account whose
 `email` is also null means "nothing to confirm", not "unconfirmed".
 
-An unconfirmed row wants a different remedy from a working account. Ask the user
-to sign up again — a fresh attempt reuses the row and mails a new link, so
-nothing has to be cleaned up first — or delete it, which frees the address. A
-password reset does not help: it never stamps the address, and login by email
-needs that stamp, so the account still cannot sign in.
+An unconfirmed row wants a different remedy from a working account: ask the user to
+sign up again (a fresh attempt reuses the row and mails a new link, so nothing needs
+cleaning up first), or delete it, which frees the address. A password reset does not
+help — it never stamps the address, which login by email requires.
 
 ### Changing an email address (issue #62)
 
@@ -74,64 +73,55 @@ approve it:**
    keeps its current address, and an unopened request expires after 24 hours.
 
 The old side is not a courtesy — it is the authorisation. This server has no
-authenticated change-password endpoint: passwords are set through reset tokens
-mailed to the account's address, which makes that address the only self-serve
-route back into an account. If one confirmation were enough, anyone who learned a
-password could move the address to their own and then use "forgot password" to
-take the account outright, locking the real owner out of a recovery channel they
-no longer control. Requiring the outgoing mailbox costs an attacker exactly what
-taking the account over already costs them.
+authenticated change-password endpoint: passwords are set through reset tokens mailed
+to the account's address, making that address the only self-serve route back into an
+account. If one confirmation were enough, anyone who learned a password could move the
+address to their own and then take the account outright via "forgot password".
 
-The same flow **adds** an address to an invite-created account, which has none.
-There is no old mailbox to approve from, so a first set needs only the new side;
-the admin endpoint below is what makes a malicious one undoable. This is also the
-answer when such a user asks why "Forgot password?" doesn't work for them: until
-they set an address there is nowhere to send the link.
+The same flow **adds** an address to an invite-created account, which has none. There
+is no old mailbox to approve from, so a first set needs only the new side; the admin
+endpoint below is what makes a malicious one undoable. This is also the answer when
+such a user asks why "Forgot password?" doesn't work for them.
 
 Four things to be able to answer for a user:
 
-- **"I never got the email."** The endpoint answers identically whether the
-  address is free, already on another account, or already their own —
-  deliberately, so a signed-in user can't probe for accounts. An address that
-  belongs to somebody else therefore produces no mail at all. Check the provider
-  logs, then check whether another account holds it.
-- **"I opened the link and nothing happened."** Almost always only one of the two
-  was opened. The page says which address is still outstanding; the account's
-  **Profile → Email address** card shows the same thing.
-- **"I got an approval request I didn't ask for."** Someone submitted their
-  password. Tell them **not** to open the link and to change their password — the
-  request cannot be made without it. Resetting the password also **cancels the
-  pending change outright**, so the link in their inbox stops working; that is
-  deliberate, because otherwise the recovery would leave the attacker's request
-  armed and one curious click would complete it.
-- **"It says the address is no longer available."** Another account claimed it
-  between the request and the second approval. The links are dead; they request
-  again.
+- **"I never got the email."** The endpoint answers identically whether the address is
+  free, already on another account, or already their own, so a signed-in user can't
+  probe for accounts — which means an address belonging to somebody else produces no
+  mail at all. Check the provider logs, then whether another account holds it.
+- **"I opened the link and nothing happened."** Almost always only one of the two was
+  opened. The page says which address is still outstanding; so does the account's
+  **Profile → Email address** card.
+- **"I got an approval request I didn't ask for."** Someone submitted their password.
+  Tell them **not** to open the link and to change their password — the request cannot
+  be made without it. Resetting the password also **cancels the pending change
+  outright**, so the link in their inbox stops working; otherwise the recovery would
+  leave the attacker's request armed for one curious click.
+- **"It says the address is no longer available."** Another account claimed it between
+  the request and the second approval. The links are dead; they request again.
 
-Confirming does not sign the user out anywhere. Both mailboxes and the password
-were needed to get there, so there is nobody to evict who isn't the owner;
-`/logout-all` remains the control for clearing other sessions. A **password
-reset**, by contrast, withdraws everything: sessions, personal access tokens, and
-any change of address in flight. Recovering an account is meant to leave nothing
-standing against it.
+Confirming does not sign the user out anywhere — both mailboxes and the password were
+needed to get there, so there is nobody to evict who isn't the owner. `/logout-all`
+remains the control for clearing other sessions. A **password reset**, by contrast,
+withdraws everything: sessions, personal access tokens, and any change of address in
+flight.
 
-One address that does *not* block a change is one held by a self-serve signup
-that was started and never verified. Such a row has no owner and nothing expires
-it, so treating it as taken would deny the address to its real owner forever —
-and, with self-signup enabled, would let anyone reserve someone else's address by
-signing up and walking away. Confirming a change clears the stub out of the way.
-A signup still holding a live verification link is a signup in progress and does
-block.
+One address that does *not* block a change is one held by a self-serve signup that was
+started and never verified. Such a row has no owner and nothing expires it, so treating
+it as taken would deny the address to its real owner forever — and, with self-signup
+enabled, would let anyone reserve someone else's address by signing up and walking
+away. Confirming a change clears the stub out of the way. A signup still holding a live
+verification link is in progress, and does block.
 
 ### Recovering an unreachable address
 
 `PATCH /api/admin/users/{user_id}/email` sets or clears the address on an account
 — `{"email": "new@example.com"}` or `{"email": null}`.
 
-Requiring both mailboxes is what makes a self-serve change safe, and it is also
-what strands somebody whose old mailbox is gone: a dead work account, a domain
-that lapsed, or an address taken along with the account. Before this endpoint the
-only remedy was deleting the user and every activity they had.
+Requiring both mailboxes is what makes a self-serve change safe, and also what
+strands somebody whose old mailbox is gone — a dead work account, a lapsed domain, an
+address taken along with the account. The only previous remedy was deleting the user
+and every activity they had.
 
 ```bash
 curl -X PATCH https://api.your-domain/api/admin/users/<user-id>/email \
@@ -150,11 +140,11 @@ It assumes the account may be in the wrong hands, so it is deliberately blunt:
   point when the mailbox being replaced is unreachable, so satisfy yourself the
   request is genuine before running it.
 
-Clearing an address leaves the account reachable only by username, which is the
-right outcome for a hijacked address: the attacker's mailbox stops being a way
-in, and the user signs in with their username while you sort out a new one. An
-account with neither a username nor an address cannot be signed into at all, so
-the endpoint is only useful for clearing where a username exists.
+Clearing an address leaves the account reachable only by username, which is the right
+outcome for a hijacked address: the attacker's mailbox stops being a way in, and the
+user signs in with their username while you sort out a new one. An account with neither
+a username nor an address cannot be signed into at all, so only clear where a username
+exists.
 
 ## Personal access tokens
 
@@ -209,10 +199,9 @@ off from their profile. Each stage fires exactly once per token.
 
 ### Inspecting and revoking a user's tokens
 
-When a token is behind a runaway integration, the audit log and rate limits name
-it by **token id** — and the instance switch would take down every user while
-deleting the account is absurd. So an admin can list and revoke one user's
-tokens:
+When a token is behind a runaway integration, the audit log and rate limits name it by
+**token id**, and the instance switch would take down every user. So an admin can list
+and revoke one user's tokens:
 
 ```bash
 # List (metadata only — never the token's name)
@@ -226,18 +215,16 @@ curl -X DELETE https://api.your-domain/api/admin/users/<user-id>/tokens/<token-i
 
 Three deliberate limits on that power:
 
-- **Metadata only, never the name.** Token names are user-written free text and
-  can be revealing on their own (`garmin-sync-for-my-cardiologist`). Revocation
-  needs the id, not the label.
-- **Revoke only — never issue on a user's behalf.** An admin-minted token would
-  be indistinguishable from one the user created, which is exactly the failure
-  this feature exists to avoid.
-- **The user is told.** Every admin revocation lands in their inbox, and in the
-  audit log.
+- **Metadata only, never the name.** Token names are user-written free text and can be
+  revealing on their own (`garmin-sync-for-my-cardiologist`). Revocation needs the id.
+- **Revoke only — never issue on a user's behalf.** An admin-minted token would be
+  indistinguishable from one the user created.
+- **The user is told.** Every admin revocation lands in their inbox and in the audit
+  log.
 
-This is not a new capability: on a self-hosted instance you already hold
-`ENCRYPTION_KEY` and root on the box, and could open `registry.db` yourself. The
-endpoint moves the action out of a shell and into the audit log.
+This is not a new capability — on a self-hosted instance you already hold
+`ENCRYPTION_KEY` and root, and could open `registry.db` yourself. The endpoint moves
+the action out of a shell and into the audit log.
 
 ### Audit log
 
@@ -247,13 +234,12 @@ rather than to a database shared across users. Outcomes distinguish
 `revoked` from `unknown_token`, which is why revoked rows are retained: somebody
 using a credential you withdrew is a different event from somebody guessing.
 
-MCP tool invocations are recorded on the same logger, as `mcp_tool_call` events
-carrying the tool name, the caller (token id when there is one, and whether the
-call came from a credential or from the server's own agent), the arguments, the
-duration and the outcome. The arguments are recorded because without them the
-record cannot answer the question it exists for — *what did this credential
-read?* — and they are dates, ids and window lengths rather than content. Results
-are never logged: those are the health data itself.
+MCP tool invocations are recorded on the same logger as `mcp_tool_call` events
+carrying the tool name, the caller (token id when there is one, and whether the call
+came from a credential or the server's own agent), the arguments, the duration and the
+outcome. Arguments are recorded because without them the record cannot answer *what did
+this credential read?*, and they are dates, ids and window lengths rather than content.
+Results are never logged: those are the health data itself.
 
 ### Tokens and the MCP endpoint
 
@@ -285,13 +271,12 @@ table, the pacing plan and the bikes the physics is solved for.
 > has to turn the switch on before an athlete can reach them again. It stays
 > in the data export throughout, switch or no switch.
 
-It defaults off, breaking the convention the two switches below set, because it
-is the only one that gates a feature needing infrastructure the instance may not
-have. The half that distinguishes course recon — classifying the road surface
-under a course — map-matches against OpenStreetMap through a **Valhalla sidecar
-you run yourself**, whose tiles you build and refresh yourself. A full-country
-build was measured at over 5 GB of peak RAM, against a default box with 2 GB. An
-instance that has made no decision about that has not implicitly said yes.
+It defaults off — unlike the two switches below — because it is the only one gating a
+feature that needs infrastructure the instance may not have. The half that
+distinguishes course recon, classifying the road surface under a course, map-matches
+against OpenStreetMap through a **Valhalla sidecar you run yourself**, whose tiles you
+build and refresh yourself; a full-country build was measured at over 5 GB peak RAM,
+against a default box with 2 GB.
 
 ```bash
 curl -X PATCH https://api.your-domain/api/admin/settings \
@@ -323,11 +308,11 @@ curl -X POST https://api.your-domain/api/courses/<course-id>/surface \
   -H "Authorization: Bearer <session token>"
 ```
 
-Surfaces come back with a confidence. Where only an explicit OpenStreetMap tag
-could have produced the class, it is **confirmed**; where openkoutsi cannot
-confirm a tag, it is **inferred** and is shown, and described to the coach, as a
-guess. OSM surface coverage is genuinely uneven, and presenting the two at equal
-weight would be worse than showing neither.
+Surfaces come back with a confidence. Where only an explicit OpenStreetMap tag could
+have produced the class it is **confirmed**; where openkoutsi cannot confirm a tag it is
+**inferred**, and is shown — and described to the coach — as a guess. OSM surface
+coverage is uneven, and presenting the two at equal weight would be worse than showing
+neither.
 
 ### Turning the MCP server off
 
@@ -350,16 +335,15 @@ curl -X PATCH https://api.your-domain/api/admin/settings \
   -d '{"allow_mcp_server": false}'
 ```
 
-It defaults on for the same reason personal access tokens do: the endpoint
-publishes read-only, scoped tools over data the caller's own credential already
-reaches, so there is no prior behaviour to preserve and nothing is widened by it
-being available. The switch exists because "an AI client may talk to my training
-data" is a decision worth making once for the instance rather than per token.
+It defaults on for the same reason personal access tokens do: the endpoint publishes
+read-only, scoped tools over data the caller's own credential already reaches, so
+nothing is widened by it being available. The switch exists because "an AI client may
+talk to my training data" is a decision worth making once for the instance rather than
+per token.
 
-Be clear with yourself about what turning it off achieves. It removes an
-*interface*, not an exposure: a token scoped to `activities:read` can read the
-same activities through the ordinary REST routes either way. What limits what a
-credential can see is its scopes.
+Be clear about what turning it off achieves. It removes an *interface*, not an
+exposure: a token scoped to `activities:read` reads the same activities through the
+ordinary REST routes either way. What limits a credential is its scopes.
 
 Denying `/mcp` at the reverse proxy does the same job from outside and is a
 reasonable second layer — see [DEPLOY.md](DEPLOY.md).
@@ -421,9 +405,8 @@ uppercase letter and one digit), and is redirected to the login page.
 - Admin set/clear of a user's email: 20 requests/hour per user
 - Personal access token creation: 20 requests/hour per user
 
-Rate limits are keyed by **principal**: an authenticated request is keyed on the
-*user*, everything else on the client address. One script hammering from one
-address is not one anonymous visitor. The key is the user rather than the token
-because a user may mint tokens freely — per-token buckets would make every limit
-multiplicative in a number nothing caps. Token ids still appear in the audit log,
-which is where per-token attribution belongs.
+Rate limits are keyed by **principal**: an authenticated request on the *user*,
+everything else on the client address. The key is the user rather than the token
+because a user may mint tokens freely, and per-token buckets would make every limit
+multiplicative in a number nothing caps. Token ids still appear in the audit log, which
+is where per-token attribution belongs.

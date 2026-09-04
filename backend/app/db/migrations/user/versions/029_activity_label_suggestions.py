@@ -7,17 +7,16 @@ activities, and the RPE queue excludes them — so an early write would both min
 achievement tiers off a heuristic and remove the ride from the prompt where the
 athlete would have confirmed it.
 
-Persisted rather than derived on read so a **dismissal is durable**. Re-offering
-a suggestion the athlete has already declined, every time the rules are
-evaluated, would be worse than not detecting anything.
+Persisted rather than derived on read so a **dismissal is durable**: re-offering
+a declined suggestion every time the rules are evaluated would be worse than not
+detecting anything.
 
-Nullable and un-backfilled: NULL means "nothing has been suggested for this
-activity", which is true of every activity that exists when this lands. The
-history scan (``POST /api/activities/scan-commutes``) is how an athlete asks for
-their back catalogue to be looked at, rather than a migration deciding for them.
+Nullable and un-backfilled — NULL means "nothing has been suggested for this
+activity". The history scan (``POST /api/activities/scan-commutes``) is how an
+athlete asks for their back catalogue to be looked at, rather than a migration
+deciding for them.
 
-Idempotent: safe to run against DBs that already have the column (including ones
-built fresh by SQLAlchemy create_all, which adds it but doesn't stamp alembic).
+Idempotent, like every migration in this tree.
 """
 from alembic import op
 import sqlalchemy as sa

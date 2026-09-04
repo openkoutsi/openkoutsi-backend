@@ -1,28 +1,25 @@
 """Commute detection from athlete-defined rules (issue #63).
 
-A commute is not defined by *where* it goes — openkoutsi holds no location data
-from activities (see :class:`openkoutsi.gpx.Route`), so the obvious detector,
-"starts and ends at the same two places every weekday", is not available. It is
-defined instead by being **the same short ride, at the same times, on working
-days**, which the fields we do store describe perfectly well: sport type,
-distance, duration, and the local clock.
+A commute is not defined by *where* it goes: openkoutsi holds no location data
+from activities (see :class:`openkoutsi.gpx.Route`), so the obvious detector is
+unavailable. It is defined instead as **the same short ride, at the same times,
+on working days** — sport type, distance, duration and the local clock.
 
-The module is pure in the spirit of :mod:`openkoutsi.categorization` — rules and
-primitives in, a match out. Everything about *where the rules are stored* and
-*whose timezone this is* belongs to ``backend.app.services.commute``; nothing
-here touches a database or an athlete.
+Pure, in the spirit of :mod:`openkoutsi.categorization`: rules and primitives in,
+a match out. Where the rules are stored and whose timezone this is belong to
+``backend.app.services.commute``.
 
 Three deliberate rules shape the design:
 
-1. **An empty rule matches nothing.** A rule with no criteria at all is a
-   configuration mistake, and the generous reading of it — "match every ride" —
-   would label an athlete's whole history in one pass. Every criterion is
-   optional, but a rule needs at least one to fire.
+1. **An empty rule matches nothing.** A rule with no criteria is a configuration
+   mistake, and the generous reading — "match every ride" — would label an
+   athlete's whole history in one pass. Every criterion is optional, but a rule
+   needs at least one to fire.
 2. **Malformed input is dropped, never raised on.** Rules live in
    ``app_settings``, a free-form JSON column with no validation behind it (see
-   the module docstring of ``backend.app.core.timezones`` for the same problem
-   with ``timezone``). A typo in one rule must not take down the ingest path, so
-   :func:`parse_rules` skips what it cannot read.
+   ``backend.app.core.timezones`` for the same problem with ``timezone``). A typo
+   in one rule must not take down the ingest path, so :func:`parse_rules` skips
+   what it cannot read.
 3. **Windows are local, and may span midnight.** 22:00–02:00 is a night-shift
    commute, not an inverted range.
 """

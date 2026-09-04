@@ -6,9 +6,8 @@ Usage:
 
 The FIT counterpart is ``generate_synthetic_fit_fixtures.py``; this is the same
 idea for the two XML formats a Strava bulk export contains (issue #36). Every
-file written here is entirely made up — the coordinates trace a closed loop in
-the middle of the Gulf of Bothnia — so they are safe to commit and give CI real
-coverage of the GPX/TCX import path.
+file written here is made up — the coordinates trace a closed loop in the middle
+of the Gulf of Bothnia — so they are safe to commit.
 
 One file is generated per format from the *same synthetic ride*:
 

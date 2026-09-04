@@ -9,18 +9,16 @@ matcher client lives in the backend (``backend/app/services/surface_matcher``);
 this module owns the vocabulary, the physics constants, and the judgement about
 what a match is actually worth.
 
-Three things it is careful about, in the order they matter:
+Three rules:
 
-1. **Confidence is not decoration.** OSM surface coverage is genuinely uneven —
-   dense across Germany and the Netherlands, thin across rural North America —
-   and a guess presented beside a fact at equal weight is worse than no answer.
-   See :func:`confidence_for`, which is exact rather than heuristic.
-2. **A short sector is not automatically noise.** A rider cannot expect to roll
-   through 40 km of asphalt if 130 m of it is mud and rocks. :func:`dissolve_runs`
-   decides on *severity*, not length alone, so a snap artefact disappears and a
-   real sector survives.
-3. **An unknown value classifies as unknown**, never as a default that looks
-   confident.
+1. **Confidence is not decoration.** OSM surface coverage is uneven, so a guess
+   presented beside a fact at equal weight is worse than no answer. See
+   :func:`confidence_for`, which is exact rather than heuristic.
+2. **A short sector is not automatically noise.** :func:`dissolve_runs` decides
+   on *severity*, not length alone, so a snap artefact disappears while 130 m of
+   mud inside 40 km of asphalt survives.
+3. **An unknown value classifies as unknown**, never as a confident-looking
+   default.
 """
 from __future__ import annotations
 
@@ -98,27 +96,20 @@ def normalise(raw: str | None) -> str:
 def confidence_for(raw: str | None) -> str:
     """Whether the matched surface rests on an explicit OSM tag.
 
-    This is exact, not a heuristic, and it follows from how the routing engine
-    builds its graph. ``OSMWay`` stores the surface in a three-bit field zeroed
-    on construction, and ``kPavedSmooth`` is enumerator 0 — so a way that
-    carries no surface information at all comes back as ``paved_smooth``. Every
-    *other* value is reachable only from an explicit tag: ``surface=*``, or,
-    where that is absent, ``tracktype=grade1..5``, ``smoothness=*``, or
-    ``sac_scale`` / ``mtb:*``.
+    Exact, not heuristic: ``OSMWay`` stores the surface in a three-bit field
+    zeroed on construction and ``kPavedSmooth`` is enumerator 0, so a way
+    carrying no surface information comes back as ``paved_smooth``. Every *other*
+    value needs an explicit tag — ``surface=*``, or failing that
+    ``tracktype=grade1..5``, ``smoothness=*``, ``sac_scale`` / ``mtb:*``.
 
-    So:
-
-    - ``paved_smooth`` → :data:`INFERRED`. The way is either explicitly paved
-      or simply untagged, and **we cannot tell the two apart**, so we report
-      the weaker claim.
-    - anything else → :data:`CONFIRMED`. Somebody tagged this road.
+    - ``paved_smooth`` → :data:`INFERRED`: explicitly paved or simply untagged,
+      and **we cannot tell the two apart**, so report the weaker claim.
+    - anything else → :data:`CONFIRMED`.
     - unrecognised or absent → :data:`INFERRED`.
 
-    Note what this deliberately does *not* claim. ``inferred`` means "openkoutsi
-    could not confirm a surface tag here", **not** "this road is untagged" — a
-    genuinely tagged asphalt road reads as inferred too. That under-claims, and
-    under-claiming is the safe direction; the UI and the docs must use the same
-    wording rather than the shorter, wronger one.
+    ``inferred`` means "could not confirm a surface tag here", **not** "this road
+    is untagged" — a genuinely tagged asphalt road reads as inferred too. The UI
+    and docs must use the same wording rather than the shorter, wronger one.
     """
     if not isinstance(raw, str):
         return INFERRED
@@ -325,17 +316,14 @@ def dissolve_runs(
 ) -> list[str]:
     """Rewrite match noise out of the per-point class series.
 
-    Returns one class per input point — the *dissolved* class, which for a
-    surviving run is simply what was matched. Callers keep ``points`` alongside
-    the result: the original class is what :func:`run_confidence` measures
-    against, so a class that exists only because a blip was dissolved cannot be
-    laundered into ``confirmed``.
+    Returns one class per input point. Callers keep ``points`` alongside the
+    result: the original class is what :func:`run_confidence` measures against,
+    so a class existing only because a blip was dissolved cannot be laundered
+    into ``confirmed``.
 
-    A run is a maximal stretch of one class, so every run considered here is
-    bounded by *different* classes — merging across a surface change is the
-    job, not a side effect. When a run does dissolve, the longer neighbour
-    wins, ties going to the preceding run (matching the gradient dissolve in
-    :func:`openkoutsi.course.segment_by_gradient`).
+    A run is a maximal stretch of one class, so merging across a surface change
+    is the job, not a side effect. When a run dissolves, the longer neighbour
+    wins, ties to the preceding run.
     """
     if len(points) != len(distances_m):
         raise ValueError("points and distances_m must be the same length")
@@ -598,16 +586,14 @@ def points_from_json(stored: Sequence | None) -> list[SurfacePoint] | None:
         points.append(
             SurfacePoint(
                 surface=surface,
-                # "Unknown implies inferred" has to hold here too, and for the
-                # same reason it holds in `confidence_for`: by construction,
-                # not by two rules agreeing. The class is re-derived on read
-                # precisely so `_FROM_MATCHER` can be tuned later without
-                # re-matching every stored course — retire a value, or give
-                # `impassable` a class of its own, and rows written under the
-                # old vocabulary would otherwise re-read as
-                # unknown-and-*confirmed*. A stored literal is a value from a
-                # previous release's vocabulary, never a fact about a class
-                # this one cannot identify.
+                # "Unknown implies inferred" holds here by construction, not by
+                # two rules agreeing — same as in `confidence_for`. The class is
+                # re-derived on read so `_FROM_MATCHER` can be tuned without
+                # re-matching every stored course; retire a value, or give
+                # `impassable` its own class, and rows written under the old
+                # vocabulary would otherwise re-read as unknown-and-*confirmed*.
+                # A stored literal is a value from a previous release's
+                # vocabulary, never a fact about an unidentifiable class.
                 confidence=INFERRED if surface == UNKNOWN else stored,
                 raw=raw,
             )
