@@ -580,8 +580,22 @@ DECOUPLING_MIN_DURATION_S = 3600
 DECOUPLING_EXCLUDED_CATEGORIES = frozenset({"vo2max", "anaerobic", "sprint"})
 
 # Above this variability index the ride was too surgy for the two-half split to
-# mean anything (same threshold `classify_workout` uses to spot interval work).
+# mean anything — but only where the intensity makes interval work a plausible
+# reading of it. This is the threshold `classify_workout` uses, and it is used
+# there the same way: that function consults VI only from ``intensity >= 0.78``
+# upward, and never reclassifies an endurance or recovery ride on VI alone.
+# Applying it at any intensity read a seven-hour ride's descents, junctions and
+# café stops as interval work and withheld exactly the figure such a ride is for.
 DECOUPLING_MAX_VI = 1.10
+
+# The intensity from which a high VI is evidence of intervals rather than of
+# terrain — `classify_workout`'s tempo/threshold boundary.
+DECOUPLING_VI_INTENSITY_FLOOR = 0.78
+
+# And the value above which a ride is surging whatever its intensity: rolling
+# terrain and stops land around 1.1–1.2, so a ride past this was ridden in
+# bursts however easy it averaged out.
+DECOUPLING_ABSOLUTE_MAX_VI = 1.25
 
 # Above this relative difference between the two halves' mean power the ride was
 # ridden as a ramp or a negative split. Pw:HR assumes steady output, and a rider
@@ -641,6 +655,29 @@ def _positive_in_both_halves(
     return bool((stream[halves[0]] > 0).any() and (stream[halves[1]] > 0).any())
 
 
+def _ridden_in_bursts(vi: float | None, intensity: float | None) -> bool:
+    """Was this ride surging, rather than merely ridden over terrain?
+
+    Variability index alone cannot tell the two apart: a seven-hour endurance
+    ride full of descents and junctions produces the same 1.1–1.2 as a session
+    of efforts, because both spend time off the pedals. Intensity is what
+    separates them — a ride averaging well under threshold was not a interval
+    session, whatever its VI — so the threshold is applied from the same
+    intensity `classify_workout` starts reading VI at, with a ceiling above it
+    for rides that are surging on any reading.
+
+    An unknown intensity (no FTP on the profile) is judged on VI alone, as
+    before: without it there is nothing to say the ride was easy.
+    """
+    if vi is None:
+        return False
+    if vi > DECOUPLING_ABSOLUTE_MAX_VI:
+        return True
+    if vi <= DECOUPLING_MAX_VI:
+        return False
+    return intensity is None or intensity >= DECOUPLING_VI_INTENSITY_FLOOR
+
+
 def decoupling_window(
     power: Sequence[float | None] | None,
     heartrate: Sequence[float | None] | None,
@@ -690,6 +727,7 @@ def decoupling_unavailable_reason(
     heartrate: Sequence[float | None] | None,
     workout_category: str | None = None,
     vi: float | None = None,
+    intensity: float | None = None,
 ) -> str | None:
     """
     Why a decoupling figure would be misleading for this activity, or None if
@@ -759,7 +797,7 @@ def decoupling_unavailable_reason(
 
     if workout_category in DECOUPLING_EXCLUDED_CATEGORIES:
         return "variable_effort"
-    if vi is not None and vi > DECOUPLING_MAX_VI:
+    if _ridden_in_bursts(vi, intensity):
         return "variable_effort"
 
     # Variability index catches surging but is blind to a monotonic ramp, which
@@ -792,6 +830,7 @@ def analyse_decoupling(
     heartrate: Sequence[float | None] | None,
     workout_category: str | None = None,
     vi: float | None = None,
+    intensity: float | None = None,
 ) -> DecouplingAnalysis:
     """Aerobic decoupling over the longest continuous block of this ride.
 
@@ -813,7 +852,7 @@ def analyse_decoupling(
         # Nothing pairs anywhere. The gate has the whole stream and will name
         # the channel that is missing.
         reason = decoupling_unavailable_reason(
-            duration_s, power, heartrate, workout_category, vi
+            duration_s, power, heartrate, workout_category, vi, intensity
         )
         return DecouplingAnalysis(None, reason or "degenerate_hr", None)
 
@@ -823,7 +862,7 @@ def analyse_decoupling(
     window_s = hi - lo
 
     reason = decoupling_unavailable_reason(
-        window_s, watts, beats, workout_category, vi
+        window_s, watts, beats, workout_category, vi, intensity
     )
     if (
         reason == "too_short"
