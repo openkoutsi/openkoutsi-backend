@@ -539,6 +539,35 @@ class TestDecouplingOverPauses:
         assert result.pct is not None
         assert result.window_s == 7 * 3600
 
+    def test_the_reported_ride_a_pause_then_a_strap_that_took_a_while_back(self):
+        """The ride this came from: paused at the first stop, strap knocked off.
+
+        Six minutes paused with the head unit stopped — a hole in every channel,
+        bridged — and then, having walked away from the bike, a strap that did
+        not report again for twenty-five minutes after the restart while the
+        power meter did. That outage was 6% of the ride's recorded seconds,
+        just past the coverage budget, and cost the whole seven hours their
+        figure. It is not a misalignment: it is a hole with the ride carrying
+        on either side of it, so the longer side is measured and says so.
+        """
+        pause_at, pause_s = 2 * 3600, 360
+        strap_out_s = 25 * 60
+        power, hr = _long_ride(stops=[(pause_at, pause_s)])
+        for i in range(pause_at + pause_s, pause_at + pause_s + strap_out_s):
+            hr[i] = None
+
+        # What it did before: heart rate missing from riding the meter saw,
+        # counted whole against the pairing.
+        assert decoupling_unavailable_reason(
+            7 * 3600, power, hr, "endurance", 1.02
+        ) == "stream_mismatch"
+
+        result = analyse_decoupling(7 * 3600, power, hr, "endurance", 1.02)
+        assert result.reason is None
+        assert result.pct is not None
+        # The stretch after the strap came back is the longer of the two.
+        assert result.window_s == 7 * 3600 - (pause_at + pause_s + strap_out_s)
+
     def test_many_short_stops_no_longer_add_up_to_a_refusal(self):
         # Eight six-minute stops: 11% of the ride recorded heart rate and no
         # watts, which cleared the old 5% budget several times over.
