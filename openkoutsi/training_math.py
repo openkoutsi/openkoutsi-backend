@@ -8,7 +8,7 @@ results from ``ActivityStream.data`` persist straight back as JSON — an
 """
 
 import math
-from typing import Sequence
+from typing import NamedTuple, Sequence
 
 import numpy as np
 
@@ -493,47 +493,73 @@ def _half_power(segment: np.ndarray) -> float | None:
     return value if value > 0 else None
 
 
+def _paired_halves(
+    watts: np.ndarray, beats: np.ndarray
+) -> tuple[np.ndarray, np.ndarray] | None:
+    """Index arrays for the two halves of the split, counted in *paired* seconds.
+
+    Cutting the grid at its midpoint hands each half whatever share of the ride
+    happened to fall either side of that second, and a stop is grid with no
+    evidence on it: a ride paused for twenty minutes before halfway has a first
+    half that is genuinely shorter than its second. Splitting on the seconds
+    that carry both channels gives the two halves the same amount to say, which
+    is what the comparison assumes. On an odd count the middle second is
+    dropped so they stay equal.
+
+    Returns None when nothing pairs, or when there is only one paired second.
+    """
+    n = min(watts.size, beats.size)
+    if n == 0:
+        return None
+    paired = np.flatnonzero(~np.isnan(watts[:n]) & ~np.isnan(beats[:n]))
+    half = paired.size // 2
+    if half == 0:
+        return None
+    return paired[:half], paired[paired.size - half:]
+
+
 def aerobic_decoupling(
     power: Sequence[float | None], heartrate: Sequence[float | None]
 ) -> float | None:
     """
     Power:HR decoupling (Pw:HR drift) as a percentage.
 
-    Splits the ride into two equal halves, takes the power-to-heart-rate ratio
-    of each, and returns how far the second half drifted from the first:
+    Splits the ride into two halves of equal *recorded* time, takes the
+    power-to-heart-rate ratio of each, and returns how far the second half
+    drifted from the first:
 
         (ratio_first - ratio_second) / ratio_first * 100
 
     A positive number means heart rate climbed relative to power — the classic
     sign of fading aerobic durability.  Streams of unequal length are truncated
-    to the shorter one; on an odd number of samples the middle sample is
+    to the shorter one; on an odd number of paired seconds the middle one is
     dropped so both halves stay the same length.
 
     Pairs power against the heart rate at the *same index*, so it is meaningful
-    only because the streams share a clock (issue #76).  Within each half the
-    channels are summarised over the samples they have, so a gap costs a second
-    of evidence rather than pairing a wattage against the wrong heartbeat.
+    only because the streams share a clock (issue #76).  Both halves are
+    summarised over the seconds carrying both channels, so a stop costs a second
+    of evidence rather than tilting the split (see `_paired_halves`).
 
-    Returns None if either half has no usable power or heart rate.  Raw math with
-    no validity checks — see `decoupling_unavailable_reason`.
+    Takes the streams it is given: computing this over part of a ride is the
+    caller's decision, and `analyse_decoupling` is where that decision is made.
+    Raw math with no validity checks — see `decoupling_unavailable_reason`.
     """
     watts = streams.as_array(power)
     beats = streams.as_array(heartrate)
-    n = min(watts.size, beats.size)
-    half = n // 2
-    if half == 0:
+    halves = _paired_halves(watts, beats)
+    if halves is None:
         return None
 
-    def ratio(lo: int, hi: int) -> float | None:
-        p = _half_power(watts[lo:hi])
-        hr_slice = beats[lo:hi]
+    def ratio(idx: np.ndarray) -> float | None:
+        p = _half_power(watts[idx])
+        hr_slice = beats[idx]
         hr_slice = hr_slice[hr_slice > 0]
         if p is None or hr_slice.size == 0:
             return None
         return p / float(hr_slice.mean())
 
-    first = ratio(0, half)
-    second = ratio(n - half, n)
+    first = ratio(halves[0])
+    second = ratio(halves[1])
     # A relative floor rather than `first == 0`: the ratio blows up continuously
     # as the first half's power approaches zero, so the function stays safe on
     # its own terms instead of relying on the caller's variability gate to have
@@ -565,8 +591,19 @@ DECOUPLING_MAX_HALF_POWER_DELTA = 0.10
 
 # The two streams are paired sample-for-sample, so the question is how much of
 # the ride they can speak to *together*. Measured as the seconds carrying both
-# channels over the seconds carrying the better-covered one: below this
-# fraction, the two are describing different parts of the ride.
+# channels over the seconds the **power meter** recorded: below this fraction,
+# heart rate is missing from riding the power meter saw, and the two are
+# describing different parts of the ride.
+#
+# Anchoring on power rather than on the better-covered channel is the whole
+# difference between a fault and a stop. A power meter stops broadcasting when
+# the cranks stop, so a head unit that keeps logging heart rate through a café
+# stop leaves seconds with a pulse and no wattage — the rider standing still,
+# not a recording that fails to line up. Counting those against the pairing
+# refused decoupling on any long ride with enough stops in it (a seven-hour ride
+# needs only twenty-one minutes of them), which is the bug this anchor fixes.
+# The reverse — heart rate absent while the meter reports watts — is a strap
+# problem, and still counts.
 #
 # This used to compare the two streams' *lengths*, which was the only symptom
 # available before the streams shared a clock — and it missed the case that
@@ -577,22 +614,74 @@ DECOUPLING_MAX_HALF_POWER_DELTA = 0.10
 # and simply contributes nothing past where it stops.
 DECOUPLING_MIN_PAIRED_COVERAGE = 0.95
 
+# A stop shorter than this does not break the ride in two. Heart rate is back
+# where it was within a couple of minutes of rolling again, so a traffic light —
+# or a five-minute mechanical in a seven-hour ride — leaves one ride's story
+# either side of it. Beyond ten minutes the rider has genuinely recovered, and a
+# first-half-against-second-half comparison spanning the stop would be measuring
+# the stop; the ride is treated as separate blocks and the longest one is used.
+DECOUPLING_MAX_BRIDGED_PAUSE_S = 600
+
 # Smallest first-half ratio, relative to the larger of the two halves, that the
 # percentage formula can be evaluated at without amplifying noise.
 DECOUPLING_MIN_RATIO = 0.05
 
 
-def _positive_in_both_halves(stream: np.ndarray, n: int) -> bool:
+def _positive_in_both_halves(
+    stream: np.ndarray, halves: tuple[np.ndarray, np.ndarray]
+) -> bool:
     """Does ``stream`` carry a positive sample in each half of the split?
 
     The whole-stream check isn't enough: a power meter that dies at halfway
     leaves a stream that is non-empty overall but unusable for a two-half
-    comparison.
+    comparison. Reads the same paired-second split the figure itself is
+    computed on, so the gate and the math never disagree about where the
+    halfway point is.
     """
-    half = n // 2
-    if half == 0:
-        return False
-    return bool((stream[:half] > 0).any() and (stream[n - half:n] > 0).any())
+    return bool((stream[halves[0]] > 0).any() and (stream[halves[1]] > 0).any())
+
+
+def decoupling_window(
+    power: Sequence[float | None] | None,
+    heartrate: Sequence[float | None] | None,
+    *,
+    max_bridged_pause_s: int = DECOUPLING_MAX_BRIDGED_PAUSE_S,
+) -> tuple[int, int] | None:
+    """The longest continuous block of the ride, as a ``[start, end)`` second range.
+
+    A ride is not always one effort. Stop for lunch and the two halves either
+    side are separate rides as far as heart-rate drift goes, and a figure
+    spanning the stop measures the lunch. But a ride is not broken by every
+    pause either: refusing to measure a seven-hour ride because of a
+    five-minute stop is the complaint this exists to answer.
+
+    So the ride is cut only where the pair goes quiet for longer than
+    ``max_bridged_pause_s``, and the block holding the most usable seconds is
+    returned. A second counts as usable when *both* channels recorded on it —
+    seconds only one of them can speak to are no use to a metric that pairs them
+    — so a stop where the power meter slept ends a block just as a device pause
+    does.
+
+    Returns None when no second carries both channels.
+    """
+    watts = streams.as_array(power)
+    beats = streams.as_array(heartrate)
+    n = min(watts.size, beats.size)
+    if n == 0:
+        return None
+
+    paired = np.flatnonzero(~np.isnan(watts[:n]) & ~np.isnan(beats[:n]))
+    if paired.size == 0:
+        return None
+
+    # Consecutive usable seconds further apart than a bridgeable pause end a
+    # block. `breaks` indexes into `paired`, so each block is a slice of it and
+    # the count of usable seconds in a block is a subtraction rather than a scan.
+    breaks = np.flatnonzero(np.diff(paired) - 1 > max_bridged_pause_s)
+    starts = np.concatenate(([0], breaks + 1))
+    ends = np.concatenate((breaks, [paired.size - 1]))
+    best = int(np.argmax(ends - starts))
+    return int(paired[starts[best]]), int(paired[ends[best]]) + 1
 
 
 def decoupling_unavailable_reason(
@@ -615,39 +704,50 @@ def decoupling_unavailable_reason(
 
     Data problems are reported before qualification problems, so the athlete is
     told the thing actually blocking the measurement.
+
+    Judges the stream it is handed, which is one continuous block of the ride
+    rather than the whole of it — ``analyse_decoupling`` picks the block and
+    refines a ``too_short`` verdict on a long ride into ``fragmented``.
     """
     watts = streams.as_array(power)
     hr = streams.as_array(heartrate)
-    n = min(watts.size, hr.size)
 
     # Content-aware, not just emptiness: a paired-but-silent meter records a
     # full stream of zeros, and calling that a heart-rate problem would send the
     # athlete (and the LLM coach) after the wrong thing entirely.
     #
-    # Whole-stream checks come first. The per-half checks below divide by the
-    # *shared* length, so a missing heart-rate stream would otherwise make the
-    # power half-check fail and misreport a fine power meter as absent.
+    # Whole-stream checks come first. The per-half checks below are taken on the
+    # seconds carrying *both* channels, so a missing heart-rate stream would
+    # otherwise leave nothing to check and misreport a fine power meter as
+    # absent.
     if not (watts > 0).any():
         return "no_power"
     if not (hr > 0).any():
         return "no_hr"
-    if not _positive_in_both_halves(watts, n):
+
+    halves = _paired_halves(watts, hr)
+    if halves is None:
+        # Both channels recorded, and never at the same time. Nothing here can
+        # be paired at all, which is the extreme of a mismatch.
+        return "stream_mismatch"
+    if not _positive_in_both_halves(watts, halves):
         return "no_power"
-    if not _positive_in_both_halves(hr, n):
+    if not _positive_in_both_halves(hr, halves):
         return "no_hr"
 
     # Seconds where both channels have something to say — the only seconds this
-    # metric can actually use.
+    # metric can actually use — against the seconds the power meter recorded.
+    # See ``DECOUPLING_MIN_PAIRED_COVERAGE`` for why the denominator is power
+    # and not whichever channel recorded more.
     paired = streams.paired_count(watts, hr)
-    covered = max(streams.present(watts).size, streams.present(hr).size)
+    covered = streams.present(watts).size
     if covered and paired < DECOUPLING_MIN_PAIRED_COVERAGE * covered:
         return "stream_mismatch"
 
-    # Both clocks matter: `duration_s` is elapsed time from the FIT header, while
-    # the halves are split by position on the grid. A ride with four hours
-    # elapsed but forty minutes recorded clears the elapsed check and then gets
-    # split into two halves that are mostly gap, so the paired seconds are
-    # counted rather than the width of the grid they are spread across.
+    # Both clocks matter: `duration_s` is how wide this block is, while the
+    # halves are split on the seconds inside it that actually recorded. A block
+    # spanning four hours with forty minutes of readings in it clears the
+    # elapsed check on width alone, so the paired seconds are counted too.
     if (duration_s or 0) < DECOUPLING_MIN_DURATION_S:
         return "too_short"
     if paired < DECOUPLING_MIN_DURATION_S:
@@ -664,18 +764,86 @@ def decoupling_unavailable_reason(
 
     # Variability index catches surging but is blind to a monotonic ramp, which
     # is precisely the shape that produces a large spurious drift number.
-    half = n // 2
-    first_recorded = streams.present(watts[:half])
-    second_recorded = streams.present(watts[n - half:n])
-    if first_recorded.size == 0 or second_recorded.size == 0:
-        return "no_power"
-    first_mean = float(first_recorded.mean())
-    second_mean = float(second_recorded.mean())
+    first_mean = float(watts[halves[0]].mean())
+    second_mean = float(watts[halves[1]].mean())
     reference = max(first_mean, second_mean)
     if reference > 0 and abs(first_mean - second_mean) / reference > DECOUPLING_MAX_HALF_POWER_DELTA:
         return "uneven_pacing"
 
     return None
+
+
+class DecouplingAnalysis(NamedTuple):
+    """What the decoupling pass concluded for one activity.
+
+    Exactly one of ``pct`` and ``reason`` is set — the invariant ``Activity``
+    documents for the two columns they are stored in. ``window_s`` is the span
+    of the block the figure describes, and is set only alongside a figure.
+    """
+
+    pct: float | None
+    reason: str | None
+    window_s: int | None
+
+
+def analyse_decoupling(
+    duration_s: int | None,
+    power: Sequence[float | None] | None,
+    heartrate: Sequence[float | None] | None,
+    workout_category: str | None = None,
+    vi: float | None = None,
+) -> DecouplingAnalysis:
+    """Aerobic decoupling over the longest continuous block of this ride.
+
+    The whole ride is the wrong unit for a metric that compares its first half
+    against its second: a stop long enough to recover from divides a session
+    into efforts that were never meant to be compared, and every check here —
+    the hour minimum, the pairing, the pacing — was reading across those stops.
+    So the block is chosen first (see :func:`decoupling_window`) and everything
+    else judges that block alone. ``window_s`` reports how much of the ride the
+    figure speaks for, because a number over four hours of a seven-hour ride
+    must not be presented as the ride's.
+
+    Reason codes are the gate's, plus ``fragmented``: the ride was long enough,
+    but no single block of it was. That distinction is only visible here — the
+    gate sees one block and can only call it short.
+    """
+    window = decoupling_window(power, heartrate)
+    if window is None:
+        # Nothing pairs anywhere. The gate has the whole stream and will name
+        # the channel that is missing.
+        reason = decoupling_unavailable_reason(
+            duration_s, power, heartrate, workout_category, vi
+        )
+        return DecouplingAnalysis(None, reason or "degenerate_hr", None)
+
+    lo, hi = window
+    watts = streams.as_array(power)[lo:hi]
+    beats = streams.as_array(heartrate)[lo:hi]
+    window_s = hi - lo
+
+    reason = decoupling_unavailable_reason(
+        window_s, watts, beats, workout_category, vi
+    )
+    if (
+        reason == "too_short"
+        and (duration_s or 0) >= DECOUPLING_MIN_DURATION_S
+        and streams.paired_count(watts, beats) < streams.paired_count(power, heartrate)
+    ):
+        # Long enough ride, and usable seconds were left outside the block: it
+        # was broken up rather than short, and saying "too short" about a
+        # seven-hour ride reads as a bug in the metric.
+        reason = "fragmented"
+    if reason is not None:
+        return DecouplingAnalysis(None, reason, None)
+
+    pct = aerobic_decoupling(watts, beats)
+    if pct is None:
+        # Defensive only. The gate checks both halves for usable data, so a
+        # passing gate should always yield a number; this keeps the
+        # exactly-one-of-two invariant true even if that ever stops holding.
+        return DecouplingAnalysis(None, "degenerate_hr", None)
+    return DecouplingAnalysis(pct, None, window_s)
 
 
 # Physiologically plausible bounds for a cycling CP/W' fit. The linear work-time

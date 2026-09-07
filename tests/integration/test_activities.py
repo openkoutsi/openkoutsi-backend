@@ -1032,6 +1032,8 @@ class TestAerobicMetrics:
         assert body["variability_index"] > 1.0
         assert body["decoupling_pct"] is not None
         assert body["decoupling_reason"] is None
+        # An unbroken ride: the figure covers all of it, and says so.
+        assert body["decoupling_window_s"] == self.TOTAL_S
         # CP/W' snapshot fit from this ride's own bests: W = 195·t + 15000.
         assert body["cp_w"] == pytest.approx(195.0, abs=1.0)
         assert body["w_prime_j"] == pytest.approx(15000.0, abs=100)
@@ -1063,6 +1065,7 @@ class TestAerobicMetrics:
         # Simulate the pre-#37 state: no aerobic columns, no w_bal stream.
         activity.decoupling_pct = None
         activity.decoupling_reason = None
+        activity.decoupling_window_s = None
         activity.cp_w = None
         activity.w_prime_j = None
         await session.commit()
@@ -1071,6 +1074,7 @@ class TestAerobicMetrics:
             f"/api/activities/{activity_id}/reprocess", headers=auth_headers
         )).json()
         assert body["decoupling_pct"] is not None
+        assert body["decoupling_window_s"] is not None
         assert body["cp_w"] is not None
         assert "w_bal" in body["streams"]
 

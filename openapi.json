@@ -8878,6 +8878,17 @@
             ],
             "title": "Decoupling Reason"
           },
+          "decoupling_window_s": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decoupling Window S"
+          },
           "workout_category": {
             "anyOf": [
               {
@@ -9368,6 +9379,17 @@
               }
             ],
             "title": "Decoupling Reason"
+          },
+          "decoupling_window_s": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decoupling Window S"
           },
           "workout_category": {
             "anyOf": [

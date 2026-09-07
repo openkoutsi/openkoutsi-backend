@@ -34,6 +34,7 @@ def _make_activity(**kwargs):
     act.max_hr = kwargs.get("max_hr", 178)
     act.decoupling_pct = kwargs.get("decoupling_pct", None)
     act.decoupling_reason = kwargs.get("decoupling_reason", None)
+    act.decoupling_window_s = kwargs.get("decoupling_window_s", None)
     act.intervals = kwargs.get("intervals", [])
     act.labels = kwargs.get("labels", [])
     act.notes = kwargs.get("notes", None)
@@ -183,6 +184,21 @@ class TestBuildPrompt:
         act = _make_activity(decoupling_pct=3.4)
         prompt = _build_prompt(act, _make_athlete())
         assert "Aerobic decoupling: 3.4%" in prompt
+
+    def test_says_when_decoupling_covers_only_part_of_the_ride(self):
+        """A figure over half a ride must not be handed over as the ride's."""
+        act = _make_activity(
+            decoupling_pct=3.4, decoupling_window_s=4 * 3600, duration_s=7 * 3600
+        )
+        prompt = _build_prompt(act, _make_athlete())
+        assert "longest continuous block" in prompt
+        assert "240 min of 420 min" in prompt
+
+    def test_a_window_covering_the_whole_ride_is_not_remarked_on(self):
+        act = _make_activity(
+            decoupling_pct=3.4, decoupling_window_s=3600, duration_s=3600
+        )
+        assert "longest continuous block" not in _build_prompt(act, _make_athlete())
 
     def test_explains_why_decoupling_is_absent(self):
         """The coach must be told why, not left to speculate about a number."""

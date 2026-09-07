@@ -113,17 +113,28 @@ class AerobicResponse(BaseModel):
         None,
         description=(
             "Aerobic decoupling: how far the power:heart-rate ratio drifted "
-            "between the first and second half of the ride, as a percentage (%). "
-            "Under ~5% is good durability. Null when not measurable — read "
-            "'decoupling_reason' instead of treating null as zero."
+            "between the first and second half of the measured block, as a "
+            "percentage (%). Under ~5% is good durability. Null when not "
+            "measurable — read 'decoupling_reason' instead of treating null as "
+            "zero."
         ),
     )
     decoupling_reason: Optional[str] = Field(
         None,
         description=(
-            "Why there is no decoupling figure: too_short, no_power, no_hr, "
-            "degenerate_hr, stream_mismatch, variable_effort or uneven_pacing. "
-            "Null when a figure was computed."
+            "Why there is no decoupling figure: too_short, fragmented (the ride "
+            "was long enough but no continuous block of it was), no_power, "
+            "no_hr, degenerate_hr, stream_mismatch, variable_effort or "
+            "uneven_pacing. Null when a figure was computed."
+        ),
+    )
+    decoupling_window_s: Optional[int] = Field(
+        None,
+        description=(
+            "Seconds of the ride the decoupling figure covers: its longest "
+            "continuous block, which is shorter than 'duration_s' on a ride "
+            "broken up by a long stop. Say so rather than describing the figure "
+            "as the whole ride's."
         ),
     )
     cp_w: Optional[float] = Field(
@@ -547,6 +558,7 @@ async def get_activity_detail(run: ToolRun, args: ActivityDetailArgs) -> Activit
             ),
             decoupling_pct=round_or_none(activity.decoupling_pct, 2),
             decoupling_reason=activity.decoupling_reason,
+            decoupling_window_s=activity.decoupling_window_s,
             cp_w=round_or_none(activity.cp_w, 1),
             w_prime_j=round_or_none(activity.w_prime_j, 0),
         ),

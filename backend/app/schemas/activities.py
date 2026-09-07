@@ -166,13 +166,21 @@ class ActivityResponse(BaseModel):
     # Aerobic response metrics (issue #37). `efficiency_factor` (weighted power
     # per heartbeat) and `variability_index` (weighted / average power) are
     # derived on read from the columns above. `decoupling_pct` is the stored
-    # power:HR drift over the ride; when it is null `decoupling_reason` says why
-    # a figure would be misleading — one of `too_short`, `no_power`, `no_hr`,
-    # `degenerate_hr`, `variable_effort`.
+    # power:HR drift; when it is null `decoupling_reason` says why a figure
+    # would be misleading — one of `too_short`, `fragmented`, `no_power`,
+    # `no_hr`, `degenerate_hr`, `stream_mismatch`, `variable_effort`,
+    # `uneven_pacing`.
+    #
+    # The drift is measured over the ride's longest continuous block rather than
+    # across a stop long enough to recover from, and `decoupling_window_s` is
+    # how many seconds that block spans. Compare it against `duration_s` before
+    # presenting the figure as the whole ride's: they differ on a ride that was
+    # broken up. Null on activities processed before this existed.
     efficiency_factor: Optional[float] = None
     variability_index: Optional[float] = None
     decoupling_pct: Optional[float] = None
     decoupling_reason: Optional[str] = None
+    decoupling_window_s: Optional[int] = None
     workout_category: Optional[str] = None
     # Which bike, and who decided (issue #64). `bike_source` is `auto` when a
     # bike's claimed sports matched, `manual` when the athlete picked it, and
