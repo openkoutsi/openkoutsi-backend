@@ -153,6 +153,13 @@ class ActivityResponse(BaseModel):
     weighted_power: Optional[float] = None
     avg_hr: Optional[float] = None
     max_hr: Optional[float] = None
+    # Average speed in metres per second, as recorded — the mean of the speed
+    # samples the device or provider supplied, not distance ÷ duration. The two
+    # disagree on any ride with stops in it, and this is the one the head unit
+    # showed. NULL when nothing carried a speed channel (a manual entry, or a
+    # file with no speed in it), which is why a client showing it needs a
+    # fallback of its own rather than a zero.
+    avg_speed_ms: Optional[float] = None
     avg_cadence: Optional[float] = None
     load: Optional[float] = None
     intensity: Optional[float] = None

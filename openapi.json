@@ -8790,6 +8790,17 @@
             ],
             "title": "Max Hr"
           },
+          "avg_speed_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Speed Ms"
+          },
           "avg_cadence": {
             "anyOf": [
               {
@@ -9269,6 +9280,17 @@
               }
             ],
             "title": "Max Hr"
+          },
+          "avg_speed_ms": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Speed Ms"
           },
           "avg_cadence": {
             "anyOf": [

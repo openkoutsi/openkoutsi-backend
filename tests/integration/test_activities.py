@@ -299,6 +299,57 @@ class TestGetActivity:
         assert resp.json()["id"] == activity_id
         assert resp.json()["streams"] == {}
 
+    async def test_recorded_avg_speed_is_exposed(self, client, auth_headers, session):
+        """The stored `avg_speed_ms` reaches both the detail and the list.
+
+        It is what the device actually recorded, so a client can show it
+        instead of dividing distance by elapsed time — the two disagree on any
+        ride with stops in it.
+        """
+        create_resp = await client.post(
+            "/api/activities",
+            json={
+                "sport_type": "Ride",
+                "start_time": "2025-01-02T10:00:00Z",
+                "duration_s": 3600,
+                "distance_m": 30000.0,
+            },
+            headers=auth_headers,
+        )
+        activity_id = create_resp.json()["id"]
+
+        activity = (
+            await session.execute(select(Activity).where(Activity.id == activity_id))
+        ).scalar_one()
+        activity.avg_speed_ms = 9.5
+        await session.commit()
+
+        detail = await client.get(f"/api/activities/{activity_id}", headers=auth_headers)
+        assert detail.json()["avg_speed_ms"] == pytest.approx(9.5)
+
+        listing = await client.get("/api/activities", headers=auth_headers)
+        row = next(a for a in listing.json()["items"] if a["id"] == activity_id)
+        assert row["avg_speed_ms"] == pytest.approx(9.5)
+
+    async def test_avg_speed_null_when_nothing_recorded_it(self, client, auth_headers):
+        """A manual entry has no speed channel, so the field is null, not zero.
+
+        Distance and duration are both present here: the point is that the API
+        does not quietly synthesise a figure from them — that fallback belongs
+        to the client, which can label it.
+        """
+        create_resp = await client.post(
+            "/api/activities",
+            json={
+                "sport_type": "Ride",
+                "start_time": "2025-01-03T10:00:00Z",
+                "duration_s": 3600,
+                "distance_m": 30000.0,
+            },
+            headers=auth_headers,
+        )
+        assert create_resp.json()["avg_speed_ms"] is None
+
     async def test_nonexistent_activity_returns_404(self, client, auth_headers):
         resp = await client.get("/api/activities/nonexistent-id", headers=auth_headers)
         assert resp.status_code == 404
