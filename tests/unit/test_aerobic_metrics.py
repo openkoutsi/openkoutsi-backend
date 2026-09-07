@@ -7,12 +7,16 @@ values and synthetic streams with known injected behaviour.
 import pytest
 
 from backend.app.services.aerobic_metrics import _sampling_supports_integration
+from openkoutsi import streams
 from openkoutsi.training_math import (
+    DECOUPLING_MAX_BRIDGED_PAUSE_S,
     DECOUPLING_MAX_VI,
     DECOUPLING_MIN_DURATION_S,
     aerobic_decoupling,
+    analyse_decoupling,
     cp_wprime_plausible,
     decoupling_unavailable_reason,
+    decoupling_window,
     efficiency_factor,
     estimate_cp_wprime,
     variability_index,
@@ -427,3 +431,271 @@ class TestWBalOverGaps:
         out = w_bal_stream([200.0, None, 200.0], 250.0, 20000.0)
         assert len(out) == 3
         assert all(isinstance(v, float) for v in out)
+
+
+def _long_ride(
+    total_s: int = 7 * 3600, *, stops: list[tuple[int, int]] | None = None, mode: str = "shared"
+) -> tuple[list[float | None], list[float | None]]:
+    """A steady seven-hour endurance ride with stops cut into it.
+
+    ``mode`` is what the stops look like on the streams:
+
+    ``shared``      no record at all, a hole in every channel — a device pause.
+    ``power_only``  heart rate keeps logging while the power meter, which sleeps
+                    when the cranks stop, records nothing. This is what a stop on
+                    a head unit with auto-pause off actually looks like, and the
+                    shape that used to cost the whole ride its figure.
+    ``hr_only``     the reverse, a strap that drops out — a fault, not a stop.
+
+    Heart rate drifts up 3% across the ride, so a figure computed over any
+    honest window of it lands a little above zero.
+    """
+    stops = stops or []
+    power: list[float | None] = []
+    hr: list[float | None] = []
+    for i in range(total_s):
+        beat = 140.0 * (1 + 0.03 * i / total_s) + (i % 5) * 0.1
+        watts = 200.0 + (i % 7)
+        stopped = any(start <= i < start + length for start, length in stops)
+        if stopped and mode == "shared":
+            power.append(None)
+            hr.append(None)
+        elif stopped and mode == "power_only":
+            power.append(None)
+            hr.append(round(beat * 0.72, 1))
+        elif stopped and mode == "hr_only":
+            power.append(watts)
+            hr.append(None)
+        else:
+            power.append(watts)
+            hr.append(round(beat, 1))
+    return power, hr
+
+
+class TestDecouplingWindow:
+    """The figure is measured over the longest continuous block, not the ride."""
+
+    def test_an_unbroken_ride_is_one_window(self):
+        power, hr = _long_ride(4000)
+        assert decoupling_window(power, hr) == (0, 4000)
+
+    def test_a_short_stop_does_not_break_the_ride(self):
+        # The complaint this fixes: a five-minute stop in a seven-hour ride.
+        power, hr = _long_ride(stops=[(3 * 3600, 300)])
+        assert decoupling_window(power, hr) == (0, 7 * 3600)
+
+    def test_a_stop_at_the_tolerance_still_bridges(self):
+        power, hr = _long_ride(stops=[(3 * 3600, DECOUPLING_MAX_BRIDGED_PAUSE_S)])
+        assert decoupling_window(power, hr) == (0, 7 * 3600)
+
+    def test_a_long_stop_splits_the_ride_and_the_longer_side_wins(self):
+        # Two hours, an hour for lunch, then four: after an hour off the bike
+        # the two sides are separate efforts, so the longer one is measured.
+        power, hr = _long_ride(stops=[(2 * 3600, 3600)])
+        assert decoupling_window(power, hr) == (3 * 3600, 7 * 3600)
+
+    def test_the_block_is_chosen_by_usable_seconds_not_width(self):
+        # Three hours of five-minute efforts between ten-minute stops — one wide
+        # block holding an hour of riding — then a solid 4000 s. The wide one
+        # covers nearly three times the clock and has less to say, so the
+        # narrow one is the window.
+        stuttering = ([200.0] * 300 + [None] * 600) * 12
+        power = stuttering + [None] * 1200 + [200.0] * 4000
+        hr = (
+            ([140.0] * 300 + [None] * 600) * 12 + [None] * 1200 + [140.0] * 4000
+        )
+        start, end = decoupling_window(power, hr)
+        assert (start, end) == (len(stuttering) + 1200, len(power))
+        assert end - start < len(stuttering)  # narrower, and still the winner
+
+    def test_a_stop_the_power_meter_slept_through_breaks_the_block_too(self):
+        # Only heart rate recorded, so there is nothing to pair: for a metric
+        # that multiplies one channel against the other this is a hole.
+        power, hr = _long_ride(stops=[(2 * 3600, 3600)], mode="power_only")
+        assert decoupling_window(power, hr) == (3 * 3600, 7 * 3600)
+
+    def test_no_overlap_at_all_has_no_window(self):
+        power = [200.0] * 100 + [None] * 100
+        hr = [None] * 100 + [140.0] * 100
+        assert decoupling_window(power, hr) is None
+
+    def test_empty_streams_have_no_window(self):
+        assert decoupling_window([], []) is None
+        assert decoupling_window(None, None) is None
+
+
+class TestDecouplingOverPauses:
+    """The reported bug: a seven-hour ride refused over the stops in it.
+
+    Every one of these produced `stream_mismatch` — "the recordings don't line
+    up closely enough to compare them" — because seconds where the power meter
+    had stopped broadcasting were counted as heart rate the pairing had failed
+    to match. They are stops, not faults.
+    """
+
+    def test_a_five_minute_stop_no_longer_costs_the_ride_its_figure(self):
+        power, hr = _long_ride(stops=[(3 * 3600, 300)], mode="power_only")
+        result = analyse_decoupling(7 * 3600 - 300, power, hr, "endurance", 1.02)
+        assert result.reason is None
+        assert result.pct is not None
+        assert result.window_s == 7 * 3600
+
+    def test_the_reported_ride_one_pause_and_stops_the_meter_slept_through(self):
+        """The ride this came from: seven hours, refused over its stops.
+
+        Six minutes paused by hand at the first stop — a hole in every channel,
+        bridged — and then the stops where the head unit was left running: the
+        power meter sleeps when the cranks stop, the strap keeps counting, and
+        every one of those seconds was heart rate the pairing had "failed" to
+        match. Together they were 7% of the ride, past a 5% budget, and the
+        whole seven hours lost its figure. Heart rate is there beside the watts
+        everywhere the rider was actually riding.
+        """
+        pause = [(2 * 3600, 360)]
+        power, hr = _long_ride(stops=pause)
+        for start, length in [(k * 2400 + 900, 240) for k in range(3, 11)]:
+            for i in range(start, start + length):
+                power[i] = None  # meter asleep; the strap keeps reporting
+
+        # What it did before: divided by the better-covered channel, which on a
+        # ride with stops in it is always heart rate.
+        paired = streams.paired_count(power, hr)
+        assert paired < 0.95 * max(
+            streams.present(power).size, streams.present(hr).size
+        )
+
+        result = analyse_decoupling(7 * 3600 - 360, power, hr, "endurance", 1.02)
+        assert result.reason is None
+        assert result.pct is not None
+        # Nothing was lost: the stops are inside the block, not breaks in it.
+        assert result.window_s == 7 * 3600
+
+    def test_a_strap_that_takes_a_long_time_to_come_back_splits_the_ride(self):
+        """The other way a stop shows up: a strap knocked off and slow to return.
+
+        Twenty-five minutes of watts with no pulse to pair them against is a
+        hole with the ride carrying on either side of it, not a misalignment.
+        Too long to bridge, so the longer side is measured and says so.
+        """
+        pause_at, pause_s = 2 * 3600, 360
+        strap_out_s = 25 * 60
+        power, hr = _long_ride(stops=[(pause_at, pause_s)])
+        for i in range(pause_at + pause_s, pause_at + pause_s + strap_out_s):
+            hr[i] = None
+
+        result = analyse_decoupling(7 * 3600, power, hr, "endurance", 1.02)
+        assert result.reason is None
+        assert result.window_s == 7 * 3600 - (pause_at + pause_s + strap_out_s)
+
+    def test_many_short_stops_no_longer_add_up_to_a_refusal(self):
+        # Eight six-minute stops: 11% of the ride recorded heart rate and no
+        # watts, which cleared the old 5% budget several times over.
+        stops = [(k * 3000 + 600, 360) for k in range(1, 9)]
+        power, hr = _long_ride(stops=stops, mode="power_only")
+        result = analyse_decoupling(7 * 3600, power, hr, "endurance", 1.02)
+        assert result.reason is None
+        assert result.pct is not None
+
+    def test_a_device_pause_is_measured_across_as_before(self):
+        power, hr = _long_ride(stops=[(3 * 3600, 300)], mode="shared")
+        result = analyse_decoupling(7 * 3600 - 300, power, hr, "endurance", 1.02)
+        assert result.reason is None
+        assert result.window_s == 7 * 3600
+
+    def test_a_lunch_stop_is_measured_over_the_longer_side(self):
+        power, hr = _long_ride(stops=[(2 * 3600, 3600)])
+        result = analyse_decoupling(6 * 3600, power, hr, "endurance", 1.02)
+        assert result.reason is None
+        assert result.window_s == 4 * 3600
+
+    def test_a_dropping_strap_is_still_a_mismatch(self):
+        # Heart rate missing while the meter reports watts is a strap problem,
+        # and pairing what is left would compare two different rides.
+        stops = [(k * 3000 + 600, 360) for k in range(1, 9)]
+        power, hr = _long_ride(stops=stops, mode="hr_only")
+        result = analyse_decoupling(7 * 3600, power, hr, "endurance", 1.02)
+        assert result.reason == "stream_mismatch"
+        assert result.pct is None
+        assert result.window_s is None
+
+    def test_a_ride_no_block_of_which_lasts_an_hour_is_fragmented(self):
+        # Stop-start city riding: five hours long, in fifty-minute pieces.
+        stops = [(k * 3600 + 3000, 900) for k in range(5)]
+        power, hr = _long_ride(5 * 3600, stops=stops)
+        result = analyse_decoupling(5 * 3600 - 5 * 900, power, hr, "endurance", 1.02)
+        assert result.reason == "fragmented"
+        assert result.pct is None
+
+    def test_a_meter_that_dies_is_measured_over_what_it_recorded(self):
+        """Deliberate: the block is the ride's longest, not a share of it.
+
+        A meter whose battery went at 70 minutes used to report `no_power`,
+        because the second half of the grid had none. Seventy minutes is an
+        honest window and the figure now covers it — which is only safe because
+        `window_s` travels with the number and says so.
+        """
+        power = [200.0 + (i % 7) for i in range(4200)] + [None] * (7 * 3600 - 4200)
+        hr = [140.0 + (i % 5) * 0.1 + 4 * i / 25200 for i in range(7 * 3600)]
+        result = analyse_decoupling(7 * 3600, power, hr, "endurance", 1.02)
+        assert result.pct is not None
+        assert result.window_s == 4200
+
+    def test_a_genuinely_short_ride_is_still_short_not_fragmented(self):
+        power, hr = _long_ride(1800)
+        result = analyse_decoupling(1800, power, hr, "endurance", 1.02)
+        assert result.reason == "too_short"
+
+    def test_a_sparse_recording_is_short_rather_than_fragmented(self):
+        # Four hours elapsed, forty minutes of readings, spread evenly: nothing
+        # was left outside the block, so the recording is thin, not broken up.
+        power = ([200.0] + [None] * 5) * 2400
+        hr = ([150.0] + [None] * 5) * 2400
+        assert analyse_decoupling(14400, power, hr, "endurance", 1.02).reason == "too_short"
+
+    def test_the_gates_still_apply_inside_the_window(self):
+        # A negative split *within* the surviving block is still refused: the
+        # window narrows where the drift is measured, it does not lower the bar.
+        power = [150.0] * 2000 + [None] * 1800 + [150.0] * 2000 + [200.0] * 2000
+        hr = (
+            [130.0 + (i % 3) for i in range(2000)]
+            + [None] * 1800
+            + [130.0 + (i % 3) for i in range(2000)]
+            + [150.0 + (i % 3) for i in range(2000)]
+        )
+        result = analyse_decoupling(6000, power, hr, "endurance", 1.03)
+        assert result.reason == "uneven_pacing"
+
+    def test_a_figure_and_a_reason_are_never_both_set(self):
+        for streams_in in (
+            _long_ride(stops=[(3 * 3600, 300)], mode="power_only"),
+            _long_ride(stops=[(2 * 3600, 3600)]),
+            _long_ride(1800),
+            ([], []),
+            ([200.0] * 4000, []),
+        ):
+            result = analyse_decoupling(7200, *streams_in, "endurance", 1.02)
+            assert (result.pct is None) != (result.reason is None)
+            # The window travels with the figure, never with a refusal.
+            assert (result.window_s is None) == (result.pct is None)
+
+
+class TestPairedHalvesSplit:
+    """The halves are equal in recorded time, not in grid position."""
+
+    def test_a_stop_before_halfway_does_not_shrink_the_first_half(self):
+        # Twenty minutes parked at 1000 s. Splitting the grid down the middle
+        # would leave the first half with 1200 s of riding against the second
+        # half's 2000 s; splitting on paired seconds gives both 1600 s. Power
+        # steps up exactly where the true recorded midpoint falls, so a grid
+        # split reads the step as drift and a paired split reads it as zero.
+        first = [200.0] * 1000 + [None] * 1200 + [200.0] * 600
+        second = [220.0] * 1600
+        power = first + second
+        hr = (
+            [140.0] * 1000
+            + [None] * 1200
+            + [140.0] * 600
+            + [154.0] * 1600
+        )
+        # 220/154 == 200/140: the ratio is identical either side of the step.
+        assert aerobic_decoupling(power, hr) == pytest.approx(0.0, abs=1e-9)

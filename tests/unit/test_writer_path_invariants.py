@@ -81,6 +81,15 @@ def _assert_invariant(activity: Activity) -> None:
         f"decoupling_reason={activity.decoupling_reason!r} — exactly one must be set. "
         "A writer path is not calling apply_aerobic_metrics."
     )
+    # The figure is measured over the ride's longest continuous block, so the
+    # span it covers has to be stored with it — a writer that sets the figure
+    # and not the window leaves the API unable to say what the number is of.
+    assert (activity.decoupling_window_s is not None) == has_value, (
+        "activity has "
+        f"decoupling_pct={activity.decoupling_pct!r} and "
+        f"decoupling_window_s={activity.decoupling_window_s!r} — the window is "
+        "set exactly when the figure is."
+    )
 
 
 class TestProviderSyncWriterPaths:

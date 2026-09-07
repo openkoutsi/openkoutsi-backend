@@ -151,8 +151,15 @@ class Activity(UserBase):
     # `decoupling_reason` then carries a stable reason code — see
     # `openkoutsi.training_math.decoupling_unavailable_reason`. Exactly one of
     # the two is set.
+    #
+    # The figure is measured over the ride's longest continuous block, not
+    # across a stop long enough to recover from, so `decoupling_window_s` says
+    # how many seconds of the ride it speaks for. Set exactly when
+    # `decoupling_pct` is; NULL on activities processed before it existed, which
+    # pick it up on reprocess.
     decoupling_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     decoupling_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    decoupling_window_s: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     # CP (watts) and W' (joules) the `w_bal` stream was integrated with, fit from
     # the athlete's power bests as they stood *on this activity's date*. Frozen
     # like `zone_times`: a ride's W' story shouldn't silently change months later

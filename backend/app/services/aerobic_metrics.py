@@ -27,8 +27,7 @@ from backend.app.services.power_profile import (
 )
 from openkoutsi import streams
 from openkoutsi.training_math import (
-    aerobic_decoupling,
-    decoupling_unavailable_reason,
+    analyse_decoupling,
     variability_index,
     w_bal_stream,
 )
@@ -57,9 +56,10 @@ async def apply_aerobic_metrics(
 ) -> list[float]:
     """Set the aerobic columns on ``activity`` and return its W' balance stream.
 
-    Sets ``decoupling_pct``/``decoupling_reason`` and the
-    ``cp_w``/``w_prime_j``/``cp_fit_points`` snapshot. Exactly one of
-    ``decoupling_pct`` and ``decoupling_reason`` is always set. The returned
+    Sets ``decoupling_pct``/``decoupling_reason``/``decoupling_window_s`` and
+    the ``cp_w``/``w_prime_j``/``cp_fit_points`` snapshot. Exactly one of
+    ``decoupling_pct`` and ``decoupling_reason`` is always set, and the window
+    is set exactly when the figure is. The returned
     stream is empty when there is no usable power, when CP could not be fit, or
     when the sampling rate can't support the integration; the caller decides how
     to persist it (a fresh row on first processing, a delete-then-insert on
@@ -75,19 +75,20 @@ async def apply_aerobic_metrics(
     power = streams.to_json_stream(stream_map.get("power") or [])
     heartrate = streams.to_json_stream(stream_map.get("heartrate") or [])
 
+    # The whole-ride variability index, deliberately: it is the figure the
+    # activity page shows, and the docs promise it is what decides whether a
+    # decoupling number is worth showing. The block chosen below narrows *where*
+    # the drift is measured, not which rides qualify.
     vi = variability_index(activity.weighted_power, activity.avg_power)
-    reason = decoupling_unavailable_reason(
+    analysis = analyse_decoupling(
         activity.duration_s, power, heartrate, activity.workout_category, vi
     )
-    decoupling = None if reason else aerobic_decoupling(power, heartrate)
-    if decoupling is None and reason is None:
-        # Defensive only. The gate checks both halves for usable data, so a
-        # passing gate should always yield a number; this keeps the
-        # exactly-one-of-two invariant true even if that ever stops holding.
-        reason = "degenerate_hr"
 
-    activity.decoupling_pct = round(decoupling, 2) if decoupling is not None else None
-    activity.decoupling_reason = reason
+    activity.decoupling_pct = (
+        round(analysis.pct, 2) if analysis.pct is not None else None
+    )
+    activity.decoupling_reason = analysis.reason
+    activity.decoupling_window_s = analysis.window_s
 
     activity.cp_w = None
     activity.w_prime_j = None

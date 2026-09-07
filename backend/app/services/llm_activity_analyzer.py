@@ -200,6 +200,8 @@ def _build_agentic_user_prompt(activity: Activity) -> str:
 # knows why the figure is missing rather than inventing one.
 _DECOUPLING_REASON_TEXT: dict[str, str] = {
     "too_short": "the ride was too short for a meaningful drift measurement",
+    "fragmented": "the ride was long enough, but stops broke it up and no single "
+                  "continuous block of it lasted the hour the measurement needs",
     "no_power": "no power data",
     "no_hr": "no heart-rate data",
     "degenerate_hr": "the heart-rate data was unusable",
@@ -291,12 +293,21 @@ def _build_prompt(
             "training load indicates improving aerobic fitness)"
         )
     if activity.decoupling_pct is not None:
+        measured_over = ""
+        window_s = activity.decoupling_window_s
+        if window_s and activity.duration_s and window_s < activity.duration_s:
+            # Measured over one block of a ride that was broken up by a stop.
+            # Handed over explicitly, or the coach reads it as the whole ride's.
+            measured_over = (
+                f"; measured over the ride's longest continuous block, "
+                f"{window_s // 60} min of {activity.duration_s // 60} min"
+            )
         lines.append(
             f"  Aerobic decoupling: {activity.decoupling_pct:.1f}% "
             "(how far the power:heart-rate ratio drifted from the first half of "
-            "the ride to the second; under ~5% is generally considered good "
-            "aerobic durability, though heat, dehydration and caffeine also "
-            "push it up)"
+            "the measured block to the second; under ~5% is generally considered "
+            "good aerobic durability, though heat, dehydration and caffeine also "
+            f"push it up{measured_over})"
         )
     elif activity.decoupling_reason:
         lines.append(
