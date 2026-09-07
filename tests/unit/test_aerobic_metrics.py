@@ -7,6 +7,7 @@ values and synthetic streams with known injected behaviour.
 import pytest
 
 from backend.app.services.aerobic_metrics import _sampling_supports_integration
+from openkoutsi import streams
 from openkoutsi.training_math import (
     DECOUPLING_MAX_BRIDGED_PAUSE_S,
     DECOUPLING_MAX_VI,
@@ -539,16 +540,42 @@ class TestDecouplingOverPauses:
         assert result.pct is not None
         assert result.window_s == 7 * 3600
 
-    def test_the_reported_ride_a_pause_then_a_strap_that_took_a_while_back(self):
-        """The ride this came from: paused at the first stop, strap knocked off.
+    def test_the_reported_ride_one_pause_and_stops_the_meter_slept_through(self):
+        """The ride this came from: seven hours, refused over its stops.
 
-        Six minutes paused with the head unit stopped — a hole in every channel,
-        bridged — and then, having walked away from the bike, a strap that did
-        not report again for twenty-five minutes after the restart while the
-        power meter did. That outage was 6% of the ride's recorded seconds,
-        just past the coverage budget, and cost the whole seven hours their
-        figure. It is not a misalignment: it is a hole with the ride carrying
-        on either side of it, so the longer side is measured and says so.
+        Six minutes paused by hand at the first stop — a hole in every channel,
+        bridged — and then the stops where the head unit was left running: the
+        power meter sleeps when the cranks stop, the strap keeps counting, and
+        every one of those seconds was heart rate the pairing had "failed" to
+        match. Together they were 7% of the ride, past a 5% budget, and the
+        whole seven hours lost its figure. Heart rate is there beside the watts
+        everywhere the rider was actually riding.
+        """
+        pause = [(2 * 3600, 360)]
+        power, hr = _long_ride(stops=pause)
+        for start, length in [(k * 2400 + 900, 240) for k in range(3, 11)]:
+            for i in range(start, start + length):
+                power[i] = None  # meter asleep; the strap keeps reporting
+
+        # What it did before: divided by the better-covered channel, which on a
+        # ride with stops in it is always heart rate.
+        paired = streams.paired_count(power, hr)
+        assert paired < 0.95 * max(
+            streams.present(power).size, streams.present(hr).size
+        )
+
+        result = analyse_decoupling(7 * 3600 - 360, power, hr, "endurance", 1.02)
+        assert result.reason is None
+        assert result.pct is not None
+        # Nothing was lost: the stops are inside the block, not breaks in it.
+        assert result.window_s == 7 * 3600
+
+    def test_a_strap_that_takes_a_long_time_to_come_back_splits_the_ride(self):
+        """The other way a stop shows up: a strap knocked off and slow to return.
+
+        Twenty-five minutes of watts with no pulse to pair them against is a
+        hole with the ride carrying on either side of it, not a misalignment.
+        Too long to bridge, so the longer side is measured and says so.
         """
         pause_at, pause_s = 2 * 3600, 360
         strap_out_s = 25 * 60
@@ -556,16 +583,8 @@ class TestDecouplingOverPauses:
         for i in range(pause_at + pause_s, pause_at + pause_s + strap_out_s):
             hr[i] = None
 
-        # What it did before: heart rate missing from riding the meter saw,
-        # counted whole against the pairing.
-        assert decoupling_unavailable_reason(
-            7 * 3600, power, hr, "endurance", 1.02
-        ) == "stream_mismatch"
-
         result = analyse_decoupling(7 * 3600, power, hr, "endurance", 1.02)
         assert result.reason is None
-        assert result.pct is not None
-        # The stretch after the strap came back is the longer of the two.
         assert result.window_s == 7 * 3600 - (pause_at + pause_s + strap_out_s)
 
     def test_many_short_stops_no_longer_add_up_to_a_refusal(self):
