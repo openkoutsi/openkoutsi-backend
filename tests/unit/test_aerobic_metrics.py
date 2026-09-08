@@ -12,6 +12,7 @@ from openkoutsi.training_math import (
     DECOUPLING_ABSOLUTE_MAX_VI,
     DECOUPLING_MAX_BRIDGED_PAUSE_S,
     DECOUPLING_MAX_VI,
+    DECOUPLING_VI_MAX_DURATION_S,
     DECOUPLING_MIN_DURATION_S,
     aerobic_decoupling,
     analyse_decoupling,
@@ -789,6 +790,21 @@ class TestVariabilityIsReadAgainstIntensityAndLength:
         assert analyse_decoupling(
             5 * 3600, power, hr, "vo2max", 1.02, intensity=0.5
         ).reason == "variable_effort"
+
+    def test_the_length_excuse_starts_exactly_at_the_limit(self):
+        # A minute either side of the line, same numbers: the shorter ride is
+        # still a session of efforts as far as the gate can tell, the longer one
+        # is a day out. Reads the constant, so moving the line moves the test.
+        just_under = DECOUPLING_VI_MAX_DURATION_S - 60
+        power, hr = _long_ride(just_under)
+        assert analyse_decoupling(
+            just_under, power, hr, "tempo", 1.15, intensity=0.85
+        ).reason == "variable_effort"
+
+        power, hr = _long_ride(DECOUPLING_VI_MAX_DURATION_S)
+        assert analyse_decoupling(
+            DECOUPLING_VI_MAX_DURATION_S, power, hr, "tempo", 1.15, intensity=0.85
+        ).reason is None
 
     def test_the_threshold_itself_is_not_surging(self):
         power, hr = self._short_ride()

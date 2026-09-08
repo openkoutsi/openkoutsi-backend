@@ -598,13 +598,13 @@ DECOUPLING_VI_INTENSITY_FLOOR = 0.78
 DECOUPLING_ABSOLUTE_MAX_VI = 1.25
 
 # Length is the other half of the same argument, and the sturdier half. Interval
-# sessions are short — nobody rides efforts for four hours — so past this much
+# sessions are short — nobody rides efforts for three hours — so past this much
 # riding the variability is the road: descents, junctions, villages, a bidon
 # stop. Intensity leans on an FTP the athlete typed in and may not have revised
 # in months; duration is a fact about the ride. Above it, only the absolute
-# ceiling applies, and each half holds hours of riding for its averages to
-# settle on besides.
-DECOUPLING_VI_MAX_DURATION_S = 4 * 3600
+# ceiling applies, and each half still holds well over an hour of riding for its
+# averages to settle on besides.
+DECOUPLING_VI_MAX_DURATION_S = 3 * 3600
 
 # Above this relative difference between the two halves' mean power the ride was
 # ridden as a ramp or a negative split. Pw:HR assumes steady output, and a rider
@@ -678,7 +678,7 @@ def _ridden_in_bursts(
     session whatever its VI, so the threshold is read from the same intensity
     `classify_workout` starts reading VI at.
 
-    *How long it went on.* Nobody rides efforts for four hours. Past that the
+    *How long it went on.* Nobody rides efforts for three hours. Past that the
     variability is the road, and this is the sturdier test of the two: intensity
     is measured against an FTP the athlete typed in, and one left stale reads a
     steady ride as a hard one.
