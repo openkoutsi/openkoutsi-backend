@@ -282,7 +282,10 @@ def _build_status_prompt(
         lines.append("  (no activities recorded)")
 
     for plan, this_week_workouts in active_plans:
-        # Ended-but-not-archived plans are no longer relevant to today's status.
+        # A plan closes itself once its last day has passed, so this is normally
+        # already handled by the status filter upstream. Kept as the guard for
+        # the window between the two — a plan that ran out overnight and has not
+        # been read since is still `active`, and is still not today's plan.
         if plan.end_date is not None and today > plan.end_date:
             continue
         # Upcoming plans (start in the future) are noted for context only, with no

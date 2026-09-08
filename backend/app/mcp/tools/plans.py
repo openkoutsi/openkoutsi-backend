@@ -26,6 +26,7 @@ from backend.app.mcp.registry import ToolArgs, tool
 from backend.app.mcp.shaping import round_or_none
 from backend.app.models.user_orm import PlannedWorkout, TrainingPlan
 from backend.app.services.plan_adherence import score_plan, workout_date
+from backend.app.services.plan_lifecycle import LIVE_STATUSES
 from openkoutsi.sport_matching import is_rest_workout
 
 #: ``PlannedSession`` has a field called ``date``, which shadows the type inside
@@ -41,8 +42,10 @@ class PlanStatusArgs(ToolArgs):
     include_archived: bool = Field(
         False,
         description=(
-            "Include archived plans as well as active ones. Archived plans are "
-            "history — useful for 'what did the last block look like', not for "
+            "Include archived plans as well. Plans the athlete is following and "
+            "plans that have run their course are both returned either way; "
+            "archived ones were filed away by hand or superseded by a newer "
+            "plan — useful for 'what did the last block look like', not for "
             "judging what the athlete should do today."
         ),
     )
@@ -106,7 +109,13 @@ class PlanStatus(BaseModel):
     plan_id: str = Field(..., description="Identifier of the training plan.")
     name: str = Field(..., description="Plan name as the athlete sees it.")
     goal: Optional[str] = Field(None, description="What the plan is built towards, in the athlete's words.")
-    status: str = Field(..., description="'active' or 'archived'.")
+    status: str = Field(
+        ...,
+        description=(
+            "'active' while the plan is being followed, 'completed' once its "
+            "last day has passed, or 'archived' if it was filed away."
+        ),
+    )
     start_date: Optional[date] = Field(None, description="First calendar date of the plan.")
     end_date: Optional[date] = Field(None, description="Last calendar date of the plan.")
     weeks: Optional[int] = Field(None, description="Planned length in weeks (count).")
@@ -227,7 +236,10 @@ async def get_plan_status(run: ToolRun, args: PlanStatusArgs) -> PlanStatusResul
     """
     query = select(TrainingPlan).where(TrainingPlan.athlete_id == run.athlete.id)
     if not args.include_archived:
-        query = query.where(TrainingPlan.status == "active")
+        # A plan that finished yesterday is exactly what the coach needs to see
+        # to talk about the block just gone, so `completed` stays in the default
+        # set; only the filed-away ones are held back.
+        query = query.where(TrainingPlan.status.in_(LIVE_STATUSES))
 
     plans = (
         await run.session.execute(

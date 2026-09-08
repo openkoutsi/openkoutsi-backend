@@ -4907,7 +4907,7 @@
           "plans"
         ],
         "summary": "Unarchive a training plan",
-        "description": "Reactivate an archived plan.\n\nAny currently-active plan whose date range overlaps the reactivated plan is\narchived, so overlapping plans are never both active at once. Active plans\ncovering a different period are left untouched.\n\n**Personal access token scope:** `plans:write`",
+        "description": "Reactivate an archived or finished plan.\n\nAny currently-active plan whose date range overlaps the reactivated plan is\narchived, so overlapping plans are never both active at once. Active plans\ncovering a different period are left untouched.\n\nReopening a plan that had finished deliberately leaves ``completed_at``\nwhere it is: it is the record that the plan once ran out, and it is what\nstops the auto-close pass shutting the plan again on the next read. An\nathlete who wants the plan to run for longer edits its dates, which clears\nthe stamp and lets it finish again on the new end date.\n\n**Personal access token scope:** `plans:write`",
         "operationId": "unarchivePlan",
         "security": [
           {
@@ -16025,6 +16025,18 @@
             "format": "date-time",
             "title": "Created At"
           },
+          "completed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
           "workouts": {
             "items": {
               "$ref": "#/components/schemas/PlannedWorkoutResponse"
@@ -16108,7 +16120,12 @@
           "status": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "string",
+                "enum": [
+                  "active",
+                  "completed",
+                  "archived"
+                ]
               },
               {
                 "type": "null"

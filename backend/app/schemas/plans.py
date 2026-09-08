@@ -1,5 +1,5 @@
 from datetime import date, datetime
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 from pydantic import BaseModel, model_validator
 
 from openkoutsi.plan_schema import DayConfig, PlanConfig  # noqa: F401 — re-exported for API layer
@@ -110,8 +110,15 @@ class TrainingPlanCreate(BaseModel):
     llm_weeks: Optional[list[list[WorkoutCreate]]] = None
 
 
+#: The three states a plan can be in. ``active`` is being followed, ``completed``
+#: is set by the auto-close pass once the plan's last day has passed
+#: (``services.plan_lifecycle``), and ``archived`` is a filing decision — made by
+#: hand, or by a newly created plan covering the same dates.
+PlanStatus = Literal["active", "completed", "archived"]
+
+
 class TrainingPlanUpdate(BaseModel):
-    status: Optional[str] = None
+    status: Optional[PlanStatus] = None
     name: Optional[str] = None
     goal: Optional[str] = None
     start_date: Optional[date] = None
@@ -179,8 +186,16 @@ class TrainingPlanResponse(BaseModel):
     end_date: Optional[date] = None
     goal: Optional[str] = None
     weeks: Optional[int] = None
+    # Read back as a plain string rather than ``PlanStatus``: writes are
+    # constrained (see ``TrainingPlanUpdate``), but this endpoint has been
+    # accepting any string for long enough that a stored oddity should still be
+    # readable rather than failing the whole response.
     status: str
     created_at: datetime
+    # When the plan finished, set with the move to ``completed``. Null for a plan
+    # that has never run out — and kept across a reopen, as the record that it
+    # once did.
+    completed_at: Optional[datetime] = None
     workouts: list[PlannedWorkoutResponse] = []
     config: Optional[dict] = None
     generation_method: Optional[str] = None

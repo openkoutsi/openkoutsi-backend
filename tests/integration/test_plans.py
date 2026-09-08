@@ -77,9 +77,11 @@ class TestCreatePlan:
             headers=auth_headers,
         )
 
-        # First plan should still be active because the ranges don't overlap.
+        # First plan should not have been archived, because the ranges don't
+        # overlap. `_START` is in the past, so reading it also closes it — what
+        # matters here is that the second plan didn't file it away.
         resp = await client.get(f"/api/plans/{plan1_id}", headers=auth_headers)
-        assert resp.json()["status"] == "active"
+        assert resp.json()["status"] != "archived"
 
     async def test_overlapping_plan_archives_first(self, client, auth_headers):
         resp1 = await client.post(
@@ -253,9 +255,10 @@ class TestUnarchivePlan:
         resp = await client.post(f"/api/plans/{plan1_id}/unarchive", headers=auth_headers)
         assert resp.json()["status"] == "active"
 
-        # Plan 2 does not overlap Plan 1, so it stays active.
+        # Plan 2 does not overlap Plan 1, so unarchiving Plan 1 doesn't file it
+        # away. Its dates are in the past, so the read closes it instead.
         resp = await client.get(f"/api/plans/{plan2_id}", headers=auth_headers)
-        assert resp.json()["status"] == "active"
+        assert resp.json()["status"] != "archived"
 
     async def test_unarchive_nonexistent_returns_404(self, client, auth_headers):
         resp = await client.post("/api/plans/nope/unarchive", headers=auth_headers)
@@ -264,6 +267,150 @@ class TestUnarchivePlan:
     async def test_unauthenticated_returns_401(self, client):
         resp = await client.post("/api/plans/some-id/unarchive")
         assert resp.status_code == 401
+
+
+class TestAutoClose:
+    """A plan closes itself once its last scheduled day has passed."""
+
+    async def _create(self, client, auth_headers, *, start, weeks=4, name="Plan"):
+        resp = await client.post(
+            "/api/plans",
+            json={"name": name, "start_date": str(start), "weeks": weeks},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 201
+        return resp.json()
+
+    async def test_reading_a_plan_closes_it_once_it_has_run_out(
+        self, client, auth_headers
+    ):
+        plan = await self._create(client, auth_headers, start=_START)
+        # Created active — the plan is only settled when something looks at it.
+        assert plan["status"] == "active"
+        assert plan["completed_at"] is None
+
+        resp = await client.get(f"/api/plans/{plan['id']}", headers=auth_headers)
+
+        assert resp.json()["status"] == "completed"
+        assert resp.json()["completed_at"] is not None
+
+    async def test_listing_plans_closes_them_too(self, client, auth_headers):
+        plan = await self._create(client, auth_headers, start=_START)
+
+        resp = await client.get("/api/plans", headers=auth_headers)
+
+        listed = next(p for p in resp.json()["items"] if p["id"] == plan["id"])
+        assert listed["status"] == "completed"
+
+    async def test_a_plan_still_running_is_left_alone(self, client, auth_headers):
+        future = date.today() + timedelta(days=7)
+        plan = await self._create(client, auth_headers, start=future)
+
+        resp = await client.get(f"/api/plans/{plan['id']}", headers=auth_headers)
+
+        assert resp.json()["status"] == "active"
+        assert resp.json()["completed_at"] is None
+
+    async def test_reopening_a_finished_plan_sticks(self, client, auth_headers):
+        """The athlete's reopen has to survive the next read, or the button
+        does nothing."""
+        plan = await self._create(client, auth_headers, start=_START)
+        await client.get(f"/api/plans/{plan['id']}", headers=auth_headers)
+
+        resp = await client.post(
+            f"/api/plans/{plan['id']}/unarchive", headers=auth_headers
+        )
+        assert resp.json()["status"] == "active"
+
+        resp = await client.get(f"/api/plans/{plan['id']}", headers=auth_headers)
+        assert resp.json()["status"] == "active"
+
+    async def test_extending_a_finished_plan_reopens_it(self, client, auth_headers):
+        plan = await self._create(client, auth_headers, start=_START)
+        await client.get(f"/api/plans/{plan['id']}", headers=auth_headers)
+
+        # Move the plan forward so it now ends in the future.
+        resp = await client.put(
+            f"/api/plans/{plan['id']}",
+            json={"start_date": str(date.today())},
+            headers=auth_headers,
+        )
+        assert resp.json()["status"] == "active"
+        assert resp.json()["completed_at"] is None
+
+        resp = await client.get(f"/api/plans/{plan['id']}", headers=auth_headers)
+        assert resp.json()["status"] == "active"
+
+    async def test_redating_a_plan_lets_it_finish_again(self, client, auth_headers):
+        plan = await self._create(client, auth_headers, start=_START)
+        await client.get(f"/api/plans/{plan['id']}", headers=auth_headers)
+
+        # Still historical, just a week later: it closes again on the new date.
+        await client.put(
+            f"/api/plans/{plan['id']}",
+            json={"start_date": str(_START + timedelta(weeks=1))},
+            headers=auth_headers,
+        )
+
+        resp = await client.get(f"/api/plans/{plan['id']}", headers=auth_headers)
+        assert resp.json()["status"] == "completed"
+
+    async def test_archived_plan_is_not_closed(self, client, auth_headers):
+        plan = await self._create(client, auth_headers, start=_START)
+        await client.put(
+            f"/api/plans/{plan['id']}",
+            json={"status": "archived"},
+            headers=auth_headers,
+        )
+
+        resp = await client.get(f"/api/plans/{plan['id']}", headers=auth_headers)
+
+        assert resp.json()["status"] == "archived"
+
+    async def test_marking_a_plan_completed_by_hand_stamps_it(
+        self, client, auth_headers
+    ):
+        # Without the stamp, reopening a hand-finished plan would be undone by
+        # the very next read.
+        future = date.today() + timedelta(days=7)
+        plan = await self._create(client, auth_headers, start=future)
+
+        resp = await client.put(
+            f"/api/plans/{plan['id']}",
+            json={"status": "completed"},
+            headers=auth_headers,
+        )
+
+        assert resp.json()["status"] == "completed"
+        assert resp.json()["completed_at"] is not None
+
+    async def test_regenerating_a_finished_plan_reopens_it(self, client, auth_headers):
+        """Regeneration moves the finish line the same way an edit does — it can
+        lengthen the plan past today, so the plan goes back to being followed."""
+        plan = await self._create(client, auth_headers, start=_START)
+        resp = await client.get(f"/api/plans/{plan['id']}", headers=auth_headers)
+        assert resp.json()["status"] == "completed"
+
+        resp = await client.post(
+            f"/api/plans/{plan['id']}/regenerate",
+            json={"weeks": 8},
+            headers=auth_headers,
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "active"
+        assert resp.json()["completed_at"] is None
+
+    async def test_unknown_status_is_refused(self, client, auth_headers):
+        plan = await self._create(client, auth_headers, start=_START)
+
+        resp = await client.put(
+            f"/api/plans/{plan['id']}",
+            json={"status": "finished-ish"},
+            headers=auth_headers,
+        )
+
+        assert resp.status_code == 422
 
 
 class TestDeletePlan:
