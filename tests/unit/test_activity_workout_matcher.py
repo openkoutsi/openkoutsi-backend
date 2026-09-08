@@ -112,10 +112,10 @@ class TestMatchesFunction:
 _START = date(2025, 6, 2)  # A Monday → day_of_week 1, week_number 1
 
 
-async def _seed_plan(session, athlete_id, workouts, *, start=_START):
+async def _seed_plan(session, athlete_id, workouts, *, start=_START, status="active"):
     plan = TrainingPlan(
         athlete_id=athlete_id, name="P", start_date=start,
-        end_date=start + timedelta(weeks=2), status="active",
+        end_date=start + timedelta(weeks=2), status=status,
     )
     session.add(plan)
     await session.flush()
@@ -194,6 +194,37 @@ class TestFindAndLinkWorkout:
 
         linked = await find_and_link_workout(session, seeded_athlete.id, act)
         assert linked is not None and linked.id == w.id
+
+    async def test_links_into_a_finished_plan(self, session, seeded_athlete):
+        # An activity can arrive long after the session it completes — a Strava
+        # backfill, a head unit emptied a week late — by which time the plan has
+        # closed. The date window decides whether it belongs, not the status.
+        w = PlannedWorkout(
+            week_number=1, day_of_week=1, workout_type="threshold",
+            target_load=100, duration_min=60,
+        )
+        await _seed_plan(session, seeded_athlete.id, [w], status="completed")
+        act = await _persist_activity(session, seeded_athlete.id)
+        act.load, act.duration_s = 90.0, 3600
+        await session.commit()
+
+        linked = await find_and_link_workout(session, seeded_athlete.id, act)
+        assert linked is not None and linked.id == w.id
+
+    async def test_does_not_link_into_an_archived_plan(self, session, seeded_athlete):
+        # Archiving is the athlete putting a plan away; a late upload should not
+        # quietly reopen the books on it.
+        w = PlannedWorkout(
+            week_number=1, day_of_week=1, workout_type="threshold",
+            target_load=100, duration_min=60,
+        )
+        await _seed_plan(session, seeded_athlete.id, [w], status="archived")
+        act = await _persist_activity(session, seeded_athlete.id)
+        act.load, act.duration_s = 90.0, 3600
+        await session.commit()
+
+        assert await find_and_link_workout(session, seeded_athlete.id, act) is None
+        assert await _links(session) == []
 
     async def test_does_not_link_to_a_rest_day(self, session, seeded_athlete):
         # Issue #40: the rest day used to swallow the ride, which then could not

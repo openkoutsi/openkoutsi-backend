@@ -31,6 +31,7 @@ from backend.app.services.plan_adherence import (
 from backend.app.services.plan_generator import (
     generate_plan, build_workout_rows, week_meta_for,
 )
+from backend.app.services.plan_lifecycle import close_finished_plans
 from openkoutsi.plan_schema import clamp_plan_params
 from openkoutsi.plan_builder import week_meta_from_weeks
 
@@ -207,6 +208,9 @@ async def list_plans(
     params: PageParams = Depends(paginate_params),
 ):
     ctx, session, athlete = ctx_athlete
+    # Settle any plan that has run out before it is listed, so the plan page
+    # never shows a finished plan as the one being followed.
+    await close_finished_plans(athlete.id, session, athlete=athlete)
     total = (await session.execute(
         select(func.count()).select_from(TrainingPlan).where(TrainingPlan.athlete_id == athlete.id)
     )).scalar_one()
@@ -330,7 +334,9 @@ async def create_plan(
 
 @router.get("/{plan_id}", response_model=TrainingPlanResponse)
 async def get_plan(plan_ctx: PlanCtx = Depends(get_owned_plan_with_workouts)):
-    return _plan_response_with_adherence(plan_ctx.plan)
+    _, session, athlete, plan = plan_ctx
+    await close_finished_plans(athlete.id, session, athlete=athlete)
+    return _plan_response_with_adherence(plan)
 
 
 @router.get("/{plan_id}/adherence", response_model=list[PlanAdherencePoint],
@@ -367,8 +373,6 @@ async def update_plan(
 ):
     _, session, athlete, plan = plan_ctx
 
-    if body.status is not None:
-        plan.status = body.status
     if body.name is not None:
         plan.name = body.name
     if body.goal is not None:
@@ -379,8 +383,26 @@ async def update_plan(
         plan.weeks = body.weeks
 
     # Recompute end_date when the start date or duration changed.
-    if (body.start_date is not None or body.weeks is not None) and plan.start_date and plan.weeks:
-        plan.end_date = plan.start_date + timedelta(weeks=plan.weeks) - timedelta(days=1)
+    dates_moved = body.start_date is not None or body.weeks is not None
+    if dates_moved:
+        if plan.start_date and plan.weeks:
+            plan.end_date = plan.start_date + timedelta(weeks=plan.weeks) - timedelta(days=1)
+        # The plan's last day moved, so whether it has finished is an open
+        # question again. Clearing the stamp is what lets it close on its new end
+        # date; a plan whose end was pushed past today is un-finished outright,
+        # and one still ending in the past simply closes again on the next read.
+        plan.completed_at = None
+        if plan.status == "completed":
+            plan.status = "active"
+
+    # Applied last, so an explicit status always wins over the reopen above.
+    if body.status is not None:
+        plan.status = body.status
+        # Keep the stamp in step with a hand-set status, so a plan marked
+        # finished by hand and later reopened is not closed straight back by the
+        # next read (`services.plan_lifecycle`).
+        if body.status == "completed" and plan.completed_at is None:
+            plan.completed_at = datetime.now(timezone.utc)
 
     await session.commit()
     await session.refresh(plan)
@@ -393,11 +415,17 @@ async def update_plan(
 @router.post("/{plan_id}/unarchive", response_model=TrainingPlanResponse,
              operation_id="unarchivePlan", summary="Unarchive a training plan")
 async def unarchive_plan(plan_ctx: PlanCtx = Depends(get_owned_plan_with_workouts)):
-    """Reactivate an archived plan.
+    """Reactivate an archived or finished plan.
 
     Any currently-active plan whose date range overlaps the reactivated plan is
     archived, so overlapping plans are never both active at once. Active plans
     covering a different period are left untouched.
+
+    Reopening a plan that had finished deliberately leaves ``completed_at``
+    where it is: it is the record that the plan once ran out, and it is what
+    stops the auto-close pass shutting the plan again on the next read. An
+    athlete who wants the plan to run for longer edits its dates, which clears
+    the stamp and lets it finish again on the new end date.
     """
     _, session, athlete, plan = plan_ctx
 
@@ -416,10 +444,10 @@ async def unarchive_plan(plan_ctx: PlanCtx = Depends(get_owned_plan_with_workout
     )
     plan = result.scalar_one()
     # No achievement recompute here: plan completion is date-and-content based
-    # and never reads `plan.status`, so archiving or unarchiving cannot change a
-    # single unlock. Archiving isn't a standalone endpoint anyway — it happens
-    # inside plan creation — so hooking only unarchive would be asymmetric as
-    # well as pointless.
+    # and never reads `plan.status`, so archiving, unarchiving or auto-closing
+    # cannot change a single unlock. Archiving isn't a standalone endpoint
+    # anyway — it happens inside plan creation — so hooking only unarchive would
+    # be asymmetric as well as pointless.
     return _plan_response_with_adherence(plan)
 
 
@@ -704,6 +732,11 @@ async def regenerate_plan(
             plan.week_meta = week_meta_for(config, num_weeks)
     if plan.start_date:
         plan.end_date = plan.start_date + timedelta(weeks=num_weeks) - timedelta(days=1)
+    # Regeneration can lengthen a plan past today, so it moves the finish line
+    # the same way an edit does — see `update_plan`.
+    plan.completed_at = None
+    if plan.status == "completed":
+        plan.status = "active"
 
     await session.commit()
 

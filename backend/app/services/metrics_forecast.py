@@ -22,6 +22,7 @@ from sqlalchemy.orm import selectinload
 
 from backend.app.models.user_orm import DailyMetric, PlannedWorkout, TrainingPlan
 from backend.app.services.plan_adherence import workout_date
+from backend.app.services.plan_lifecycle import LIVE_STATUSES
 from openkoutsi.fatigue_metrics import compute_daily_metrics
 
 # Horizon defaults/bounds for the projection. A fixed default (rather than "run
@@ -71,7 +72,10 @@ async def planned_load_by_date(
     ``PlannedWorkout`` stores ``week_number`` + ``day_of_week`` rather than a
     date, so each is placed via :func:`workout_date` relative to its plan's
     ``start_date``. Plans without one cannot be placed and are skipped; archived
-    plans are excluded by the status filter.
+    plans are excluded by the status filter. A finished plan passes that filter
+    but contributes nothing anyway — every one of its days is behind
+    ``from_date`` — so the filter says "not filed away" here for consistency
+    with the other consumers rather than to change the numbers.
 
     Creating a plan only archives *overlapping* active ones, so two can
     contribute around a boundary — loads are **summed** across plans.
@@ -84,7 +88,7 @@ async def planned_load_by_date(
         select(TrainingPlan)
         .where(
             TrainingPlan.athlete_id == athlete_id,
-            TrainingPlan.status == "active",
+            TrainingPlan.status.in_(LIVE_STATUSES),
         )
         # Only the workouts themselves are needed. ``linked_activities`` is
         # declared ``lazy="selectin"``, so it would otherwise hydrate every

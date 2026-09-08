@@ -751,6 +751,33 @@ async def test_plan_status_hides_archived_plans_unless_asked(
     assert {p["name"] for p in everything.data["plans"]} == {"Spring base", "Winter block"}
 
 
+async def test_plan_status_still_shows_the_block_just_finished(
+    caller, session, training_data, registry_session
+):
+    """A plan that ran its course is what the coach needs to talk about the
+    block just gone, so closing it must not hide it."""
+    session.add(
+        TrainingPlan(
+            id="plan-done", athlete_id=training_data.id, name="Winter block",
+            start_date=date.today() - timedelta(days=100),
+            end_date=date.today() - timedelta(days=30), weeks=10,
+            status="completed",
+        )
+    )
+    await session.commit()
+
+    result = await run(
+        "get_plan_status", caller=caller, session=session, athlete=training_data,
+        registry_session=registry_session,
+    )
+
+    assert {p["name"] for p in result.data["plans"]} == {"Spring base", "Winter block"}
+    finished = next(p for p in result.data["plans"] if p["name"] == "Winter block")
+    assert finished["status"] == "completed"
+    # Over, so there is no week of it to be in.
+    assert finished["current_week"] is None
+
+
 async def test_goal_progress_computes_progress_and_flags_the_overdue_one(
     caller, session, training_data, registry_session
 ):

@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from backend.app.models.user_orm import PlanAdherenceDaily, PlannedWorkout, TrainingPlan
+from backend.app.services.plan_lifecycle import LIVE_STATUSES, close_finished_plans
 from openkoutsi.plan_adherence import (
     COMPLETED_MIN_SCORE,
     SUPPLEMENTAL_WEIGHT_FALLBACK,
@@ -144,14 +145,21 @@ def score_plan(plan: TrainingPlan, today: date) -> PlanScore:
     return result
 
 
-async def _load_active_plans(
+async def _load_live_plans(
     athlete_id: str, session: AsyncSession
 ) -> list[TrainingPlan]:
+    """Plans the athlete has not filed away — ``active`` and ``completed`` both.
+
+    A finished plan keeps its snapshot series: the last day of a plan is exactly
+    when its adherence is worth reading, and a retroactive change (an activity
+    linked to a session weeks later) still has to heal the stored rows. Only
+    ``archived`` is excluded, which is what the status filter meant all along.
+    """
     result = await session.execute(
         select(TrainingPlan)
         .where(
             TrainingPlan.athlete_id == athlete_id,
-            TrainingPlan.status == "active",
+            TrainingPlan.status.in_(LIVE_STATUSES),
         )
         .options(
             selectinload(TrainingPlan.workouts).selectinload(
@@ -190,19 +198,30 @@ def _snapshot_differs(row: PlanAdherenceDaily, ps: PlanScore) -> bool:
 
 
 async def catch_up_adherence(athlete_id: str, session: AsyncSession) -> bool:
-    """Recompute the ``plan_adherence_daily`` snapshot series for active plans.
+    """Recompute the ``plan_adherence_daily`` snapshot series for live plans.
 
-    For each active plan, every day in ``[start_date, today]`` is scored "as of"
-    that day and compared against what's stored. A day is (re)written when it is
-    **missing** or **stale** — the latter self-heals rows invalidated by
-    retroactive changes (an activity linked/unlinked to an old workout, a past
-    workout edited or its skip reason changed, or a formula change), the same way
+    For each plan the athlete has not filed away, every day in
+    ``[start_date, min(today, end_date)]`` is scored "as of" that day and
+    compared against what's stored. A day is (re)written when it is **missing**
+    or **stale** — the latter self-heals rows invalidated by retroactive changes
+    (an activity linked/unlinked to an old workout, a past workout edited or its
+    skip reason changed, or a formula change), the same way
     ``metrics_engine.catch_up_metrics`` heals stale ``daily_metrics``. Days that
     already match are left untouched, so the pass is deterministic and
     idempotent. Returns True if any row was written.
+
+    Ending the series at ``end_date`` is what stops a finished plan writing an
+    identical row every day for the rest of the athlete's account: the days after
+    the last one score the same thing forever, and none of them is about the
+    plan.
     """
+    # Cheapest place to notice a plan has run out: this already runs on every
+    # ingest and on the first read of the day, and the scoring below wants the
+    # settled status anyway.
+    await close_finished_plans(athlete_id, session)
+
     today = date.today()
-    plans = await _load_active_plans(athlete_id, session)
+    plans = await _load_live_plans(athlete_id, session)
     if not plans:
         return False
 
@@ -223,8 +242,9 @@ async def catch_up_adherence(athlete_id: str, session: AsyncSession) -> bool:
             ).scalars()
         }
 
+        last_day = today if plan.end_date is None else min(today, plan.end_date)
         day = plan.start_date
-        while day <= today:
+        while day <= last_day:
             ps = score_plan(plan, day)
             row = existing.get(day)
             if row is None:

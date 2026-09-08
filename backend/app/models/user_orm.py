@@ -520,8 +520,19 @@ class TrainingPlan(UserBase):
     end_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     goal: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     weeks: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # "active" | "completed" | "archived". A plan closes itself into `completed`
+    # once its last scheduled day has passed (`services.plan_lifecycle`);
+    # `archived` is a filing decision the athlete or an overlapping new plan
+    # makes, and says nothing about whether the work happened.
     status: Mapped[str] = mapped_column(String, default="active")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
+    # When the plan finished. Set with the move to `completed`, and left in place
+    # when the athlete reopens the plan — that is what stops the closer closing
+    # it straight back. Cleared when the plan's dates move, so a re-dated plan
+    # can finish again on its new end date.
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     config: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     generation_method: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     # Per-week metadata (build vs recovery week, focus note, target weekly

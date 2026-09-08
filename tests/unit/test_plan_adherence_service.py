@@ -160,10 +160,10 @@ class TestScorePlan:
 
 
 class TestCatchUpAdherence:
-    async def _make_plan(self, session, athlete_id):
+    async def _make_plan(self, session, athlete_id, *, status="active"):
         plan = TrainingPlan(
             athlete_id=athlete_id, name="P", start_date=_START,
-            end_date=_START + timedelta(weeks=1), status="active",
+            end_date=_START + timedelta(weeks=1), status=status,
         )
         session.add(plan)
         await session.flush()
@@ -218,6 +218,110 @@ class TestCatchUpAdherence:
             assert len(rows2) == 8
         finally:
             svc.date = orig
+
+    async def test_series_stops_at_the_plans_last_day(self, session, seeded_athlete):
+        """Days after the end date score the same thing forever and none of them
+        is about the plan, so the series ends where the plan does."""
+        import backend.app.services.plan_adherence as svc
+
+        plan = await self._make_plan(session, seeded_athlete.id)
+        frozen = plan.end_date + timedelta(days=30)
+        orig = svc.date
+
+        class _D:
+            @staticmethod
+            def today():
+                return frozen
+        svc.date = _D
+        try:
+            await catch_up_adherence(seeded_athlete.id, session)
+        finally:
+            svc.date = orig
+
+        dates = [
+            r.date for r in (await session.execute(
+                PlanAdherenceDaily.__table__.select().order_by(
+                    PlanAdherenceDaily.date
+                )
+            )).fetchall()
+        ]
+        assert dates[0] == _START
+        assert dates[-1] == plan.end_date
+        assert len(dates) == 8
+
+    async def test_closes_a_plan_that_has_run_out(self, session, seeded_athlete):
+        """The catch-up is the cheapest place to notice a plan has finished: it
+        already runs on every ingest and on the first read of the day."""
+        plan = await self._make_plan(session, seeded_athlete.id)
+        assert plan.end_date < date.today()  # the fixture dates are historical
+
+        await catch_up_adherence(seeded_athlete.id, session)
+
+        assert plan.status == "completed"
+        assert plan.completed_at is not None
+
+    async def test_finished_plan_still_self_heals(self, session, seeded_athlete):
+        """Closing a plan must not freeze its stored series: an activity linked
+        to one of its sessions weeks later still has to rewrite the days it
+        changes."""
+        import backend.app.services.plan_adherence as svc
+
+        plan = await self._make_plan(session, seeded_athlete.id, status="completed")
+        frozen = plan.end_date + timedelta(days=30)
+        orig = svc.date
+
+        class _D:
+            @staticmethod
+            def today():
+                return frozen
+        svc.date = _D
+        try:
+            await catch_up_adherence(seeded_athlete.id, session)
+            last_day = (await session.execute(
+                PlanAdherenceDaily.__table__.select().where(
+                    PlanAdherenceDaily.date == plan.end_date
+                )
+            )).fetchone()
+            assert last_day.missed == 2
+
+            day1 = (await session.execute(
+                select(PlannedWorkout).where(
+                    PlannedWorkout.plan_id == plan.id,
+                    PlannedWorkout.day_of_week == 1,
+                )
+            )).scalar_one()
+            act = Activity(
+                athlete_id=seeded_athlete.id, sport_type="Ride",
+                load=100, duration_s=3600,
+                start_time=datetime(2025, 6, 2, 10, tzinfo=timezone.utc),
+            )
+            session.add(act)
+            await session.flush()
+            session.add(PlannedWorkoutActivity(
+                planned_workout_id=day1.id, activity_id=act.id,
+            ))
+            await session.commit()
+
+            assert await catch_up_adherence(seeded_athlete.id, session) is True
+        finally:
+            svc.date = orig
+
+        healed = (await session.execute(
+            PlanAdherenceDaily.__table__.select().where(
+                PlanAdherenceDaily.date == plan.end_date
+            )
+        )).fetchone()
+        assert healed.completed == 1
+        assert healed.missed == 1
+
+    async def test_archived_plan_is_not_snapshotted(self, session, seeded_athlete):
+        await self._make_plan(session, seeded_athlete.id, status="archived")
+
+        assert await catch_up_adherence(seeded_athlete.id, session) is False
+        rows = (await session.execute(
+            PlanAdherenceDaily.__table__.select()
+        )).fetchall()
+        assert rows == []
 
     async def test_self_heals_stale_snapshot_after_retroactive_link(
         self, session, seeded_athlete

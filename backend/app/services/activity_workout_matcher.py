@@ -14,6 +14,7 @@ from backend.app.models.user_orm import (
     PlannedWorkoutActivity,
     TrainingPlan,
 )
+from backend.app.services.plan_lifecycle import LIVE_STATUSES
 from openkoutsi.plan_adherence import MATCH_THRESHOLD, meets_threshold
 from openkoutsi.sport_matching import is_rest_workout, sports_match
 
@@ -65,11 +66,15 @@ async def find_and_link_workout(
     # isoweekday(): Monday=1, Sunday=7 — matches PlannedWorkout.day_of_week convention
     day_of_week = act_date.isoweekday()
 
-    # Find active plans for this athlete
+    # Every plan the athlete hasn't filed away — a finished plan included. An
+    # activity can arrive long after the session it completes (a Strava backfill,
+    # a head unit emptied a week late), and the plan it belongs to may well have
+    # closed in the meantime; the date window below is what decides whether it
+    # belongs, not the plan's status.
     plans_result = await session.execute(
         select(TrainingPlan).where(
             TrainingPlan.athlete_id == athlete_id,
-            TrainingPlan.status == "active",
+            TrainingPlan.status.in_(LIVE_STATUSES),
         )
     )
     plans = plans_result.scalars().all()
