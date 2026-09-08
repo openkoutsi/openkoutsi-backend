@@ -384,6 +384,23 @@ class TestAutoClose:
         assert resp.json()["status"] == "completed"
         assert resp.json()["completed_at"] is not None
 
+    async def test_regenerating_a_finished_plan_reopens_it(self, client, auth_headers):
+        """Regeneration moves the finish line the same way an edit does — it can
+        lengthen the plan past today, so the plan goes back to being followed."""
+        plan = await self._create(client, auth_headers, start=_START)
+        resp = await client.get(f"/api/plans/{plan['id']}", headers=auth_headers)
+        assert resp.json()["status"] == "completed"
+
+        resp = await client.post(
+            f"/api/plans/{plan['id']}/regenerate",
+            json={"weeks": 8},
+            headers=auth_headers,
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "active"
+        assert resp.json()["completed_at"] is None
+
     async def test_unknown_status_is_refused(self, client, auth_headers):
         plan = await self._create(client, auth_headers, start=_START)
 
