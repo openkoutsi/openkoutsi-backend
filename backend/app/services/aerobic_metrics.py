@@ -78,10 +78,17 @@ async def apply_aerobic_metrics(
     # The whole-ride variability index, deliberately: it is the figure the
     # activity page shows, and the docs promise it is what decides whether a
     # decoupling number is worth showing. The block chosen below narrows *where*
-    # the drift is measured, not which rides qualify.
+    # the drift is measured, not which rides qualify. It travels with the ride's
+    # intensity, which is what tells a surging session from a long ride over
+    # terrain — see ``_ridden_in_bursts``.
     vi = variability_index(activity.weighted_power, activity.avg_power)
     analysis = analyse_decoupling(
-        activity.duration_s, power, heartrate, activity.workout_category, vi
+        activity.duration_s,
+        power,
+        heartrate,
+        activity.workout_category,
+        vi,
+        activity.intensity,
     )
 
     activity.decoupling_pct = (

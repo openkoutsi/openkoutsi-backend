@@ -580,8 +580,31 @@ DECOUPLING_MIN_DURATION_S = 3600
 DECOUPLING_EXCLUDED_CATEGORIES = frozenset({"vo2max", "anaerobic", "sprint"})
 
 # Above this variability index the ride was too surgy for the two-half split to
-# mean anything (same threshold `classify_workout` uses to spot interval work).
+# mean anything — but only where the intensity makes interval work a plausible
+# reading of it. This is the threshold `classify_workout` uses, and it is used
+# there the same way: that function consults VI only from ``intensity >= 0.78``
+# upward, and never reclassifies an endurance or recovery ride on VI alone.
+# Applying it at any intensity read a seven-hour ride's descents, junctions and
+# café stops as interval work and withheld exactly the figure such a ride is for.
 DECOUPLING_MAX_VI = 1.10
+
+# The intensity from which a high VI is evidence of intervals rather than of
+# terrain — `classify_workout`'s tempo/threshold boundary.
+DECOUPLING_VI_INTENSITY_FLOOR = 0.78
+
+# And the value above which a ride is surging whatever its intensity: rolling
+# terrain and stops land around 1.1–1.2, so a ride past this was ridden in
+# bursts however easy it averaged out.
+DECOUPLING_ABSOLUTE_MAX_VI = 1.25
+
+# Length is the other half of the same argument, and the sturdier half. Interval
+# sessions are short — nobody rides efforts for three hours — so past this much
+# riding the variability is the road: descents, junctions, villages, a bidon
+# stop. Intensity leans on an FTP the athlete typed in and may not have revised
+# in months; duration is a fact about the ride. Above it, only the absolute
+# ceiling applies, and each half still holds well over an hour of riding for its
+# averages to settle on besides.
+DECOUPLING_VI_MAX_DURATION_S = 3 * 3600
 
 # Above this relative difference between the two halves' mean power the ride was
 # ridden as a ramp or a negative split. Pw:HR assumes steady output, and a rider
@@ -641,6 +664,41 @@ def _positive_in_both_halves(
     return bool((stream[halves[0]] > 0).any() and (stream[halves[1]] > 0).any())
 
 
+def _ridden_in_bursts(
+    vi: float | None, intensity: float | None, duration_s: int | None
+) -> bool:
+    """Was this ride surging, rather than merely ridden over terrain?
+
+    Variability index alone cannot tell the two apart: a long ride full of
+    descents and junctions produces the same 1.1–1.2 as a session of efforts,
+    because both spend time off the pedals. Two things separate them, and a
+    ride only has to clear one.
+
+    *How hard it was.* A ride averaging well under threshold was not an interval
+    session whatever its VI, so the threshold is read from the same intensity
+    `classify_workout` starts reading VI at.
+
+    *How long it went on.* Nobody rides efforts for three hours. Past that the
+    variability is the road, and this is the sturdier test of the two: intensity
+    is measured against an FTP the athlete typed in, and one left stale reads a
+    steady ride as a hard one.
+
+    Above ``DECOUPLING_ABSOLUTE_MAX_VI`` neither excuse holds — that ride was
+    ridden in bursts on any reading. An unknown intensity (no FTP on the
+    profile) is judged on VI alone, as before: without it there is nothing to
+    say the ride was easy.
+    """
+    if vi is None:
+        return False
+    if vi > DECOUPLING_ABSOLUTE_MAX_VI:
+        return True
+    if vi <= DECOUPLING_MAX_VI:
+        return False
+    if (duration_s or 0) >= DECOUPLING_VI_MAX_DURATION_S:
+        return False
+    return intensity is None or intensity >= DECOUPLING_VI_INTENSITY_FLOOR
+
+
 def decoupling_window(
     power: Sequence[float | None] | None,
     heartrate: Sequence[float | None] | None,
@@ -690,6 +748,7 @@ def decoupling_unavailable_reason(
     heartrate: Sequence[float | None] | None,
     workout_category: str | None = None,
     vi: float | None = None,
+    intensity: float | None = None,
 ) -> str | None:
     """
     Why a decoupling figure would be misleading for this activity, or None if
@@ -759,7 +818,7 @@ def decoupling_unavailable_reason(
 
     if workout_category in DECOUPLING_EXCLUDED_CATEGORIES:
         return "variable_effort"
-    if vi is not None and vi > DECOUPLING_MAX_VI:
+    if _ridden_in_bursts(vi, intensity, duration_s):
         return "variable_effort"
 
     # Variability index catches surging but is blind to a monotonic ramp, which
@@ -792,6 +851,7 @@ def analyse_decoupling(
     heartrate: Sequence[float | None] | None,
     workout_category: str | None = None,
     vi: float | None = None,
+    intensity: float | None = None,
 ) -> DecouplingAnalysis:
     """Aerobic decoupling over the longest continuous block of this ride.
 
@@ -813,7 +873,7 @@ def analyse_decoupling(
         # Nothing pairs anywhere. The gate has the whole stream and will name
         # the channel that is missing.
         reason = decoupling_unavailable_reason(
-            duration_s, power, heartrate, workout_category, vi
+            duration_s, power, heartrate, workout_category, vi, intensity
         )
         return DecouplingAnalysis(None, reason or "degenerate_hr", None)
 
@@ -823,7 +883,7 @@ def analyse_decoupling(
     window_s = hi - lo
 
     reason = decoupling_unavailable_reason(
-        window_s, watts, beats, workout_category, vi
+        window_s, watts, beats, workout_category, vi, intensity
     )
     if (
         reason == "too_short"

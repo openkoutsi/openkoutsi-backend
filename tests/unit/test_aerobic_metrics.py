@@ -9,8 +9,10 @@ import pytest
 from backend.app.services.aerobic_metrics import _sampling_supports_integration
 from openkoutsi import streams
 from openkoutsi.training_math import (
+    DECOUPLING_ABSOLUTE_MAX_VI,
     DECOUPLING_MAX_BRIDGED_PAUSE_S,
     DECOUPLING_MAX_VI,
+    DECOUPLING_VI_MAX_DURATION_S,
     DECOUPLING_MIN_DURATION_S,
     aerobic_decoupling,
     analyse_decoupling,
@@ -699,3 +701,113 @@ class TestPairedHalvesSplit:
         )
         # 220/154 == 200/140: the ratio is identical either side of the step.
         assert aerobic_decoupling(power, hr) == pytest.approx(0.0, abs=1e-9)
+
+
+class TestVariabilityIsReadAgainstIntensityAndLength:
+    """A long ride over terrain is not an interval session.
+
+    `classify_workout` consults variability index only from intensity 0.78
+    upward — it never reclassifies an endurance or recovery ride on VI alone.
+    The decoupling gate borrowed the 1.10 threshold and applied it at every
+    intensity and every length, so a ride whose descents, junctions and café
+    stops pulled its VI just past 1.10 was refused as "interval or otherwise
+    surging riding", which is the one thing it was not.
+
+    Two things now excuse a VI over the threshold, and a ride needs only one:
+    it was ridden easy, or it went on far longer than any session of efforts.
+    """
+
+    def _short_ride(self):
+        # Ninety minutes: the length an interval session actually is.
+        return _long_ride(90 * 60)
+
+    def _long_endurance_ride(self):
+        return _long_ride(5 * 3600)
+
+    def test_the_reported_ride_is_measured(self):
+        # The ride this came from: seven hours at IF 0.82, VI 1.12. Both
+        # numbers sit just past a limit, and neither says "intervals" about a
+        # ride that long.
+        power, hr = _long_ride(7 * 3600)
+        result = analyse_decoupling(
+            7 * 3600, power, hr, "threshold", 1.12, intensity=0.82
+        )
+        assert result.reason is None
+        assert result.pct is not None
+
+    def test_a_long_ride_over_terrain_is_measured_however_hard(self):
+        power, hr = self._long_endurance_ride()
+        assert analyse_decoupling(
+            5 * 3600, power, hr, "tempo", 1.15, intensity=0.85
+        ).reason is None
+
+    def test_the_same_numbers_over_ninety_minutes_are_refused(self):
+        # Same VI, same intensity, a length a session of efforts fits into.
+        power, hr = self._short_ride()
+        assert analyse_decoupling(
+            90 * 60, power, hr, "tempo", 1.15, intensity=0.85
+        ).reason == "variable_effort"
+
+    def test_a_short_easy_ride_over_terrain_is_measured(self):
+        power, hr = self._short_ride()
+        assert analyse_decoupling(
+            90 * 60, power, hr, "endurance", 1.15, intensity=0.62
+        ).reason is None
+
+    def test_a_ride_surging_on_any_reading_is_refused(self):
+        # Above the absolute ceiling neither excuse holds, at any length.
+        power, hr = self._long_endurance_ride()
+        assert analyse_decoupling(
+            5 * 3600, power, hr, "endurance",
+            DECOUPLING_ABSOLUTE_MAX_VI + 0.01, intensity=0.55,
+        ).reason == "variable_effort"
+
+    def test_an_unknown_intensity_on_a_short_ride_is_judged_on_variability(self):
+        # No FTP on the profile: nothing says the ride was easy, and it is not
+        # long enough to speak for itself, so the old reading stands.
+        power, hr = self._short_ride()
+        assert analyse_decoupling(
+            90 * 60, power, hr, "endurance", 1.15, intensity=None
+        ).reason == "variable_effort"
+
+    def test_an_unknown_intensity_on_a_long_ride_is_measured(self):
+        power, hr = self._long_endurance_ride()
+        assert analyse_decoupling(
+            5 * 3600, power, hr, "endurance", 1.15, intensity=None
+        ).reason is None
+
+    def test_a_steady_ride_passes_at_every_intensity(self):
+        power, hr = self._short_ride()
+        for intensity in (None, 0.55, 0.85, 1.05):
+            assert analyse_decoupling(
+                90 * 60, power, hr, "endurance", 1.02, intensity=intensity
+            ).reason is None
+
+    def test_an_interval_category_is_refused_however_long_or_easy(self):
+        # The category check is untouched: it reads neither VI nor intensity
+        # nor the clock.
+        power, hr = self._long_endurance_ride()
+        assert analyse_decoupling(
+            5 * 3600, power, hr, "vo2max", 1.02, intensity=0.5
+        ).reason == "variable_effort"
+
+    def test_the_length_excuse_starts_exactly_at_the_limit(self):
+        # A minute either side of the line, same numbers: the shorter ride is
+        # still a session of efforts as far as the gate can tell, the longer one
+        # is a day out. Reads the constant, so moving the line moves the test.
+        just_under = DECOUPLING_VI_MAX_DURATION_S - 60
+        power, hr = _long_ride(just_under)
+        assert analyse_decoupling(
+            just_under, power, hr, "tempo", 1.15, intensity=0.85
+        ).reason == "variable_effort"
+
+        power, hr = _long_ride(DECOUPLING_VI_MAX_DURATION_S)
+        assert analyse_decoupling(
+            DECOUPLING_VI_MAX_DURATION_S, power, hr, "tempo", 1.15, intensity=0.85
+        ).reason is None
+
+    def test_the_threshold_itself_is_not_surging(self):
+        power, hr = self._short_ride()
+        assert analyse_decoupling(
+            90 * 60, power, hr, "tempo", DECOUPLING_MAX_VI, intensity=0.95
+        ).reason is None
