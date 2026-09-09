@@ -199,3 +199,22 @@ class TestCallWithRetryAfter:
         with pytest.raises(httpx.HTTPStatusError):
             await call_with_retry_after(call, "tok", provider="strava", what="streams")
         assert call.await_count == 1
+
+
+class TestCoverageOfTheRemainingBranches:
+    """The paths the main cases above happen not to walk through."""
+
+    def test_a_naive_http_date_is_read_as_utc(self):
+        """`parsedate_to_datetime` returns a naive datetime for a zoneless stamp.
+
+        Subtracting one from an aware `now` raises, so the tz has to be filled in
+        — and UTC is the only reading of an HTTP-date that is ever correct.
+        """
+        when = datetime.now(timezone.utc) + timedelta(seconds=45)
+        parsed = parse_retry_after(when.strftime("%a, %d %b %Y %H:%M:%S"))
+        assert parsed is not None
+        assert 15 <= parsed <= 75
+
+    def test_a_throttle_is_never_definitive(self):
+        """The one exception type that carries a status but settles nothing."""
+        assert is_definitive(ProviderThrottled("strava", 429)) is False

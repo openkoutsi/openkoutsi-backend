@@ -1583,3 +1583,118 @@ class TestRepairCountsAsAnUpdate:
         count, earliest = await _sync(athlete, session, _client())
 
         assert (count, earliest) == (0, None)
+
+
+class TestLosingTheSyncLease:
+    async def test_the_walk_stops_when_the_lease_is_gone(self, session):
+        """A lost lease means someone else is importing this history now.
+
+        Carrying on would be exactly the duplicate backfill the lease exists to
+        prevent, so the walk ends at the page boundary that noticed.
+        """
+        from backend.app.db import leases
+
+        athlete = await _make_athlete(session, user_id="lease-lost-1")
+        page_one = [_norm("act-1", start_time=datetime(2024, 6, 1, 10, 0, tzinfo=timezone.utc))]
+        page_two = [_norm("act-2", start_time=datetime(2024, 6, 2, 10, 0, tzinfo=timezone.utc))]
+        client = _client(list_activities=AsyncMock(side_effect=[page_one, page_two, []]))
+
+        real_renew = leases.renew
+
+        async def _lost(*args, **kwargs):
+            await real_renew(*args, **kwargs)  # keep the write, discard the answer
+            return False
+
+        with patch.object(leases, "renew", _lost):
+            count, _ = await _sync(athlete, session, client)
+
+        assert count == 1
+        assert client.list_activities.await_count == 1
+        acts = (
+            await session.execute(select(Activity).where(Activity.athlete_id == athlete.id))
+        ).scalars().all()
+        assert [a.name for a in acts] == ["Test Ride"]
+
+
+class TestDurationCorrection:
+    """The provider's `moving_time` beating what is already stored.
+
+    Both branches recompute the ride's load, which is what makes this more than
+    a cosmetic field update: an activity whose duration shrinks by half has to
+    stop claiming the training stress of the longer one.
+    """
+
+    async def _seed(self, session, athlete, **activity_fields) -> Activity:
+        act = Activity(
+            athlete_id=athlete.id,
+            start_time=datetime(2024, 6, 1, 10, 0, tzinfo=timezone.utc),
+            duration_s=7200,
+            status="processed",
+            **activity_fields,
+        )
+        session.add(act)
+        await session.flush()
+        session.add(
+            ActivitySource(
+                activity_id=act.id,
+                provider="strava",
+                external_id="act-1",
+                streams_fetched_at=datetime(2024, 6, 1, 12, 0, tzinfo=timezone.utc),
+            )
+        )
+        await session.commit()
+        return act
+
+    async def test_a_shorter_duration_restates_load_from_power(self, session):
+        athlete = await _make_athlete(session, user_id="duration-1")
+        athlete.ftp = 250
+        athlete.max_hr = 190
+        act = await self._seed(session, athlete, weighted_power=200.0, avg_hr=150.0)
+        before = act.load
+
+        client = _client()  # `_norm` reports 3600 s, half of what is stored
+        count, _ = await _sync(athlete, session, client)
+
+        assert count == 0  # a correction is not an import
+        await session.refresh(act)
+        assert act.duration_s == 3600
+        assert act.load != before
+        assert act.intensity is not None
+
+    async def test_a_shorter_duration_restates_load_from_hr_alone(self, session):
+        """No power on the ride, so the HR branch has to carry the recompute."""
+        athlete = await _make_athlete(session, user_id="duration-2")
+        athlete.max_hr = 190
+        act = await self._seed(session, athlete, avg_hr=150.0)
+
+        await _sync(athlete, session, _client())
+
+        await session.refresh(act)
+        assert act.duration_s == 3600
+        assert act.load is not None
+
+    async def test_a_longer_duration_is_left_alone(self, session):
+        """Only `moving_time` beating `elapsed_time` is a correction."""
+        athlete = await _make_athlete(session, user_id="duration-3")
+        act = Activity(
+            athlete_id=athlete.id,
+            start_time=datetime(2024, 6, 1, 10, 0, tzinfo=timezone.utc),
+            duration_s=1800,
+            status="processed",
+        )
+        session.add(act)
+        await session.flush()
+        session.add(
+            ActivitySource(
+                activity_id=act.id,
+                provider="strava",
+                external_id="act-1",
+                streams_fetched_at=datetime(2024, 6, 1, 12, 0, tzinfo=timezone.utc),
+            )
+        )
+        await session.commit()
+
+        await _sync(athlete, session, _client())
+
+        await session.refresh(act)
+        assert act.duration_s == 1800

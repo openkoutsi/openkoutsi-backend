@@ -209,3 +209,49 @@ class TestDownloadFitFileTellsThrottlingFromAbsence:
             ],
         ):
             assert await client.download_fit_file("tok", "1") == b"FIT-BYTES"
+
+    async def test_a_throttled_cdn_leaves_the_throttle_standing(self):
+        """Both routes refused, so there is still no answer about this workout."""
+        from backend.app.services.providers.throttling import ProviderThrottled
+
+        throttled = httpx.Response(
+            429, request=httpx.Request("GET", "https://api.wahooligan.test/fit")
+        )
+        cdn_throttled = httpx.Response(
+            503, request=httpx.Request("GET", "https://cdn.wahooligan.test/x.fit")
+        )
+        client = WahooClient()
+        client._fit_urls = {"1": "https://cdn.wahooligan.test/x.fit"}
+
+        with patch(
+            "backend.app.services.providers.wahoo.httpx.AsyncClient",
+            side_effect=[
+                _mock_httpx_context(throttled),
+                _mock_httpx_context(cdn_throttled),
+            ],
+        ):
+            with pytest.raises(ProviderThrottled) as exc:
+                await client.download_fit_file("tok", "1")
+        # The API endpoint's refusal is the one reported: it is the request that
+        # was actually rate-limited, the CDN being only a fallback.
+        assert exc.value.status_code == 429
+
+    async def test_a_404_with_a_dead_cdn_is_still_just_absence(self):
+        """A missing file plus an unhelpful CDN must not become a throttle."""
+        missing = httpx.Response(
+            404, request=httpx.Request("GET", "https://api.wahooligan.test/fit")
+        )
+        cdn_missing = httpx.Response(
+            404, request=httpx.Request("GET", "https://cdn.wahooligan.test/x.fit")
+        )
+        client = WahooClient()
+        client._fit_urls = {"1": "https://cdn.wahooligan.test/x.fit"}
+
+        with patch(
+            "backend.app.services.providers.wahoo.httpx.AsyncClient",
+            side_effect=[
+                _mock_httpx_context(missing),
+                _mock_httpx_context(cdn_missing),
+            ],
+        ):
+            assert await client.download_fit_file("tok", "1") is None

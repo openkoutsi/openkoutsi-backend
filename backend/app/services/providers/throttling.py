@@ -85,10 +85,12 @@ def parse_retry_after(value: str | None) -> float | None:
     try:
         when = email.utils.parsedate_to_datetime(raw)
     except (TypeError, ValueError):
-        return None
-    if when is None:
+        # The only failure mode since 3.10: it raises rather than returning None.
         return None
     if when.tzinfo is None:
+        # A zoneless HTTP-date. UTC is the only reading of one that is ever
+        # right, and it has to be filled in before the subtraction below —
+        # naive minus aware raises.
         when = when.replace(tzinfo=timezone.utc)
     return max(0.0, (when - datetime.now(timezone.utc)).total_seconds())
 
