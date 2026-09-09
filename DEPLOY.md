@@ -487,8 +487,10 @@ single-process by design, and several things depend on that:
 No longer on this list: **duplicate activity creation**, **OAuth token rotation**
 and **one provider backfill at a time** are guarded in the database rather than in
 memory — two lease rows and a claimed column — so all three hold between processes.
-The backfill lease renews at each page boundary and expires 15 minutes after the
-last one, so a sync whose process died frees it without anyone intervening.
+The backfill lease renews once per imported activity and expires 15 minutes after
+the last renewal, so a sync whose process died frees it without anyone
+intervening — and one that is merely slow keeps it, which a page-boundary
+renewal could not promise: a Strava page is 200 activities.
 
 **Deploying the bridges.** The backend and the two bridges are separate images and the
 deploy recreates only what changed, so a new backend can briefly meet an old bridge. It

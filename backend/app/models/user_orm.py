@@ -329,8 +329,13 @@ class ActivityStream(UserBase):
     __tablename__ = "activity_streams"
 
     id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    # Indexed: every read and every delete of a ride's streams is by activity,
+    # and this is the largest table in the per-user database by a wide margin —
+    # one row per channel per ride, each holding an hour or more of 1 Hz samples.
+    # Without it `_repopulate_activity`'s `DELETE ... WHERE activity_id = ?` is a
+    # full scan on every priority upgrade and every repair.
     activity_id: Mapped[str] = mapped_column(
-        String, ForeignKey("activities.id", ondelete="CASCADE")
+        String, ForeignKey("activities.id", ondelete="CASCADE"), index=True
     )
     stream_type: Mapped[str] = mapped_column(String)
     data: Mapped[list] = mapped_column(JSON)

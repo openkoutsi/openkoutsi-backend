@@ -29,10 +29,18 @@ import httpx
 
 log = logging.getLogger(__name__)
 
+#: The throttle proper: a statement about our standing with the provider, not
+#: about the thing we asked for. Nothing else we ask will fare better.
+RATE_LIMIT_STATUSES = frozenset({429})
+
+#: The provider having a bad moment. Also not an answer about this activity's
+#: data — but, unlike a throttle, it says nothing about the *next* activity, and
+#: treating the two the same let one permanently-500 ride stop the walk at the
+#: same place on every sync, walling off everything older than it.
+SERVER_ERROR_STATUSES = frozenset({500, 502, 503, 504})
+
 #: Statuses that mean "ask again later" rather than "there is nothing here".
-#: 429 is the throttle proper; the 5xx family is the provider having a bad
-#: moment, which is equally not an answer about this activity's data.
-RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+RETRYABLE_STATUSES = RATE_LIMIT_STATUSES | SERVER_ERROR_STATUSES
 
 #: Longest ``Retry-After`` we will hold a sync open for. Strava's quota windows
 #: are 15 minutes, and blocking a background task that long to save one request
@@ -65,7 +73,18 @@ class ProviderThrottled(Exception):
         self.retry_after = retry_after
         detail = f"HTTP {status_code}" if status_code is not None else "no status"
         wait = f", retry after {retry_after:.0f}s" if retry_after is not None else ""
-        super().__init__(f"{provider} is throttling us ({detail}{wait})")
+        super().__init__(f"{provider} is refusing us ({detail}{wait})")
+
+    @property
+    def is_rate_limit(self) -> bool:
+        """Whether this is about our standing with the provider, or about one request.
+
+        A 429 says every further request will meet the same wall, so a walk that
+        hits one should stop. A 5xx says this request failed; the next activity
+        is a fresh question, and stopping on it makes one unservable ride a
+        permanent barrier to everything the walk had not yet reached.
+        """
+        return self.status_code in RATE_LIMIT_STATUSES
 
 
 def parse_retry_after(value: str | None) -> float | None:
@@ -153,14 +172,21 @@ async def call_with_retry_after(
     *args: Any,
     provider: str,
     what: str,
+    may_wait: bool = True,
 ) -> Any:
     """Make one provider call, honouring ``Retry-After`` once.
 
-    Raises :class:`ProviderThrottled` when the provider is still throttling us —
+    Raises :class:`ProviderThrottled` when the provider is still refusing us —
     either because it named a wait longer than :data:`MAX_RETRY_AFTER_WAIT`, or
     because it named none at all, or because it threw us out again after we
     waited. Every other exception propagates untouched, so a caller that wants
     to treat a plain failure as absence still can.
+
+    ``may_wait=False`` for a call made while a lease is held. Sleeping there
+    spends someone else's deadline: the activity-create lease covers a section
+    already sized for a FIT download and parse, and two minutes of politeness on
+    top of that is how a merely slow holder becomes an expired one, handing the
+    same lease to two callers.
     """
     attempts = 0
     while True:
@@ -172,7 +198,12 @@ async def call_with_retry_after(
                 raise
             attempts += 1
             delay = throttle.retry_after
-            if attempts >= _ATTEMPTS or delay is None or delay > MAX_RETRY_AFTER_WAIT:
+            if (
+                not may_wait
+                or attempts >= _ATTEMPTS
+                or delay is None
+                or delay > MAX_RETRY_AFTER_WAIT
+            ):
                 raise throttle from exc
             log.warning(
                 "%s throttled the %s request (HTTP %s) — waiting %.0fs as asked",

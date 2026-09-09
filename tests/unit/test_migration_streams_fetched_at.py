@@ -61,15 +61,29 @@ def _seed_activity(conn, activity_id: str) -> None:
     )
 
 
-def _seed_source(conn, source_id: str, activity_id: str, fit_path: str | None) -> None:
+def _seed_source(
+    conn,
+    source_id: str,
+    activity_id: str,
+    fit_path: str | None,
+    provider: str = "strava",
+) -> None:
+    # `provider` matters for the sibling cases: one source per provider per
+    # activity is a unique constraint, so a two-source ride is two providers.
     conn.execute(
         text(
             "INSERT INTO activity_sources "
             "(id, activity_id, provider, external_id, fit_file_path, "
             " fit_file_encrypted, created_at) "
-            "VALUES (:i, :a, 'strava', :e, :f, 0, '2026-08-02 09:30:00')"
+            "VALUES (:i, :a, :p, :e, :f, 0, '2026-08-02 09:30:00')"
         ),
-        {"i": source_id, "a": activity_id, "e": f"ext-{source_id}", "f": fit_path},
+        {
+            "i": source_id,
+            "a": activity_id,
+            "p": provider,
+            "e": f"ext-{source_id}",
+            "f": fit_path,
+        },
     )
 
 
@@ -194,3 +208,89 @@ def test_it_chains_from_the_previous_head():
     module = importlib.import_module(MIGRATION)
     assert module.revision == "034_activity_source_streams_fetched_at"
     assert module.down_revision == "033_plan_completed_at"
+
+
+def test_a_sibling_source_does_not_stamp_a_hollow_one(legacy):
+    """Review of #143: the `EXISTS` is keyed on the activity, not the source.
+
+    On a two-source ride, a Wahoo source whose FIT download was throttled owns no
+    file and resolved nothing — but the activity has streams, because Strava put
+    them there. Crediting the Wahoo row with them settles it forever, and those
+    multi-source rides are the likeliest shape of the already-hollow history this
+    backfill is meant to leave repairable.
+    """
+    with legacy.begin() as conn:
+        _seed_activity(conn, "act-pair")
+        _seed_source(conn, "src-strava", "act-pair", None, provider="strava")
+        _seed_source(conn, "src-wahoo", "act-pair", None, provider="wahoo")
+        _seed_stream(conn, "act-pair")
+    _run(legacy)
+    assert _fetched_at(legacy, "src-strava") is None
+    assert _fetched_at(legacy, "src-wahoo") is None
+
+
+def test_a_sibling_with_its_own_file_is_still_stamped(legacy):
+    """The per-source half of the predicate is sound and stays.
+
+    A source holding a file resolved its own question, whatever its siblings did.
+    """
+    with legacy.begin() as conn:
+        _seed_activity(conn, "act-mixed")
+        _seed_source(
+            conn, "src-has-file", "act-mixed", "/data/act-mixed.fit", provider="wahoo"
+        )
+        _seed_source(conn, "src-no-file", "act-mixed", None, provider="strava")
+        _seed_stream(conn, "act-mixed")
+    _run(legacy)
+    assert _fetched_at(legacy, "src-has-file") is not None
+    assert _fetched_at(legacy, "src-no-file") is None
+
+
+def test_the_streams_index_is_created(legacy):
+    """Without it the backfill re-scans the largest table once per source row."""
+    with legacy.connect() as conn:
+        conn.execute(text("DROP INDEX IF EXISTS ix_activity_streams_activity_id"))
+        conn.commit()
+    _run(legacy)
+    with legacy.connect() as conn:
+        found = conn.execute(
+            text(
+                "SELECT name FROM sqlite_master WHERE type='index' "
+                "AND name='ix_activity_streams_activity_id'"
+            )
+        ).fetchone()
+    assert found is not None
+
+
+def test_the_index_survives_downgrade(legacy):
+    """It is the model's now, not this revision's.
+
+    Dropping it on downgrade would put a migrated database and a freshly created
+    one out of step over an index neither of them should be missing.
+    """
+    _run(legacy)
+    _run(legacy, "downgrade")
+    with legacy.connect() as conn:
+        found = conn.execute(
+            text(
+                "SELECT name FROM sqlite_master WHERE type='index' "
+                "AND name='ix_activity_streams_activity_id'"
+            )
+        ).fetchone()
+    assert found is not None
+
+
+def test_the_backfill_uses_the_index(legacy):
+    """The plan, not just the timing — a scan here is the 17 s the review measured."""
+    _run(legacy)
+    with legacy.connect() as conn:
+        plan = " ".join(
+            row[3]
+            for row in conn.execute(
+                text(
+                    "EXPLAIN QUERY PLAN "
+                    "SELECT 1 FROM activity_streams WHERE activity_id = 'x'"
+                )
+            )
+        )
+    assert "ix_activity_streams_activity_id" in plan, plan

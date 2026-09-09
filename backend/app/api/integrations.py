@@ -24,12 +24,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.api.consent import require_consent
 from backend.app.core.config import settings
 from backend.app.core.deps import get_ctx_and_session, get_ctx_session_athlete
-from backend.app.core.limiter import limiter
+from backend.app.core.limiter import limiter, principal_key
 from backend.app.core.scopes import pat_forbidden, pat_scopes
+from backend.app.db import leases
 from backend.app.db.registry import get_registry_session
 from backend.app.models.registry_orm import ProviderConnection
-from backend.app.models.user_orm import Activity, ActivitySource, Athlete
-from backend.app.services.provider_sync import ensure_fresh_token, sync_provider_activities
+from backend.app.models.user_orm import Activity, ActivitySource, Athlete, SyncLease
+from backend.app.services.provider_sync import (
+    ensure_fresh_token,
+    sync_lease_name,
+    sync_provider_activities,
+)
 from backend.app.services.providers.registry import PROVIDERS
 from openkoutsi.zones import (
     HR_ZONE_COUNT,
@@ -217,8 +222,20 @@ async def callback(
 
 # ── Sync ───────────────────────────────────────────────────────────────────
 
+def _sync_limit_key(request: Request) -> str:
+    """Rate-limit key for the sync route: the caller *and* the provider.
+
+    The shared limiter is built with ``key_style="endpoint"``, which keys on the
+    route function rather than the substituted path — so without this the six an
+    hour would be six across every provider combined, and an athlete connected to
+    both Strava and Wahoo would spend one allowance on two quotas that have
+    nothing to do with each other.
+    """
+    return f"{principal_key(request)}:{request.path_params.get('provider', '')}"
+
+
 @router.post("/{provider}/sync")
-@limiter.limit("6/hour")
+@limiter.limit("6/hour", key_func=_sync_limit_key)
 async def sync(
     request: Request,
     provider: str,
@@ -233,14 +250,29 @@ async def sync(
     Rate-limited because the quota it spends belongs to the *application*, not
     the athlete: one impatient user clicking sync repeatedly used to start a
     fresh full backfill per click, against a budget shared with everyone else's
-    syncs and webhook imports (issue #67). The sync itself refuses to run twice
-    concurrently for the same (user, provider); this keeps the requests that
-    would ask it to from arriving in the first place.
+    syncs and webhook imports (issue #67).
+
+    Answers **409** while a sync for this provider is already running, rather
+    than promising one it knows will not start. The background task refuses the
+    duplicate either way, but only saying so afterwards in a log meant an
+    impatient athlete could be told "sync started" six times, have nothing start
+    any of those times, and spend the hour's allowance on the no-ops.
+
+    The check is advisory — it reads the lease rather than taking it, so two
+    requests arriving together can both pass — and the ``acquire`` inside the
+    sync stays the thing that actually decides.
     """
-    ctx, _ = ctx_session
+    ctx, session = ctx_session
     _require_provider(provider)
     await _get_connection(ctx.user_id, provider, registry_session)  # ensure connected
     await registry_session.close()  # return pool connection before bg task needs its own
+
+    if await leases.is_held(session, SyncLease, sync_lease_name(provider)):
+        raise HTTPException(
+            status_code=409,
+            detail=f"A {provider} sync is already running",
+        )
+
     background_tasks.add_task(_bg_provider_sync, ctx.user_id, provider)
     return {"status": "sync started"}
 

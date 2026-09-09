@@ -21,6 +21,7 @@ from backend.app.models.user_orm import Activity, ActivitySource, Athlete
 from backend.app.services.commute import adopt_provider_flag
 from backend.app.services.provider_sync import (
     _DUPLICATE_WINDOW,
+    _discard_partial_import,
     activity_create_guard,
     _populate_activity,
     _repopulate_activity,
@@ -29,6 +30,7 @@ from backend.app.services.provider_sync import (
     ensure_fresh_token,
 )
 from backend.app.services.providers.base import NormalizedActivity
+from backend.app.services.providers.throttling import ProviderThrottled
 from backend.app.services.stranded_runs import (
     begin_activity_analysis_run,
     begin_training_status_run,
@@ -269,10 +271,20 @@ async def _process_event_for_user(
             # sessions before this lock is released (fixes the #76 race condition).
             await session.commit()
 
-        await _populate_activity(
-            activity, src, norm, _strava_client, access_token,
-            athlete, session, user_id=user_id,
-        )
+        try:
+            await _populate_activity(
+                activity, src, norm, _strava_client, access_token,
+                athlete, session, user_id=user_id,
+            )
+        except ProviderThrottled:
+            # Committed inside the guard above, so nothing here rolls it back —
+            # and the raise also skips the recalculate, the workout link, the
+            # adherence catch-up and the achievements mark below, leaving the ride
+            # at `status="pending"` and contributing nothing until the athlete
+            # clicks Sync. Take it back out; the next sync imports it properly
+            # (issue #67).
+            await _discard_partial_import(session, activity.id)
+            raise
 
         if activity.start_time:
             start_date = (

@@ -1440,8 +1440,6 @@ class TestRepairingIncompleteImports:
 class TestBackfillLimits:
     async def test_the_page_loop_is_bounded(self, session):
         """A provider that never returns an empty page must not spin forever."""
-        from backend.app.services.provider_sync import _MAX_SYNC_PAGES
-
         athlete = await _make_athlete(session, user_id="bounded-1")
         act = Activity(
             athlete_id=athlete.id,
@@ -1463,12 +1461,53 @@ class TestBackfillLimits:
 
         # The same already-imported activity on every page: a provider stuck on
         # page 1 is exactly the bug the cap exists for, and it keeps the test to
-        # one cheap skip per page.
+        # one cheap skip per page. The cap is patched down so the test exercises
+        # the mechanism rather than the number.
         client = _client(list_activities=AsyncMock(return_value=[_norm("act-1")]))
-        count, _ = await _sync(athlete, session, client)
+        with patch("backend.app.services.provider_sync._MAX_SYNC_PAGES", 5):
+            count, _ = await _sync(athlete, session, client)
 
         assert count == 0
-        assert client.list_activities.await_count == _MAX_SYNC_PAGES
+        assert client.list_activities.await_count == 5
+
+    async def test_the_walk_is_bounded_in_activities_not_pages(self, session):
+        """A page is not a fixed amount of anything.
+
+        Strava lists 200 at a time and Wahoo 30, so a page cap alone would mean
+        20 000 workouts on one provider and 3 000 on the other — and 3 000 is
+        inside a real riding history, which a bound meant as an impossibility
+        must never be.
+        """
+        athlete = await _make_athlete(session, user_id="bounded-2")
+        act = Activity(
+            athlete_id=athlete.id,
+            start_time=datetime(2024, 6, 1, 10, 0, tzinfo=timezone.utc),
+            duration_s=3600,
+            status="processed",
+        )
+        session.add(act)
+        await session.flush()
+        session.add(
+            ActivitySource(
+                activity_id=act.id,
+                provider="strava",
+                external_id="act-1",
+                streams_fetched_at=datetime(2024, 6, 1, 12, 0, tzinfo=timezone.utc),
+            )
+        )
+        await session.commit()
+
+        # Three activities a page, a cap of seven: the walk must stop on the page
+        # that crosses it rather than on a page count.
+        client = _client(
+            list_activities=AsyncMock(
+                return_value=[_norm("act-1"), _norm("act-1"), _norm("act-1")]
+            )
+        )
+        with patch("backend.app.services.provider_sync._MAX_SYNC_ACTIVITIES", 7):
+            await _sync(athlete, session, client)
+
+        assert client.list_activities.await_count == 3  # 3, 6, 9 → stops at 9 ≥ 7
 
     async def test_a_second_concurrent_sync_does_not_start(self, session):
         """One backfill per (user, provider): the quota is the instance's, not the user's."""
@@ -1586,34 +1625,62 @@ class TestRepairCountsAsAnUpdate:
 
 
 class TestLosingTheSyncLease:
-    async def test_the_walk_stops_when_the_lease_is_gone(self, session):
+    async def test_the_walk_stops_the_moment_the_lease_is_gone(self, session):
         """A lost lease means someone else is importing this history now.
 
         Carrying on would be exactly the duplicate backfill the lease exists to
-        prevent, so the walk ends at the page boundary that noticed.
+        prevent. Checked per activity rather than per page: a Strava page is 200
+        activities, so a page-boundary check would let a whole page of duplicated
+        work through after the deadline had already lapsed.
         """
         from backend.app.db import leases
 
         athlete = await _make_athlete(session, user_id="lease-lost-1")
-        page_one = [_norm("act-1", start_time=datetime(2024, 6, 1, 10, 0, tzinfo=timezone.utc))]
-        page_two = [_norm("act-2", start_time=datetime(2024, 6, 2, 10, 0, tzinfo=timezone.utc))]
-        client = _client(list_activities=AsyncMock(side_effect=[page_one, page_two, []]))
+        activities = [
+            _norm("act-1", start_time=datetime(2024, 6, 1, 10, 0, tzinfo=timezone.utc)),
+            _norm("act-2", start_time=datetime(2024, 6, 2, 10, 0, tzinfo=timezone.utc)),
+            _norm("act-3", start_time=datetime(2024, 6, 3, 10, 0, tzinfo=timezone.utc)),
+        ]
+        client = _client(list_activities=AsyncMock(side_effect=[activities, []]))
+
+        real_renew = leases.renew
+        calls = 0
+
+        async def _lost_after_one(*args, **kwargs):
+            # The real write still happens; only the answer is a lie, so the test
+            # fails if the `break` goes away rather than if the mock does.
+            nonlocal calls
+            await real_renew(*args, **kwargs)
+            calls += 1
+            return calls == 1
+
+        with patch.object(leases, "renew", _lost_after_one):
+            count, _ = await _sync(athlete, session, client)
+
+        # Stopped inside the page, not at the end of it.
+        assert count == 1
+        acts = (
+            await session.execute(select(Activity).where(Activity.athlete_id == athlete.id))
+        ).scalars().all()
+        assert len(acts) == 1
+
+    async def test_a_lease_lost_before_the_first_activity_imports_nothing(self, session):
+        from backend.app.db import leases
+
+        athlete = await _make_athlete(session, user_id="lease-lost-2")
+        client = _client()
 
         real_renew = leases.renew
 
         async def _lost(*args, **kwargs):
-            await real_renew(*args, **kwargs)  # keep the write, discard the answer
+            await real_renew(*args, **kwargs)
             return False
 
         with patch.object(leases, "renew", _lost):
-            count, _ = await _sync(athlete, session, client)
+            count, earliest = await _sync(athlete, session, client)
 
-        assert count == 1
-        assert client.list_activities.await_count == 1
-        acts = (
-            await session.execute(select(Activity).where(Activity.athlete_id == athlete.id))
-        ).scalars().all()
-        assert [a.name for a in acts] == ["Test Ride"]
+        assert (count, earliest) == (0, None)
+        client.get_activity_streams.assert_not_awaited()
 
 
 class TestDurationCorrection:
@@ -1698,3 +1765,231 @@ class TestDurationCorrection:
 
         await session.refresh(act)
         assert act.duration_s == 1800
+
+
+class TestAServerErrorIsNotAThrottle:
+    """Review of #143: a 5xx is about one request, a 429 about the connection.
+
+    Treating them alike made a single unservable ride a permanent wall — the walk
+    is newest-first and restarts from the newest each sync, so everything older
+    than the poison activity became unreachable forever.
+    """
+
+    async def test_one_permanently_500_activity_does_not_block_older_ones(self, session):
+        athlete = await _make_athlete(session, user_id="poison-1")
+        listing = [
+            _norm("act-1", start_time=datetime(2024, 6, 3, 10, 0, tzinfo=timezone.utc)),
+            _norm("act-2", start_time=datetime(2024, 6, 2, 10, 0, tzinfo=timezone.utc)),
+            _norm("act-3", start_time=datetime(2024, 6, 1, 10, 0, tzinfo=timezone.utc)),
+        ]
+
+        async def streams(_token, ext_id):
+            if ext_id == "act-2":
+                raise _status_error(500)
+            return {"power": [200, 210, 220]}
+
+        await _sync(
+            athlete,
+            session,
+            _client(
+                list_activities=AsyncMock(side_effect=[list(listing), []]),
+                get_activity_streams=AsyncMock(side_effect=streams),
+            ),
+        )
+
+        srcs = (await session.execute(select(ActivitySource))).scalars().all()
+        assert sorted(s.external_id for s in srcs) == ["act-1", "act-2", "act-3"]
+
+        by_id = {s.external_id: s for s in srcs}
+        assert by_id["act-1"].streams_fetched_at is not None
+        assert by_id["act-3"].streams_fetched_at is not None
+        # …and the one that could not be served is left for repair, not settled.
+        assert by_id["act-2"].streams_fetched_at is None
+
+    async def test_a_429_still_stops_the_walk(self, session):
+        """The distinction has to cut one way only."""
+        athlete = await _make_athlete(session, user_id="poison-2")
+        listing = [
+            _norm("act-1", start_time=datetime(2024, 6, 3, 10, 0, tzinfo=timezone.utc)),
+            _norm("act-2", start_time=datetime(2024, 6, 2, 10, 0, tzinfo=timezone.utc)),
+            _norm("act-3", start_time=datetime(2024, 6, 1, 10, 0, tzinfo=timezone.utc)),
+        ]
+
+        async def streams(_token, ext_id):
+            if ext_id == "act-2":
+                raise _status_error(429)
+            return {"power": [200, 210, 220]}
+
+        await _sync(
+            athlete,
+            session,
+            _client(
+                list_activities=AsyncMock(side_effect=[list(listing), []]),
+                get_activity_streams=AsyncMock(side_effect=streams),
+            ),
+        )
+
+        srcs = (await session.execute(select(ActivitySource))).scalars().all()
+        assert [s.external_id for s in srcs] == ["act-1"]
+
+    async def test_a_provider_failing_everything_stops_the_walk(self, session):
+        """One bad ride is not a reason to stop; a provider that is down is.
+
+        Every failure still costs a round trip, so a walk that carried on through
+        thousands of them would be the amplification the issue is about.
+        """
+        athlete = await _make_athlete(session, user_id="poison-3")
+        listing = [
+            _norm(
+                f"act-{i}",
+                start_time=datetime(2024, 6, 1, 10, 0, tzinfo=timezone.utc)
+                + timedelta(days=i),
+            )
+            for i in range(10)
+        ]
+        client = _client(
+            list_activities=AsyncMock(side_effect=[listing, []]),
+            get_activity_streams=AsyncMock(side_effect=_status_error(503)),
+        )
+
+        with patch(
+            "backend.app.services.provider_sync._MAX_CONSECUTIVE_UNRESOLVED", 3
+        ):
+            await _sync(athlete, session, client)
+
+        # Stopped after the run of failures rather than walking all ten — and
+        # without spending one more request to find that out, because the run is
+        # checked before each activity rather than after it.
+        assert client.get_activity_streams.await_count == 3
+        srcs = (await session.execute(select(ActivitySource))).scalars().all()
+        assert all(s.streams_fetched_at is None for s in srcs)
+
+    async def test_a_success_resets_the_run(self, session):
+        """Scattered bad rides must never accumulate into a stop."""
+        athlete = await _make_athlete(session, user_id="poison-4")
+        listing = [
+            _norm(
+                f"act-{i}",
+                start_time=datetime(2024, 6, 1, 10, 0, tzinfo=timezone.utc)
+                + timedelta(days=i),
+            )
+            for i in range(9)
+        ]
+
+        async def streams(_token, ext_id):
+            # Every third one fails: never three in a row.
+            if int(ext_id.split("-")[1]) % 3:
+                raise _status_error(500)
+            return {"power": [200, 210, 220]}
+
+        client = _client(
+            list_activities=AsyncMock(side_effect=[listing, []]),
+            get_activity_streams=AsyncMock(side_effect=streams),
+        )
+        with patch(
+            "backend.app.services.provider_sync._MAX_CONSECUTIVE_UNRESOLVED", 3
+        ):
+            await _sync(athlete, session, client)
+
+        srcs = (await session.execute(select(ActivitySource))).scalars().all()
+        assert len(srcs) == 9, "the walk must reach every activity"
+
+
+class TestAGuessIsNotAnAnswer:
+    """Review of #143: a FIT we failed to reach is not a FIT that is not there."""
+
+    async def _seed_populated_strava(self, session, athlete, base):
+        act = Activity(
+            athlete_id=athlete.id, start_time=base, duration_s=3600, status="processed"
+        )
+        session.add(act)
+        await session.flush()
+        session.add(
+            ActivitySource(
+                activity_id=act.id,
+                provider="strava",
+                external_id="s-1",
+                streams_fetched_at=base,
+            )
+        )
+        await session.commit()
+        return act
+
+    async def test_a_timeout_on_the_attach_prefetch_leaves_the_source_open(self, session):
+        """Otherwise the device file that would have won is buried permanently.
+
+        Wahoo-with-FIT outranks Strava; Wahoo-without loses to it. Deciding that
+        contest on a `ConnectTimeout` and then stamping the source means the
+        higher-priority file is never fetched again.
+        """
+        athlete = await _make_athlete(session, user_id="guess-1")
+        base = datetime(2024, 6, 1, 10, 0, tzinfo=timezone.utc)
+        await self._seed_populated_strava(session, athlete, base)
+
+        wahoo = _client(
+            list_activities=AsyncMock(side_effect=[[_norm("w-1", "wahoo", base)], []]),
+            download_fit_file=AsyncMock(side_effect=httpx.ConnectTimeout("boom")),
+        )
+        await _sync(athlete, session, wahoo, provider="wahoo")
+
+        src = (
+            await session.execute(
+                select(ActivitySource).where(ActivitySource.provider == "wahoo")
+            )
+        ).scalar_one()
+        assert src.streams_fetched_at is None
+
+    async def test_a_definitive_absence_still_settles_the_source(self, session):
+        """The other half: a provider that says "no file" has answered."""
+        athlete = await _make_athlete(session, user_id="guess-2")
+        base = datetime(2024, 6, 1, 10, 0, tzinfo=timezone.utc)
+        await self._seed_populated_strava(session, athlete, base)
+
+        wahoo = _client(
+            list_activities=AsyncMock(side_effect=[[_norm("w-1", "wahoo", base)], []]),
+            download_fit_file=AsyncMock(return_value=None),
+        )
+        await _sync(athlete, session, wahoo, provider="wahoo")
+
+        src = (
+            await session.execute(
+                select(ActivitySource).where(ActivitySource.provider == "wahoo")
+            )
+        ).scalar_one()
+        assert src.streams_fetched_at is not None
+
+    async def test_a_repair_is_not_spent_on_a_failed_lookup(self, session):
+        """A source gets one repair attempt — not one wasted on a timeout."""
+        athlete = await _make_athlete(session, user_id="guess-3")
+        base = datetime(2024, 6, 1, 10, 0, tzinfo=timezone.utc)
+        act = Activity(
+            athlete_id=athlete.id, start_time=base, duration_s=3600, status="processed"
+        )
+        session.add(act)
+        await session.flush()
+        session.add(
+            ActivitySource(
+                activity_id=act.id,
+                provider="upload",
+                external_id=None,
+                fit_file_path="/tmp/does-not-need-to-exist.fit",
+                streams_fetched_at=base,
+            )
+        )
+        session.add(
+            ActivitySource(activity_id=act.id, provider="wahoo", external_id="w-1")
+        )
+        await session.commit()
+
+        wahoo = _client(
+            list_activities=AsyncMock(side_effect=[[_norm("w-1", "wahoo", base)], []]),
+            download_fit_file=AsyncMock(side_effect=httpx.ReadTimeout("slow")),
+        )
+        await _sync(athlete, session, wahoo, provider="wahoo")
+
+        src = (
+            await session.execute(
+                select(ActivitySource).where(ActivitySource.provider == "wahoo")
+            )
+        ).scalar_one()
+        assert src.streams_fetched_at is None

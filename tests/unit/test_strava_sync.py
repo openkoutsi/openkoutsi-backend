@@ -346,3 +346,63 @@ class TestProcessEventUpdate:
         )
 
         session.commit.assert_not_called()
+
+
+class TestAThrottledWebhookLeavesNoHollowRow:
+    """Review of #143: the create path's raise had no cleanup behind it.
+
+    The `Activity` is committed inside the guard and the detail fetch happens
+    outside it, so `ProviderThrottled` propagating from `_populate_activity`
+    leaves the row — and skips the recalculate, the workout link, the adherence
+    catch-up and the achievements mark below it. The ride would sit at
+    `status="pending"`, contributing nothing, until the athlete clicked Sync;
+    there is no scheduled sync in the tree to find it.
+
+    `_discard_partial_import` is proven against a real database in
+    `test_provider_sync.py`; what this covers is that the webhook path reaches it.
+    """
+
+    async def test_the_created_activity_is_taken_back_out(self):
+        from backend.app.services.providers.throttling import ProviderThrottled
+
+        athlete = _make_athlete()
+        conn = _make_conn()
+        session = AsyncMock()
+        session.add = MagicMock()
+        session.flush = AsyncMock()
+        session.commit = AsyncMock()
+
+        dupe_check = MagicMock()
+        dupe_check.scalar_one_or_none.return_value = None
+        existing_check = MagicMock()
+        existing_check.scalar_one_or_none.return_value = None
+        session.execute = AsyncMock(side_effect=[dupe_check, existing_check])
+
+        mock_resp = MagicMock()
+        mock_resp.json.return_value = _make_strava_raw()
+        mock_resp.raise_for_status = MagicMock()
+        mock_http = AsyncMock()
+        mock_http.get = AsyncMock(return_value=mock_resp)
+        mock_http.__aenter__ = AsyncMock(return_value=mock_http)
+        mock_http.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("backend.app.services.metrics_engine.recalculate_from", new_callable=AsyncMock),
+            patch("backend.app.services.strava_sync.activity_create_guard", _no_guard),
+            patch(
+                "backend.app.services.strava_sync._populate_activity",
+                AsyncMock(side_effect=ProviderThrottled("strava", 429)),
+            ),
+            patch(
+                "backend.app.services.strava_sync._discard_partial_import",
+                new_callable=AsyncMock,
+            ) as discard,
+            patch("httpx.AsyncClient", return_value=mock_http),
+        ):
+            with pytest.raises(ProviderThrottled):
+                await _process_event_for_user(
+                    "create", "99", {"object_id": 99, "object_type": "activity"},
+                    athlete, conn, "access-token-xxx", "team-1", session,
+                )
+
+        discard.assert_awaited_once()

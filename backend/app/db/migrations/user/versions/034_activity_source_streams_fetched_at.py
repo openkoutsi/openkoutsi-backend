@@ -19,13 +19,33 @@ that plainly did land are stamped as fetched:
   * the source has a stored file (``fit_file_path``), or
   * its activity has at least one stream row.
 
-What is left NULL is what is actually suspect: a source with no file whose
-activity has no streams either. Those get one repair attempt on the next sync
-and are then settled either way, which is also how already-affected athletes are
-healed rather than only new imports being protected.
+What is left NULL is what is actually suspect: a source with no file that cannot
+be shown to own the streams on its activity. Those get one repair attempt on the
+next sync and are then settled either way, which is also how already-affected
+athletes are healed rather than only new imports being protected.
+
+**Why the streams half only counts single-source activities.** ``EXISTS`` on
+``activity_streams`` is keyed on the *activity*, and an activity can have several
+sources. On a two-source ride, a Wahoo source whose FIT download was throttled
+owns no file and resolved nothing — but the activity has streams, because Strava
+put them there, so an unqualified ``EXISTS`` would stamp it. Those multi-source
+rides are the likeliest shape of the already-hollow history this backfill is
+meant to leave repairable, so they are excluded: only a source that is the sole
+one on its activity can be credited with that activity's streams. Single-source
+rides are the overwhelming majority and the whole quota-burst concern, and they
+stay stamped.
 
 The stamp is ``created_at`` rather than now: it is when the data was fetched,
 and dating it to the migration would claim a fetch that never happened today.
+
+**The index is not incidental.** The correlated subquery below has no index to
+use on ``activity_streams.activity_id``, so it re-scans the largest table in the
+database once per source row — measured at 17 s on a 4 000-activity history, and
+the cost is the product of the two tables. Creating the index first takes that to
+well under a second, and it earns its keep afterwards: every stream delete in
+``_repopulate_activity`` is the same lookup. It is declared on the model now, so
+``downgrade`` leaves it alone — dropping it would put a fresh database and a
+migrated one out of step.
 
 Idempotent, like every migration in this tree.
 """
@@ -44,8 +64,26 @@ def _column_exists(conn, table_name: str, column_name: str) -> bool:
     return any(row[1] == column_name for row in rows)
 
 
+def _index_exists(conn, index_name: str) -> bool:
+    row = conn.execute(
+        text("SELECT name FROM sqlite_master WHERE type='index' AND name=:n"),
+        {"n": index_name},
+    ).fetchone()
+    return row is not None
+
+
 def upgrade() -> None:
     conn = op.get_bind()
+
+    # First, and regardless of the column: the backfill below reads this table
+    # once per source row, and every stream delete in the sync does the same
+    # lookup. Separate from the column check so a database that somehow has one
+    # and not the other still ends up with both.
+    if not _index_exists(conn, "ix_activity_streams_activity_id"):
+        op.create_index(
+            "ix_activity_streams_activity_id", "activity_streams", ["activity_id"]
+        )
+
     if _column_exists(conn, "activity_sources", "streams_fetched_at"):
         return
 
@@ -59,11 +97,20 @@ def upgrade() -> None:
             UPDATE activity_sources
                SET streams_fetched_at = created_at
              WHERE fit_file_path IS NOT NULL
-                OR EXISTS (
-                        SELECT 1
-                          FROM activity_streams
-                         WHERE activity_streams.activity_id
-                               = activity_sources.activity_id
+                OR (
+                        NOT EXISTS (
+                            SELECT 1
+                              FROM activity_sources AS sibling
+                             WHERE sibling.activity_id
+                                   = activity_sources.activity_id
+                               AND sibling.id <> activity_sources.id
+                        )
+                    AND EXISTS (
+                            SELECT 1
+                              FROM activity_streams
+                             WHERE activity_streams.activity_id
+                                   = activity_sources.activity_id
+                        )
                    )
             """
         )

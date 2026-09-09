@@ -91,12 +91,25 @@ _ACTIVITY_LEASE_WAIT = 60.0
 
 # ── Backfill safety limits (issue #67) ───────────────────────────────────────
 
-# The pagination loop's stop. At 200 activities a page this is 20 000 workouts,
-# well past any real history, so it never fires on an honest sync — it exists
-# because the loop's only other exit is the provider returning an empty page,
-# and a provider that never does (a bug, a proxy, a mangled cursor) would
-# otherwise spin against a shared quota until the process died.
-_MAX_SYNC_PAGES = 100
+# How much history one backfill will walk. Counted in *activities listed*, not
+# pages, because a page is not a fixed amount of anything: Strava lists 200 at a
+# time and Wahoo 30, so a page cap means 20 000 workouts on one and 3 000 on the
+# other — and 3 000 is inside a real riding history, which a bound meant as an
+# impossibility must never be.
+_MAX_SYNC_ACTIVITIES = 20_000
+
+# A second bound, on requests rather than work, for the provider that answers
+# every page with one activity and never an empty one. The activity cap alone
+# would still terminate, eventually, having spent 20 000 requests to do it.
+_MAX_SYNC_PAGES = 1_000
+
+# Consecutive activities whose detail data would not come before the walk gives
+# up on the provider rather than the activity. One unservable ride must not stop
+# a backfill — that is the whole reason a 5xx no longer does — but a provider
+# failing every request in turn is not a run worth finishing, and each failure
+# still costs a round trip. Reset by the first activity that resolves, so this
+# counts an outage, not a tally of bad rides scattered through a history.
+_MAX_CONSECUTIVE_UNRESOLVED = 25
 
 # How long one backfill may run before another may start in its place. Long
 # enough that a real import never trips it, and renewed at every page boundary
@@ -423,6 +436,16 @@ async def _rotate_under_claim(
 # ── Full sync ─────────────────────────────────────────────────────────────────
 
 
+def sync_lease_name(provider: str) -> str:
+    """The lease one backfill per (user, provider) is held under.
+
+    Named here rather than spelled out at each site because the sync endpoint
+    reads the same lease to answer 409 before queueing a run that would refuse
+    itself.
+    """
+    return f"provider-sync:{provider}"
+
+
 async def sync_provider_activities(
     athlete: Athlete,
     connection: ProviderConnection,
@@ -467,7 +490,7 @@ async def sync_provider_activities(
     # a second backfill of the same history is pure duplicated load on a quota
     # shared by every athlete on the instance — so a busy lease means "already
     # running", and ``wait=0`` because there is nothing worth queueing for.
-    lease_name = f"provider-sync:{provider_name}"
+    lease_name = sync_lease_name(provider_name)
     lease_token = await leases.acquire(
         session, SyncLease, lease_name, ttl=_SYNC_LEASE_TTL, wait=0.0
     )
@@ -534,17 +557,22 @@ async def _import_all_pages(
     count = 0
     earliest: date | None = None
     page = 1
+    listed = 0
+    consecutive_unresolved = 0
+    stop = False
 
     try:
-        while True:
-            if page > _MAX_SYNC_PAGES:
+        while not stop:
+            if listed >= _MAX_SYNC_ACTIVITIES or page > _MAX_SYNC_PAGES:
                 log.error(
-                    "%s sync for user %s hit the %d-page cap — stopping. Either "
-                    "the history is implausibly long or the provider is not "
-                    "paginating; either way this is not a loop to keep running.",
+                    "%s sync for user %s stopped at its safety limit — %d "
+                    "activities over %d pages. Either the history is "
+                    "implausibly long or the provider is not paginating; either "
+                    "way this is not a loop to keep running.",
                     provider_name,
                     user_id,
-                    _MAX_SYNC_PAGES,
+                    listed,
+                    page - 1,
                 )
                 break
 
@@ -557,8 +585,39 @@ async def _import_all_pages(
             )
             if not activities:
                 break
+            listed += len(activities)
 
             for norm in activities:
+                # Renewed per activity, not per page: a Strava page is 200
+                # activities, and a deadline that only moves once a page has
+                # finished is tracking "a sync that finished a page" rather than
+                # one still working. Letting it lapse mid-page is what would let
+                # a second backfill start alongside this one.
+                if not await leases.renew(
+                    session, SyncLease, lease_name, lease_token, ttl=_SYNC_LEASE_TTL
+                ):
+                    log.warning(
+                        "Lost the %s sync lease for user %s at page %d — stopping",
+                        provider_name,
+                        user_id,
+                        page,
+                    )
+                    stop = True
+                    break
+
+                if consecutive_unresolved >= _MAX_CONSECUTIVE_UNRESOLVED:
+                    log.error(
+                        "%s has not served detail data for %d activities in a "
+                        "row for user %s — stopping. What is imported so far "
+                        "stands, and every source left unresolved is repaired by "
+                        "a later sync.",
+                        provider_name,
+                        consecutive_unresolved,
+                        user_id,
+                    )
+                    stop = True
+                    break
+
                 ext_id = norm.external_id
 
                 # ── Already imported this (provider, external_id)? ────────────
@@ -626,6 +685,9 @@ async def _import_all_pages(
                                 user_id=user_id,
                                 provider_name=provider_name,
                             )
+                        consecutive_unresolved = _track_resolution(
+                            existing_src, consecutive_unresolved
+                        )
                         # A repair restates this ride's load and intensity, so it
                         # counts like any other update — that is what has the
                         # caller recalculate the athlete's metrics from its date
@@ -690,8 +752,16 @@ async def _import_all_pages(
                         # whether to repopulate. This avoids the bug where Wahoo with
                         # FIT (priority=2) would be skipped because the pessimistic
                         # priority (no FIT, priority=4) doesn't beat Strava (priority=3).
-                        prefetched_fit = await _prefetch_fit(
-                            client, access_token, norm, provider_name=provider_name
+                        # `may_wait=False`: this runs under the activity-create
+                        # lease, whose deadline is sized for a FIT download and
+                        # parse — not for that plus a minute of honouring a
+                        # `Retry-After`.
+                        prefetched_fit, fit_resolved = await _prefetch_fit(
+                            client,
+                            access_token,
+                            norm,
+                            provider_name=provider_name,
+                            may_wait=False,
                         )
 
                         actual_priority = _source_priority(
@@ -708,8 +778,12 @@ async def _import_all_pages(
                                 session,
                                 user_id=user_id,
                                 prefetched_fit=prefetched_fit,
+                                prefetched_fit_resolved=fit_resolved,
                             )
                             count += 1
+                            consecutive_unresolved = _track_resolution(
+                                new_src, consecutive_unresolved
+                            )
                             if existing_act.start_time:
                                 day = (
                                     existing_act.start_time.date()
@@ -722,9 +796,16 @@ async def _import_all_pages(
                             # Lower priority — just record the source, don't touch
                             # metrics. Its detail data is settled by that decision:
                             # nothing will ever read it, so nothing should re-fetch
-                            # it (issue #67).
-                            new_src.streams_fetched_at = datetime.now(timezone.utc)
+                            # it (issue #67) — but only when the contest was
+                            # decided on a real answer. A FIT we merely failed to
+                            # reach may yet outrank what is on the activity, and
+                            # settling on that guess would bury it for good.
+                            if fit_resolved:
+                                new_src.streams_fetched_at = datetime.now(timezone.utc)
                             await session.commit()
+                            consecutive_unresolved = _track_resolution(
+                                new_src, consecutive_unresolved
+                            )
                         continue
 
                     # ── New workout — create Activity + ActivitySource ─────────
@@ -787,6 +868,7 @@ async def _import_all_pages(
                     await _discard_partial_import(session, activity.id)
                     raise
                 count += 1
+                consecutive_unresolved = _track_resolution(src, consecutive_unresolved)
 
                 if activity.start_time:
                     day = (
@@ -820,22 +902,6 @@ async def _import_all_pages(
                         )
 
             page += 1
-
-            # Push the deadline out at the page boundary, where everything is
-            # committed. A backfill can outlast any deadline short enough to
-            # recover promptly from a crashed one, and losing the lease means
-            # someone else is now importing this history — carrying on would be
-            # the duplicate the lease exists to prevent.
-            if not await leases.renew(
-                session, SyncLease, lease_name, lease_token, ttl=_SYNC_LEASE_TTL
-            ):
-                log.warning(
-                    "Lost the %s sync lease for user %s at page %d — stopping",
-                    provider_name,
-                    user_id,
-                    page - 1,
-                )
-                break
     except ProviderThrottled as exc:
         # Nothing half-written survives: the guard rolls its own block back, and
         # this covers the paths outside it.
@@ -859,27 +925,56 @@ async def _import_all_pages(
     return count, earliest
 
 
-async def _prefetch_fit(
-    client, access_token: str, norm, *, provider_name: str
-) -> bytes | None:
-    """Download the FIT the priority decision needs, or None if there isn't one.
+def _track_resolution(src: ActivitySource, consecutive_unresolved: int) -> int:
+    """Count how long the provider has been unable to answer, in a row.
 
-    ``None`` means the provider has no FIT for this activity. A provider that is
-    throttling us has not said that — it has said nothing — so that case raises
-    :class:`ProviderThrottled` instead of quietly reading as absence (issue #67).
+    A source left without ``streams_fetched_at`` is one whose detail data did not
+    come — a 5xx, a timeout, a transport error. One of those is a ride to repair
+    later and no reason to stop; twenty-five in a row is a provider that is not
+    answering at all, and every one of them still costs a round trip.
+
+    Reset by the first source that resolves, so a handful of bad rides scattered
+    through a history never accumulates into a stop.
+    """
+    return 0 if src.streams_fetched_at is not None else consecutive_unresolved + 1
+
+
+async def _prefetch_fit(
+    client, access_token: str, norm, *, provider_name: str, may_wait: bool = True
+) -> tuple[bytes | None, bool]:
+    """The FIT the priority decision needs, and whether that is the real answer.
+
+    Returns ``(fit_or_None, resolved)``. ``resolved`` is what keeps a *guess*
+    from being recorded as fact: a ``ConnectTimeout`` also produces ``None``
+    here, and a caller that stamped ``streams_fetched_at`` on it would settle,
+    permanently, a source whose device file it had simply failed to reach — the
+    priority contest decided against a file nobody ever looked for.
+
+    A rate limit still raises: there is no next request that would fare better.
     """
     try:
-        return await call_with_retry_after(
+        fit = await call_with_retry_after(
             client.download_fit_file,
             access_token,
             norm.external_id,
             provider=provider_name,
             what=f"FIT for {norm.external_id}",
+            may_wait=may_wait,
         )
-    except ProviderThrottled:
-        raise
-    except Exception:
-        return None
+    except ProviderThrottled as exc:
+        if exc.is_rate_limit:
+            raise
+        # The provider is unwell, not silent about this activity.
+        log.warning(
+            "Could not fetch the %s FIT for %s (%s) — leaving it for a later sync",
+            provider_name,
+            norm.external_id,
+            exc,
+        )
+        return None, False
+    except Exception as exc:
+        return None, is_definitive(exc)
+    return fit, True
 
 
 async def _discard_partial_import(session: AsyncSession, activity_id: str) -> None:
@@ -933,8 +1028,9 @@ async def _repair_source(
     # into the collection it came from — so the collection has to be asked for.
     await session.refresh(activity, ["sources"])
 
-    prefetched_fit = await _prefetch_fit(
-        client, access_token, norm, provider_name=provider_name
+    # `may_wait=False` — the activity-create lease is held around this call.
+    prefetched_fit, fit_resolved = await _prefetch_fit(
+        client, access_token, norm, provider_name=provider_name, may_wait=False
     )
     if _source_priority(provider_name, prefetched_fit is not None) <= _winning_priority(
         activity
@@ -949,6 +1045,7 @@ async def _repair_source(
             session,
             user_id=user_id,
             prefetched_fit=prefetched_fit,
+            prefetched_fit_resolved=fit_resolved,
         )
         log.info(
             "Repaired %s/%s — it was imported without its stream data",
@@ -958,9 +1055,13 @@ async def _repair_source(
         return True
 
     # A higher-priority source populates this activity, so this one's detail data
-    # would never be read. Settle it so no later sync spends a request asking.
-    src.streams_fetched_at = datetime.now(timezone.utc)
-    await session.commit()
+    # would never be read. Settle it so no later sync spends a request asking —
+    # unless the contest was decided by a FIT we failed to reach rather than one
+    # the provider does not have, which would spend this source's single repair
+    # attempt on an answer nobody gave.
+    if fit_resolved:
+        src.streams_fetched_at = datetime.now(timezone.utc)
+        await session.commit()
     return False
 
 
@@ -978,9 +1079,14 @@ async def _populate_activity(
     *,
     user_id: str,
     prefetched_fit=_NOTFETCHED,
+    prefetched_fit_resolved: bool = True,
 ) -> None:
     """Populate a new Activity's metrics, streams and bests from src's data."""
-    await _fill_from_source(activity, src, norm, client, access_token, athlete, session, user_id=user_id, prefetched_fit=prefetched_fit)
+    await _fill_from_source(
+        activity, src, norm, client, access_token, athlete, session,
+        user_id=user_id, prefetched_fit=prefetched_fit,
+        prefetched_fit_resolved=prefetched_fit_resolved,
+    )
 
 
 async def _repopulate_activity(
@@ -994,6 +1100,7 @@ async def _repopulate_activity(
     *,
     user_id: str,
     prefetched_fit=_NOTFETCHED,
+    prefetched_fit_resolved: bool = True,
 ) -> None:
     """Re-populate an existing Activity's metrics with data from a higher-priority source.
 
@@ -1016,6 +1123,8 @@ async def _repopulate_activity(
         delete(ActivityInterval).where(ActivityInterval.activity_id == activity.id)
     )
     await session.flush()
+    # Always called under the activity-create lease, so no provider call beneath
+    # this one may spend the holder's deadline waiting out a `Retry-After`.
     await _fill_from_source(
         activity,
         new_src,
@@ -1026,6 +1135,8 @@ async def _repopulate_activity(
         session,
         user_id=user_id,
         prefetched_fit=prefetched_fit,
+        prefetched_fit_resolved=prefetched_fit_resolved,
+        may_wait=False,
     )
 
 
@@ -1112,6 +1223,8 @@ async def _fill_from_source(
     *,
     user_id: str,
     prefetched_fit=_NOTFETCHED,
+    prefetched_fit_resolved: bool = True,
+    may_wait: bool = True,
 ) -> None:
     """Core import logic: try FIT first, fall back to stream API.
 
@@ -1131,11 +1244,12 @@ async def _fill_from_source(
 
     # ── FIT-first path (Wahoo and any future FIT-capable provider) ──────
     if prefetched_fit is _NOTFETCHED:
-        fit_bytes = await _prefetch_fit(
-            client, access_token, norm, provider_name=src.provider
+        fit_bytes, fit_resolved = await _prefetch_fit(
+            client, access_token, norm, provider_name=src.provider, may_wait=may_wait
         )
     else:
         fit_bytes = prefetched_fit  # type: ignore[assignment]
+        fit_resolved = prefetched_fit_resolved
 
     if fit_bytes is not None:
         storage_dir = settings.user_fit_dir(athlete.global_user_id)
@@ -1236,7 +1350,7 @@ async def _fill_from_source(
     # unsettled source is re-tried by the next sync instead of standing as a
     # permanently hollow import. A throttle is neither — it propagates, and the
     # caller stops the sync rather than importing this activity at all.
-    resolved = True
+    resolved = fit_resolved
     try:
         streams_raw = await call_with_retry_after(
             client.get_activity_streams,
@@ -1244,12 +1358,27 @@ async def _fill_from_source(
             norm.external_id,
             provider=src.provider,
             what=f"streams for {norm.external_id}",
+            may_wait=may_wait,
         )
-    except ProviderThrottled:
-        raise
+    except ProviderThrottled as exc:
+        # A rate limit ends the run — every further request meets the same wall.
+        # A 5xx is about this request, and stopping on it would make one
+        # unservable ride a permanent barrier to every older one behind it, since
+        # the walk restarts from the newest each time.
+        if exc.is_rate_limit:
+            raise
+        log.warning(
+            "%s could not serve the streams for %s (%s) — importing the summary "
+            "only; a later sync will try again",
+            src.provider,
+            norm.external_id,
+            exc,
+        )
+        resolved = False
+        streams_raw = {}
     except Exception as exc:
-        resolved = is_definitive(exc)
-        if not resolved:
+        if not is_definitive(exc):
+            resolved = False
             log.warning(
                 "Could not fetch %s streams for %s — importing the summary only; "
                 "a later sync will try again",
