@@ -297,6 +297,33 @@ class TestSync:
         resp = await client.post("/api/integrations/strava/sync")
         assert resp.status_code == 401
 
+    def test_the_sync_route_declares_a_rate_limit(self, app):
+        """Issue #67: this was the one expensive endpoint with no limit at all.
+
+        Checked against slowapi's own registry rather than by reading the
+        source, so it cannot pass because a decorator moved. The shared `client`
+        fixture disables the limiter, so the limit's *effect* is not exercisable
+        here — that it is declared, and on the right route, is.
+        """
+        from fastapi.routing import APIRoute
+
+        from backend.app.core.limiter import limiter
+
+        registered = set(getattr(limiter, "_route_limits", {}))
+        sync_routes = [
+            r
+            for r in app.routes
+            if isinstance(r, APIRoute) and r.path.endswith("/sync")
+            and r.path.startswith("/api/integrations")
+        ]
+        assert sync_routes, "no sync route found — has the path changed?"
+        unlimited = [
+            r.path
+            for r in sync_routes
+            if f"{r.endpoint.__module__}.{r.endpoint.__name__}" not in registered
+        ]
+        assert unlimited == [], f"sync routes with no rate limit: {unlimited}"
+
     async def test_a_history_import_marks_achievements_for_recompute(
         self, registry_engine, registry_session, user_engine, session,
         seeded_athlete, auth_headers,

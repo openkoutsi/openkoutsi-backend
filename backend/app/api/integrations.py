@@ -15,6 +15,7 @@ from datetime import date, datetime, time, timedelta, timezone
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query
 from fastapi.responses import RedirectResponse
+from starlette.requests import Request
 from jose import JWTError, jwt
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -23,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.api.consent import require_consent
 from backend.app.core.config import settings
 from backend.app.core.deps import get_ctx_and_session, get_ctx_session_athlete
+from backend.app.core.limiter import limiter
 from backend.app.core.scopes import pat_forbidden, pat_scopes
 from backend.app.db.registry import get_registry_session
 from backend.app.models.registry_orm import ProviderConnection
@@ -216,7 +218,9 @@ async def callback(
 # ── Sync ───────────────────────────────────────────────────────────────────
 
 @router.post("/{provider}/sync")
+@limiter.limit("6/hour")
 async def sync(
+    request: Request,
     provider: str,
     background_tasks: BackgroundTasks,
     ctx_session=Depends(get_ctx_and_session),
@@ -225,6 +229,13 @@ async def sync(
     """Trigger a full history import from the given provider in the background.
 
     Imports the full history into the user's own DB.
+
+    Rate-limited because the quota it spends belongs to the *application*, not
+    the athlete: one impatient user clicking sync repeatedly used to start a
+    fresh full backfill per click, against a budget shared with everyone else's
+    syncs and webhook imports (issue #67). The sync itself refuses to run twice
+    concurrently for the same (user, provider); this keeps the requests that
+    would ask it to from arriving in the first place.
     """
     ctx, _ = ctx_session
     _require_provider(provider)

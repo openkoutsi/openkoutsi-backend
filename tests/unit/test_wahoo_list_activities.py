@@ -130,3 +130,82 @@ async def test_list_activities_all_planned_returns_empty():
         activities = await client.list_activities("access-tok", page=1)
 
     assert activities == []
+
+
+# ── download_fit_file: a throttle is not an absence (issue #67) ──────────────
+
+
+class TestDownloadFitFileTellsThrottlingFromAbsence:
+    """``None`` is an answer this client gives about the *workout*.
+
+    It inspects statuses itself instead of raising for them, so before issue #67
+    a rate-limited download reached the sync pipeline looking exactly like "this
+    workout has no FIT" — and the workout was imported with no streams behind it.
+    """
+
+    def _client(self) -> WahooClient:
+        client = WahooClient()
+        client._fit_urls = {}
+        return client
+
+    async def test_a_404_still_means_there_is_no_file(self):
+        response = httpx.Response(
+            404, request=httpx.Request("GET", "https://api.wahooligan.test/fit")
+        )
+        with patch(
+            "backend.app.services.providers.wahoo.httpx.AsyncClient",
+            return_value=_mock_httpx_context(response),
+        ):
+            assert await self._client().download_fit_file("tok", "1") is None
+
+    async def test_a_429_raises_instead_of_reading_as_absence(self):
+        from backend.app.services.providers.throttling import ProviderThrottled
+
+        response = httpx.Response(
+            429,
+            headers={"Retry-After": "30"},
+            request=httpx.Request("GET", "https://api.wahooligan.test/fit"),
+        )
+        with patch(
+            "backend.app.services.providers.wahoo.httpx.AsyncClient",
+            return_value=_mock_httpx_context(response),
+        ):
+            with pytest.raises(ProviderThrottled) as exc:
+                await self._client().download_fit_file("tok", "1")
+        assert exc.value.status_code == 429
+        assert exc.value.retry_after == 30.0
+
+    async def test_a_5xx_raises_too(self):
+        from backend.app.services.providers.throttling import ProviderThrottled
+
+        response = httpx.Response(
+            503, request=httpx.Request("GET", "https://api.wahooligan.test/fit")
+        )
+        with patch(
+            "backend.app.services.providers.wahoo.httpx.AsyncClient",
+            return_value=_mock_httpx_context(response),
+        ):
+            with pytest.raises(ProviderThrottled):
+                await self._client().download_fit_file("tok", "1")
+
+    async def test_the_cdn_fallback_still_gets_its_turn(self):
+        """A throttled API endpoint must not skip the copy we can still fetch."""
+        throttled = httpx.Response(
+            429, request=httpx.Request("GET", "https://api.wahooligan.test/fit")
+        )
+        from_cdn = httpx.Response(
+            200,
+            content=b"FIT-BYTES",
+            request=httpx.Request("GET", "https://cdn.wahooligan.test/x.fit"),
+        )
+        client = WahooClient()
+        client._fit_urls = {"1": "https://cdn.wahooligan.test/x.fit"}
+
+        with patch(
+            "backend.app.services.providers.wahoo.httpx.AsyncClient",
+            side_effect=[
+                _mock_httpx_context(throttled),
+                _mock_httpx_context(from_cdn),
+            ],
+        ):
+            assert await client.download_fit_file("tok", "1") == b"FIT-BYTES"

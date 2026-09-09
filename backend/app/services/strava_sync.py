@@ -222,6 +222,10 @@ async def _process_event_for_user(
                         )
                         await recalculate_from(athlete.id, start_date, session)
                 else:
+                    # Nothing will ever read this source's streams, so nothing
+                    # should go back for them — settle it rather than leave a
+                    # NULL the next sync reads as an unfinished import (#67).
+                    new_src.streams_fetched_at = datetime.now(timezone.utc)
                     await session.commit()
                 # A higher-priority source can restate distance, elevation or
                 # sport type on an activity that already exists, and all three

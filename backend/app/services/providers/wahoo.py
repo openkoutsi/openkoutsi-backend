@@ -23,6 +23,7 @@ _dbg = logging.getLogger("wahoo.raw_debug")
 
 from backend.app.core.config import settings
 from backend.app.services.providers.base import BaseProviderClient, NormalizedActivity, ZoneData
+from backend.app.services.providers.throttling import ProviderThrottled, from_response
 
 _BASE = "https://api.wahooligan.com"
 _AUTH_URL = f"{_BASE}/oauth/authorize"
@@ -254,8 +255,17 @@ class WahooClient(BaseProviderClient):
     async def download_fit_file(
         self, access_token: str, external_id: str
     ) -> bytes | None:
-        """Download the raw FIT file for a Wahoo workout."""
+        """Download the raw FIT file for a Wahoo workout.
+
+        ``None`` means Wahoo has no FIT for this workout — a real answer the
+        caller acts on. A throttle or a 5xx is *not* that answer, and this method
+        inspects statuses itself rather than raising for them, so returning
+        ``None`` for one is how a rate-limited download used to arrive at the
+        sync pipeline as "this workout has no file" (issue #67). Those raise
+        instead, once the CDN fallback below has also had its turn.
+        """
         headers = {"Authorization": f"Bearer {access_token}"}
+        throttled: ProviderThrottled | None = None
         async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
             r = await client.get(
                 f"{_API_BASE}/workouts/{external_id}/fit_file",
@@ -268,6 +278,7 @@ class WahooClient(BaseProviderClient):
                     "download_fit_file workout_id=%s → HTTP %d from API endpoint: %s",
                     external_id, r.status_code, r.text[:300],
                 )
+                throttled = from_response(r, self.PROVIDER_NAME)
             else:
                 _dbg.debug(
                     "download_fit_file workout_id=%s → %d bytes via API endpoint",
@@ -291,9 +302,12 @@ class WahooClient(BaseProviderClient):
                     "download_fit_file workout_id=%s → CDN URL returned HTTP %d",
                     external_id, cdn_r.status_code,
                 )
+                throttled = throttled or from_response(cdn_r, self.PROVIDER_NAME)
         else:
             _dbg.debug("download_fit_file workout_id=%s → no CDN URL cached", external_id)
 
+        if throttled is not None:
+            raise throttled
         return None
 
     async def get_activity_streams(

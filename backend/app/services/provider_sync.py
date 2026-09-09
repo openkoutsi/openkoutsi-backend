@@ -53,6 +53,11 @@ from openkoutsi.fit_processing import (
 )
 from backend.app.services.providers.base import NormalizedActivity
 from backend.app.services.providers.registry import PROVIDERS
+from backend.app.services.providers.throttling import (
+    ProviderThrottled,
+    call_with_retry_after,
+    is_definitive,
+)
 from backend.app.services.weight import effective_weight_for, load_weight_log, w_per_kg
 from backend.app.services.aerobic_metrics import apply_aerobic_metrics
 from backend.app.services.commute import adopt_provider_flag, evaluate_activity
@@ -83,6 +88,22 @@ _NOTFETCHED = object()
 # exists to prevent. See `backend.app.db.leases`.
 _ACTIVITY_LEASE_TTL = timedelta(minutes=5)
 _ACTIVITY_LEASE_WAIT = 60.0
+
+# ── Backfill safety limits (issue #67) ───────────────────────────────────────
+
+# The pagination loop's stop. At 200 activities a page this is 20 000 workouts,
+# well past any real history, so it never fires on an honest sync — it exists
+# because the loop's only other exit is the provider returning an empty page,
+# and a provider that never does (a bug, a proxy, a mangled cursor) would
+# otherwise spin against a shared quota until the process died.
+_MAX_SYNC_PAGES = 100
+
+# How long one backfill may run before another may start in its place. Long
+# enough that a real import never trips it, and renewed at every page boundary
+# so the deadline tracks a sync that is demonstrably still working — see
+# `backend.app.db.leases` for why a lease is a crash-recovery bound rather than
+# a timeout.
+_SYNC_LEASE_TTL = timedelta(minutes=15)
 
 # Per-(user_id, athlete_id) lock serialising the dedup-window query and the
 # create/attach that follows, so two concurrent syncs cannot both see "no
@@ -414,7 +435,9 @@ async def sync_provider_activities(
     Import all activities from a provider that aren't already in the database.
 
     For each activity from the provider:
-      - If this (provider, external_id) pair already has an ActivitySource → skip.
+      - If this (provider, external_id) pair already has an ActivitySource →
+        skip, unless that source never got its detail data, in which case repair
+        it (issue #67).
       - If an Activity exists within ±5 min → attach a new ActivitySource and
         repopulate the Activity if the new source has higher priority.
       - Otherwise → create a new Activity + ActivitySource.
@@ -424,6 +447,12 @@ async def sync_provider_activities(
     while ``connection`` is a registry row, so refreshing a token needs a session
     this function does not have.
 
+    **One backfill at a time per (user, provider)** (issue #67). The provider
+    quota belongs to the *application*, not the athlete, so a duplicate backfill
+    spends everyone's headroom re-importing history that is already arriving.
+    A second call while one is running returns ``(0, None)`` rather than
+    starting one.
+
     Returns (count_created_or_updated, earliest_start_date).
     """
     provider_name = connection.provider
@@ -432,230 +461,507 @@ async def sync_provider_activities(
         log.error("No client registered for provider %s", provider_name)
         return 0, None
 
-    client = client_cls()
+    # ``leases.acquire``, not ``leases.hold``: ``hold`` deliberately runs the
+    # block anyway when the lease is busy, because the race it guards is rarer
+    # than the imports refusing would cost. Here that trade runs the other way —
+    # a second backfill of the same history is pure duplicated load on a quota
+    # shared by every athlete on the instance — so a busy lease means "already
+    # running", and ``wait=0`` because there is nothing worth queueing for.
+    lease_name = f"provider-sync:{provider_name}"
+    lease_token = await leases.acquire(
+        session, SyncLease, lease_name, ttl=_SYNC_LEASE_TTL, wait=0.0
+    )
+    if lease_token is None:
+        log.info(
+            "A %s sync is already running for user %s — not starting a second",
+            provider_name,
+            user_id,
+        )
+        return 0, None
 
+    failed = False
+    try:
+        return await _import_all_pages(
+            athlete,
+            client_cls(),
+            session,
+            user_id=user_id,
+            access_token=access_token,
+            provider_name=provider_name,
+            lease_name=lease_name,
+            lease_token=lease_token,
+        )
+    except BaseException:
+        failed = True
+        raise
+    finally:
+        try:
+            # Discard the failure's half-finished work *before* the release
+            # commits, and un-poison a session left in pending-rollback by a
+            # failed flush — the same order, for the same reasons, as
+            # ``leases.hold``.
+            if failed and session.in_transaction():
+                await session.rollback()
+            await leases.release(session, SyncLease, lease_name, lease_token)
+        except Exception:
+            # The deadline covers this: the lease frees itself shortly.
+            log.exception("Could not release the %s sync lease", provider_name)
+
+
+async def _import_all_pages(
+    athlete: Athlete,
+    client,
+    session: AsyncSession,
+    *,
+    user_id: str,
+    access_token: str,
+    provider_name: str,
+    lease_name: str,
+    lease_token: str,
+) -> tuple[int, date | None]:
+    """Walk the provider's pages and import what is not here yet.
+
+    Split out of :func:`sync_provider_activities` so the sync lease can wrap the
+    whole walk, and so the throttle handling has one place to live.
+
+    **A throttle ends the walk** (issue #67). Marching on through a 429 imported
+    every remaining activity without its streams, each one collecting another
+    429 on the way — permanently, because the skip above keyed on a source
+    merely existing. Stopping costs the rest of *this* run; the next sync picks
+    up where it left off, since everything imported so far is committed and
+    everything half-done is rolled back.
+    """
     count = 0
     earliest: date | None = None
     page = 1
 
-    while True:
-        activities = await client.list_activities(access_token, page)
-        if not activities:
-            break
-
-        for norm in activities:
-            ext_id = norm.external_id
-
-            # ── Already imported this (provider, external_id)? ────────────
-            src_result = await session.execute(
-                select(ActivitySource)
-                .join(Activity, ActivitySource.activity_id == Activity.id)
-                .where(
-                    Activity.athlete_id == athlete.id,
-                    ActivitySource.provider == provider_name,
-                    ActivitySource.external_id == ext_id,
+    try:
+        while True:
+            if page > _MAX_SYNC_PAGES:
+                log.error(
+                    "%s sync for user %s hit the %d-page cap — stopping. Either "
+                    "the history is implausibly long or the provider is not "
+                    "paginating; either way this is not a loop to keep running.",
+                    provider_name,
+                    user_id,
+                    _MAX_SYNC_PAGES,
                 )
+                break
+
+            activities = await call_with_retry_after(
+                client.list_activities,
+                access_token,
+                page,
+                provider=provider_name,
+                what=f"activity list page {page}",
             )
-            existing_src = src_result.scalar_one_or_none()
-            if existing_src is not None:
-                # Handle duration correction (moving_time preference)
-                act = existing_src.activity
-                if (
-                    norm.duration_s
-                    and act.duration_s
-                    and norm.duration_s < act.duration_s
-                ):
-                    old_dur = act.duration_s
-                    act.duration_s = norm.duration_s
-                    if act.weighted_power and athlete.ftp:
-                        new_tss, new_if = calculate_load(
-                            norm.duration_s,
-                            act.weighted_power,
-                            act.avg_hr,
-                            athlete.ftp,
-                            athlete.max_hr,
-                        )
-                        act.load = new_tss
-                        act.intensity = new_if
-                    elif act.avg_hr and athlete.max_hr:
-                        new_tss, _ = calculate_load(
-                            norm.duration_s,
-                            None,
-                            act.avg_hr,
-                            athlete.ftp,
-                            athlete.max_hr,
-                        )
-                        act.load = new_tss
-                    await session.commit()
-                    log.info(
-                        "Corrected duration for %s/%s: %ds → %ds",
-                        provider_name,
-                        ext_id,
-                        old_dur,
-                        norm.duration_s,
-                    )
-                continue
+            if not activities:
+                break
 
-            # ── Find-or-create under the activity-create guard ────────────
-            # The attach branch below downloads a FIT inside the block, which is
-            # what `_ACTIVITY_LEASE_TTL` is sized for.
-            async with activity_create_guard(session, user_id, athlete.id):
-                # ── Activity within the time window? ──────────────────────
-                if norm.start_time is not None:
-                    act_result = await session.execute(
-                        select(Activity).where(
-                            Activity.athlete_id == athlete.id,
-                            Activity.start_time >= norm.start_time - _DUPLICATE_WINDOW,
-                            Activity.start_time <= norm.start_time + _DUPLICATE_WINDOW,
-                        )
-                    )
-                    existing_act = act_result.scalar_one_or_none()
-                else:
-                    existing_act = None
+            for norm in activities:
+                ext_id = norm.external_id
 
-                if existing_act is not None:
-                    # Guard: if the existing activity already has a source from
-                    # this same provider (but a different external_id), these are
-                    # two distinct workouts that both fall inside the dedup window
-                    # (e.g. a warm-up and a main ride starting 3 min apart, both
-                    # on Strava). The (activity_id, provider) unique constraint
-                    # would fire if we tried to attach a second source from the
-                    # same provider to the same activity. Treat the incoming
-                    # activity as a separate workout by clearing existing_act and
-                    # falling through to the "new workout" path below.
-                    if any(s.provider == provider_name for s in existing_act.sources):
+                # ── Already imported this (provider, external_id)? ────────────
+                src_result = await session.execute(
+                    select(ActivitySource)
+                    .join(Activity, ActivitySource.activity_id == Activity.id)
+                    .where(
+                        Activity.athlete_id == athlete.id,
+                        ActivitySource.provider == provider_name,
+                        ActivitySource.external_id == ext_id,
+                    )
+                )
+                existing_src = src_result.scalar_one_or_none()
+                if existing_src is not None:
+                    # Handle duration correction (moving_time preference)
+                    act = existing_src.activity
+                    if (
+                        norm.duration_s
+                        and act.duration_s
+                        and norm.duration_s < act.duration_s
+                    ):
+                        old_dur = act.duration_s
+                        act.duration_s = norm.duration_s
+                        if act.weighted_power and athlete.ftp:
+                            new_tss, new_if = calculate_load(
+                                norm.duration_s,
+                                act.weighted_power,
+                                act.avg_hr,
+                                athlete.ftp,
+                                athlete.max_hr,
+                            )
+                            act.load = new_tss
+                            act.intensity = new_if
+                        elif act.avg_hr and athlete.max_hr:
+                            new_tss, _ = calculate_load(
+                                norm.duration_s,
+                                None,
+                                act.avg_hr,
+                                athlete.ftp,
+                                athlete.max_hr,
+                            )
+                            act.load = new_tss
+                        await session.commit()
+                        log.info(
+                            "Corrected duration for %s/%s: %ds → %ds",
+                            provider_name,
+                            ext_id,
+                            old_dur,
+                            norm.duration_s,
+                        )
+                    # An import whose detail fetch never landed is repaired here
+                    # rather than skipped for good (issue #67). Guarded, like the
+                    # attach path, because the repair can replace this activity's
+                    # streams wholesale.
+                    if existing_src.streams_fetched_at is None:
+                        async with activity_create_guard(session, user_id, athlete.id):
+                            repaired = await _repair_source(
+                                act,
+                                existing_src,
+                                norm,
+                                client,
+                                access_token,
+                                athlete,
+                                session,
+                                user_id=user_id,
+                                provider_name=provider_name,
+                            )
+                        # A repair restates this ride's load and intensity, so it
+                        # counts like any other update — that is what has the
+                        # caller recalculate the athlete's metrics from its date
+                        # instead of leaving them on the hollow ride's figures.
+                        if repaired:
+                            count += 1
+                            if act.start_time:
+                                day = (
+                                    act.start_time.date()
+                                    if hasattr(act.start_time, "date")
+                                    else act.start_time
+                                )
+                                if earliest is None or day < earliest:
+                                    earliest = day
+                    continue
+
+                # ── Find-or-create under the activity-create guard ────────────
+                # The attach branch below downloads a FIT inside the block, which is
+                # what `_ACTIVITY_LEASE_TTL` is sized for.
+                async with activity_create_guard(session, user_id, athlete.id):
+                    # ── Activity within the time window? ──────────────────────
+                    if norm.start_time is not None:
+                        act_result = await session.execute(
+                            select(Activity).where(
+                                Activity.athlete_id == athlete.id,
+                                Activity.start_time
+                                >= norm.start_time - _DUPLICATE_WINDOW,
+                                Activity.start_time
+                                <= norm.start_time + _DUPLICATE_WINDOW,
+                            )
+                        )
+                        existing_act = act_result.scalar_one_or_none()
+                    else:
                         existing_act = None
 
-                if existing_act is not None:
-                    # Same real-world workout from a different provider — attach a new source.
-                    new_src = ActivitySource(
-                        activity_id=existing_act.id,
+                    if existing_act is not None:
+                        # Guard: if the existing activity already has a source from
+                        # this same provider (but a different external_id), these are
+                        # two distinct workouts that both fall inside the dedup window
+                        # (e.g. a warm-up and a main ride starting 3 min apart, both
+                        # on Strava). The (activity_id, provider) unique constraint
+                        # would fire if we tried to attach a second source from the
+                        # same provider to the same activity. Treat the incoming
+                        # activity as a separate workout by clearing existing_act and
+                        # falling through to the "new workout" path below.
+                        if any(
+                            s.provider == provider_name for s in existing_act.sources
+                        ):
+                            existing_act = None
+
+                    if existing_act is not None:
+                        # Same real-world workout from a different provider — attach a new source.
+                        new_src = ActivitySource(
+                            activity_id=existing_act.id,
+                            provider=provider_name,
+                            external_id=ext_id,
+                        )
+                        session.add(new_src)
+                        await session.flush()
+
+                        # Pre-fetch FIT to determine actual priority before deciding
+                        # whether to repopulate. This avoids the bug where Wahoo with
+                        # FIT (priority=2) would be skipped because the pessimistic
+                        # priority (no FIT, priority=4) doesn't beat Strava (priority=3).
+                        prefetched_fit = await _prefetch_fit(
+                            client, access_token, norm, provider_name=provider_name
+                        )
+
+                        actual_priority = _source_priority(
+                            provider_name, prefetched_fit is not None
+                        )
+                        if actual_priority < _winning_priority(existing_act):
+                            await _repopulate_activity(
+                                existing_act,
+                                new_src,
+                                norm,
+                                client,
+                                access_token,
+                                athlete,
+                                session,
+                                user_id=user_id,
+                                prefetched_fit=prefetched_fit,
+                            )
+                            count += 1
+                            if existing_act.start_time:
+                                day = (
+                                    existing_act.start_time.date()
+                                    if hasattr(existing_act.start_time, "date")
+                                    else existing_act.start_time
+                                )
+                                if earliest is None or day < earliest:
+                                    earliest = day
+                        else:
+                            # Lower priority — just record the source, don't touch
+                            # metrics. Its detail data is settled by that decision:
+                            # nothing will ever read it, so nothing should re-fetch
+                            # it (issue #67).
+                            new_src.streams_fetched_at = datetime.now(timezone.utc)
+                            await session.commit()
+                        continue
+
+                    # ── New workout — create Activity + ActivitySource ─────────
+                    activity = Activity(
+                        athlete_id=athlete.id,
+                        name=norm.name,
+                        sport_type=norm.sport_type,
+                        start_time=norm.start_time,
+                        duration_s=norm.duration_s,
+                        distance_m=norm.distance_m,
+                        elevation_m=norm.elevation_m,
+                        avg_power=norm.avg_power,
+                        avg_hr=norm.avg_hr,
+                        max_hr=norm.max_hr,
+                        avg_speed_ms=norm.avg_speed_ms,
+                        avg_cadence=norm.avg_cadence,
+                        status="pending",
+                    )
+                    # The provider's own commute flag, where it has one, is the athlete's
+                    # assertion rather than our guess — so it is applied outright instead
+                    # of being suggested (issue #63). Done before the rules ever run, so
+                    # a flagged ride never also collects a pending suggestion.
+                    adopt_provider_flag(activity, norm.commute)
+                    session.add(activity)
+                    await session.flush()
+
+                    src = ActivitySource(
+                        activity_id=activity.id,
                         provider=provider_name,
                         external_id=ext_id,
                     )
-                    session.add(new_src)
+                    session.add(src)
                     await session.flush()
 
-                    # Pre-fetch FIT to determine actual priority before deciding
-                    # whether to repopulate. This avoids the bug where Wahoo with
-                    # FIT (priority=2) would be skipped because the pessimistic
-                    # priority (no FIT, priority=4) doesn't beat Strava (priority=3).
-                    prefetched_fit: bytes | None = None
-                    try:
-                        prefetched_fit = await client.download_fit_file(
-                            access_token, norm.external_id
-                        )
-                    except Exception:
-                        prefetched_fit = None
-
-                    actual_priority = _source_priority(
-                        provider_name, prefetched_fit is not None
-                    )
-                    if actual_priority < _winning_priority(existing_act):
-                        await _repopulate_activity(
-                            existing_act,
-                            new_src,
-                            norm,
-                            client,
-                            access_token,
-                            athlete,
-                            session,
-                            user_id=user_id,
-                            prefetched_fit=prefetched_fit,
-                        )
-                        count += 1
-                        if existing_act.start_time:
-                            day = (
-                                existing_act.start_time.date()
-                                if hasattr(existing_act.start_time, "date")
-                                else existing_act.start_time
-                            )
-                            if earliest is None or day < earliest:
-                                earliest = day
-                    else:
-                        # Lower priority — just record the source, don't touch metrics.
-                        await session.commit()
-                    continue
-
-                # ── New workout — create Activity + ActivitySource ─────────
-                activity = Activity(
-                    athlete_id=athlete.id,
-                    name=norm.name,
-                    sport_type=norm.sport_type,
-                    start_time=norm.start_time,
-                    duration_s=norm.duration_s,
-                    distance_m=norm.distance_m,
-                    elevation_m=norm.elevation_m,
-                    avg_power=norm.avg_power,
-                    avg_hr=norm.avg_hr,
-                    max_hr=norm.max_hr,
-                    avg_speed_ms=norm.avg_speed_ms,
-                    avg_cadence=norm.avg_cadence,
-                    status="pending",
-                )
-                # The provider's own commute flag, where it has one, is the athlete's
-                # assertion rather than our guess — so it is applied outright instead
-                # of being suggested (issue #63). Done before the rules ever run, so
-                # a flagged ride never also collects a pending suggestion.
-                adopt_provider_flag(activity, norm.commute)
-                session.add(activity)
-                await session.flush()
-
-                src = ActivitySource(
-                    activity_id=activity.id,
-                    provider=provider_name,
-                    external_id=ext_id,
-                )
-                session.add(src)
-                await session.flush()
-
-                # Commit inside the lock so the Activity is visible to any
-                # concurrent session that next acquires the lock and queries
-                # the dedup window.  _populate_activity will update the row
-                # again (metrics, streams, status) and commit a second time.
-                await session.commit()
-
-            # FIT download and stream processing happen outside the lock —
-            # they are slow I/O operations that don't need to be serialised.
-            await _populate_activity(
-                activity, src, norm, client, access_token, athlete, session, user_id=user_id
-            )
-            count += 1
-
-            if activity.start_time:
-                day = (
-                    activity.start_time.date()
-                    if hasattr(activity.start_time, "date")
-                    else activity.start_time
-                )
-                if earliest is None or day < earliest:
-                    earliest = day
-
-            app_cfg = athlete.app_settings or {}
-            if app_cfg.get("auto_analyze"):
-                from backend.app.services.llm_access import auto_analysis_allowed
-                from backend.app.services.llm_activity_analyzer import (
-                    analyze_activity_bg,
-                )
-
-                # Issue #9: skip the instance-paid auto analysis for denied users
-                # on a gated instance.
-                if await auto_analysis_allowed(user_id, athlete):
-                    run_id = begin_activity_analysis_run(activity)
+                    # Commit inside the lock so the Activity is visible to any
+                    # concurrent session that next acquires the lock and queries
+                    # the dedup window.  _populate_activity will update the row
+                    # again (metrics, streams, status) and commit a second time.
                     await session.commit()
-                    # Issue #43: a backlog import is the one path where an agent loop's
-                    # 4–6× calls is a real bill and nobody reads the output one by
-                    # one, so it always takes the single-shot prompt.
-                    asyncio.create_task(
-                        analyze_activity_bg(
-                            activity.id, athlete.id, user_id,
-                            allow_agentic=False, run_id=run_id,
-                        )
+
+                # FIT download and stream processing happen outside the lock —
+                # they are slow I/O operations that don't need to be serialised.
+                try:
+                    await _populate_activity(
+                        activity,
+                        src,
+                        norm,
+                        client,
+                        access_token,
+                        athlete,
+                        session,
+                        user_id=user_id,
+                    )
+                except ProviderThrottled:
+                    # The row above is already committed, so a throttle here is
+                    # exactly the case that used to leave a permanent activity
+                    # with no streams behind it. Take it back out: the workout
+                    # is simply not imported yet, and the next sync imports it
+                    # properly (issue #67).
+                    await _discard_partial_import(session, activity.id)
+                    raise
+                count += 1
+
+                if activity.start_time:
+                    day = (
+                        activity.start_time.date()
+                        if hasattr(activity.start_time, "date")
+                        else activity.start_time
+                    )
+                    if earliest is None or day < earliest:
+                        earliest = day
+
+                app_cfg = athlete.app_settings or {}
+                if app_cfg.get("auto_analyze"):
+                    from backend.app.services.llm_access import auto_analysis_allowed
+                    from backend.app.services.llm_activity_analyzer import (
+                        analyze_activity_bg,
                     )
 
-        page += 1
+                    # Issue #9: skip the instance-paid auto analysis for denied users
+                    # on a gated instance.
+                    if await auto_analysis_allowed(user_id, athlete):
+                        run_id = begin_activity_analysis_run(activity)
+                        await session.commit()
+                        # Issue #43: a backlog import is the one path where an agent loop's
+                        # 4–6× calls is a real bill and nobody reads the output one by
+                        # one, so it always takes the single-shot prompt.
+                        asyncio.create_task(
+                            analyze_activity_bg(
+                                activity.id, athlete.id, user_id,
+                                allow_agentic=False, run_id=run_id,
+                            )
+                        )
+
+            page += 1
+
+            # Push the deadline out at the page boundary, where everything is
+            # committed. A backfill can outlast any deadline short enough to
+            # recover promptly from a crashed one, and losing the lease means
+            # someone else is now importing this history — carrying on would be
+            # the duplicate the lease exists to prevent.
+            if not await leases.renew(
+                session, SyncLease, lease_name, lease_token, ttl=_SYNC_LEASE_TTL
+            ):
+                log.warning(
+                    "Lost the %s sync lease for user %s at page %d — stopping",
+                    provider_name,
+                    user_id,
+                    page - 1,
+                )
+                break
+    except ProviderThrottled as exc:
+        # Nothing half-written survives: the guard rolls its own block back, and
+        # this covers the paths outside it.
+        if session.in_transaction():
+            await session.rollback()
+        # A rollback — this one, or the one `_discard_partial_import` already did
+        # — expires every object the session has loaded, and in async SQLAlchemy
+        # reading an expired attribute outside an awaited call raises rather than
+        # quietly reloading. The caller goes straight on to read `athlete.id`, so
+        # hand it back an athlete it can actually read.
+        await session.refresh(athlete)
+        log.warning(
+            "%s stopped the sync for user %s after %d activities: %s. "
+            "The next sync resumes from here.",
+            provider_name,
+            user_id,
+            count,
+            exc,
+        )
 
     return count, earliest
+
+
+async def _prefetch_fit(
+    client, access_token: str, norm, *, provider_name: str
+) -> bytes | None:
+    """Download the FIT the priority decision needs, or None if there isn't one.
+
+    ``None`` means the provider has no FIT for this activity. A provider that is
+    throttling us has not said that — it has said nothing — so that case raises
+    :class:`ProviderThrottled` instead of quietly reading as absence (issue #67).
+    """
+    try:
+        return await call_with_retry_after(
+            client.download_fit_file,
+            access_token,
+            norm.external_id,
+            provider=provider_name,
+            what=f"FIT for {norm.external_id}",
+        )
+    except ProviderThrottled:
+        raise
+    except Exception:
+        return None
+
+
+async def _discard_partial_import(session: AsyncSession, activity_id: str) -> None:
+    """Remove an activity whose detail fetch was thrown out by the provider.
+
+    The Activity is committed inside the create guard, before its streams are
+    fetched, so that window is where a 429 used to leave a permanent row with no
+    power, HR or cadence behind it — one the sync's own skip would never look at
+    again. Deleting it is what makes the next sync import the workout rather than
+    step over the wreckage of this one.
+    """
+    await session.rollback()
+    result = await session.execute(select(Activity).where(Activity.id == activity_id))
+    orphan = result.scalar_one_or_none()
+    if orphan is None:
+        return
+    # Through the ORM, not a DELETE: ``PRAGMA foreign_keys`` is off on these
+    # connections, so the sources and streams go only if the relationship
+    # cascades take them.
+    await session.delete(orphan)
+    await session.commit()
+
+
+async def _repair_source(
+    activity: Activity,
+    src: ActivitySource,
+    norm,
+    client,
+    access_token: str,
+    athlete: Athlete,
+    session: AsyncSession,
+    *,
+    user_id: str,
+    provider_name: str,
+) -> bool:
+    """Fill in a source whose detail data never landed (issue #67).
+
+    Returns whether the activity's metrics were rebuilt from this source.
+
+    Reached from the skip path, for a source with no ``streams_fetched_at``:
+    either the fetch failed when it was imported, or it predates the column and
+    the migration found nothing to suggest it succeeded.
+
+    The priority contest is re-run rather than assumed, exactly as on the attach
+    path — a source that lost it has nothing to repair, because nothing reads its
+    data. Settling it either way is what bounds this: every source gets at most
+    one repair attempt per failure, not one per sync forever.
+    """
+    # `_winning_priority` reads `activity.sources`, and this Activity arrived via
+    # `ActivitySource.activity` — an eager load SQLAlchemy will not chain back
+    # into the collection it came from — so the collection has to be asked for.
+    await session.refresh(activity, ["sources"])
+
+    prefetched_fit = await _prefetch_fit(
+        client, access_token, norm, provider_name=provider_name
+    )
+    if _source_priority(provider_name, prefetched_fit is not None) <= _winning_priority(
+        activity
+    ):
+        await _repopulate_activity(
+            activity,
+            src,
+            norm,
+            client,
+            access_token,
+            athlete,
+            session,
+            user_id=user_id,
+            prefetched_fit=prefetched_fit,
+        )
+        log.info(
+            "Repaired %s/%s — it was imported without its stream data",
+            provider_name,
+            norm.external_id,
+        )
+        return True
+
+    # A higher-priority source populates this activity, so this one's detail data
+    # would never be read. Settle it so no later sync spends a request asking.
+    src.streams_fetched_at = datetime.now(timezone.utc)
+    await session.commit()
+    return False
 
 
 # ── Data population ───────────────────────────────────────────────────────────
@@ -812,17 +1118,22 @@ async def _fill_from_source(
     prefetched_fit: if _NOTFETCHED, the FIT will be downloaded here.
                     If None, FIT was already tried and failed (skip download).
                     If bytes, use the pre-fetched FIT data directly.
+
+    Stamps ``src.streams_fetched_at`` when the provider actually answered about
+    this activity's detail data, and leaves it NULL when it did not (issue #67).
+    That column is what the sync's skip path consults, so leaving it NULL is how
+    an import that fell short asks to be finished later instead of standing as a
+    complete one forever. Raises :class:`ProviderThrottled` rather than importing
+    anything at all when the provider is refusing us.
     """
     # Effective weight at the activity's date, for the W/kg on each power best.
     weight_log = await load_weight_log(athlete.id, session)
 
     # ── FIT-first path (Wahoo and any future FIT-capable provider) ──────
     if prefetched_fit is _NOTFETCHED:
-        fit_bytes: bytes | None = None
-        try:
-            fit_bytes = await client.download_fit_file(access_token, norm.external_id)
-        except Exception:
-            fit_bytes = None
+        fit_bytes = await _prefetch_fit(
+            client, access_token, norm, provider_name=src.provider
+        )
     else:
         fit_bytes = prefetched_fit  # type: ignore[assignment]
 
@@ -911,14 +1222,41 @@ async def _fill_from_source(
                 setattr(activity, key, value)
             activity.status = "processed"
 
+        # The file is in hand, so this source's detail data is resolved even
+        # where the parse failed — a re-fetch would download the same
+        # unparseable bytes (issue #67).
+        src.streams_fetched_at = datetime.now(timezone.utc)
         await session.commit()
         await session.refresh(activity)
         return
 
     # ── Stream-based fallback (Strava, providers without FIT download) ───
+    # `resolved` is what separates "this activity has no streams" from "we never
+    # got to ask" (issue #67): only the first settles the source, and an
+    # unsettled source is re-tried by the next sync instead of standing as a
+    # permanently hollow import. A throttle is neither — it propagates, and the
+    # caller stops the sync rather than importing this activity at all.
+    resolved = True
     try:
-        streams_raw = await client.get_activity_streams(access_token, norm.external_id)
-    except Exception:
+        streams_raw = await call_with_retry_after(
+            client.get_activity_streams,
+            access_token,
+            norm.external_id,
+            provider=src.provider,
+            what=f"streams for {norm.external_id}",
+        )
+    except ProviderThrottled:
+        raise
+    except Exception as exc:
+        resolved = is_definitive(exc)
+        if not resolved:
+            log.warning(
+                "Could not fetch %s streams for %s — importing the summary only; "
+                "a later sync will try again",
+                src.provider,
+                norm.external_id,
+                exc_info=True,
+            )
         streams_raw = {}
 
     # The provider client is responsible for putting its streams on the shared
@@ -946,6 +1284,8 @@ async def _fill_from_source(
         load_duration_s=norm.duration_s or 0,
     )
 
+    if resolved:
+        src.streams_fetched_at = datetime.now(timezone.utc)
     await session.commit()
     await session.refresh(activity)
 

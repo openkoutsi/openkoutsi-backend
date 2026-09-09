@@ -302,6 +302,19 @@ class ActivitySource(UserBase):
     # downloads is not the file they uploaded. Everything that reads the
     # original — the download endpoint, reprocess — dispatches on this instead.
     format: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # When this source's detail data (FIT file or stream API) was last resolved
+    # against the provider (issue #67). NULL means it never was: the fetch was
+    # tried and failed, or a higher-priority source has not yet made it moot.
+    #
+    # "Resolved" is not "returned something". A provider that answers "this
+    # activity has no streams" has resolved it, and asking again next sync gets
+    # the same answer forever. A provider that throttled us, or timed out, has
+    # not — and the difference is the whole point of the column: without it the
+    # skip at the top of the sync loop keyed on the *existence* of a source, so
+    # an activity imported behind a 429 stayed hollow permanently.
+    streams_fetched_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
 
     activity: Mapped["Activity"] = relationship("Activity", back_populates="sources", lazy="selectin")
