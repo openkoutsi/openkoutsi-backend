@@ -13,6 +13,7 @@ from backend.app.core.config import settings
 from backend.app.core.limiter import limiter
 from backend.app.core.scopes import build_access_map
 from backend.app.db.registry import init_registry_db
+from backend.app.db.api_usage import init_api_usage_db
 from backend.app.db.usage import init_usage_db
 
 log = logging.getLogger(__name__)
@@ -36,6 +37,7 @@ async def lifespan(app: FastAPI):
 
     await init_registry_db()
     await init_usage_db()
+    await init_api_usage_db()
 
     # Nothing that writes a `pending` LLM status survives this process (issue
     # #91): the auto-analyse paths run under `asyncio.create_task` and the

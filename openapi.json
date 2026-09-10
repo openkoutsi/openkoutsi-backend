@@ -1260,6 +1260,220 @@
         }
       }
     },
+    "/api/admin/quota/headroom": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Current third-party quota headroom per service",
+        "description": "Where we stand against each third party's quota, right now.\n\nThe reading is the provider's own, taken from the headers of the last\nresponse we saw, so it is exact rather than an approximation from our call\ncounts \u2014 but it is only as fresh as that call, and only valid inside the\nwindow it was observed in. Both facts travel with it: ``age_seconds`` for\nstaleness, and ``observed_in_window`` for a window that has since reset.\n\nThe query itself lives in :mod:`backend.app.services.quota` rather than here\nso the throttle in issue #67 can consume the same read model.\n\n**Not available to personal access tokens.**",
+        "operationId": "getQuotaHeadroom",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuotaHeadroomResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "x-personal-access-token": {
+          "allowed": false
+        }
+      }
+    },
+    "/api/admin/api-usage/summary": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Aggregate outbound third-party API usage",
+        "description": "Aggregate the third-party API-usage DB (issue #66).\n\n``group_by`` is one of ``day | week | month | service | endpoint | status |\noutcome | user``. One row is one **HTTP request** for Strava and Wahoo \u2014 not\none provider method call, which can be several \u2014 and one **message** for\nemail, which is how email is billed. ``endpoint`` is a normalised template,\nso grouping by it is safe to show and stays a small set.\n\n**Not available to personal access tokens.**",
+        "operationId": "getApiUsageSummary",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "From"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "To"
+            }
+          },
+          {
+            "name": "group_by",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "day",
+              "title": "Group By"
+            }
+          },
+          {
+            "name": "service",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Service"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiUsageSummaryResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-personal-access-token": {
+          "allowed": false
+        }
+      }
+    },
+    "/api/admin/webhook-usage/summary": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Aggregate inbound webhook deliveries per bridge",
+        "description": "Inbound webhook deliveries, counted at the bridges (issue #66).\n\nDeliveries never reach the backend: they land on the standalone bridges,\nwhich queue them for the backend to claim. So this proxies each bridge's\n``GET /stats`` rather than counting locally \u2014 the backend's own view would\ncount nacked redeliveries repeatedly and miss events shed by the queue\nceiling entirely, which is a different number wearing the same name.\n\nInbound volume spends none of our outbound quota, but it is a leading\nindicator of what will: each activity webhook triggers the fetches that do.\n\nA bridge that cannot be reached is named in ``unavailable`` rather than\nsilently contributing zero.\n\n**Not available to personal access tokens.**",
+        "operationId": "getWebhookUsageSummary",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "From"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "To"
+            }
+          },
+          {
+            "name": "group_by",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "day",
+              "title": "Group By"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WebhookUsageSummaryResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-personal-access-token": {
+          "allowed": false
+        }
+      }
+    },
     "/api/admin/users/{user_id}/tokens": {
       "get": {
         "tags": [
@@ -9749,6 +9963,110 @@
         "type": "object",
         "title": "AnalyzeBody"
       },
+      "ApiUsageBucket": {
+        "properties": {
+          "key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key"
+          },
+          "calls": {
+            "type": "integer",
+            "title": "Calls"
+          },
+          "ok": {
+            "type": "integer",
+            "title": "Ok"
+          },
+          "client_error": {
+            "type": "integer",
+            "title": "Client Error"
+          },
+          "server_error": {
+            "type": "integer",
+            "title": "Server Error"
+          },
+          "transport_error": {
+            "type": "integer",
+            "title": "Transport Error"
+          },
+          "rate_limited": {
+            "type": "integer",
+            "title": "Rate Limited"
+          },
+          "avg_duration_ms": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Duration Ms"
+          }
+        },
+        "type": "object",
+        "required": [
+          "calls",
+          "ok",
+          "client_error",
+          "server_error",
+          "transport_error",
+          "rate_limited"
+        ],
+        "title": "ApiUsageBucket",
+        "description": "One aggregation row of the third-party API-usage summary.\n\n``calls`` counts **HTTP requests** for the providers and **messages** for\nemail, which is the unit each is respectively limited and billed in. The\noutcome breakdown travels with the count because a bucket of 900 calls means\nsomething very different when 200 of them are ``rate_limited``."
+      },
+      "ApiUsageSummaryResponse": {
+        "properties": {
+          "group_by": {
+            "type": "string",
+            "title": "Group By"
+          },
+          "from": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "From"
+          },
+          "to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "To"
+          },
+          "buckets": {
+            "items": {
+              "$ref": "#/components/schemas/ApiUsageBucket"
+            },
+            "type": "array",
+            "title": "Buckets",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "group_by"
+        ],
+        "title": "ApiUsageSummaryResponse"
+      },
       "AssignHistoryResponse": {
         "properties": {
           "scanned": {
@@ -15474,6 +15792,146 @@
         "type": "object",
         "title": "PowerModelsResponse"
       },
+      "QuotaHeadroom": {
+        "properties": {
+          "service": {
+            "type": "string",
+            "title": "Service"
+          },
+          "observed_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Observed At"
+          },
+          "age_seconds": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Age Seconds"
+          },
+          "windows": {
+            "items": {
+              "$ref": "#/components/schemas/QuotaWindow"
+            },
+            "type": "array",
+            "title": "Windows",
+            "default": []
+          },
+          "last_rate_limited_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Rate Limited At"
+          }
+        },
+        "type": "object",
+        "required": [
+          "service"
+        ],
+        "title": "QuotaHeadroom",
+        "description": "A service's current headroom, with everything needed to read it honestly.\n\n``observed_at``/``age_seconds`` are present because headroom is a *now*\nnumber that is only as fresh as our last call: a caller must be able to say\n\"no observation in this window\" rather than implying a live reading."
+      },
+      "QuotaHeadroomResponse": {
+        "properties": {
+          "services": {
+            "items": {
+              "$ref": "#/components/schemas/QuotaHeadroom"
+            },
+            "type": "array",
+            "title": "Services",
+            "default": []
+          }
+        },
+        "type": "object",
+        "title": "QuotaHeadroomResponse"
+      },
+      "QuotaWindow": {
+        "properties": {
+          "window": {
+            "type": "string",
+            "title": "Window"
+          },
+          "scope": {
+            "type": "string",
+            "title": "Scope"
+          },
+          "usage": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Usage"
+          },
+          "limit": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Limit"
+          },
+          "remaining": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remaining"
+          },
+          "window_start": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Window Start"
+          },
+          "resets_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Resets At"
+          },
+          "observed_in_window": {
+            "type": "boolean",
+            "title": "Observed In Window"
+          }
+        },
+        "type": "object",
+        "required": [
+          "window",
+          "scope",
+          "window_start",
+          "resets_at",
+          "observed_in_window"
+        ],
+        "title": "QuotaWindow",
+        "description": "One quota window's standing for a service.\n\n``observed_in_window`` is the field that stops this panel lying. When it is\nfalse the window has rolled over since we last called the provider, so\n``usage`` is 0 by inference rather than by observation \u2014 the counter is\ngenuinely empty, and showing last window's number instead would report\nalarming usage against a window nothing has spent."
+      },
       "RangeSpec": {
         "properties": {
           "type": {
@@ -16499,6 +16957,104 @@
           "starts"
         ],
         "title": "WahooPushResponse"
+      },
+      "WebhookUsageBucket": {
+        "properties": {
+          "key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key"
+          },
+          "provider": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Provider"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "count": {
+            "type": "integer",
+            "title": "Count"
+          }
+        },
+        "type": "object",
+        "required": [
+          "count"
+        ],
+        "title": "WebhookUsageBucket",
+        "description": "One aggregation row of the inbound-webhook summary.\n\nCounted at the bridge, which is the only place that sees a delivery\n*received*. The backend's own view would count redeliveries repeatedly and\nmiss events shed by the queue ceiling entirely."
+      },
+      "WebhookUsageSummaryResponse": {
+        "properties": {
+          "group_by": {
+            "type": "string",
+            "title": "Group By"
+          },
+          "from": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "From"
+          },
+          "to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "To"
+          },
+          "buckets": {
+            "items": {
+              "$ref": "#/components/schemas/WebhookUsageBucket"
+            },
+            "type": "array",
+            "title": "Buckets",
+            "default": []
+          },
+          "unavailable": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Unavailable",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "group_by"
+        ],
+        "title": "WebhookUsageSummaryResponse"
       },
       "WeeklyZoneBucket": {
         "properties": {

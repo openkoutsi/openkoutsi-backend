@@ -13,6 +13,14 @@ for per-existing-user in-app notifications keyed by a per-user DB).
 """
 
 from backend.app.services.email.base import EmailProvider, OutboundMessage
+from backend.app.services.email.counting import (
+    KIND_EMAIL_CHANGE,
+    KIND_EMAIL_CHANGE_AUTHORISATION,
+    KIND_PASSWORD_RESET,
+    KIND_TOKEN_EXPIRY,
+    KIND_VERIFICATION,
+    email_kind,
+)
 from backend.app.services.email.rendering import render_transactional_email
 
 _VERIFY_SUBJECT = "Confirm your email"
@@ -39,9 +47,10 @@ async def send_verification_email(
             "If you didn't create an account, you can safely ignore this email."
         ),
     )
-    return await provider.send(
-        OutboundMessage(to=to, subject=_VERIFY_SUBJECT, html=html, text=text)
-    )
+    with email_kind(KIND_VERIFICATION):
+        return await provider.send(
+            OutboundMessage(to=to, subject=_VERIFY_SUBJECT, html=html, text=text)
+        )
 
 
 async def send_email_change_email(
@@ -69,9 +78,10 @@ async def send_email_change_email(
             "nothing changes until the link is opened."
         ),
     )
-    return await provider.send(
-        OutboundMessage(to=to, subject=_EMAIL_CHANGE_SUBJECT, html=html, text=text)
-    )
+    with email_kind(KIND_EMAIL_CHANGE):
+        return await provider.send(
+            OutboundMessage(to=to, subject=_EMAIL_CHANGE_SUBJECT, html=html, text=text)
+        )
 
 
 async def send_email_change_authorisation(
@@ -106,11 +116,12 @@ async def send_email_change_authorisation(
             "password now, because whoever asked knows it."
         ),
     )
-    return await provider.send(
-        OutboundMessage(
-            to=to, subject=_EMAIL_CHANGE_AUTHORISE_SUBJECT, html=html, text=text
+    with email_kind(KIND_EMAIL_CHANGE_AUTHORISATION):
+        return await provider.send(
+            OutboundMessage(
+                to=to, subject=_EMAIL_CHANGE_AUTHORISE_SUBJECT, html=html, text=text
+            )
         )
-    )
 
 
 async def send_password_reset_email(
@@ -131,9 +142,10 @@ async def send_password_reset_email(
             "email — your password won't change."
         ),
     )
-    return await provider.send(
-        OutboundMessage(to=to, subject=_RESET_SUBJECT, html=html, text=text)
-    )
+    with email_kind(KIND_PASSWORD_RESET):
+        return await provider.send(
+            OutboundMessage(to=to, subject=_RESET_SUBJECT, html=html, text=text)
+        )
 
 
 async def send_token_expiry_email(
@@ -182,6 +194,7 @@ async def send_token_expiry_email(
             "in-app notification will still be sent."
         ),
     )
-    return await provider.send(
-        OutboundMessage(to=to, subject=_TOKEN_EXPIRY_SUBJECT, html=html, text=text)
-    )
+    with email_kind(KIND_TOKEN_EXPIRY):
+        return await provider.send(
+            OutboundMessage(to=to, subject=_TOKEN_EXPIRY_SUBJECT, html=html, text=text)
+        )

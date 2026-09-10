@@ -16,6 +16,7 @@ import pytest
 
 from backend.app.core.config import Settings
 from backend.app.services.email import (
+    CountingEmailProvider,
     EmailConfigurationError,
     EmailError,
     EuromailProvider,
@@ -38,7 +39,10 @@ def _settings(**overrides) -> Settings:
 
 def test_factory_returns_euromail_when_selected():
     provider = build_email_provider(_settings(email_provider="euromail"))
-    assert isinstance(provider, EuromailProvider)
+    # The factory wraps its choice in the usage-counting decorator (issue #66),
+    # so the selection is asserted through the wrapper rather than on it.
+    assert isinstance(provider, CountingEmailProvider)
+    assert isinstance(provider.wrapped, EuromailProvider)
     assert provider.PROVIDER_NAME == "euromail"
 
 

@@ -27,6 +27,19 @@ class UsageBase(DeclarativeBase):
     pass
 
 
+class ApiUsageBase(DeclarativeBase):
+    """Base for the dedicated third-party API-usage DB (issue #66).
+
+    A sibling of :class:`UsageBase`, not an extension of it: one append-only row
+    per outbound HTTP request to a third party (Strava, Wahoo) and per outbound
+    email. Its volume profile is an order of magnitude away from the LLM table's
+    — machine-driven bursts during a backfill against one row per deliberate
+    user action — so it gets its own file and its own retention policy, and
+    ``llm_usage.db`` keeps its accurate name.
+    """
+    pass
+
+
 def _set_wal_mode(dbapi_conn, _connection_record) -> None:
     cursor = dbapi_conn.cursor()
     cursor.execute("PRAGMA journal_mode=WAL")

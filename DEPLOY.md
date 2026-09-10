@@ -426,18 +426,46 @@ applies pending migrations on start, so there is no checkpoint after that.
 
 #### Registry and usage databases
 
-The registry DB and the dedicated **LLM-usage** DB (issue #9) are created
-automatically on first startup. When upgrading an existing deployment, apply
-their Alembic migrations:
+The registry DB, the dedicated **LLM-usage** DB (issue #9) and the dedicated
+**third-party API-usage** DB (issue #66) are created automatically on first
+startup. When upgrading an existing deployment, apply their Alembic migrations:
 
 ```bash
-uv run alembic -c backend/alembic-registry.ini upgrade head   # e.g. adds llm_entitlements
+uv run alembic -c backend/alembic-registry.ini upgrade head    # e.g. adds llm_entitlements
 uv run alembic -c backend/alembic-usage.ini upgrade head       # the separate llm_usage DB
+uv run alembic -c backend/alembic-api-usage.ini upgrade head   # the separate api_usage DB
 ```
 
-The usage DB path defaults to `<DATA_DIR>/llm_usage.db`; override it with
-`LLM_USAGE_DB`. Its rows are append-only and hold no registry foreign keys, so
-it can be pruned/rotated independently.
+The LLM-usage DB path defaults to `<DATA_DIR>/llm_usage.db`; override it with
+`LLM_USAGE_DB`. The API-usage DB path defaults to `<DATA_DIR>/api_usage.db`;
+override it with `API_USAGE_DB`. Both hold append-only rows with no registry
+foreign keys, so each can be pruned/rotated independently — and they are
+separate files precisely so they can be pruned on *different* schedules: an
+API-usage row is written per outbound HTTP request, so a large history backfill
+writes thousands in a burst, while an LLM-usage row is written per deliberate
+user action.
+
+Both live under `DATA_DIR`, so the existing `rsync -a` of the data directory
+already carries them; neither needs a backup step of its own.
+
+> **Neither is applied by `docker-entrypoint.sh`.** The entrypoint auto-applies
+> only the *registry* chain. Both usage DBs are created by `create_all` at
+> startup, and their Alembic chains are applied by hand as above — the new one
+> follows the existing pattern exactly, so there is no entrypoint change.
+
+##### Growth and pruning
+
+`api_usage` has no automatic prune (neither does `llm_usage`). A full history
+import is roughly one row per activity for streams plus FIT downloads plus
+pagination — a few thousand rows for a large backfill, far less in steady state,
+which SQLite handles comfortably. To trim by hand:
+
+```bash
+sqlite3 "$DATA_DIR/api_usage.db" \
+  "DELETE FROM api_usage WHERE created_at < datetime('now', '-400 days'); VACUUM;"
+```
+
+Keep at least a year if you want year-over-year comparisons in the admin tables.
 
 > **Upgrading from a multi-team (v1) deployment?** openkoutsi v2 removes the team
 > layer in favour of a single instance with per-user databases. Migrate existing

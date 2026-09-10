@@ -31,6 +31,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
 
 # ── Settings ──────────────────────────────────────────────────────────────
@@ -134,6 +135,61 @@ class WebhookEvent(Base):
     )
     attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0,
                                           server_default="0")
+
+
+class WebhookStat(Base):
+    """Aggregate delivery counts, one row per (UTC day, outcome) (issue #66).
+
+    Counters rather than per-event history, and **never pruned**, for two
+    reasons. The bridges are the only publicly exposed component and are
+    deliberately data-light, so per-event history stays out of the public box;
+    and `_cleanup_loop` deletes events after seven days on purpose, which means
+    the per-month figure the issue asks for simply cannot be derived from
+    `webhook_events`. A handful of rows a day survives that prune indefinitely.
+
+    This counts deliveries **received**, which is not the same number as events
+    the main app processes: nacked events are redelivered and would be counted
+    repeatedly, and events shed by the queue ceiling would never be counted at
+    all.
+    """
+
+    __tablename__ = "webhook_stats"
+
+    day: Mapped[str] = mapped_column(String, primary_key=True)      # YYYY-MM-DD, UTC
+    outcome: Mapped[str] = mapped_column(String, primary_key=True)
+    count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
+#: Outcomes counted on the webhook path. `ignored` is kept apart from `rejected`
+#: because the providers routinely send event types we do not queue, and showing
+#: those as rejections would read as a fault where there is none.
+OUTCOME_ACCEPTED = "accepted"
+OUTCOME_DUPLICATE = "duplicate"
+OUTCOME_IGNORED = "ignored"
+OUTCOME_REJECTED = "rejected"
+OUTCOME_VERIFICATION = "verification"
+
+
+async def _count_webhook(outcome: str) -> None:
+    """Increment today's counter for *outcome*. Never raises.
+
+    A failed counter must never turn into a rejected delivery: the providers do
+    not resend on our account, so losing the event to protect the statistic
+    would be exactly backwards.
+    """
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    try:
+        async with AsyncSessionLocal() as session:
+            stmt = sqlite_insert(WebhookStat).values(
+                day=day, outcome=outcome, count=1
+            ).on_conflict_do_update(
+                index_elements=["day", "outcome"],
+                set_={"count": WebhookStat.count + 1},
+            )
+            await session.execute(stmt)
+            await session.commit()
+    except Exception:
+        log.warning("Could not record webhook stat (%s)", outcome, exc_info=True)
 
 
 engine = create_async_engine(f"sqlite+aiosqlite:///{settings.database_path}")
@@ -303,8 +359,12 @@ async def hub_challenge(request: Request):
     if mode == "subscribe" and _secret_equals(
         verify_token or "", settings.bridge_secret
     ):
+        # Counted apart from the event outcomes so the handshake does not
+        # inflate the delivery count (issue #66).
+        await _count_webhook(OUTCOME_VERIFICATION)
         return {"hub.challenge": challenge}
 
+    await _count_webhook(OUTCOME_REJECTED)
     raise HTTPException(status_code=403, detail="Invalid verify_token")
 
 
@@ -328,21 +388,27 @@ async def receive_webhook(request: Request):
         # Reported separately from a bad signature so an operator who never set
         # the secret sees that, rather than a signature error they can't explain.
         if not settings.strava_client_secret:
+            await _count_webhook(OUTCOME_REJECTED)
             raise HTTPException(
                 status_code=403, detail="Strava webhooks not configured"
             )
 
         sig = request.headers.get("x-hub-signature-256")
         if not _verify_hmac_256(body, sig):
+            await _count_webhook(OUTCOME_REJECTED)
             raise HTTPException(status_code=401, detail="Invalid signature")
 
     try:
         payload = json.loads(body)
     except json.JSONDecodeError:
+        await _count_webhook(OUTCOME_REJECTED)
         raise HTTPException(status_code=400, detail="Invalid JSON")
 
     # Only store activity events
     if payload.get("object_type") != "activity":
+        # A real delivery we deliberately do not queue (Strava also sends
+        # athlete deauthorisations here) — not a rejection.
+        await _count_webhook(OUTCOME_IGNORED)
         return Response(status_code=200)
 
     event = WebhookEvent(
@@ -367,13 +433,43 @@ async def receive_webhook(request: Request):
                 pending,
                 settings.max_queue_events,
             )
+            await _count_webhook(OUTCOME_REJECTED)
             raise HTTPException(
                 status_code=503, detail="Event queue is full; try again later"
             )
         session.add(event)
         await session.commit()
 
+    await _count_webhook(OUTCOME_ACCEPTED)
     return Response(status_code=200)
+
+
+@app.get("/stats")
+async def webhook_stats(request: Request):
+    """Aggregate delivery counts per UTC day and outcome. Auth: Bearer bridge_secret.
+
+    Proxied by the main app's admin API (issue #66). These counters outlive the
+    seven-day event prune, which is what makes a per-month figure answerable at
+    all.
+    """
+    _require_bearer(request)
+    from_day = request.query_params.get("from")
+    to_day = request.query_params.get("to")
+    stmt = select(WebhookStat.day, WebhookStat.outcome, WebhookStat.count)
+    if from_day:
+        stmt = stmt.where(WebhookStat.day >= from_day)
+    if to_day:
+        stmt = stmt.where(WebhookStat.day <= to_day)
+    stmt = stmt.order_by(WebhookStat.day, WebhookStat.outcome)
+    async with AsyncSessionLocal() as session:
+        rows = (await session.execute(stmt)).all()
+    return {
+        "provider": "strava",
+        "stats": [
+            {"day": day, "outcome": outcome, "count": count}
+            for day, outcome, count in rows
+        ],
+    }
 
 
 # ── Polling endpoints (called by main app) ────────────────────────────────

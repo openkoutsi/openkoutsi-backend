@@ -136,6 +136,14 @@ class Settings(BaseSettings):
     # the registry DB. Leave empty to default to ``<data_dir>/llm_usage.db``.
     llm_usage_db: str = ""
 
+    # Path to the dedicated third-party API-usage database (append-only per-call
+    # accounting for outbound Strava/Wahoo requests and outbound email, plus the
+    # rate-limit headroom readings those responses carry; issue #66). A sibling
+    # of the LLM-usage file rather than a table inside it: machine-driven burst
+    # volume wants its own retention. Leave empty to default to
+    # ``<data_dir>/api_usage.db``.
+    api_usage_db: str = ""
+
     # Field-level encryption key for sensitive DB columns (Fernet/base64-urlsafe, 32 bytes).
     # Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
     # Required unless `allow_plaintext_secrets` is set — see the validator below.
@@ -231,6 +239,16 @@ class Settings(BaseSettings):
         if self.llm_usage_db:
             return self.llm_usage_db
         return str(Path(self.data_dir) / "llm_usage.db")
+
+    @property
+    def api_usage_db_path(self) -> str:
+        """Filesystem path of the dedicated third-party API-usage database.
+
+        Configurable via ``API_USAGE_DB``; defaults to ``<data_dir>/api_usage.db``.
+        """
+        if self.api_usage_db:
+            return self.api_usage_db
+        return str(Path(self.data_dir) / "api_usage.db")
 
     def user_data_dir(self, user_id: str) -> Path:
         return Path(self.data_dir) / "users" / user_id

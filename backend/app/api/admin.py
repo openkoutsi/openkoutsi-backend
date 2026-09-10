@@ -12,6 +12,7 @@ import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -23,8 +24,15 @@ from backend.app.core.file_encryption import encrypt_instance_secret
 from backend.app.core.limiter import limiter
 from backend.app.core.scopes import pat_forbidden
 from backend.app.db.registry import get_registry_session
+from backend.app.api.usage_query import (
+    TIME_BUCKETS,
+    parse_usage_dt,
+    time_bucket_expr,
+)
+from backend.app.db.api_usage import get_api_usage_session
 from backend.app.db.usage import get_usage_session
 from backend.app.db.user_session import delete_user_db
+from backend.app.models.api_usage_orm import ApiUsage
 from backend.app.models.usage_orm import LlmUsage
 from backend.app.models.registry_orm import (
     EmailChangeToken,
@@ -37,6 +45,8 @@ from backend.app.models.registry_orm import (
     User,
 )
 from backend.app.schemas.admin import (
+    ApiUsageBucket,
+    ApiUsageSummaryResponse,
     InstanceSettingsPatch,
     InstanceSettingsResponse,
     InvitationCreate,
@@ -48,13 +58,20 @@ from backend.app.schemas.admin import (
     LlmUsageBucket,
     LlmUsageSummaryResponse,
     PasswordResetLinkResponse,
+    QuotaHeadroom,
+    QuotaHeadroomResponse,
+    QuotaWindow,
     UserResponse,
     UserEmailUpdate,
     UserRolesUpdate,
+    WebhookUsageBucket,
+    WebhookUsageSummaryResponse,
 )
 from backend.app.schemas.tokens import AdminPersonalAccessTokenResponse
 from backend.app.services import notifications
 from backend.app.services import personal_access_tokens as pat
+from backend.app.services import quota
+from backend.app.services.bridge_client import BridgeClient
 from backend.app.services.llm_access import is_entitled
 from backend.app.schemas.pagination import Page, PageParams, paginate_params
 
@@ -618,26 +635,6 @@ async def set_llm_entitlement(
     return _user_response(user, ent)
 
 
-# SQLite strftime formats for the time-bucketed group_by values.
-_USAGE_TIME_BUCKETS = {
-    "day": "%Y-%m-%d",
-    "week": "%Y-W%W",
-    "month": "%Y-%m",
-}
-
-
-def _parse_usage_dt(raw: str | None):
-    if not raw:
-        return None
-    try:
-        return datetime.fromisoformat(raw)
-    except ValueError:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid date/time '{raw}' — use ISO format (YYYY-MM-DD).",
-        )
-
-
 @router.get("/llm-usage/summary", response_model=LlmUsageSummaryResponse,
             operation_id="getLlmUsageSummary", summary="Aggregate instance-paid LLM usage")
 async def llm_usage_summary(
@@ -657,8 +654,8 @@ async def llm_usage_summary(
     "average LLM cost per user" question. Every row is instance-paid; BYOK calls
     are never recorded, so no filter is needed.
     """
-    if group_by in _USAGE_TIME_BUCKETS:
-        key_expr = func.strftime(_USAGE_TIME_BUCKETS[group_by], LlmUsage.created_at)
+    if group_by in TIME_BUCKETS:
+        key_expr = time_bucket_expr(group_by, LlmUsage.created_at)
     elif group_by == "user":
         key_expr = LlmUsage.user_id
     elif group_by == "provider":
@@ -693,8 +690,8 @@ async def llm_usage_summary(
         unknown,
     )
 
-    from_dt = _parse_usage_dt(from_)
-    to_dt = _parse_usage_dt(to)
+    from_dt = parse_usage_dt(from_)
+    to_dt = parse_usage_dt(to)
     if from_dt is not None:
         stmt = stmt.where(LlmUsage.created_at >= from_dt)
     if to_dt is not None:
@@ -718,6 +715,240 @@ async def llm_usage_summary(
     ]
     return LlmUsageSummaryResponse(group_by=group_by, from_=from_, to=to, buckets=buckets)
 
+
+# ── Third-party API usage and quota headroom (issue #66) ────────────────────
+#
+# Two views, answering two different questions, and the distinction is the whole
+# design. **Headroom** ("can we start a big import right now?") comes from the
+# provider's own rate-limit response headers, which report our standing
+# authoritatively; calendar buckets cannot answer it, because Strava's quota
+# windows are 15 minutes and a day, not a month. **Volume** ("are we trending
+# toward the ceiling, and what does email cost?") comes from counting our own
+# rows.
+
+
+@router.get("/quota/headroom", response_model=QuotaHeadroomResponse,
+            operation_id="getQuotaHeadroom",
+            summary="Current third-party quota headroom per service")
+async def quota_headroom(
+    _: UserContext = Depends(require_admin),
+    session: AsyncSession = Depends(get_api_usage_session),
+):
+    """Where we stand against each third party's quota, right now.
+
+    The reading is the provider's own, taken from the headers of the last
+    response we saw, so it is exact rather than an approximation from our call
+    counts — but it is only as fresh as that call, and only valid inside the
+    window it was observed in. Both facts travel with it: ``age_seconds`` for
+    staleness, and ``observed_in_window`` for a window that has since reset.
+
+    The query itself lives in :mod:`backend.app.services.quota` rather than here
+    so the throttle in issue #67 can consume the same read model.
+    """
+    services = await quota.all_headroom(session=session)
+    return QuotaHeadroomResponse(
+        services=[
+            QuotaHeadroom(
+                service=s.service,
+                observed_at=s.observed_at,
+                age_seconds=s.age_seconds,
+                last_rate_limited_at=s.last_rate_limited_at,
+                windows=[
+                    QuotaWindow(
+                        window=w.window,
+                        scope=w.scope,
+                        usage=w.usage,
+                        limit=w.limit,
+                        remaining=w.remaining,
+                        window_start=w.window_start,
+                        resets_at=w.resets_at,
+                        observed_in_window=w.observed_in_window,
+                    )
+                    for w in s.windows
+                ],
+            )
+            for s in services
+        ]
+    )
+
+
+_API_USAGE_GROUP_COLUMNS = {
+    "service": ApiUsage.service,
+    "endpoint": ApiUsage.endpoint,
+    "status": ApiUsage.status_code,
+    "outcome": ApiUsage.outcome,
+    "user": ApiUsage.user_id,
+}
+
+
+def _outcome_count(value: str):
+    return func.sum(case((ApiUsage.outcome == value, 1), else_=0))
+
+
+@router.get("/api-usage/summary", response_model=ApiUsageSummaryResponse,
+            operation_id="getApiUsageSummary",
+            summary="Aggregate outbound third-party API usage")
+async def api_usage_summary(
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = Query(None, alias="to"),
+    group_by: str = Query("day"),
+    service: str | None = Query(None),
+    _: UserContext = Depends(require_admin),
+    session: AsyncSession = Depends(get_api_usage_session),
+):
+    """Aggregate the third-party API-usage DB (issue #66).
+
+    ``group_by`` is one of ``day | week | month | service | endpoint | status |
+    outcome | user``. One row is one **HTTP request** for Strava and Wahoo — not
+    one provider method call, which can be several — and one **message** for
+    email, which is how email is billed. ``endpoint`` is a normalised template,
+    so grouping by it is safe to show and stays a small set.
+    """
+    if group_by in TIME_BUCKETS:
+        key_expr = time_bucket_expr(group_by, ApiUsage.created_at)
+    elif group_by in _API_USAGE_GROUP_COLUMNS:
+        key_expr = _API_USAGE_GROUP_COLUMNS[group_by]
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "group_by must be one of service, endpoint, status, outcome, "
+                "user, day, week, month."
+            ),
+        )
+
+    stmt = select(
+        key_expr.label("bucket"),
+        func.count().label("calls"),
+        _outcome_count("ok"),
+        _outcome_count("client_error"),
+        _outcome_count("server_error"),
+        _outcome_count("transport_error"),
+        _outcome_count("rate_limited"),
+        func.avg(ApiUsage.duration_ms),
+    )
+
+    from_dt = parse_usage_dt(from_)
+    to_dt = parse_usage_dt(to)
+    if from_dt is not None:
+        stmt = stmt.where(ApiUsage.created_at >= from_dt)
+    if to_dt is not None:
+        stmt = stmt.where(ApiUsage.created_at <= to_dt)
+    if service:
+        stmt = stmt.where(ApiUsage.service == service)
+
+    stmt = stmt.group_by(key_expr).order_by(key_expr)
+
+    rows = (await session.execute(stmt)).all()
+    buckets = [
+        ApiUsageBucket(
+            key=None if row[0] is None else str(row[0]),
+            calls=row[1],
+            ok=int(row[2] or 0),
+            client_error=int(row[3] or 0),
+            server_error=int(row[4] or 0),
+            transport_error=int(row[5] or 0),
+            rate_limited=int(row[6] or 0),
+            avg_duration_ms=None if row[7] is None else int(row[7]),
+        )
+        for row in rows
+    ]
+    return ApiUsageSummaryResponse(
+        group_by=group_by, from_=from_, to=to, buckets=buckets
+    )
+
+_WEBHOOK_GROUP_BY = {"day", "week", "month", "provider", "outcome"}
+
+
+def _webhook_bucket_key(group_by: str, day: str, provider: str, outcome: str) -> str:
+    """The bucket a bridge counter row falls in.
+
+    Bucketing happens here rather than in SQL because the rows arrive from the
+    bridges over HTTP, already aggregated per day. ``week`` reproduces SQLite's
+    ``%W`` so a week means the same week as in the other two summaries.
+    """
+    if group_by == "provider":
+        return provider
+    if group_by == "outcome":
+        return outcome
+    if group_by == "day":
+        return day
+    parsed = datetime.strptime(day, "%Y-%m-%d")
+    if group_by == "month":
+        return parsed.strftime("%Y-%m")
+    return parsed.strftime("%Y-W%W")
+
+
+@router.get("/webhook-usage/summary", response_model=WebhookUsageSummaryResponse,
+            operation_id="getWebhookUsageSummary",
+            summary="Aggregate inbound webhook deliveries per bridge")
+async def webhook_usage_summary(
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = Query(None, alias="to"),
+    group_by: str = Query("day"),
+    _: UserContext = Depends(require_admin),
+):
+    """Inbound webhook deliveries, counted at the bridges (issue #66).
+
+    Deliveries never reach the backend: they land on the standalone bridges,
+    which queue them for the backend to claim. So this proxies each bridge's
+    ``GET /stats`` rather than counting locally — the backend's own view would
+    count nacked redeliveries repeatedly and miss events shed by the queue
+    ceiling entirely, which is a different number wearing the same name.
+
+    Inbound volume spends none of our outbound quota, but it is a leading
+    indicator of what will: each activity webhook triggers the fetches that do.
+
+    A bridge that cannot be reached is named in ``unavailable`` rather than
+    silently contributing zero.
+    """
+    if group_by not in _WEBHOOK_GROUP_BY:
+        raise HTTPException(
+            status_code=400,
+            detail="group_by must be one of provider, outcome, day, week, month.",
+        )
+    # Validated for consistency with the other summaries, and passed to the
+    # bridges as plain day strings — their counters are keyed by UTC day.
+    parse_usage_dt(from_)
+    parse_usage_dt(to)
+
+    configured = [
+        ("strava", settings.bridge_url, settings.bridge_secret),
+        ("wahoo", settings.wahoo_bridge_url, settings.wahoo_bridge_secret),
+    ]
+    counts: dict[tuple[str, str, str], int] = {}
+    unavailable: list[str] = []
+
+    async with httpx.AsyncClient(timeout=10.0) as http:
+        for provider, url, secret in configured:
+            if not url or not secret:
+                continue
+            rows = await BridgeClient(http, url, secret).stats(
+                from_day=from_, to_day=to
+            )
+            if rows is None:
+                unavailable.append(provider)
+                continue
+            for row in rows:
+                day = str(row.get("day", ""))
+                outcome = str(row.get("outcome", "unknown"))
+                try:
+                    key = _webhook_bucket_key(group_by, day, provider, outcome)
+                except ValueError:
+                    # A day string the bridge wrote that we cannot parse. Skip
+                    # the row rather than failing the whole table for it.
+                    continue
+                slot = (key, provider, outcome)
+                counts[slot] = counts.get(slot, 0) + int(row.get("count", 0) or 0)
+
+    buckets = [
+        WebhookUsageBucket(key=key, provider=provider, outcome=outcome, count=count)
+        for (key, provider, outcome), count in sorted(counts.items())
+    ]
+    return WebhookUsageSummaryResponse(
+        group_by=group_by, from_=from_, to=to, buckets=buckets,
+        unavailable=unavailable,
+    )
 
 # ── Personal access tokens (instance admin, issue #46) ──────────────────────
 #
