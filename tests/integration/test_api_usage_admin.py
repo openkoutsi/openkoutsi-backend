@@ -137,6 +137,16 @@ class TestApiUsageSummary:
         (bucket,) = resp.json()["buckets"]
         assert bucket["calls"] == 1
 
+    async def test_to_filter_excludes_later_rows(self, client, auth_headers, api_usage_db):
+        await _add(api_usage_db)
+        await _add(api_usage_db, created_at=OBSERVED_AT + timedelta(days=40))
+        resp = await client.get(
+            "/api/admin/api-usage/summary?group_by=service&to=2026-09-11",
+            headers=auth_headers,
+        )
+        (bucket,) = resp.json()["buckets"]
+        assert bucket["calls"] == 1
+
     async def test_bad_group_by_is_400(self, client, auth_headers, api_usage_db):
         resp = await client.get(
             "/api/admin/api-usage/summary?group_by=nonsense", headers=auth_headers
@@ -288,6 +298,61 @@ class TestWebhookUsageSummary:
         (bucket,) = resp.json()["buckets"]
         assert bucket["key"] == "2026-09"
         assert bucket["count"] == 12
+
+    @pytest.mark.parametrize(
+        "group_by,expected_key",
+        [
+            # Every group_by the endpoint offers; each takes a different branch
+            # of the bucketing, and a wrong one silently mislabels the table.
+            ("provider", "strava"),
+            ("outcome", "accepted"),
+            ("week", "2026-W35"),
+            ("day", "2026-09-01"),
+            ("month", "2026-09"),
+        ],
+    )
+    async def test_every_group_by_buckets_correctly(
+        self, client, auth_headers, monkeypatch, api_usage_db, group_by, expected_key
+    ):
+        from backend.app.core.config import settings
+
+        monkeypatch.setattr(settings, "bridge_url", "https://bridge.test")
+        monkeypatch.setattr(settings, "bridge_secret", "s3cret")
+        monkeypatch.setattr(settings, "wahoo_bridge_url", "")
+
+        rows = [{"day": "2026-09-01", "outcome": "accepted", "count": 5}]
+        with patch("backend.app.api.admin.BridgeClient", self._bridge(rows)):
+            resp = await client.get(
+                f"/api/admin/webhook-usage/summary?group_by={group_by}",
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200
+        (bucket,) = resp.json()["buckets"]
+        assert bucket["key"] == expected_key
+        assert bucket["count"] == 5
+
+    async def test_a_day_the_bridge_wrote_that_we_cannot_parse_is_skipped(
+        self, client, auth_headers, monkeypatch, api_usage_db
+    ):
+        """One unreadable row must not take the whole table down with it."""
+        from backend.app.core.config import settings
+
+        monkeypatch.setattr(settings, "bridge_url", "https://bridge.test")
+        monkeypatch.setattr(settings, "bridge_secret", "s3cret")
+        monkeypatch.setattr(settings, "wahoo_bridge_url", "")
+
+        rows = [
+            {"day": "not-a-date", "outcome": "accepted", "count": 99},
+            {"day": "2026-09-01", "outcome": "accepted", "count": 5},
+        ]
+        with patch("backend.app.api.admin.BridgeClient", self._bridge(rows)):
+            resp = await client.get(
+                "/api/admin/webhook-usage/summary?group_by=month", headers=auth_headers
+            )
+        assert resp.status_code == 200
+        (bucket,) = resp.json()["buckets"]
+        assert bucket["key"] == "2026-09"
+        assert bucket["count"] == 5, "the readable row still counts"
 
     async def test_an_unreachable_bridge_is_named_not_silently_zero(
         self, client, auth_headers, monkeypatch, api_usage_db
