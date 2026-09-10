@@ -140,6 +140,10 @@ class TestDelegation:
         assert provider.wrapped is inner
         assert provider.is_configured is True
         assert provider.verify_inbound_signature(b"body", {}) is True
+        # Inbound is pure delegation — nothing arriving is a third-party call of
+        # ours, so nothing here is counted.
+        with pytest.raises(NotImplementedError):
+            provider.parse_inbound(b"body", {})
 
         await provider.send(
             OutboundMessage(to="a@b.co", subject="s", html="<p>h</p>", text="h")

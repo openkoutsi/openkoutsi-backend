@@ -68,6 +68,35 @@ class TestWindowBoundaries:
         assert start == datetime(2026, 9, 10, 0, 0, 0, tzinfo=timezone.utc)
 
 
+class TestRemaining:
+    def test_is_none_when_either_side_is_unknown(self):
+        from backend.app.services.quota import WindowHeadroom
+
+        def w(usage, limit):
+            return WindowHeadroom(
+                window="short", scope="overall", usage=usage, limit=limit,
+                window_start=OBSERVED_AT, resets_at=OBSERVED_AT,
+                observed_in_window=True,
+            )
+
+        # "We do not know" must not collapse into a number. A limit we never saw
+        # would otherwise read as a headroom figure.
+        assert w(100, None).remaining is None
+        assert w(None, 600).remaining is None
+        assert w(None, None).remaining is None
+        assert w(100, 600).remaining == 500
+
+    def test_never_goes_negative(self):
+        from backend.app.services.quota import WindowHeadroom
+
+        over = WindowHeadroom(
+            window="short", scope="overall", usage=700, limit=600,
+            window_start=OBSERVED_AT, resets_at=OBSERVED_AT,
+            observed_in_window=True,
+        )
+        assert over.remaining == 0
+
+
 class TestHeadroomWithinTheWindow:
     async def test_observation_inside_the_window_is_reported_as_seen(self, api_usage_db):
         await _record(api_usage_db)

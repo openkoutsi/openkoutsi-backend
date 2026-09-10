@@ -83,6 +83,40 @@ class TestNormaliseEndpoint:
         )
         assert normalise_endpoint(url) == "cdn.wahooligan.com/*"
 
+    @pytest.mark.parametrize(
+        "url,expected",
+        [
+            # A trailing slash leaves an empty final segment, and a doubled one
+            # an empty middle segment. Neither is an id, and neither may make
+            # the template unrecognisable.
+            ("https://www.strava.com/api/v3/athlete/", "/athlete/"),
+            ("https://www.strava.com/api/v3//athlete", "//athlete"),
+        ],
+    )
+    def test_empty_segments_are_left_alone(self, url, expected):
+        assert normalise_endpoint(httpx.URL(url)) == expected
+
+    @pytest.mark.parametrize(
+        "segment",
+        [
+            "550e8400-e29b-41d4-a716-446655440000",  # uuid
+            "a1b2c3d4",                              # short hex
+            "deadbeefcafef00d",                      # long hex
+            "9f8e7d6c5b4a39281706",                  # hex, digits and letters
+        ],
+    )
+    def test_non_numeric_ids_are_replaced_too(self, segment):
+        """Not every id is a run of digits.
+
+        The numeric cases short-circuit on ``isdigit()``, so without this the
+        uuid/hex branch is never exercised — and that branch is the one standing
+        between a provider that switches to opaque ids and a table full of them.
+        """
+        url = httpx.URL(f"https://api.wahooligan.com/v1/workouts/{segment}/fit_file")
+        stored = normalise_endpoint(url)
+        assert stored == "/workouts/{id}/fit_file"
+        assert segment not in stored
+
     def test_no_identifier_or_credential_survives(self):
         stored = normalise_endpoint(
             httpx.URL(
@@ -282,6 +316,38 @@ class TestRecordingNeverBreaksTheCaller:
         await record_api_usage(
             service="strava", endpoint="/athlete", method="GET", status_code=200
         )
+
+
+class TestDatabasePath:
+    """``API_USAGE_DB`` overrides the path; otherwise it sits under the data dir.
+
+    The override is what lets a hoster put this file on a different volume, or
+    prune it on its own schedule — the whole reason it is a separate database.
+    """
+
+    def test_defaults_under_the_data_dir(self, monkeypatch):
+        from backend.app.core.config import settings
+
+        monkeypatch.setattr(settings, "api_usage_db", "")
+        monkeypatch.setattr(settings, "data_dir", "/srv/okdata")
+        assert settings.api_usage_db_path == "/srv/okdata/api_usage.db"
+
+    def test_explicit_override_wins(self, monkeypatch):
+        from backend.app.core.config import settings
+
+        monkeypatch.setattr(settings, "api_usage_db", "/mnt/slow/api_usage.db")
+        monkeypatch.setattr(settings, "data_dir", "/srv/okdata")
+        assert settings.api_usage_db_path == "/mnt/slow/api_usage.db"
+
+    def test_it_is_a_different_file_from_the_llm_usage_db(self, monkeypatch):
+        # Sibling databases, not one file with two tables: their retention needs
+        # differ by an order of magnitude.
+        from backend.app.core.config import settings
+
+        monkeypatch.setattr(settings, "api_usage_db", "")
+        monkeypatch.setattr(settings, "llm_usage_db", "")
+        monkeypatch.setattr(settings, "data_dir", "/srv/okdata")
+        assert settings.api_usage_db_path != settings.llm_usage_db_path
 
 
 class TestProviderClientFactory:

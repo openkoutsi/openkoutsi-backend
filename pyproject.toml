@@ -46,8 +46,14 @@ markers = [
 
 [tool.coverage.run]
 omit = [
+    # Alembic scaffolding: env scripts and revision files are run by
+    # `alembic upgrade`, never by the test suite, so counting them measures
+    # nothing and drags every migration PR's patch number down. Globbed rather
+    # than listed per file — the old per-file list covered three env scripts and
+    # no revision at all, so each new chain quietly started counting again
+    # (issue #66). `codecov.yml` already states the intent this now matches.
     "backend/app/db/migrations/env.py",
-    "backend/app/db/migrations/registry/env.py",
-    "backend/app/db/migrations/team/env.py",
+    "backend/app/db/migrations/*/env.py",
+    "backend/app/db/migrations/*/versions/*.py",
     "strava_bridge/main.py",
 ]
