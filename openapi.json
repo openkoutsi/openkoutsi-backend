@@ -3073,7 +3073,7 @@
           "integrations"
         ],
         "summary": "Sync",
-        "description": "Trigger a full history import from the given provider in the background.\n\nImports the full history into the user's own DB.\n\n**Personal access token scope:** `integrations:write`",
+        "description": "Trigger a full history import from the given provider in the background.\n\nImports the full history into the user's own DB.\n\nRate-limited because the quota it spends belongs to the *application*, not\nthe athlete: one impatient user clicking sync repeatedly used to start a\nfresh full backfill per click, against a budget shared with everyone else's\nsyncs and webhook imports (issue #67).\n\nAnswers **409** while a sync for this provider is already running, rather\nthan promising one it knows will not start. The background task refuses the\nduplicate either way, but only saying so afterwards in a log meant an\nimpatient athlete could be told \"sync started\" six times, have nothing start\nany of those times, and spend the hour's allowance on the no-ops.\n\nThe check is advisory \u2014 it reads the lease rather than taking it, so two\nrequests arriving together can both pass \u2014 and the ``acquire`` inside the\nsync stays the thing that actually decides.\n\n**Personal access token scope:** `integrations:write`",
         "operationId": "sync_api_integrations__provider__sync_post",
         "security": [
           {

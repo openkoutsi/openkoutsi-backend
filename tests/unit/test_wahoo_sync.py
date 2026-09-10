@@ -199,3 +199,53 @@ async def test_process_wahoo_webhook_missing_workout_ignored(session, registry_s
 
     activities = (await session.execute(select(Activity))).scalars().all()
     assert activities == []
+
+
+@pytest.mark.asyncio
+async def test_a_throttled_webhook_import_leaves_no_hollow_activity(
+    session, registry_session
+):
+    """Review of #143: the create path raised without cleaning up after itself.
+
+    The Activity is committed inside the create guard and the detail fetch
+    happens outside it, so a throttle used to leave the row behind at
+    `status="pending"` — and skip the recalculate, the workout link, the
+    adherence catch-up and the achievements mark. There is no scheduled sync in
+    the tree, so it stayed that way until the athlete clicked Sync by hand.
+
+    Driven through the *prefetch* rather than the populate on purpose: that call
+    sits between the commit and the import too, and covering only the populate
+    left this exact row stranded.
+    """
+    from backend.app.services.providers.throttling import ProviderThrottled
+
+    await _seed_athlete_and_conn(session, registry_session)
+
+    with (
+        patch(
+            "backend.app.db.registry._RegistrySessionLocal",
+            new=_make_session_cm(registry_session),
+        ),
+        patch(
+            "backend.app.db.user_session.get_user_session_factory",
+            return_value=_make_session_cm(session),
+        ),
+        patch(
+            "backend.app.services.wahoo_sync.ensure_fresh_token",
+            new=AsyncMock(return_value="access-tok"),
+        ),
+        patch(
+            "backend.app.services.wahoo_sync._wahoo_client.download_fit_file",
+            new=AsyncMock(side_effect=ProviderThrottled("wahoo", 429)),
+        ),
+        patch(
+            "backend.app.services.metrics_engine.recalculate_from", new=AsyncMock()
+        ),
+    ):
+        # The handler logs and swallows, as it does for any failure.
+        await process_wahoo_webhook(WAHOO_PAYLOAD)
+
+    activities = (await session.execute(select(Activity))).scalars().all()
+    assert activities == [], "a throttled import must not leave an activity behind"
+    sources = (await session.execute(select(ActivitySource))).scalars().all()
+    assert sources == []

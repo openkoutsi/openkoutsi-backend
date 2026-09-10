@@ -297,6 +297,107 @@ class TestSync:
         resp = await client.post("/api/integrations/strava/sync")
         assert resp.status_code == 401
 
+    async def test_a_sync_already_running_answers_409(
+        self, client, registry_session, session, auth_headers
+    ):
+        """Review of #143: the endpoint used to promise a sync it knew would not start.
+
+        The background task refuses the duplicate either way, but only said so in
+        a log — so an impatient athlete could be told "sync started" six times,
+        have nothing start any of those times, and spend the hour's allowance on
+        the no-ops.
+        """
+        from datetime import timedelta as _timedelta
+
+        from backend.app.db import leases
+        from backend.app.models.user_orm import SyncLease
+        from backend.app.services.provider_sync import sync_lease_name
+
+        await _add_connection(registry_session, _TEST_USER_ID, "strava")
+        held = await leases.acquire(
+            session,
+            SyncLease,
+            sync_lease_name("strava"),
+            ttl=_timedelta(minutes=15),
+            wait=0.0,
+        )
+        assert held is not None
+        try:
+            resp = await client.post(
+                "/api/integrations/strava/sync", headers=auth_headers
+            )
+        finally:
+            await leases.release(session, SyncLease, sync_lease_name("strava"), held)
+
+        assert resp.status_code == 409
+        # `detail` is what the web app reads, so this reaches the athlete.
+        assert "strava" in resp.json()["detail"]
+
+    async def test_a_free_lease_still_starts_a_sync(
+        self, client, registry_session, session, auth_headers
+    ):
+        """The 409 must not fire on the ordinary case."""
+        await _add_connection(registry_session, _TEST_USER_ID, "strava")
+        resp = await client.post(
+            "/api/integrations/strava/sync", headers=auth_headers
+        )
+        assert resp.status_code == 200
+
+    def test_the_sync_route_declares_a_rate_limit(self, app):
+        """Issue #67: this was the one expensive endpoint with no limit at all.
+
+        Checked against slowapi's own registry rather than by reading the
+        source, so it cannot pass because a decorator moved. The shared `client`
+        fixture disables the limiter, so the limit's *effect* is not exercisable
+        here — that it is declared, and on the right route, is.
+        """
+        from fastapi.routing import APIRoute
+
+        from backend.app.core.limiter import limiter
+
+        registered = set(getattr(limiter, "_route_limits", {}))
+        sync_routes = [
+            r
+            for r in app.routes
+            if isinstance(r, APIRoute) and r.path.endswith("/sync")
+            and r.path.startswith("/api/integrations")
+        ]
+        assert sync_routes, "no sync route found — has the path changed?"
+        unlimited = [
+            r.path
+            for r in sync_routes
+            if f"{r.endpoint.__module__}.{r.endpoint.__name__}" not in registered
+        ]
+        assert unlimited == [], f"sync routes with no rate limit: {unlimited}"
+
+    def test_the_sync_limit_is_keyed_per_provider(self):
+        """`key_style="endpoint"` drops the path parameter from the key.
+
+        Without folding the provider back in, six an hour is six across every
+        provider combined — so an athlete connected to Strava and Wahoo spends one
+        allowance on two quotas that have nothing to do with each other.
+        """
+        from starlette.datastructures import Headers
+        from starlette.requests import Request
+
+        from backend.app.api.integrations import _sync_limit_key
+
+        def _request(provider: str) -> Request:
+            scope = {
+                "type": "http",
+                "method": "POST",
+                "path": f"/api/integrations/{provider}/sync",
+                "headers": Headers({}).raw,
+                "path_params": {"provider": provider},
+                "client": ("10.0.0.1", 1234),
+            }
+            request = Request(scope)
+            request.state.principal_user_id = "user-1"
+            return request
+
+        assert _sync_limit_key(_request("strava")) != _sync_limit_key(_request("wahoo"))
+        assert _sync_limit_key(_request("strava")).endswith(":strava")
+
     async def test_a_history_import_marks_achievements_for_recompute(
         self, registry_engine, registry_session, user_engine, session,
         seeded_athlete, auth_headers,

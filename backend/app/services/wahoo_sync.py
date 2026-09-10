@@ -10,6 +10,7 @@ called directly from the webhook handler without a pre-existing session.
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 
@@ -17,6 +18,7 @@ from backend.app.models.registry_orm import ProviderConnection
 from backend.app.models.user_orm import Activity, ActivitySource, Athlete
 from backend.app.services.provider_sync import (
     _DUPLICATE_WINDOW,
+    _discard_partial_import,
     activity_create_guard,
     _populate_activity,
     _repopulate_activity,
@@ -24,6 +26,7 @@ from backend.app.services.provider_sync import (
     _source_priority,
     ensure_fresh_token,
 )
+from backend.app.services.providers.throttling import ProviderThrottled
 from backend.app.services.providers.wahoo import WahooClient, _normalize_workout
 from backend.app.services.stranded_runs import (
     begin_activity_analysis_run,
@@ -177,6 +180,13 @@ async def _process_wahoo_for_user(norm, athlete, conn, access_token, user_id, se
                 prefetched_fit = await _download_fit_cdn_first(
                     access_token, norm.external_id, cdn_fit_url
                 )
+            except ProviderThrottled:
+                # A throttle is not "there is no FIT" (issue #67). Swallowing it
+                # here would decide the priority contest on an answer Wahoo never
+                # gave, and then settle the source on that decision — leaving a
+                # device file that outranks what is on the activity permanently
+                # unfetched.
+                raise
             except Exception:
                 prefetched_fit = None
 
@@ -194,6 +204,10 @@ async def _process_wahoo_for_user(norm, athlete, conn, access_token, user_id, se
                     )
                     await recalculate_from(athlete.id, start_date, session)
             else:
+                # Nothing will ever read this source's streams, so nothing should
+                # go back for them — settle it rather than leave a NULL the next
+                # sync reads as an unfinished import (#67).
+                new_src.streams_fetched_at = datetime.now(timezone.utc)
                 await session.commit()
             # A higher-priority source can restate distance, elevation or sport
             # type on an activity that already exists, and all three feed badges
@@ -233,18 +247,31 @@ async def _process_wahoo_for_user(norm, athlete, conn, access_token, user_id, se
         # sessions before this lock is released (fixes the #76 race condition).
         await session.commit()
 
-    prefetched_fit_new: bytes | None = None
+    # The Activity was committed inside the guard above, so nothing from here on
+    # rolls it back — and a raise also skips the recalculate, the workout link,
+    # the adherence catch-up and the achievements mark below, leaving the ride at
+    # `status="pending"` and contributing nothing until the athlete happens to
+    # click Sync. So everything between that commit and a finished import is
+    # covered, the prefetch included: it is a provider call like any other and a
+    # throttle there strands the row just as thoroughly (issue #67).
     try:
-        prefetched_fit_new = await _download_fit_cdn_first(
-            access_token, norm.external_id, cdn_fit_url
-        )
-    except Exception:
-        prefetched_fit_new = None
+        prefetched_fit_new: bytes | None = None
+        try:
+            prefetched_fit_new = await _download_fit_cdn_first(
+                access_token, norm.external_id, cdn_fit_url
+            )
+        except ProviderThrottled:
+            raise  # not "there is no FIT" — see the attach path above
+        except Exception:
+            prefetched_fit_new = None
 
-    await _populate_activity(
-        activity, src, norm, _wahoo_client, access_token, athlete, session, user_id=user_id,
-        prefetched_fit=prefetched_fit_new
-    )
+        await _populate_activity(
+            activity, src, norm, _wahoo_client, access_token, athlete, session, user_id=user_id,
+            prefetched_fit=prefetched_fit_new
+        )
+    except ProviderThrottled:
+        await _discard_partial_import(session, activity.id)
+        raise
 
     if activity.start_time:
         start_date = (

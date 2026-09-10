@@ -30,7 +30,7 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import AsyncIterator, Optional, Type
 
-from sqlalchemy import DateTime, String, or_, update
+from sqlalchemy import DateTime, String, or_, select, update
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Mapped, mapped_column
@@ -132,6 +132,31 @@ async def acquire(
             return None
         await asyncio.sleep(min(delay, remaining))
         delay = min(delay * 2, MAX_POLL_SECONDS)
+
+
+async def is_held(
+    session: AsyncSession, model: Type[LeaseMixin], name: str
+) -> bool:
+    """Whether someone currently holds this lease.
+
+    A *read*, deliberately: it answers "is this running?" for a caller that wants
+    to say so, without taking anything. It is therefore advisory — two callers
+    can both read "free" before either acquires — so it belongs in front of an
+    :func:`acquire`, never instead of one. The conditional UPDATE stays the only
+    thing that decides who runs.
+    """
+    row = await session.execute(
+        select(model.expires_at).where(
+            model.name == name, model.holder.is_not(None)
+        )
+    )
+    expires_at = row.scalar_one_or_none()
+    if expires_at is None:
+        return False
+    if expires_at.tzinfo is None:
+        # SQLite hands these back naive.
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+    return expires_at > datetime.now(timezone.utc)
 
 
 async def release(

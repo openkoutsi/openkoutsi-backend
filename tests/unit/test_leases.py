@@ -280,3 +280,36 @@ class TestWaitLoopCost:
         # And the polling itself must not be a write storm: a 0.4 s wait should
         # cost a handful of statements, not dozens.
         assert len(statements) <= 12, statements
+
+
+class TestIsHeld:
+    """The advisory read, for a caller that wants to *say* a run is in progress.
+
+    Never a substitute for `acquire`: two callers can both read "free" before
+    either takes it, so this answers a question rather than settling a race.
+    """
+
+    async def test_an_unused_lease_is_free(self, session):
+        assert await leases.is_held(session, SyncLease, "never-taken") is False
+
+    async def test_a_held_lease_reads_as_held(self, session):
+        token = await leases.acquire(
+            session, SyncLease, "busy", ttl=timedelta(minutes=5), wait=0.0
+        )
+        assert token is not None
+        assert await leases.is_held(session, SyncLease, "busy") is True
+
+    async def test_a_released_lease_is_free_again(self, session):
+        token = await leases.acquire(
+            session, SyncLease, "cycled", ttl=timedelta(minutes=5), wait=0.0
+        )
+        await leases.release(session, SyncLease, "cycled", token)
+        assert await leases.is_held(session, SyncLease, "cycled") is False
+
+    async def test_an_expired_lease_is_free(self, session):
+        """A holder that died cannot release; the deadline is what frees it."""
+        token = await leases.acquire(
+            session, SyncLease, "abandoned", ttl=timedelta(seconds=-1), wait=0.0
+        )
+        assert token is not None
+        assert await leases.is_held(session, SyncLease, "abandoned") is False

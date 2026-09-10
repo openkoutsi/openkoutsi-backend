@@ -472,10 +472,10 @@ single-process by design, and several things depend on that:
   not own.
 - **`AGENT_MAX_CONCURRENT_RUNS`** is an in-process counter, so N processes allow
   N times the concurrency you configured against your LLM.
-- **Rate limits** (login, password reset, chat, uploads, bulk import, MCP) are
-  held in memory, so N processes give each caller N times the intended
-  allowance. For login and password reset that is a weakened brute-force
-  defence, not just a looser quota.
+- **Rate limits** (login, password reset, chat, uploads, bulk import, provider
+  sync, MCP) are held in memory, so N processes give each caller N times the
+  intended allowance. For login and password reset that is a weakened
+  brute-force defence, not just a looser quota.
 - **The one-import-at-a-time check** (`POST /api/activities/import` refuses a
   second job while one is pending or running) is a query against the per-user
   database rather than in-process state, so it holds between processes. A job whose
@@ -484,9 +484,13 @@ single-process by design, and several things depend on that:
   progress every 25 files, well inside that bound — it is crash recovery, not a
   timeout.
 
-No longer on this list: **duplicate activity creation** and **OAuth token rotation**
-are guarded in the database rather than in memory — a lease row and a claimed column
-respectively — so both hold between processes.
+No longer on this list: **duplicate activity creation**, **OAuth token rotation**
+and **one provider backfill at a time** are guarded in the database rather than in
+memory — two lease rows and a claimed column — so all three hold between processes.
+The backfill lease renews once per imported activity and expires 15 minutes after
+the last renewal, so a sync whose process died frees it without anyone
+intervening — and one that is merely slow keeps it, which a page-boundary
+renewal could not promise: a Strava page is 200 activities.
 
 **Deploying the bridges.** The backend and the two bridges are separate images and the
 deploy recreates only what changed, so a new backend can briefly meet an old bridge. It
