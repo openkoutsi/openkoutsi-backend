@@ -467,6 +467,11 @@ sqlite3 "$DATA_DIR/api_usage.db" \
 
 Keep at least a year if you want year-over-year comparisons in the admin tables.
 
+`VACUUM` takes an exclusive lock on the whole file. Usage writes are scheduled
+off the request path, so the prune costs some accounting rows for its duration
+rather than slowing every outbound provider request — but it is still worth
+running when a backfill is not.
+
 > **Upgrading from a multi-team (v1) deployment?** openkoutsi v2 removes the team
 > layer in favour of a single instance with per-user databases. Migrate existing
 > team data with the one-time script `backend/scripts/migrate_to_per_user.py`

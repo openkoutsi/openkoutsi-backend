@@ -27,7 +27,7 @@ from collections.abc import Mapping
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Iterator
 
-from backend.app.services.api_usage import record_api_usage
+from backend.app.services.api_usage import schedule_api_usage
 from backend.app.services.email.base import (
     EmailConfigurationError,
     EmailProvider,
@@ -109,7 +109,7 @@ class CountingEmailProvider(EmailProvider):
         except EmailConfigurationError:
             raise
         except Exception:
-            await record_api_usage(
+            schedule_api_usage(
                 service=self._inner.PROVIDER_NAME,
                 endpoint=endpoint,
                 method="POST",
@@ -117,7 +117,7 @@ class CountingEmailProvider(EmailProvider):
                 duration_ms=int((time.perf_counter() - started) * 1000),
             )
             raise
-        await record_api_usage(
+        schedule_api_usage(
             service=self._inner.PROVIDER_NAME,
             endpoint=endpoint,
             method="POST",

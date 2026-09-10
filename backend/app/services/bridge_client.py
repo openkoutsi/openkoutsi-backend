@@ -99,9 +99,21 @@ class BridgeClient:
                 f"{self._base}/stats", headers=self._headers, params=params
             )
             r.raise_for_status()
-            return r.json().get("stats", [])
-        except (httpx.HTTPError, ValueError):
-            log.warning("Could not fetch webhook stats from bridge at %s", self._base)
+            body = r.json()
+            return body.get("stats", []) if isinstance(body, dict) else []
+        except Exception:
+            # Deliberately broad, and broader than `claim_batch` above: that one
+            # is called from a poller that tolerates a bad round, this one from a
+            # request handler where anything escaping becomes a 500 on the admin
+            # page — for a panel whose entire job is to report which bridges
+            # answered. `httpx.InvalidURL` (a misconfigured BRIDGE_URL, exactly
+            # the misconfiguration worth surfacing) is not an `httpx.HTTPError`,
+            # so a narrower clause would let it through.
+            log.warning(
+                "Could not fetch webhook stats from bridge at %s",
+                self._base,
+                exc_info=True,
+            )
             return None
 
     async def ack(self, event_id: str, claim_token: Optional[str]) -> None:

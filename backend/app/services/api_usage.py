@@ -17,11 +17,13 @@ linked).
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import logging
 from contextvars import ContextVar
+from datetime import datetime, timezone
 from dataclasses import dataclass
-from typing import Iterator, Optional
+from typing import Any, Iterator, Optional
 
 from ..db.api_usage import api_usage_session_factory
 from ..models.api_usage_orm import ApiUsage
@@ -38,6 +40,10 @@ OUTCOME_TRANSPORT_ERROR = "transport_error"
 OUTCOME_RATE_LIMITED = "rate_limited"
 
 _user_id: ContextVar[Optional[str]] = ContextVar("api_usage_user_id", default=None)
+
+#: In-flight recording tasks, held so the event loop cannot garbage-collect one
+#: mid-write. ``asyncio`` keeps only a weak reference to a running task.
+_pending: set[asyncio.Task] = set()
 
 
 @contextlib.contextmanager
@@ -151,6 +157,49 @@ def parse_rate_limit(headers) -> RateLimitReading:
     )
 
 
+def schedule_api_usage(**fields: Any) -> None:
+    """Record one call **off the caller's critical path**.
+
+    This is the seam every hot caller should use. :func:`record_api_usage` can
+    never *fail* a request — it swallows everything — but awaiting it inline can
+    still *stall* one: the engine's pool and connect timeouts are measured in
+    tens of seconds, so a database held under an exclusive lock (which is
+    precisely what the ``VACUUM`` in the documented retention prune takes) turns
+    every outbound provider request into a 30-second one. A backfill then does
+    not fail, it crawls, and nothing in the admin panel explains why.
+
+    ``created_at`` is stamped **here**, at the moment of the call, and carried
+    into the write. SQLAlchemy evaluates a column default at INSERT time, so
+    leaving it to the model would date each row by when its write happened to
+    win the database — which, once the writes run concurrently, is not the order
+    the calls were made in. Headroom reads the newest row for a service, so a
+    later observation landing first would shadow the one that is actually
+    current.
+
+    Silently does nothing when there is no running loop — there is nothing to
+    schedule onto, and a synchronous caller is not on a critical path worth
+    protecting.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    fields.setdefault("created_at", datetime.now(timezone.utc))
+    task = loop.create_task(record_api_usage(**fields))
+    _pending.add(task)
+    task.add_done_callback(_pending.discard)
+
+
+async def drain_api_usage_writes() -> None:
+    """Wait for every scheduled write to finish.
+
+    Used on shutdown, so a redeploy does not drop the rows still in flight, and
+    by tests, which would otherwise race the writes they assert on.
+    """
+    while _pending:
+        await asyncio.gather(*list(_pending), return_exceptions=True)
+
+
 async def record_api_usage(
     *,
     service: str,
@@ -160,6 +209,7 @@ async def record_api_usage(
     duration_ms: int | None = None,
     user_id: str | None = None,
     rate_limit: RateLimitReading | None = None,
+    created_at: datetime | None = None,
 ) -> None:
     """Record one outbound third-party call. Never raises into the caller.
 
@@ -172,6 +222,7 @@ async def record_api_usage(
         async with api_usage_session_factory()() as session:
             session.add(
                 ApiUsage(
+                    created_at=created_at or datetime.now(timezone.utc),
                     service=service,
                     endpoint=endpoint,
                     method=method.upper(),

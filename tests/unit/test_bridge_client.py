@@ -200,6 +200,22 @@ class TestStats:
         # lands as the same "no data from this one" — no version negotiation.
         assert await _client(lambda r: httpx.Response(404)).stats() is None
 
+    async def test_a_malformed_bridge_url_is_none_not_a_500(self):
+        """`httpx.InvalidURL` is not an `httpx.HTTPError`.
+
+        A BRIDGE_URL missing its scheme is exactly the misconfiguration a
+        "which bridges answered" panel exists to surface — it must not instead
+        become a 500 on the page that would have surfaced it.
+        """
+        http = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+        client = BridgeClient(http, "not-a-url", SECRET)
+        assert await client.stats() is None
+
+    async def test_a_json_array_body_is_not_an_attribute_error(self):
+        # A proxy or ingress answering 200 with `[]` used to raise
+        # AttributeError out of `.get()` and 500 the admin page.
+        assert await _client(lambda r: httpx.Response(200, json=[])).stats() == []
+
     async def test_a_non_json_body_is_none(self):
         assert await _client(
             lambda r: httpx.Response(200, content=b"<html>nope</html>")

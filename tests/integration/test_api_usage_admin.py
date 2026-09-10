@@ -331,6 +331,117 @@ class TestWebhookUsageSummary:
         assert bucket["key"] == expected_key
         assert bucket["count"] == 5
 
+    async def _two_by_two_by_two(self, client, auth_headers, monkeypatch, group_by):
+        """Two providers x two outcomes x two days, so aggregation is visible.
+
+        A single row makes every ``group_by`` look like it aggregates, which is
+        what let the collapse bug hide.
+        """
+        from backend.app.core.config import settings
+
+        monkeypatch.setattr(settings, "bridge_url", "https://bridge.test")
+        monkeypatch.setattr(settings, "bridge_secret", "s3cret")
+        monkeypatch.setattr(settings, "wahoo_bridge_url", "https://wahoo.test")
+        monkeypatch.setattr(settings, "wahoo_bridge_secret", "s3cret")
+
+        rows = [
+            {"day": "2026-09-01", "outcome": "accepted", "count": 1},
+            {"day": "2026-09-01", "outcome": "rejected", "count": 2},
+            {"day": "2026-09-02", "outcome": "accepted", "count": 4},
+            {"day": "2026-09-02", "outcome": "rejected", "count": 8},
+        ]
+        # Both bridges answer the same shape, so every total is doubled.
+        with patch("backend.app.api.admin.BridgeClient", self._bridge(rows)):
+            resp = await client.get(
+                f"/api/admin/webhook-usage/summary?group_by={group_by}",
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200
+        return resp.json()["buckets"]
+
+    async def test_group_by_provider_collapses_outcomes(
+        self, client, auth_headers, monkeypatch, api_usage_db
+    ):
+        """One row per provider, not one per (provider, outcome).
+
+        Before this was literal, both providers emitted two buckets each sharing
+        a key — a client rendering key -> count showed duplicate keys and a total
+        that looked wrong.
+        """
+        buckets = await self._two_by_two_by_two(
+            client, auth_headers, monkeypatch, "provider"
+        )
+        by_key = {b["key"]: b for b in buckets}
+        assert sorted(by_key) == ["strava", "wahoo"], "one bucket per provider"
+        assert by_key["strava"]["count"] == 15  # 1 + 2 + 4 + 8
+        assert by_key["wahoo"]["count"] == 15
+        assert all(b["outcome"] is None for b in buckets), "outcomes collapsed"
+
+    async def test_group_by_outcome_collapses_providers(
+        self, client, auth_headers, monkeypatch, api_usage_db
+    ):
+        buckets = await self._two_by_two_by_two(
+            client, auth_headers, monkeypatch, "outcome"
+        )
+        by_key = {b["key"]: b for b in buckets}
+        assert sorted(by_key) == ["accepted", "rejected"]
+        assert by_key["accepted"]["count"] == 10  # (1 + 4) from each of two bridges
+        assert by_key["rejected"]["count"] == 20  # (2 + 8) from each of two bridges
+        assert all(b["provider"] is None for b in buckets), "providers collapsed"
+
+    async def test_provider_and_outcome_are_not_the_same_table(
+        self, client, auth_headers, monkeypatch, api_usage_db
+    ):
+        # They used to return identical row sets differing only in `key`.
+        by_provider = await self._two_by_two_by_two(
+            client, auth_headers, monkeypatch, "provider"
+        )
+        by_outcome = await self._two_by_two_by_two(
+            client, auth_headers, monkeypatch, "outcome"
+        )
+        assert {b["key"] for b in by_provider} != {b["key"] for b in by_outcome}
+
+    async def test_time_buckets_keep_the_outcome_breakdown(
+        self, client, auth_headers, monkeypatch, api_usage_db
+    ):
+        """A daily total that hides accepted-vs-rejected is not worth reading."""
+        buckets = await self._two_by_two_by_two(
+            client, auth_headers, monkeypatch, "day"
+        )
+        seen = {(b["key"], b["provider"], b["outcome"]): b["count"] for b in buckets}
+        assert seen[("2026-09-01", "strava", "accepted")] == 1
+        assert seen[("2026-09-02", "wahoo", "rejected")] == 8
+        assert len(seen) == 8, "2 days x 2 providers x 2 outcomes"
+
+    @pytest.mark.parametrize("param", ["from", "to"])
+    async def test_iso_datetimes_are_narrowed_to_a_day(
+        self, client, auth_headers, monkeypatch, api_usage_db, param
+    ):
+        """The bridge compares day strings, so a time component must not survive.
+
+        `"2026-09-10" >= "2026-09-10T12:00:00"` is False, so forwarding the raw
+        value silently dropped a whole day at the `from` end and kept it at the
+        `to` end — asymmetric, and neither what was asked for.
+        """
+        from backend.app.core.config import settings
+
+        monkeypatch.setattr(settings, "bridge_url", "https://bridge.test")
+        monkeypatch.setattr(settings, "bridge_secret", "s3cret")
+        monkeypatch.setattr(settings, "wahoo_bridge_url", "")
+
+        stub = AsyncMock()
+        stub.stats = AsyncMock(return_value=[])
+        with patch(
+            "backend.app.api.admin.BridgeClient", lambda *a, **k: stub
+        ):
+            resp = await client.get(
+                f"/api/admin/webhook-usage/summary?{param}=2026-09-10T12:00:00",
+                headers=auth_headers,
+            )
+        assert resp.status_code == 200
+        forwarded = stub.stats.await_args.kwargs
+        assert forwarded[f"{param}_day"] == "2026-09-10"
+
     async def test_a_day_the_bridge_wrote_that_we_cannot_parse_is_skipped(
         self, client, auth_headers, monkeypatch, api_usage_db
     ):

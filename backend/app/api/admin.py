@@ -860,23 +860,32 @@ async def api_usage_summary(
 _WEBHOOK_GROUP_BY = {"day", "week", "month", "provider", "outcome"}
 
 
-def _webhook_bucket_key(group_by: str, day: str, provider: str, outcome: str) -> str:
-    """The bucket a bridge counter row falls in.
+def _webhook_slot(
+    group_by: str, day: str, provider: str, outcome: str
+) -> tuple[str, str | None, str | None]:
+    """The ``(key, provider, outcome)`` a bridge counter row aggregates into.
 
     Bucketing happens here rather than in SQL because the rows arrive from the
     bridges over HTTP, already aggregated per day. ``week`` reproduces SQLite's
     ``%W`` so a week means the same week as in the other two summaries.
+
+    ``group_by`` is **literal**: grouping by ``provider`` collapses the outcomes
+    and grouping by ``outcome`` collapses the providers, so each key appears
+    once. Only the time buckets keep the ``(provider, outcome)`` breakdown, and
+    they keep it on purpose — "how many webhooks a day" with accepted and
+    rejected summed together hides the one comparison that makes the number
+    worth reading.
     """
     if group_by == "provider":
-        return provider
+        return provider, provider, None
     if group_by == "outcome":
-        return outcome
+        return outcome, None, outcome
     if group_by == "day":
-        return day
+        return day, provider, outcome
     parsed = datetime.strptime(day, "%Y-%m-%d")
     if group_by == "month":
-        return parsed.strftime("%Y-%m")
-    return parsed.strftime("%Y-W%W")
+        return parsed.strftime("%Y-%m"), provider, outcome
+    return parsed.strftime("%Y-W%W"), provider, outcome
 
 
 @router.get("/webhook-usage/summary", response_model=WebhookUsageSummaryResponse,
@@ -899,6 +908,11 @@ async def webhook_usage_summary(
     Inbound volume spends none of our outbound quota, but it is a leading
     indicator of what will: each activity webhook triggers the fetches that do.
 
+    ``group_by`` is literal: ``provider`` and ``outcome`` each collapse to one
+    row per value, while the time buckets keep the ``(provider, outcome)``
+    breakdown, because a daily total with accepted and rejected summed together
+    hides the comparison worth making.
+
     A bridge that cannot be reached is named in ``unavailable`` rather than
     silently contributing zero.
     """
@@ -907,16 +921,20 @@ async def webhook_usage_summary(
             status_code=400,
             detail="group_by must be one of provider, outcome, day, week, month.",
         )
-    # Validated for consistency with the other summaries, and passed to the
-    # bridges as plain day strings — their counters are keyed by UTC day.
-    parse_usage_dt(from_)
-    parse_usage_dt(to)
+    # The bridges' counters are keyed by UTC day and compared as strings, so an
+    # ISO value with a time component would be compared against `YYYY-MM-DD`
+    # lexicographically and silently drop a day at the `from` end. Narrow the
+    # parsed value to its date rather than forwarding what the caller typed.
+    from_dt = parse_usage_dt(from_)
+    to_dt = parse_usage_dt(to)
+    from_day = from_dt.date().isoformat() if from_dt else None
+    to_day = to_dt.date().isoformat() if to_dt else None
 
     configured = [
         ("strava", settings.bridge_url, settings.bridge_secret),
         ("wahoo", settings.wahoo_bridge_url, settings.wahoo_bridge_secret),
     ]
-    counts: dict[tuple[str, str, str], int] = {}
+    counts: dict[tuple[str, str | None, str | None], int] = {}
     unavailable: list[str] = []
 
     async with httpx.AsyncClient(timeout=10.0) as http:
@@ -924,7 +942,7 @@ async def webhook_usage_summary(
             if not url or not secret:
                 continue
             rows = await BridgeClient(http, url, secret).stats(
-                from_day=from_, to_day=to
+                from_day=from_day, to_day=to_day
             )
             if rows is None:
                 unavailable.append(provider)
@@ -933,12 +951,11 @@ async def webhook_usage_summary(
                 day = str(row.get("day", ""))
                 outcome = str(row.get("outcome", "unknown"))
                 try:
-                    key = _webhook_bucket_key(group_by, day, provider, outcome)
+                    slot = _webhook_slot(group_by, day, provider, outcome)
                 except ValueError:
                     # A day string the bridge wrote that we cannot parse. Skip
                     # the row rather than failing the whole table for it.
                     continue
-                slot = (key, provider, outcome)
                 counts[slot] = counts.get(slot, 0) + int(row.get("count", 0) or 0)
 
     buckets = [

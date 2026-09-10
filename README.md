@@ -394,8 +394,10 @@ evidence of exceeding. Inbound webhooks are counted at the bridges as aggregate
 per-day counters that outlive their seven-day event prune — the backend's own view
 would tally nacked redeliveries repeatedly and miss events shed by the queue
 ceiling. `endpoint` stores a normalised template (`/activities/{id}/streams`),
-never a raw URL, and recording is fire-and-forget: a locked or full usage database
-costs an accounting row, never an athlete's sync. Read via
+never a raw URL, and the write is **scheduled off the request path**: a locked or
+full usage database costs an accounting row, never an athlete's sync and never
+its latency either — awaiting the insert inline would have added the engine's
+lock wait to every outbound request for the length of a retention `VACUUM`. Read via
 `GET /api/admin/quota/headroom`, `/api/admin/api-usage/summary` and
 `/api/admin/webhook-usage/summary`; see [ADMIN.md](ADMIN.md).
 

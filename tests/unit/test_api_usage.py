@@ -19,6 +19,7 @@ from backend.app.services.api_usage import (
     OUTCOME_SERVER_ERROR,
     OUTCOME_TRANSPORT_ERROR,
     attribute_to_user,
+    drain_api_usage_writes,
     outcome_for,
     parse_rate_limit,
     record_api_usage,
@@ -31,6 +32,9 @@ from backend.app.services.providers.http import (
 
 
 async def _rows(factory):
+    # Writes are scheduled off the caller's path (issue #66), so an assertion
+    # made straight after a request would race them.
+    await drain_api_usage_writes()
     async with factory() as session:
         return (
             (await session.execute(select(ApiUsage).order_by(ApiUsage.created_at)))
@@ -318,6 +322,32 @@ class TestRecordingNeverBreaksTheCaller:
         )
 
 
+class TestDocumentedAlembicUpgrade:
+    async def test_a_created_database_is_stamped_at_head(self, api_usage_db):
+        """`create_all` writes no `alembic_version` row of its own.
+
+        Without a stamp, the `alembic ... upgrade head` DEPLOY.md documents
+        replays `001` against tables that already exist and fails with "table
+        api_usage already exists" — on every deployment that has ever started
+        the app, which is every deployment.
+        """
+        from sqlalchemy import text
+
+        from backend.app.db.api_usage import (
+            _get_api_usage_engine,
+            _script_directory,
+        )
+        from backend.app.core.config import settings
+
+        engine = _get_api_usage_engine(settings.api_usage_db_path)
+        async with engine.begin() as conn:
+            stamped = (
+                await conn.execute(text("SELECT version_num FROM alembic_version"))
+            ).scalars().all()
+
+        assert stamped == [_script_directory().get_current_head()]
+
+
 class TestOAuthPathsAreRecordedWithNoUser:
     """The OAuth exchange happens before an account is linked to a provider.
 
@@ -462,3 +492,97 @@ class TestProviderClientFactory:
         client = provider_client("strava", timeout=httpx.Timeout(5.0))
         assert isinstance(client._transport, CountingTransport)
         assert client._transport._service == "strava"
+
+    def test_environment_proxies_survive_the_wrapping(self, monkeypatch):
+        """Counting must not cost an instance its egress proxy.
+
+        httpx builds proxy mounts only when no explicit transport is given, so
+        constructing with `transport=` drops `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`
+        entirely — which would silently stop provider sync on any instance behind
+        a proxy, and record the result as a transport error rather than explain it.
+        """
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
+        monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:3128")
+        monkeypatch.setenv("NO_PROXY", "localhost,127.0.0.1")
+
+        plain = httpx.AsyncClient()
+        counted = provider_client("strava")
+        try:
+            assert len(counted._mounts) == len(plain._mounts) > 0
+            assert set(counted._mounts) == set(plain._mounts), "NO_PROXY kept"
+        finally:
+            pass
+
+    def test_every_proxy_route_is_counted_too(self, monkeypatch):
+        # A request that goes out through a proxy spends the same quota as a
+        # direct one, so wrapping only the default transport would under-report.
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example:3128")
+        client = provider_client("wahoo")
+        assert isinstance(client._transport, CountingTransport)
+        assert all(
+            t is None or isinstance(t, CountingTransport)
+            for t in client._mounts.values()
+        )
+        assert all(
+            t is None or t._service == "wahoo" for t in client._mounts.values()
+        )
+
+
+class TestRecordingIsOffTheCriticalPath:
+    """Swallowing failures stops accounting *failing* a sync; it does not stop
+    it *slowing* one. The write is scheduled, not awaited."""
+
+    async def test_a_slow_write_does_not_delay_the_response(
+        self, api_usage_db, monkeypatch
+    ):
+        import asyncio as _asyncio
+        import time as _time
+
+        from backend.app.db import api_usage as api_usage_db_module
+
+        released = _asyncio.Event()
+        real_factory = api_usage_db_module.api_usage_session_factory
+
+        def slow_factory():
+            factory = real_factory()
+
+            class _Slow:
+                async def __aenter__(self):
+                    await released.wait()
+                    self._session = factory()
+                    return await self._session.__aenter__()
+
+                async def __aexit__(self, *exc):
+                    return await self._session.__aexit__(*exc)
+
+            return _Slow
+
+        monkeypatch.setattr(
+            api_usage_service, "api_usage_session_factory", slow_factory
+        )
+
+        started = _time.perf_counter()
+        async with _client(lambda r: httpx.Response(200)) as client:
+            await client.get("https://www.strava.com/api/v3/athlete")
+        elapsed = _time.perf_counter() - started
+
+        # The response came back while the write was still blocked.
+        assert elapsed < 1.0, f"the request waited {elapsed:.1f}s on the write"
+
+        released.set()
+        await drain_api_usage_writes()
+        assert len(await _rows(api_usage_db)) == 1, "and the row still lands"
+
+    async def test_the_row_is_dated_when_the_call_happened(self, api_usage_db):
+        """Not when its write won the database.
+
+        Headroom reads the newest row per service, so a later observation whose
+        insert landed first would shadow the one that is actually current.
+        """
+        async with _client(lambda r: httpx.Response(200)) as client:
+            await client.get("https://www.strava.com/api/v3/athlete")
+            await client.get("https://www.strava.com/api/v3/athlete/zones")
+
+        rows = await _rows(api_usage_db)
+        assert [r.endpoint for r in rows] == ["/athlete", "/athlete/zones"]
+        assert rows[0].created_at <= rows[1].created_at

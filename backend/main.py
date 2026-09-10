@@ -71,6 +71,16 @@ async def lifespan(app: FastAPI):
 
     await close_surface_matcher()
 
+    # Usage rows are written off the request path (issue #66), so a redeploy can
+    # land between a provider call and its accounting. Draining here costs a
+    # moment of shutdown and keeps the count honest across one.
+    from backend.app.services.api_usage import drain_api_usage_writes
+
+    try:
+        await asyncio.wait_for(drain_api_usage_writes(), timeout=5)
+    except Exception:
+        log.warning("Some API-usage rows were still in flight at shutdown")
+
     supervisor.cancel()
     try:
         await supervisor

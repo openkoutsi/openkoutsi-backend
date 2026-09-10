@@ -478,7 +478,8 @@ never see events shed by the queue ceiling.
 Outcomes are `accepted`, `ignored` (a real delivery of a type we deliberately do
 not queue, such as a Strava athlete event), `rejected` (malformed, bad token, or
 the queue ceiling), and `verification` (the subscription handshake, kept apart so
-it does not inflate the delivery count).
+it does not inflate the delivery count). There is no `duplicate`: neither bridge
+deduplicates, so it would name a row that can never exist.
 
 Both bridges delete events older than seven days, so these are aggregate counters
 rather than per-event history — which is what makes a per-month figure possible
@@ -495,10 +496,17 @@ GET /api/admin/api-usage/summary?from=&to=&group_by=day|week|month|service|endpo
 GET /api/admin/webhook-usage/summary?from=&to=&group_by=day|week|month|provider|outcome
 ```
 
+On the webhook summary `group_by` is literal — `provider` and `outcome` each
+collapse to one row per value. The time buckets keep the `(provider, outcome)`
+breakdown, because a daily total with accepted and rejected summed together
+hides the comparison worth making.
+
 Rows live in their own SQLite file (`<DATA_DIR>/api_usage.db`, override with
 `API_USAGE_DB`) so it can be pruned on its own schedule — see
-[DEPLOY.md](DEPLOY.md). Recording is fire-and-forget: a locked or full usage
-database costs an accounting row, never an athlete's sync.
+[DEPLOY.md](DEPLOY.md). The write is scheduled off the request path, so a locked
+or full usage database costs an accounting row and nothing else: not the sync,
+and not its speed. Running the retention prune during a backfill therefore loses
+some rows rather than slowing every request down.
 
 > Enforcement — backing off automatically when headroom is low — is separate from
 > this reporting. See issue #67.

@@ -163,8 +163,13 @@ class WebhookStat(Base):
 #: Outcomes counted on the webhook path. `ignored` is kept apart from `rejected`
 #: because the providers routinely send event types we do not queue, and showing
 #: those as rejections would read as a fault where there is none.
+#:
+#: The issue's suggested `duplicate` is deliberately absent: `receive_webhook`
+#: does not deduplicate — every delivery past the filters becomes a fresh row
+#: with a new uuid4, and nothing looks up the provider's event id — so the
+#: constant would name a column that could never have a row. Adding it back is
+#: part of adding the dedupe, not separate from it.
 OUTCOME_ACCEPTED = "accepted"
-OUTCOME_DUPLICATE = "duplicate"
 OUTCOME_IGNORED = "ignored"
 OUTCOME_REJECTED = "rejected"
 OUTCOME_VERIFICATION = "verification"

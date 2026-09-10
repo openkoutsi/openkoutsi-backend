@@ -11,6 +11,7 @@ import pytest
 from sqlalchemy import select
 
 from backend.app.models.api_usage_orm import ApiUsage
+from backend.app.services.api_usage import drain_api_usage_writes
 from backend.app.services.email import messages
 from backend.app.services.email.base import (
     EmailConfigurationError,
@@ -54,6 +55,9 @@ class _FakeProvider(EmailProvider):
 
 
 async def _rows(factory):
+    # Writes are scheduled off the caller's path (issue #66), so an assertion
+    # made straight after a request would race them.
+    await drain_api_usage_writes()
     async with factory() as session:
         return (
             (await session.execute(select(ApiUsage).order_by(ApiUsage.created_at)))

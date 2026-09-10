@@ -31,7 +31,7 @@ from typing import Optional
 
 import httpx
 
-from backend.app.services.api_usage import parse_rate_limit, record_api_usage
+from backend.app.services.api_usage import parse_rate_limit, schedule_api_usage
 
 #: Hosts we own the URL shape of, and the path prefix to strip from each so the
 #: recorded template reads like the provider's documented endpoint rather than
@@ -97,10 +97,13 @@ def normalise_endpoint(url: httpx.URL) -> str:
 class CountingTransport(httpx.AsyncBaseTransport):
     """Wraps a transport, recording one ``api_usage`` row per request.
 
-    Recording is awaited inline rather than fired off as a task: the write is a
-    single insert into a WAL-mode SQLite file, and doing it here keeps the row
-    ordered against the response that produced it. It cannot fail the request —
-    :func:`~backend.app.services.api_usage.record_api_usage` swallows everything.
+    The write is **scheduled, not awaited**. Swallowing its failures is enough to
+    stop accounting failing a sync, but not enough to stop it *slowing* one: the
+    usage engine's pool and connect timeouts run to tens of seconds, so a
+    database under an exclusive lock — what the documented retention ``VACUUM``
+    takes — would add ~30s to every outbound provider request. Handing the
+    response back first is what makes "never at the athlete's expense" true of
+    latency as well as of failure.
     """
 
     def __init__(
@@ -123,7 +126,7 @@ class CountingTransport(httpx.AsyncBaseTransport):
             # No response was produced, so there is no status and no rate-limit
             # reading — but the request was still made, and a backfill that dies
             # on DNS is exactly the kind of thing this table should show.
-            await record_api_usage(
+            schedule_api_usage(
                 service=self._service,
                 endpoint=endpoint,
                 method=request.method,
@@ -133,7 +136,7 @@ class CountingTransport(httpx.AsyncBaseTransport):
             )
             raise
 
-        await record_api_usage(
+        schedule_api_usage(
             service=self._service,
             endpoint=endpoint,
             method=request.method,
@@ -172,12 +175,37 @@ def provider_client(
     site. ``user_id`` is optional; when omitted the recorded row takes whatever
     :func:`~backend.app.services.api_usage.attribute_to_user` has established for
     the surrounding context, and NULL when nothing has.
+
+    **The client is built first and its transports wrapped afterwards**, rather
+    than constructed with ``transport=``. httpx reads ``HTTP_PROXY`` /
+    ``HTTPS_PROXY`` / ``NO_PROXY`` only when no explicit transport is given
+    (``allow_env_proxies = trust_env and transport is None``), so passing one
+    drops the whole proxy map — which would have silently stopped provider sync
+    on any instance whose egress goes through a proxy, and reported the result as
+    a transport error rather than explaining it. Every mount is wrapped too, so a
+    request that takes a proxy route is counted exactly like a direct one.
     """
-    return httpx.AsyncClient(
-        transport=CountingTransport(
-            httpx.AsyncHTTPTransport(), service=service, user_id=user_id
-        ),
-        timeout=timeout,
-        follow_redirects=follow_redirects,
-        **kwargs,
+    client = httpx.AsyncClient(
+        timeout=timeout, follow_redirects=follow_redirects, **kwargs
     )
+
+    def wrap(transport):
+        return CountingTransport(transport, service=service, user_id=user_id)
+
+    # Private attributes, because httpx offers no public hook for decorating the
+    # transports it built. Every access is type-guarded rather than merely
+    # present-guarded, so this degrades to wrapping less rather than raising:
+    # an httpx upgrade that renames or reshapes them still yields a working
+    # client, and a test that patches `httpx.AsyncClient` with a mock gets its
+    # mock back untouched instead of a TypeError from iterating it.
+    transport = getattr(client, "_transport", None)
+    if isinstance(transport, httpx.AsyncBaseTransport):
+        client._transport = wrap(transport)
+
+    mounts = getattr(client, "_mounts", None)
+    if isinstance(mounts, dict):
+        client._mounts = {
+            pattern: wrap(t) if isinstance(t, httpx.AsyncBaseTransport) else t
+            for pattern, t in mounts.items()
+        }
+    return client
