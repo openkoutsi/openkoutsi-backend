@@ -318,6 +318,113 @@ class TestRecordingNeverBreaksTheCaller:
         )
 
 
+class TestOAuthPathsAreRecordedWithNoUser:
+    """The OAuth exchange happens before an account is linked to a provider.
+
+    It is still an outbound request against the same application-wide quota, so
+    it must be counted — and it is the case the nullable ``user_id`` column
+    exists for. Nothing asserted that until now.
+
+    The inner transport is faked rather than the client, so the real
+    ``provider_client`` and its ``CountingTransport`` stay in the path: what is
+    under test is that the wrapper is actually wired into these methods.
+    """
+
+    @staticmethod
+    def _fake_transport(monkeypatch, handler):
+        async def handle(self, request):
+            return handler(request)
+
+        monkeypatch.setattr(
+            httpx.AsyncHTTPTransport, "handle_async_request", handle
+        )
+
+    async def test_strava_token_exchange(self, api_usage_db, monkeypatch):
+        from backend.app.services.providers.strava import StravaProviderClient
+
+        self._fake_transport(
+            monkeypatch,
+            lambda r: httpx.Response(
+                200,
+                json={
+                    "access_token": "at",
+                    "refresh_token": "rt",
+                    "expires_at": 1_800_000_000,
+                    "athlete": {"id": 4242},
+                },
+            ),
+        )
+
+        result = await StravaProviderClient.exchange_code("code", "https://app/cb")
+        assert result["access_token"] == "at"
+
+        (row,) = await _rows(api_usage_db)
+        assert row.service == "strava"
+        assert row.endpoint == "/oauth/token"
+        assert row.method == "POST"
+        assert row.outcome == OUTCOME_OK
+        assert row.user_id is None, "no account is linked yet"
+
+    async def test_strava_token_refresh(self, api_usage_db, monkeypatch):
+        from backend.app.services.providers.strava import StravaProviderClient
+
+        self._fake_transport(
+            monkeypatch,
+            lambda r: httpx.Response(
+                200,
+                json={
+                    "access_token": "at2",
+                    "refresh_token": "rt2",
+                    "expires_at": 1_800_000_000,
+                },
+            ),
+        )
+
+        await StravaProviderClient.refresh_access_token("rt")
+        (row,) = await _rows(api_usage_db)
+        assert (row.service, row.endpoint) == ("strava", "/oauth/token")
+
+    async def test_wahoo_exchange_counts_both_of_its_requests(
+        self, api_usage_db, monkeypatch
+    ):
+        """One method call, two requests — the thesis this design rests on.
+
+        ``exchange_code`` posts for a token and then fetches the profile. Counting
+        at the provider-method layer would report half of what it actually spent.
+        """
+        from backend.app.services.providers.wahoo import WahooClient
+
+        def handler(request):
+            if request.url.path.endswith("/oauth/token"):
+                return httpx.Response(
+                    200,
+                    json={"access_token": "at", "refresh_token": "rt", "expires_in": 3600},
+                )
+            return httpx.Response(200, json={"id": 99})
+
+        self._fake_transport(monkeypatch, handler)
+
+        await WahooClient.exchange_code("code", "https://app/cb")
+
+        rows = await _rows(api_usage_db)
+        assert [r.endpoint for r in rows] == ["/oauth/token", "/user"]
+        assert {r.service for r in rows} == {"wahoo"}
+        assert all(r.user_id is None for r in rows)
+
+    async def test_a_failed_exchange_is_still_counted(self, api_usage_db, monkeypatch):
+        # A refused exchange spent a request just as a successful one did.
+        from backend.app.services.providers.strava import StravaProviderClient
+
+        self._fake_transport(monkeypatch, lambda r: httpx.Response(400, json={}))
+
+        with pytest.raises(httpx.HTTPStatusError):
+            await StravaProviderClient.exchange_code("bad", "https://app/cb")
+
+        (row,) = await _rows(api_usage_db)
+        assert row.status_code == 400
+        assert row.outcome == OUTCOME_CLIENT_ERROR
+
+
 class TestDatabasePath:
     """``API_USAGE_DB`` overrides the path; otherwise it sits under the data dir.
 
