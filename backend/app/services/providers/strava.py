@@ -14,6 +14,7 @@ import httpx
 
 from backend.app.core.config import settings
 from backend.app.services.providers.base import BaseProviderClient, NormalizedActivity, ZoneData
+from backend.app.services.providers.http import provider_client
 from openkoutsi.streams import resample_from_time_stream
 
 _AUTH_BASE = "https://www.strava.com"
@@ -28,6 +29,10 @@ _STRAVA_SCOPE = "read,activity:read_all,profile:read_all"
 
 _PAGE_SIZE = 200
 _TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=5.0)
+
+#: Service name recorded against every request below (issue #66). Module-level
+#: because the OAuth calls are ``@staticmethod`` and have no ``PROVIDER_NAME``.
+PROVIDER = "strava"
 
 
 class StravaProviderClient(BaseProviderClient):
@@ -48,7 +53,7 @@ class StravaProviderClient(BaseProviderClient):
 
     @staticmethod
     async def exchange_code(code: str, redirect_uri: str) -> dict:  # type: ignore[override]
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        async with provider_client(PROVIDER, timeout=_TIMEOUT) as client:
             r = await client.post(
                 f"{_AUTH_BASE}/oauth/token",
                 json={
@@ -71,7 +76,7 @@ class StravaProviderClient(BaseProviderClient):
 
     @staticmethod
     async def refresh_access_token(refresh_token: str) -> dict:  # type: ignore[override]
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        async with provider_client(PROVIDER, timeout=_TIMEOUT) as client:
             r = await client.post(
                 f"{_AUTH_BASE}/oauth/token",
                 json={
@@ -93,7 +98,7 @@ class StravaProviderClient(BaseProviderClient):
 
     @staticmethod
     async def deauthorize(access_token: str) -> None:  # type: ignore[override]
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        async with provider_client(PROVIDER, timeout=_TIMEOUT) as client:
             await client.post(
                 f"{_AUTH_BASE}/oauth/deauthorize",
                 data={"access_token": access_token},
@@ -105,7 +110,7 @@ class StravaProviderClient(BaseProviderClient):
         self, access_token: str, page: int
     ) -> list[NormalizedActivity]:
         headers = {"Authorization": f"Bearer {access_token}"}
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        async with provider_client(PROVIDER, timeout=_TIMEOUT) as client:
             r = await client.get(
                 f"{_API_BASE}/athlete/activities",
                 headers=headers,
@@ -118,7 +123,7 @@ class StravaProviderClient(BaseProviderClient):
 
     async def fetch_zones(self, access_token: str) -> ZoneData:
         headers = {"Authorization": f"Bearer {access_token}"}
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        async with provider_client(PROVIDER, timeout=_TIMEOUT) as client:
             r_athlete, r_zones = await asyncio.gather(
                 client.get(f"{_API_BASE}/athlete", headers=headers),
                 client.get(f"{_API_BASE}/athlete/zones", headers=headers),
@@ -145,7 +150,7 @@ class StravaProviderClient(BaseProviderClient):
         self, access_token: str, external_id: str
     ) -> dict[str, list[float]]:
         headers = {"Authorization": f"Bearer {access_token}"}
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        async with provider_client(PROVIDER, timeout=_TIMEOUT) as client:
             r = await client.get(
                 f"{_API_BASE}/activities/{external_id}/streams",
                 headers=headers,

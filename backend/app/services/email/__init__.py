@@ -32,6 +32,7 @@ from backend.app.services.email.base import (
     InboundParseError,
     OutboundMessage,
 )
+from backend.app.services.email.counting import CountingEmailProvider, email_kind
 from backend.app.services.email.euromail import EuromailProvider
 from backend.app.services.email.factory import (
     build_email_provider,
@@ -56,6 +57,8 @@ __all__ = [
     "OutboundMessage",
     "LettermintProvider",
     "EuromailProvider",
+    "CountingEmailProvider",
+    "email_kind",
     "build_email_provider",
     "get_email_provider",
     "render_transactional_email",

@@ -154,6 +154,9 @@ services stay focused on what is actually different between them:
 | Auth + per-user session + athlete lookup for a route | `core/deps.py` (`get_ctx_session_athlete`) |
 | Plan / planned-workout ownership checks | `api/plans.py` (`get_owned_plan`, `get_owned_workout`) |
 | Streaming LLM analyses (transport, DB drain loop, usage recording) | `services/llm_streaming.py` |
+| Counting every outbound provider HTTP request | `services/providers/http.py` |
+| Recording third-party API/email usage | `services/api_usage.py` |
+| Reading current provider quota headroom | `services/quota.py` |
 | Non-streaming LLM calls (config resolution, structured outputs) | `services/llm_client.py` |
 | Turning imported activity data into stored metrics, bests and intervals | `services/provider_sync.py` |
 | Reading an activity file, whatever its format | `openkoutsi/activity_formats.py` (registry) + `gpx.py` / `tcx.py` / `fit.py` |
@@ -295,6 +298,11 @@ LLM_ALLOW_PRIVATE_NETWORKS=false
 # Optional: path to the dedicated LLM-usage database (per-call token accounting
 # for instance-paid calls). Empty = <DATA_DIR>/llm_usage.db.
 LLM_USAGE_DB=
+
+# Optional: path to the dedicated third-party API-usage database (per-call
+# accounting for outbound Strava/Wahoo requests and outbound email, plus the
+# quota headroom their responses report). Empty = <DATA_DIR>/api_usage.db.
+API_USAGE_DB=
 ```
 
 There are no server-side LLM env-var defaults: all LLM connections are defined as
@@ -368,6 +376,31 @@ provider and model) is recorded in a separate database (`LLM_USAGE_DB`, default
 via `GET /api/admin/llm-usage/summary` (day/week/month buckets). BYOK calls are never
 recorded — the user pays their own provider.
 
+**Third-party API usage and quota headroom** (issue #66). Every outbound HTTP
+request to Strava and Wahoo, and every transactional email, is recorded in its own
+database (`API_USAGE_DB`, default `data/api_usage.db`) — counted at the HTTP layer
+rather than the provider-method layer, because quotas are counted in requests and
+one method call is often several (Strava's `fetch_zones()` issues two; a Wahoo FIT
+download may follow a CDN redirect). Counting sits in an `httpx` transport wrapper
+rather than a response hook so that transport failures — which never produce a
+response — are recorded too. The Usage tab leads with **headroom**: Strava reports
+our standing exactly in the rate-limit headers of every response, so that reading
+is stored on each row and "where are we now" is the newest one, with the overall
+and the lower read-only quota tracked separately because a backfill is all reads.
+A reading from a window that has since rolled over displays as **reset — 0 used**,
+not as last window's number, and its age travels with it so a stale reading is
+never presented as live; `429`s are recorded distinctly as the one unambiguous
+evidence of exceeding. Inbound webhooks are counted at the bridges as aggregate
+per-day counters that outlive their seven-day event prune — the backend's own view
+would tally nacked redeliveries repeatedly and miss events shed by the queue
+ceiling. `endpoint` stores a normalised template (`/activities/{id}/streams`),
+never a raw URL, and the write is **scheduled off the request path**: a locked or
+full usage database costs an accounting row, never an athlete's sync and never
+its latency either — awaiting the insert inline would have added the engine's
+lock wait to every outbound request for the length of a retention `VACUUM`. Read via
+`GET /api/admin/quota/headroom`, `/api/admin/api-usage/summary` and
+`/api/admin/webhook-usage/summary`; see [ADMIN.md](ADMIN.md).
+
 The web frontend has its own configuration (`API_URL`, etc.) — see the [openkoutsi-web](https://github.com/openkoutsi/openkoutsi-web) repository.
 
 ## Integrations
@@ -375,7 +408,7 @@ The web frontend has its own configuration (`API_URL`, etc.) — see the [openko
 - **Strava:** configure Strava app credentials in `.env` and deploy `strava_bridge/` to a public HTTPS URL. The bridge's `POST /webhook` is **unauthenticated**: Strava documents no webhook signing, so the `X-Hub-Signature-256` check is off by default — requiring a header Strava never sends refused every real event with `401`. In its place: activity-only filtering, the unknown-owner drop in the main app, re-fetching each activity from Strava's API, and the `MAX_QUEUE_EVENTS` ceiling. The check stays behind `STRAVA_VERIFY_WEBHOOK_SIGNATURE=true` for the day Strava documents a validation sequence.
 - **Wahoo:** configure Wahoo credentials in `.env` and deploy `wahoo_bridge/` to a public HTTPS URL. Pushing structured workouts to Wahoo requires the `plans_read`, `plans_write`, and `workouts_write` scopes; users connected before this feature must reconnect Wahoo to grant them. The "Generate workouts" plan action needs a server-reachable LLM (resolved athlete → instance → global) to synthesize the structured workouts; uploading the generated workouts to Wahoo is then done individually from the Workouts tab.
 - **Disconnecting a provider:** `DELETE /api/integrations/{provider}/disconnect` also deletes the imported activities when `delete_data=true` is passed (as a query parameter *or* in the JSON body). The data is deleted and committed *before* the connection is removed, and a failed deletion returns `500` with the connection left in place — the caller is never told the data is gone unless it was.
-- **A throttled sync stops instead of importing hollow rides** (issue #67) — the provider quota belongs to the *application*, so one athlete's backfill is spent from a budget shared with everyone else's syncs and webhook imports. A `429` or `5xx` used to be swallowed by the same `except Exception` that means "this activity has no FIT" — and Wahoo's client, which reads statuses itself rather than raising, returned its plain "no file" `None` for one — so the ride was imported with no power, HR or cadence and the sync marched on collecting the next refusal; the skip that keys on a source already existing then meant no later sync ever looked at it again. Now a refusal is told apart from an absence, and a rate limit from a bad moment: a `429` stops the backfill cleanly with the activity behind it not imported at all (`Retry-After` is honoured once first, when the provider names a wait worth holding for), while a `5xx` on one activity's detail fetch leaves that source unresolved and carries on — stopping there would make one unservable ride a permanent wall, since the walk is newest-first and restarts from the newest each time. A run of 25 consecutive unresolved activities does stop it: that is a provider that is down, not a ride that is awkward. `ActivitySource.streams_fetched_at` records when a source's detail data was actually *resolved*, which a failure to reach it never is, so a contest decided against a FIT nobody could fetch is retried rather than settled — including rides already left hollow, which the migration leaves unstamped for exactly that reason. The walk is bounded in activities rather than pages (a page is 200 on Strava and 30 on Wahoo), one backfill runs at a time per (user, provider) behind a database lease renewed per activity, and `POST /api/integrations/{provider}/sync` is rate-limited per provider and answers `409` while one is already running rather than promising a sync it knows will not start. Pacing the outbound calls against the provider's real quota headroom waits on the usage observability in issue #66
+- **A throttled sync stops instead of importing hollow rides** (issue #67) — the provider quota belongs to the *application*, so one athlete's backfill is spent from a budget shared with everyone else's syncs and webhook imports. A `429` or `5xx` used to be swallowed by the same `except Exception` that means "this activity has no FIT" — and Wahoo's client, which reads statuses itself rather than raising, returned its plain "no file" `None` for one — so the ride was imported with no power, HR or cadence and the sync marched on collecting the next refusal; the skip that keys on a source already existing then meant no later sync ever looked at it again. Now a refusal is told apart from an absence, and a rate limit from a bad moment: a `429` stops the backfill cleanly with the activity behind it not imported at all (`Retry-After` is honoured once first, when the provider names a wait worth holding for), while a `5xx` on one activity's detail fetch leaves that source unresolved and carries on — stopping there would make one unservable ride a permanent wall, since the walk is newest-first and restarts from the newest each time. A run of 25 consecutive unresolved activities does stop it: that is a provider that is down, not a ride that is awkward. `ActivitySource.streams_fetched_at` records when a source's detail data was actually *resolved*, which a failure to reach it never is, so a contest decided against a FIT nobody could fetch is retried rather than settled — including rides already left hollow, which the migration leaves unstamped for exactly that reason. The walk is bounded in activities rather than pages (a page is 200 on Strava and 30 on Wahoo), one backfill runs at a time per (user, provider) behind a database lease renewed per activity, and `POST /api/integrations/{provider}/sync` is rate-limited per provider and answers `409` while one is already running rather than promising a sync it knows will not start. Pacing the outbound calls against the provider's real quota headroom is now possible: issue #66 records the headroom reading and exposes it through `services/quota.py::current_headroom()`, which a throttle can consume without a refactor
 
 ### Deployment
 

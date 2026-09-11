@@ -43,6 +43,7 @@ from backend.app.models.user_orm import (
     Athlete,
     SyncLease,
 )
+from backend.app.services.api_usage import attribute_to_user
 from backend.app.services.stranded_runs import begin_activity_analysis_run
 from openkoutsi.categorization import classify_workout
 from openkoutsi.fit_processing import (
@@ -504,16 +505,22 @@ async def sync_provider_activities(
 
     failed = False
     try:
-        return await _import_all_pages(
-            athlete,
-            client_cls(),
-            session,
-            user_id=user_id,
-            access_token=access_token,
-            provider_name=provider_name,
-            lease_name=lease_name,
-            lease_token=lease_token,
-        )
+        # Attribute every outbound provider request this backfill makes to the
+        # athlete whose history it is walking (issue #66). The quota is
+        # per-application, so this is diagnostic rather than billing — but one
+        # athlete's backfill can throttle everyone on the instance, which makes
+        # "whose sync burned it" the first question an admin asks.
+        with attribute_to_user(user_id):
+            return await _import_all_pages(
+                athlete,
+                client_cls(),
+                session,
+                user_id=user_id,
+                access_token=access_token,
+                provider_name=provider_name,
+                lease_name=lease_name,
+                lease_token=lease_token,
+            )
     except BaseException:
         failed = True
         raise

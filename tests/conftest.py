@@ -124,14 +124,16 @@ def isolate_user_dbs(tmp_path, monkeypatch):
     its own data_dir and a cleared engine cache for isolation.
     """
     from backend.app.core.config import settings
-    from backend.app.db import usage, user_session
+    from backend.app.db import api_usage, usage, user_session
 
     monkeypatch.setattr(settings, "data_dir", str(tmp_path))
     user_session._get_user_engine.cache_clear()
     usage._get_usage_engine.cache_clear()
+    api_usage._get_api_usage_engine.cache_clear()
     yield
     user_session._get_user_engine.cache_clear()
     usage._get_usage_engine.cache_clear()
+    api_usage._get_api_usage_engine.cache_clear()
 
 
 @pytest.fixture
@@ -144,6 +146,18 @@ async def usage_db(isolate_user_dbs):
 
     await init_usage_db()
     return usage_session_factory()
+
+
+@pytest.fixture
+async def api_usage_db(isolate_user_dbs):
+    """Initialise the dedicated third-party API-usage DB in this test's temp dir.
+
+    Returns a session factory for asserting on recorded ``api_usage`` rows.
+    """
+    from backend.app.db.api_usage import api_usage_session_factory, init_api_usage_db
+
+    await init_api_usage_db()
+    return api_usage_session_factory()
 
 
 # ── DB fixtures ────────────────────────────────────────────────────────────

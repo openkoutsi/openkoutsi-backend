@@ -23,6 +23,7 @@ _dbg = logging.getLogger("wahoo.raw_debug")
 
 from backend.app.core.config import settings
 from backend.app.services.providers.base import BaseProviderClient, NormalizedActivity, ZoneData
+from backend.app.services.providers.http import provider_client
 from backend.app.services.providers.throttling import ProviderThrottled, from_response
 
 _BASE = "https://api.wahooligan.com"
@@ -36,6 +37,10 @@ _SCOPES = (
 )
 _PAGE_SIZE = 30
 _TIMEOUT = httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=5.0)
+
+#: Service name recorded against every request below (issue #66). Module-level
+#: because the OAuth calls are ``@staticmethod`` and have no ``PROVIDER_NAME``.
+PROVIDER = "wahoo"
 
 # Wahoo workout_type_id → sport_type string
 _SPORT_TYPES: dict[int, str] = {
@@ -144,7 +149,7 @@ class WahooClient(BaseProviderClient):
 
     @staticmethod
     async def exchange_code(code: str, redirect_uri: str) -> dict:  # type: ignore[override]
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        async with provider_client(PROVIDER, timeout=_TIMEOUT) as client:
             r = await client.post(
                 _TOKEN_URL,
                 data={
@@ -159,7 +164,7 @@ class WahooClient(BaseProviderClient):
             data = r.json()
 
         # Fetch user profile to get the Wahoo user ID
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        async with provider_client(PROVIDER, timeout=_TIMEOUT) as client:
             u = await client.get(
                 f"{_API_BASE}/user",
                 headers={"Authorization": f"Bearer {data['access_token']}"},
@@ -179,7 +184,7 @@ class WahooClient(BaseProviderClient):
 
     @staticmethod
     async def refresh_access_token(refresh_token: str) -> dict:  # type: ignore[override]
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        async with provider_client(PROVIDER, timeout=_TIMEOUT) as client:
             r = await client.post(
                 _TOKEN_URL,
                 data={
@@ -204,7 +209,7 @@ class WahooClient(BaseProviderClient):
 
     @staticmethod
     async def deauthorize(access_token: str) -> None:  # type: ignore[override]
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        async with provider_client(PROVIDER, timeout=_TIMEOUT) as client:
             await client.delete(
                 f"{_API_BASE}/permissions",
                 headers={"Authorization": f"Bearer {access_token}"},
@@ -216,7 +221,7 @@ class WahooClient(BaseProviderClient):
         self, access_token: str, page: int
     ) -> list[NormalizedActivity]:
         headers = {"Authorization": f"Bearer {access_token}"}
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        async with provider_client(PROVIDER, timeout=_TIMEOUT) as client:
             r = await client.get(
                 f"{_API_BASE}/workouts",
                 headers=headers,
@@ -266,7 +271,7 @@ class WahooClient(BaseProviderClient):
         """
         headers = {"Authorization": f"Bearer {access_token}"}
         throttled: ProviderThrottled | None = None
-        async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as client:
+        async with provider_client(PROVIDER, timeout=_TIMEOUT, follow_redirects=True) as client:
             r = await client.get(
                 f"{_API_BASE}/workouts/{external_id}/fit_file",
                 headers=headers,
@@ -290,7 +295,7 @@ class WahooClient(BaseProviderClient):
         cdn_url = self._fit_urls.get(external_id)
         if cdn_url:
             _dbg.debug("download_fit_file workout_id=%s → trying CDN URL %s", external_id, cdn_url)
-            async with httpx.AsyncClient(timeout=_TIMEOUT, follow_redirects=True) as cdn_client:
+            async with provider_client(PROVIDER, timeout=_TIMEOUT, follow_redirects=True) as cdn_client:
                 cdn_r = await cdn_client.get(cdn_url)
                 if cdn_r.is_success:
                     _dbg.debug(
@@ -329,7 +334,7 @@ class WahooClient(BaseProviderClient):
 
     async def fetch_zones(self, access_token: str) -> ZoneData:
         headers = {"Authorization": f"Bearer {access_token}"}
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        async with provider_client(PROVIDER, timeout=_TIMEOUT) as client:
             r = await client.get(f"{_API_BASE}/power_zones", headers=headers)
         r.raise_for_status()
         raw = r.json()
@@ -358,7 +363,7 @@ class WahooClient(BaseProviderClient):
     ) -> dict | None:
         """Return the existing plan record for an external_id, or None."""
         headers = {"Authorization": f"Bearer {access_token}"}
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        async with provider_client(PROVIDER, timeout=_TIMEOUT) as client:
             r = await client.get(
                 f"{_API_BASE}/plans",
                 headers=headers,
@@ -404,7 +409,7 @@ class WahooClient(BaseProviderClient):
 
         existing = await self.find_plan_by_external_id(access_token, external_id)
 
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        async with provider_client(PROVIDER, timeout=_TIMEOUT) as client:
             if existing and existing.get("id"):
                 r = await client.put(
                     f"{_API_BASE}/plans/{existing['id']}", headers=headers, data=data
@@ -444,7 +449,7 @@ class WahooClient(BaseProviderClient):
             "workout[plan_id]": str(plan_id),
         }
 
-        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        async with provider_client(PROVIDER, timeout=_TIMEOUT) as client:
             if existing_id:
                 r = await client.put(
                     f"{_API_BASE}/workouts/{existing_id}", headers=headers, data=data

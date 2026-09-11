@@ -16,6 +16,7 @@ import pytest
 
 from backend.app.core.config import Settings
 from backend.app.services.email import (
+    CountingEmailProvider,
     EmailConfigurationError,
     EmailError,
     InboundEmail,
@@ -77,7 +78,10 @@ def test_render_without_action_omits_button():
 
 def test_factory_returns_lettermint_by_default():
     provider = build_email_provider(_settings())
-    assert isinstance(provider, LettermintProvider)
+    # The factory wraps its choice in the usage-counting decorator (issue #66),
+    # so the selection is asserted through the wrapper rather than on it.
+    assert isinstance(provider, CountingEmailProvider)
+    assert isinstance(provider.wrapped, LettermintProvider)
     assert provider.PROVIDER_NAME == "lettermint"
 
 

@@ -410,3 +410,103 @@ everything else on the client address. The key is the user rather than the token
 because a user may mint tokens freely, and per-token buckets would make every limit
 multiplicative in a number nothing caps. Token ids still appear in the audit log, which
 is where per-token attribution belongs.
+
+## Third-party API usage and quota headroom
+
+The **Usage** tab on the admin page reports what the instance spends against its
+third-party APIs. Two different questions are answered there, and it is worth
+knowing which panel answers which.
+
+### Headroom — "can we start a big import right now?"
+
+Strava enforces a quota on the whole **application**, not per athlete: one user's
+history backfill can throttle everybody on the instance. Its windows are **15
+minutes** and **one day**, so a monthly total tells you nothing about whether the
+next import will be refused.
+
+The headroom panel does not estimate this from our own call counts. Strava
+reports our standing exactly, in the rate-limit headers of *every* response, so
+the panel shows the provider's own figure taken from the last response we saw.
+Two limits are tracked separately:
+
+| Quota | Typical ceiling | Why it is shown apart |
+|---|---|---|
+| **Overall** | 600 per 15 min / 30 000 per day | What a 429 enforces |
+| **Read** | 300 per 15 min / 15 000 per day | Lower, and a backfill is *all* reads — so this is the one that runs out first |
+
+Two labels on that panel matter:
+
+- **Observation age.** Headroom is a *now* number, but it is only as fresh as our
+  last call to the provider. An hours-old reading is shown with its age rather
+  than presented as live.
+- **"Window reset".** A usage reading is only valid inside the window it was
+  taken in. If the newest observation predates the current window, the counter
+  has demonstrably reset and the panel shows **0 used**, flagged as inferred. It
+  does not show last window's number — that would report alarming usage against a
+  window nothing has spent.
+
+Wahoo publishes no comparable quota, so it shows as reporting none. That is
+different from "no data".
+
+**Rate-limited (429) responses** are recorded distinctly and the most recent one
+is shown per service. A 429 is the only unambiguous evidence that a quota was
+exceeded, so it is the thing worth watching.
+
+### Volume — "what are we spending, and on what?"
+
+Counts of our own calls, grouped by day, week, month, service, endpoint, status,
+outcome or user. The unit is the **HTTP request** for Strava and Wahoo — quotas
+are counted in requests, and one provider method call is often several — and the
+**message** for email, which is how email is billed.
+
+Endpoints are stored as normalised templates (`/activities/{id}/streams`), never
+raw URLs: raw URLs carry activity ids and, on some paths, query-string
+credentials. Request headers are never stored at all.
+
+Per-user attribution is available (`group_by=user`) because the quota is
+instance-wide, which makes "whose sync burned it" the first diagnostic question.
+Rows for bridge polling and pre-link OAuth have no user and group under a blank
+key.
+
+### Inbound webhooks
+
+Counted at the **bridges**, which is where deliveries actually land — the backend
+only claims events the bridges have queued. The two numbers are not the same:
+counting at the backend would tally nacked redeliveries repeatedly and would
+never see events shed by the queue ceiling.
+
+Outcomes are `accepted`, `ignored` (a real delivery of a type we deliberately do
+not queue, such as a Strava athlete event), `rejected` (malformed, bad token, or
+the queue ceiling), and `verification` (the subscription handshake, kept apart so
+it does not inflate the delivery count). There is no `duplicate`: neither bridge
+deduplicates, so it would name a row that can never exist.
+
+Both bridges delete events older than seven days, so these are aggregate counters
+rather than per-event history — which is what makes a per-month figure possible
+at all. They are never pruned. A bridge that cannot be reached is named in the
+response rather than silently counted as zero.
+
+### API
+
+All admin-only (403 otherwise):
+
+```
+GET /api/admin/quota/headroom
+GET /api/admin/api-usage/summary?from=&to=&group_by=day|week|month|service|endpoint|status|outcome|user&service=
+GET /api/admin/webhook-usage/summary?from=&to=&group_by=day|week|month|provider|outcome
+```
+
+On the webhook summary `group_by` is literal — `provider` and `outcome` each
+collapse to one row per value. The time buckets keep the `(provider, outcome)`
+breakdown, because a daily total with accepted and rejected summed together
+hides the comparison worth making.
+
+Rows live in their own SQLite file (`<DATA_DIR>/api_usage.db`, override with
+`API_USAGE_DB`) so it can be pruned on its own schedule — see
+[DEPLOY.md](DEPLOY.md). The write is scheduled off the request path, so a locked
+or full usage database costs an accounting row and nothing else: not the sync,
+and not its speed. Running the retention prune during a backfill therefore loses
+some rows rather than slowing every request down.
+
+> Enforcement — backing off automatically when headroom is low — is separate from
+> this reporting. See issue #67.

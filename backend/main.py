@@ -13,9 +13,35 @@ from backend.app.core.config import settings
 from backend.app.core.limiter import limiter
 from backend.app.core.scopes import build_access_map
 from backend.app.db.registry import init_registry_db
+from backend.app.db.api_usage import init_api_usage_db
 from backend.app.db.usage import init_usage_db
 
 log = logging.getLogger(__name__)
+
+
+async def init_usage_databases() -> None:
+    """Open the two accounting databases, best-effort.
+
+    The registry is a hard startup dependency because nothing works without it.
+    These two are accounting, not function: a mistyped `LLM_USAGE_DB` or
+    `API_USAGE_DB` should cost the instance its statistics, not its startup.
+    Letting them raise would make the subsystem whose whole contract is "never
+    the thing that fails" the one that fails hardest — before a single request
+    is served, with an unwritable accounting path as the cause.
+    """
+    for label, init in (
+        ("LLM usage", init_usage_db),
+        ("third-party API usage", init_api_usage_db),
+    ):
+        try:
+            await init()
+        except Exception:
+            log.error(
+                "Could not open the %s database — the instance will run with "
+                "that accounting unavailable. Check its configured path.",
+                label,
+                exc_info=True,
+            )
 
 
 @asynccontextmanager
@@ -35,7 +61,8 @@ async def lifespan(app: FastAPI):
         )
 
     await init_registry_db()
-    await init_usage_db()
+
+    await init_usage_databases()
 
     # Nothing that writes a `pending` LLM status survives this process (issue
     # #91): the auto-analyse paths run under `asyncio.create_task` and the
@@ -68,6 +95,16 @@ async def lifespan(app: FastAPI):
     from backend.app.services.surface_matcher import close_surface_matcher
 
     await close_surface_matcher()
+
+    # Usage rows are written off the request path (issue #66), so a redeploy can
+    # land between a provider call and its accounting. Draining here costs a
+    # moment of shutdown and keeps the count honest across one.
+    from backend.app.services.api_usage import drain_api_usage_writes
+
+    try:
+        await asyncio.wait_for(drain_api_usage_writes(), timeout=5)
+    except Exception:
+        log.warning("Some API-usage rows were still in flight at shutdown")
 
     supervisor.cancel()
     try:

@@ -153,3 +153,70 @@ class TestAnUnreachableBridge:
             raise httpx.ConnectError("bridge is down")
 
         await _client(handler).ack("e1", "t1")  # must not raise
+
+
+class TestStats:
+    """Aggregate delivery counts, proxied by the admin API (issue #66)."""
+
+    async def test_returns_the_rows(self):
+        def handler(request):
+            assert request.url.path == "/stats"
+            assert request.headers["Authorization"] == f"Bearer {SECRET}"
+            return httpx.Response(
+                200,
+                json={
+                    "provider": "strava",
+                    "stats": [{"day": "2026-09-10", "outcome": "accepted", "count": 3}],
+                },
+            )
+
+        rows = await _client(handler).stats()
+        assert rows == [{"day": "2026-09-10", "outcome": "accepted", "count": 3}]
+
+    async def test_day_range_is_passed_through(self):
+        seen = []
+
+        def handler(request):
+            seen.append(str(request.url))
+            return httpx.Response(200, json={"stats": []})
+
+        await _client(handler).stats(from_day="2026-09-01", to_day="2026-09-30")
+        assert "from=2026-09-01" in seen[0]
+        assert "to=2026-09-30" in seen[0]
+
+    async def test_an_unreachable_bridge_is_none_not_empty(self):
+        """The two answers mean different things to an admin table.
+
+        No deliveries is a fact; a bridge we could not reach is a gap, and the
+        caller has to be able to say which it is showing.
+        """
+        def handler(request):
+            raise httpx.ConnectError("refused", request=request)
+
+        assert await _client(handler).stats() is None
+
+    async def test_a_bridge_without_stats_is_none(self):
+        # A bridge deployed before /stats existed. Purely additive, so a 404
+        # lands as the same "no data from this one" — no version negotiation.
+        assert await _client(lambda r: httpx.Response(404)).stats() is None
+
+    async def test_a_malformed_bridge_url_is_none_not_a_500(self):
+        """`httpx.InvalidURL` is not an `httpx.HTTPError`.
+
+        A BRIDGE_URL missing its scheme is exactly the misconfiguration a
+        "which bridges answered" panel exists to surface — it must not instead
+        become a 500 on the page that would have surfaced it.
+        """
+        http = httpx.AsyncClient(transport=httpx.MockTransport(lambda r: httpx.Response(200)))
+        client = BridgeClient(http, "not-a-url", SECRET)
+        assert await client.stats() is None
+
+    async def test_a_json_array_body_is_not_an_attribute_error(self):
+        # A proxy or ingress answering 200 with `[]` used to raise
+        # AttributeError out of `.get()` and 500 the admin page.
+        assert await _client(lambda r: httpx.Response(200, json=[])).stats() == []
+
+    async def test_a_non_json_body_is_none(self):
+        assert await _client(
+            lambda r: httpx.Response(200, content=b"<html>nope</html>")
+        ).stats() is None

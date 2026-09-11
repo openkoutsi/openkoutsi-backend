@@ -76,6 +76,46 @@ class BridgeClient:
             log.warning("Could not fetch events from bridge at %s", self._base)
             return []
 
+    async def stats(
+        self, *, from_day: str | None = None, to_day: str | None = None
+    ) -> list[dict] | None:
+        """Aggregate delivery counts from the bridge, or ``None`` if unreachable.
+
+        ``None`` rather than ``[]`` on failure, because the two mean different
+        things to an admin table: no deliveries is a fact, and a bridge we could
+        not reach is a gap. The caller says which it is showing (issue #66).
+
+        A bridge that predates ``/stats`` answers 404, which lands here as the
+        same "no data from this one" — no version negotiation needed, since the
+        endpoint is purely additive.
+        """
+        params = {}
+        if from_day:
+            params["from"] = from_day
+        if to_day:
+            params["to"] = to_day
+        try:
+            r = await self._http.get(
+                f"{self._base}/stats", headers=self._headers, params=params
+            )
+            r.raise_for_status()
+            body = r.json()
+            return body.get("stats", []) if isinstance(body, dict) else []
+        except Exception:
+            # Deliberately broad, and broader than `claim_batch` above: that one
+            # is called from a poller that tolerates a bad round, this one from a
+            # request handler where anything escaping becomes a 500 on the admin
+            # page — for a panel whose entire job is to report which bridges
+            # answered. `httpx.InvalidURL` (a misconfigured BRIDGE_URL, exactly
+            # the misconfiguration worth surfacing) is not an `httpx.HTTPError`,
+            # so a narrower clause would let it through.
+            log.warning(
+                "Could not fetch webhook stats from bridge at %s",
+                self._base,
+                exc_info=True,
+            )
+            return None
+
     async def ack(self, event_id: str, claim_token: Optional[str]) -> None:
         """This event is done: never serve it again."""
         if claim_token is None:

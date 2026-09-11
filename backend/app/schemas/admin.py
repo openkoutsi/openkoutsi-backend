@@ -243,3 +243,96 @@ class LlmUsageSummaryResponse(BaseModel):
     buckets: list[LlmUsageBucket] = []
 
     model_config = {"populate_by_name": True}
+
+
+# ── Third-party API usage and quota headroom (issue #66) ────────────────────
+
+
+class ApiUsageBucket(BaseModel):
+    """One aggregation row of the third-party API-usage summary.
+
+    ``calls`` counts **HTTP requests** for the providers and **messages** for
+    email, which is the unit each is respectively limited and billed in. The
+    outcome breakdown travels with the count because a bucket of 900 calls means
+    something very different when 200 of them are ``rate_limited``.
+    """
+    key: Optional[str] = None
+    calls: int
+    ok: int
+    client_error: int
+    server_error: int
+    transport_error: int
+    rate_limited: int
+    avg_duration_ms: Optional[int] = None
+
+
+class ApiUsageSummaryResponse(BaseModel):
+    group_by: str
+    from_: Optional[str] = Field(default=None, serialization_alias="from")
+    to: Optional[str] = None
+    buckets: list[ApiUsageBucket] = []
+
+    model_config = {"populate_by_name": True}
+
+
+class QuotaWindow(BaseModel):
+    """One quota window's standing for a service.
+
+    ``observed_in_window`` is the field that stops this panel lying. When it is
+    false the window has rolled over since we last called the provider, so
+    ``usage`` is 0 by inference rather than by observation — the counter is
+    genuinely empty, and showing last window's number instead would report
+    alarming usage against a window nothing has spent.
+    """
+    window: str          # short | daily
+    scope: str           # overall | read
+    usage: Optional[int] = None
+    limit: Optional[int] = None
+    remaining: Optional[int] = None
+    window_start: datetime
+    resets_at: datetime
+    observed_in_window: bool
+
+
+class QuotaHeadroom(BaseModel):
+    """A service's current headroom, with everything needed to read it honestly.
+
+    ``observed_at``/``age_seconds`` are present because headroom is a *now*
+    number that is only as fresh as our last call: a caller must be able to say
+    "no observation in this window" rather than implying a live reading.
+    """
+    service: str
+    observed_at: Optional[datetime] = None
+    age_seconds: Optional[float] = None
+    windows: list[QuotaWindow] = []
+    last_rate_limited_at: Optional[datetime] = None
+
+
+class QuotaHeadroomResponse(BaseModel):
+    services: list[QuotaHeadroom] = []
+
+
+class WebhookUsageBucket(BaseModel):
+    """One aggregation row of the inbound-webhook summary.
+
+    Counted at the bridge, which is the only place that sees a delivery
+    *received*. The backend's own view would count redeliveries repeatedly and
+    miss events shed by the queue ceiling entirely.
+    """
+    key: Optional[str] = None
+    provider: Optional[str] = None
+    outcome: Optional[str] = None
+    count: int
+
+
+class WebhookUsageSummaryResponse(BaseModel):
+    group_by: str
+    from_: Optional[str] = Field(default=None, serialization_alias="from")
+    to: Optional[str] = None
+    buckets: list[WebhookUsageBucket] = []
+    #: Bridges that could not be reached for this request. The table is rendered
+    #: from whatever did answer, with these named — a bridge being down is not a
+    #: reason to show nothing, but it is a reason not to imply completeness.
+    unavailable: list[str] = []
+
+    model_config = {"populate_by_name": True}

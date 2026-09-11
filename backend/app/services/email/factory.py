@@ -9,6 +9,7 @@ from functools import lru_cache
 
 from backend.app.core.config import Settings, settings
 from backend.app.services.email.base import EmailProvider
+from backend.app.services.email.counting import CountingEmailProvider
 from backend.app.services.email.euromail import EuromailProvider
 from backend.app.services.email.lettermint import LettermintProvider
 
@@ -19,7 +20,13 @@ _PROVIDERS: dict[str, type[EmailProvider]] = {
 
 
 def build_email_provider(config: Settings) -> EmailProvider:
-    """Construct the provider named by ``config.email_provider``."""
+    """Construct the provider named by ``config.email_provider``.
+
+    The result is wrapped in :class:`CountingEmailProvider` so every message sent
+    through it is accounted for (issue #66). Wrapping here rather than at the
+    call sites is what makes that unmissable: a new caller of ``send()`` is
+    counted without knowing the counting exists.
+    """
     name = config.email_provider
     provider_cls = _PROVIDERS.get(name)
     if provider_cls is None:
@@ -27,7 +34,7 @@ def build_email_provider(config: Settings) -> EmailProvider:
             f"Unknown email_provider {name!r}. "
             f"Known providers: {', '.join(sorted(_PROVIDERS))}."
         )
-    return provider_cls.from_settings(config)
+    return CountingEmailProvider(provider_cls.from_settings(config))
 
 
 @lru_cache(maxsize=1)
