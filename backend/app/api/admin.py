@@ -5,6 +5,7 @@ into a single token-scoped resource. There is one instance and a single global
 ``administrator`` role; these endpoints manage users, instance-wide invitations,
 and instance LLM settings.
 """
+import asyncio
 import hashlib
 import json
 import logging
@@ -859,6 +860,13 @@ async def api_usage_summary(
 
 _WEBHOOK_GROUP_BY = {"day", "week", "month", "provider", "outcome"}
 
+#: A stats panel, not a sync path: a bridge that has not answered in this long
+#: is not about to produce a useful number.
+_WEBHOOK_STATS_TIMEOUT = 5.0
+
+#: Default window when the caller names no `from`. See the note where it is used.
+_WEBHOOK_DEFAULT_DAYS = 90
+
 
 def _webhook_slot(
     group_by: str, day: str, provider: str, outcome: str
@@ -914,7 +922,10 @@ async def webhook_usage_summary(
     hides the comparison worth making.
 
     A bridge that cannot be reached is named in ``unavailable`` rather than
-    silently contributing zero.
+    silently contributing zero, and the bridges are queried concurrently so one
+    that is down costs its own timeout rather than adding to the other's.
+
+    With no ``from``, the window defaults to the last 90 days.
     """
     if group_by not in _WEBHOOK_GROUP_BY:
         raise HTTPException(
@@ -930,33 +941,53 @@ async def webhook_usage_summary(
     from_day = from_dt.date().isoformat() if from_dt else None
     to_day = to_dt.date().isoformat() if to_dt else None
 
+    if from_day is None:
+        # `webhook_stats` is never pruned, so an unbounded default would grow the
+        # page load for the life of the instance. A window keeps it flat; an
+        # admin who wants the whole history asks for it with `from`.
+        from_day = (
+            datetime.now(timezone.utc).date() - timedelta(days=_WEBHOOK_DEFAULT_DAYS)
+        ).isoformat()
+
     configured = [
-        ("strava", settings.bridge_url, settings.bridge_secret),
-        ("wahoo", settings.wahoo_bridge_url, settings.wahoo_bridge_secret),
+        (provider, url, secret)
+        for provider, url, secret in (
+            ("strava", settings.bridge_url, settings.bridge_secret),
+            ("wahoo", settings.wahoo_bridge_url, settings.wahoo_bridge_secret),
+        )
+        if url and secret
     ]
     counts: dict[tuple[str, str | None, str | None], int] = {}
     unavailable: list[str] = []
 
-    async with httpx.AsyncClient(timeout=10.0) as http:
-        for provider, url, secret in configured:
-            if not url or not secret:
-                continue
-            rows = await BridgeClient(http, url, secret).stats(
-                from_day=from_day, to_day=to_day
+    # Concurrently, because the bridges are independent and sequential fetches
+    # would make this request's worst case the *sum* of their timeouts — long
+    # enough for a reverse proxy to give up and turn a partially-degraded page
+    # into a 504, on exactly the panel an admin opens when a bridge is down.
+    async with httpx.AsyncClient(timeout=_WEBHOOK_STATS_TIMEOUT) as http:
+        results = await asyncio.gather(
+            *(
+                BridgeClient(http, url, secret).stats(
+                    from_day=from_day, to_day=to_day
+                )
+                for _, url, secret in configured
             )
-            if rows is None:
-                unavailable.append(provider)
+        )
+
+    for (provider, _url, _secret), rows in zip(configured, results):
+        if rows is None:
+            unavailable.append(provider)
+            continue
+        for row in rows:
+            day = str(row.get("day", ""))
+            outcome = str(row.get("outcome", "unknown"))
+            try:
+                slot = _webhook_slot(group_by, day, provider, outcome)
+            except ValueError:
+                # A day string the bridge wrote that we cannot parse. Skip
+                # the row rather than failing the whole table for it.
                 continue
-            for row in rows:
-                day = str(row.get("day", ""))
-                outcome = str(row.get("outcome", "unknown"))
-                try:
-                    slot = _webhook_slot(group_by, day, provider, outcome)
-                except ValueError:
-                    # A day string the bridge wrote that we cannot parse. Skip
-                    # the row rather than failing the whole table for it.
-                    continue
-                counts[slot] = counts.get(slot, 0) + int(row.get("count", 0) or 0)
+            counts[slot] = counts.get(slot, 0) + int(row.get("count", 0) or 0)
 
     buckets = [
         WebhookUsageBucket(key=key, provider=provider, outcome=outcome, count=count)

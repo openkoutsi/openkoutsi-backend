@@ -41,6 +41,13 @@ OUTCOME_RATE_LIMITED = "rate_limited"
 
 _user_id: ContextVar[Optional[str]] = ContextVar("api_usage_user_id", default=None)
 
+#: Whether the last write failed. Failures here repeat once per outbound HTTP
+#: request, so a traceback each would turn "accounting is degraded" into "the
+#: disk is full" — which is the contract this module exists to keep, broken one
+#: indirection later. Reported in full once, then at debug until a write
+#: succeeds, so a later unrelated failure is not permanently demoted.
+_write_failing = False
+
 #: In-flight recording tasks, held so the event loop cannot garbage-collect one
 #: mid-write. ``asyncio`` keeps only a weak reference to a running task.
 _pending: set[asyncio.Task] = set()
@@ -217,6 +224,7 @@ async def record_api_usage(
     :func:`backend.app.services.providers.http.normalise_endpoint`. Nothing here
     inspects a URL, so nothing here can leak one.
     """
+    global _write_failing
     reading = rate_limit or RateLimitReading()
     try:
         async with api_usage_session_factory()() as session:
@@ -241,10 +249,25 @@ async def record_api_usage(
                 )
             )
             await session.commit()
-    except Exception:  # noqa: BLE001 - accounting must never break a sync
-        log.warning(
-            "Failed to record API usage (service=%s endpoint=%s)",
-            service,
-            endpoint,
-            exc_info=True,
-        )
+        _write_failing = False
+    except Exception as exc:  # noqa: BLE001 - accounting must never break a sync
+        if _write_failing:
+            # Already reported. One line, no traceback: this path runs once per
+            # outbound request, and a 10,000-request backfill against an
+            # unwritable database would otherwise write ~90 MB of identical
+            # tracebacks onto the same volume as DATA_DIR.
+            log.debug(
+                "Still failing to record API usage (service=%s endpoint=%s): %s",
+                service,
+                endpoint,
+                exc,
+            )
+        else:
+            _write_failing = True
+            log.warning(
+                "Failed to record API usage (service=%s endpoint=%s) — further "
+                "failures will be logged at debug until one succeeds",
+                service,
+                endpoint,
+                exc_info=True,
+            )

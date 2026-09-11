@@ -6,6 +6,8 @@ recorded request, the rate-limit headers being read off every response, and —
 the one that matters most — a recording failure never reaching the caller.
 """
 
+import logging
+
 import httpx
 import pytest
 from sqlalchemy import select
@@ -485,6 +487,99 @@ class TestDatabasePath:
         monkeypatch.setattr(settings, "llm_usage_db", "")
         monkeypatch.setattr(settings, "data_dir", "/srv/okdata")
         assert settings.api_usage_db_path != settings.llm_usage_db_path
+
+
+class TestFailureLoggingIsBounded:
+    """A traceback per failure is how accounting breaks a sync indirectly.
+
+    This path runs once per outbound HTTP request. Against an unwritable
+    database a large backfill would write ~9 KB of identical traceback per
+    request onto the same volume as DATA_DIR — accounting DB unusable, log
+    flood, disk full, *user* database writes failing.
+    """
+
+    @staticmethod
+    def _break_writes(monkeypatch):
+        def boom():
+            raise RuntimeError("database is locked")
+
+        monkeypatch.setattr(api_usage_service, "api_usage_session_factory", boom)
+
+    async def test_repeated_failures_report_once(self, api_usage_db, monkeypatch, caplog):
+        monkeypatch.setattr(api_usage_service, "_write_failing", False)
+        self._break_writes(monkeypatch)
+
+        with caplog.at_level(logging.WARNING):
+            for _ in range(20):
+                await record_api_usage(
+                    service="strava", endpoint="/athlete", method="GET",
+                    status_code=200,
+                )
+
+        warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert len(warnings) == 1, "one report, not one per request"
+        assert warnings[0].exc_info is not None, "and the first one carries the traceback"
+
+    async def test_a_later_failure_is_reported_again_after_a_success(
+        self, api_usage_db, monkeypatch, caplog
+    ):
+        """A transient lock must not permanently demote the next real failure."""
+        monkeypatch.setattr(api_usage_service, "_write_failing", False)
+
+        working = api_usage_service.api_usage_session_factory
+        broken = {"now": True}
+
+        def maybe_broken():
+            if broken["now"]:
+                raise RuntimeError("database is locked")
+            return working()
+
+        monkeypatch.setattr(
+            api_usage_service, "api_usage_session_factory", maybe_broken
+        )
+
+        async def record():
+            await record_api_usage(
+                service="strava", endpoint="/athlete", method="GET", status_code=200
+            )
+
+        with caplog.at_level(logging.WARNING):
+            await record()
+        assert len([r for r in caplog.records if r.levelno >= logging.WARNING]) == 1
+
+        broken["now"] = False
+        await record()  # succeeds, clearing the "already reported" flag
+
+        broken["now"] = True
+        caplog.clear()
+        with caplog.at_level(logging.WARNING):
+            await record()
+        assert len([r for r in caplog.records if r.levelno >= logging.WARNING]) == 1
+
+
+class TestSchemaShape:
+    def test_service_is_not_separately_indexed(self):
+        """It is the prefix of the (service, created_at) composite.
+
+        SQLite uses the composite for service-only predicates, so a standalone
+        index is a fifth B-tree maintained on every insert for no query benefit
+        — on the hottest write path in the system.
+        """
+        from backend.app.models.api_usage_orm import ApiUsage
+
+        names = {ix.name for ix in ApiUsage.__table__.indexes}
+        assert "ix_api_usage_service_created" in names
+        assert "ix_api_usage_service" not in names
+
+    def test_the_primary_key_is_a_rowid_alias(self):
+        # An INTEGER PK *is* the table in SQLite, so it costs no index; a random
+        # UUID would need its own B-tree and scatter page splits, and nothing
+        # here is ever looked up by id.
+        from sqlalchemy import Integer
+
+        from backend.app.models.api_usage_orm import ApiUsage
+
+        assert isinstance(ApiUsage.__table__.c.id.type, Integer)
 
 
 class TestProviderClientFactory:

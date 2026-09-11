@@ -15,7 +15,6 @@ Two questions are served by the one table:
 * **Volume** — "are we trending toward the ceiling, and what does email cost?"
   Answered by counting our own rows, bucketed by day/week/month.
 """
-import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -23,10 +22,6 @@ from sqlalchemy import DateTime, Index, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from backend.app.db.base import ApiUsageBase
-
-
-def _uuid() -> str:
-    return str(uuid.uuid4())
 
 
 def _now() -> datetime:
@@ -49,12 +44,19 @@ class ApiUsage(ApiUsageBase):
         Index("ix_api_usage_user_created", "user_id", "created_at"),
     )
 
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    #: An INTEGER primary key, which SQLite makes an alias for the rowid — so it
+    #: costs no index of its own. A random UUID would need a second B-tree and
+    #: scatter its page splits, and buy nothing: this table is append-only,
+    #: nothing joins to it, and it is only ever read in aggregate.
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), index=True, default=_now, nullable=False
     )
-    # strava | wahoo | lettermint | euromail
-    service: Mapped[str] = mapped_column(String, index=True, nullable=False)
+    #: Not separately indexed: ``service`` is the prefix of the
+    #: ``(service, created_at)`` composite below, so SQLite uses that for
+    #: service-only predicates too. One less B-tree to maintain on what is the
+    #: hottest write path in the system.
+    service: Mapped[str] = mapped_column(String, nullable=False)
     #: A **normalised template**, never the raw URL — ``/activities/12345/streams``
     #: is stored as ``/activities/{id}/streams``. Raw URLs carry activity ids and,
     #: on some paths, query-string credentials. Headers are never stored at all.

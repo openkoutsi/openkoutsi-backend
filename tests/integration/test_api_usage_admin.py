@@ -496,6 +496,86 @@ class TestWebhookUsageSummary:
         assert body["buckets"] == []
         assert body["unavailable"] == []
 
+    async def test_both_bridges_are_queried_concurrently(
+        self, client, auth_headers, monkeypatch, api_usage_db
+    ):
+        """Sequentially, this request's worst case is the *sum* of the timeouts.
+
+        Long enough for a reverse proxy to give up and turn a partially-degraded
+        page into a 504 — on the panel an admin opens precisely when a bridge is
+        down.
+        """
+        import asyncio
+        import time
+
+        from backend.app.core.config import settings
+
+        monkeypatch.setattr(settings, "bridge_url", "https://bridge.test")
+        monkeypatch.setattr(settings, "bridge_secret", "s3cret")
+        monkeypatch.setattr(settings, "wahoo_bridge_url", "https://wahoo.test")
+        monkeypatch.setattr(settings, "wahoo_bridge_secret", "s3cret")
+
+        async def slow_stats(**kwargs):
+            await asyncio.sleep(0.3)
+            return []
+
+        stub = AsyncMock()
+        stub.stats = slow_stats
+        started = time.perf_counter()
+        with patch("backend.app.api.admin.BridgeClient", lambda *a, **k: stub):
+            resp = await client.get(
+                "/api/admin/webhook-usage/summary", headers=auth_headers
+            )
+        elapsed = time.perf_counter() - started
+
+        assert resp.status_code == 200
+        assert elapsed < 0.55, (
+            f"took {elapsed:.2f}s — two 0.3s bridges ran in series, not parallel"
+        )
+
+    async def test_an_unbounded_default_window_would_grow_forever(
+        self, client, auth_headers, monkeypatch, api_usage_db
+    ):
+        """`webhook_stats` is never pruned, so the default load needs a bound."""
+        from datetime import date
+
+        from backend.app.core.config import settings
+
+        monkeypatch.setattr(settings, "bridge_url", "https://bridge.test")
+        monkeypatch.setattr(settings, "bridge_secret", "s3cret")
+        monkeypatch.setattr(settings, "wahoo_bridge_url", "")
+
+        stub = AsyncMock()
+        stub.stats = AsyncMock(return_value=[])
+        with patch("backend.app.api.admin.BridgeClient", lambda *a, **k: stub):
+            resp = await client.get(
+                "/api/admin/webhook-usage/summary", headers=auth_headers
+            )
+        assert resp.status_code == 200
+
+        asked_for = stub.stats.await_args.kwargs["from_day"]
+        assert asked_for is not None, "no default window"
+        days_back = (date.today() - date.fromisoformat(asked_for)).days
+        assert days_back == 90
+
+    async def test_an_explicit_from_overrides_the_default_window(
+        self, client, auth_headers, monkeypatch, api_usage_db
+    ):
+        from backend.app.core.config import settings
+
+        monkeypatch.setattr(settings, "bridge_url", "https://bridge.test")
+        monkeypatch.setattr(settings, "bridge_secret", "s3cret")
+        monkeypatch.setattr(settings, "wahoo_bridge_url", "")
+
+        stub = AsyncMock()
+        stub.stats = AsyncMock(return_value=[])
+        with patch("backend.app.api.admin.BridgeClient", lambda *a, **k: stub):
+            await client.get(
+                "/api/admin/webhook-usage/summary?from=2024-01-01",
+                headers=auth_headers,
+            )
+        assert stub.stats.await_args.kwargs["from_day"] == "2024-01-01"
+
     async def test_bad_group_by_is_400(self, client, auth_headers, api_usage_db):
         resp = await client.get(
             "/api/admin/webhook-usage/summary?group_by=nonsense", headers=auth_headers

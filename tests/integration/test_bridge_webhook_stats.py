@@ -73,6 +73,41 @@ async def strava_client():
     await engine.dispose()
 
 
+class TestJournalMode:
+    """The counter made every delivery two write transactions, not one.
+
+    Both bridges ran in rollback-journal mode, where a writer takes an exclusive
+    lock on the whole file — unlike every engine in the main app. The asymmetry
+    is what makes it matter: a failed counter write is swallowed, while a failed
+    *event* write is a 500 that makes the provider redeliver.
+    """
+
+    @pytest.mark.parametrize("module", [strava_bridge, wahoo_bridge])
+    async def test_the_queue_is_in_wal_mode(self, module, tmp_path):
+        engine = create_async_engine(
+            f"sqlite+aiosqlite:///{tmp_path / f'{module.__name__}.db'}"
+        )
+        from sqlalchemy import event as sa_event
+
+        sa_event.listen(engine.sync_engine, "connect", module._set_wal_mode)
+        async with engine.begin() as conn:
+            mode = (await conn.exec_driver_sql("PRAGMA journal_mode")).scalar()
+            busy = (await conn.exec_driver_sql("PRAGMA busy_timeout")).scalar()
+        await engine.dispose()
+
+        assert mode == "wal"
+        assert busy == 30000
+
+    @pytest.mark.parametrize("module", [strava_bridge, wahoo_bridge])
+    def test_the_listener_is_actually_wired_to_the_engine(self, module):
+        # A helper nothing registers would pass the test above and change nothing.
+        from sqlalchemy import event as sa_event
+
+        assert sa_event.contains(
+            module.engine.sync_engine, "connect", module._set_wal_mode
+        )
+
+
 class TestStravaBridgeCounters:
     async def test_accepted_deliveries_are_counted(self, strava_client):
         client, _ = strava_client

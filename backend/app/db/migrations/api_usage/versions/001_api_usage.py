@@ -28,7 +28,7 @@ depends_on = None
 def upgrade() -> None:
     op.create_table(
         "api_usage",
-        sa.Column("id", sa.String(), primary_key=True),
+        sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("service", sa.String(), nullable=False),
         sa.Column("endpoint", sa.String(), nullable=False),
@@ -47,7 +47,6 @@ def upgrade() -> None:
         sa.Column("ratelimit_read_limit_daily", sa.Integer(), nullable=True),
     )
     op.create_index("ix_api_usage_created_at", "api_usage", ["created_at"])
-    op.create_index("ix_api_usage_service", "api_usage", ["service"])
     op.create_index(
         "ix_api_usage_service_created", "api_usage", ["service", "created_at"]
     )
@@ -57,6 +56,5 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_index("ix_api_usage_user_created", table_name="api_usage")
     op.drop_index("ix_api_usage_service_created", table_name="api_usage")
-    op.drop_index("ix_api_usage_service", table_name="api_usage")
     op.drop_index("ix_api_usage_created_at", table_name="api_usage")
     op.drop_table("api_usage")
