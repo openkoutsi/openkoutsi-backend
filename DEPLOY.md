@@ -453,6 +453,24 @@ already carries them; neither needs a backup step of its own.
 > startup, and their Alembic chains are applied by hand as above — the new one
 > follows the existing pattern exactly, so there is no entrypoint change.
 
+A database the app creates is stamped at head on creation, so `upgrade head` is
+a clean no-op on it. A database created *before* that behaviour existed carries
+no revision at all, and `upgrade head` fails on it with `table llm_usage already
+exists` — it tries to replay `001` over tables that are already there. That
+affects `llm_usage.db` on any deployment predating this change. Adopt it once:
+
+```bash
+uv run alembic -c backend/alembic-usage.ini stamp head    # once, only if it has no revision
+uv run alembic -c backend/alembic-usage.ini upgrade head  # normally, from then on
+```
+
+Check first with `sqlite3 "$DATA_DIR/llm_usage.db" "SELECT * FROM alembic_version;"`
+— an error saying the table does not exist means it needs adopting, and a row
+means it does not. Only stamp a database whose schema really is at head; the app
+deliberately will not do this for you, because stamping a database that is
+*behind* the chain would mark migrations as applied that never ran, and
+`create_all` adds missing tables but never missing columns.
+
 ##### Growth and pruning
 
 `api_usage` has no automatic prune (neither does `llm_usage`). A full history

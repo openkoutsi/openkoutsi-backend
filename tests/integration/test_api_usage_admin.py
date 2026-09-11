@@ -558,6 +558,51 @@ class TestWebhookUsageSummary:
         days_back = (date.today() - date.fromisoformat(asked_for)).days
         assert days_back == 90
 
+    async def test_the_response_reports_the_window_it_actually_used(
+        self, client, auth_headers, monkeypatch, api_usage_db
+    ):
+        """Not the caller's raw input, which is None when the default applies.
+
+        Reporting an unbounded window over 90 days of data is the same class of
+        mistake `observed_in_window` and `unavailable` exist to prevent.
+        """
+        from datetime import date
+
+        from backend.app.core.config import settings
+
+        monkeypatch.setattr(settings, "bridge_url", "https://bridge.test")
+        monkeypatch.setattr(settings, "bridge_secret", "s3cret")
+        monkeypatch.setattr(settings, "wahoo_bridge_url", "")
+
+        stub = AsyncMock()
+        stub.stats = AsyncMock(return_value=[])
+        with patch("backend.app.api.admin.BridgeClient", lambda *a, **k: stub):
+            resp = await client.get(
+                "/api/admin/webhook-usage/summary", headers=auth_headers
+            )
+        body = resp.json()
+        assert body["from"] is not None, "reported an unbounded window"
+        assert body["from"] == stub.stats.await_args.kwargs["from_day"]
+        assert (date.today() - date.fromisoformat(body["from"])).days == 90
+
+    async def test_an_iso_datetime_is_reported_as_the_day_it_became(
+        self, client, auth_headers, monkeypatch, api_usage_db
+    ):
+        from backend.app.core.config import settings
+
+        monkeypatch.setattr(settings, "bridge_url", "https://bridge.test")
+        monkeypatch.setattr(settings, "bridge_secret", "s3cret")
+        monkeypatch.setattr(settings, "wahoo_bridge_url", "")
+
+        stub = AsyncMock()
+        stub.stats = AsyncMock(return_value=[])
+        with patch("backend.app.api.admin.BridgeClient", lambda *a, **k: stub):
+            resp = await client.get(
+                "/api/admin/webhook-usage/summary?from=2026-09-01T12:00:00",
+                headers=auth_headers,
+            )
+        assert resp.json()["from"] == "2026-09-01"
+
     async def test_an_explicit_from_overrides_the_default_window(
         self, client, auth_headers, monkeypatch, api_usage_db
     ):

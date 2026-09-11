@@ -349,6 +349,54 @@ class TestDocumentedAlembicUpgrade:
 
         assert stamped == [_script_directory().get_current_head()]
 
+    async def test_startup_never_restamps_a_database_that_already_existed(
+        self, api_usage_db, monkeypatch
+    ):
+        """The stamp is for a database we just created, never for one we found.
+
+        ``init_api_usage_db`` runs on *every* startup, unlike the per-user stamp
+        it mirrors, which is only reached while creating a user's database.
+        Stamping unconditionally would move an existing deployment's revision
+        forward without running the migration — and since ``create_all`` adds
+        missing tables but never missing *columns*, the schema would stay behind
+        a version it claims to be at. ``upgrade head`` then reports nothing to
+        do and that migration can never be applied: a silent, permanent failure
+        in place of the loud one stamping was added to fix.
+
+        Asserted on whether the stamp is *invoked*, not on the resulting
+        revision. A sentinel revision that the chain does not know makes
+        ``stamp`` raise into the best-effort guard, so the row survives and a
+        DB-level assertion passes even with the bug present.
+        """
+        from backend.app.db import api_usage as module
+
+        calls: list[object] = []
+        monkeypatch.setattr(
+            module, "_stamp_at_head", lambda connection: calls.append(connection)
+        )
+
+        # The fixture already created and stamped this database.
+        await module.init_api_usage_db()
+
+        assert calls == [], "startup stamped a database it did not create"
+
+    async def test_a_database_being_created_is_stamped(self, isolate_user_dbs, monkeypatch):
+        """The other half: the fresh-file path must still stamp.
+
+        Otherwise the documented `alembic upgrade head` goes back to failing
+        with "table api_usage already exists".
+        """
+        from backend.app.db import api_usage as module
+
+        calls: list[object] = []
+        monkeypatch.setattr(
+            module, "_stamp_at_head", lambda connection: calls.append(connection)
+        )
+
+        await module.init_api_usage_db()  # nothing exists yet in this tmp data dir
+
+        assert len(calls) == 1
+
 
 class TestOAuthPathsAreRecordedWithNoUser:
     """The OAuth exchange happens before an account is linked to a provider.

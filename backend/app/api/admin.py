@@ -993,8 +993,12 @@ async def webhook_usage_summary(
         WebhookUsageBucket(key=key, provider=provider, outcome=outcome, count=count)
         for (key, provider, outcome), count in sorted(counts.items())
     ]
+    # The window actually queried, not the one the caller typed. With no `from`
+    # those differ, and echoing the caller's `None` would report an unbounded
+    # window over 90 days of data — the same class of thing `observed_in_window`
+    # and `unavailable` exist to prevent: a panel implying more than it knows.
     return WebhookUsageSummaryResponse(
-        group_by=group_by, from_=from_, to=to, buckets=buckets,
+        group_by=group_by, from_=from_day, to=to_day, buckets=buckets,
         unavailable=unavailable,
     )
 

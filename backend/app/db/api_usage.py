@@ -15,7 +15,7 @@ from collections.abc import AsyncGenerator
 from functools import lru_cache
 from pathlib import Path
 
-from sqlalchemy import event, text
+from sqlalchemy import event, inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from backend.app.core.config import settings
@@ -24,7 +24,9 @@ from backend.app.db.base import ApiUsageBase, _set_wal_mode
 
 log = logging.getLogger(__name__)
 
-_ALEMBIC_INI = "backend/alembic-api-usage.ini"
+#: Anchored to this file rather than the working directory — the stamp below
+#: runs at startup, wherever the process happens to have been launched from.
+_ALEMBIC_INI = str(Path(__file__).resolve().parents[2] / "alembic-api-usage.ini")
 _CHAIN = "api_usage.db"
 
 
@@ -67,8 +69,19 @@ async def init_api_usage_db() -> None:
     engine = _get_api_usage_engine(settings.api_usage_db_path)
     async with engine.begin() as conn:
         await conn.execute(text("PRAGMA journal_mode=WAL"))
+        # Whether this database already existed decides whether stamping it is
+        # safe. This runs on *every* startup, not only at creation — unlike
+        # ``db/user_session.py``, whose stamp is reached only from
+        # ``init_user_db``. Stamping unconditionally would move an existing
+        # deployment's revision forward without running the migration, and
+        # ``create_all`` adds missing tables but never missing *columns*, so the
+        # schema would silently stay behind a version it claims to be at.
+        existed = await conn.run_sync(
+            lambda sync_conn: inspect(sync_conn).has_table("api_usage")
+        )
         await conn.run_sync(ApiUsageBase.metadata.create_all)
-        await conn.run_sync(_stamp_at_head)
+        if not existed:
+            await conn.run_sync(_stamp_at_head)
 
 
 def _stamp_at_head(connection) -> None:
