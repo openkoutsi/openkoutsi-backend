@@ -19,6 +19,31 @@ from backend.app.db.usage import init_usage_db
 log = logging.getLogger(__name__)
 
 
+async def init_usage_databases() -> None:
+    """Open the two accounting databases, best-effort.
+
+    The registry is a hard startup dependency because nothing works without it.
+    These two are accounting, not function: a mistyped `LLM_USAGE_DB` or
+    `API_USAGE_DB` should cost the instance its statistics, not its startup.
+    Letting them raise would make the subsystem whose whole contract is "never
+    the thing that fails" the one that fails hardest — before a single request
+    is served, with an unwritable accounting path as the cause.
+    """
+    for label, init in (
+        ("LLM usage", init_usage_db),
+        ("third-party API usage", init_api_usage_db),
+    ):
+        try:
+            await init()
+        except Exception:
+            log.error(
+                "Could not open the %s database — the instance will run with "
+                "that accounting unavailable. Check its configured path.",
+                label,
+                exc_info=True,
+            )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from backend.app.services.stranded_runs import settle_stranded_runs
@@ -36,8 +61,8 @@ async def lifespan(app: FastAPI):
         )
 
     await init_registry_db()
-    await init_usage_db()
-    await init_api_usage_db()
+
+    await init_usage_databases()
 
     # Nothing that writes a `pending` LLM status survives this process (issue
     # #91): the auto-analyse paths run under `asyncio.create_task` and the

@@ -398,6 +398,60 @@ class TestDocumentedAlembicUpgrade:
         assert len(calls) == 1
 
 
+class TestAccountingIsNotAStartupDependency:
+    async def test_an_unopenable_usage_database_does_not_stop_the_app(
+        self, isolate_user_dbs, monkeypatch, caplog
+    ):
+        """A mistyped `API_USAGE_DB` costs statistics, not the instance.
+
+        The registry is a hard dependency because nothing works without it.
+        These two are accounting, and letting them raise would make the
+        subsystem whose whole contract is "never the thing that fails" the one
+        that fails hardest — before a single request is served.
+        """
+        import backend.main as main_module
+
+        opened: list[str] = []
+
+        async def ok():
+            opened.append("llm")
+
+        async def unopenable():
+            raise OSError("No such file or directory: '/nope/api_usage.db'")
+
+        monkeypatch.setattr(main_module, "init_usage_db", ok)
+        monkeypatch.setattr(main_module, "init_api_usage_db", unopenable)
+
+        with caplog.at_level(logging.ERROR):
+            await main_module.init_usage_databases()  # must not raise
+
+        assert opened == ["llm"], "the healthy database still opened"
+        assert any(
+            "third-party API usage" in r.message for r in caplog.records
+        ), "the failure must still be reported, loudly"
+
+    async def test_a_failure_in_the_first_does_not_skip_the_second(
+        self, isolate_user_dbs, monkeypatch, caplog
+    ):
+        import backend.main as main_module
+
+        opened: list[str] = []
+
+        async def broken():
+            raise OSError("nope")
+
+        async def ok():
+            opened.append("api")
+
+        monkeypatch.setattr(main_module, "init_usage_db", broken)
+        monkeypatch.setattr(main_module, "init_api_usage_db", ok)
+
+        with caplog.at_level(logging.ERROR):
+            await main_module.init_usage_databases()
+
+        assert opened == ["api"]
+
+
 class TestOAuthPathsAreRecordedWithNoUser:
     """The OAuth exchange happens before an account is linked to a provider.
 
