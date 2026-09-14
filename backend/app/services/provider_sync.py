@@ -723,6 +723,11 @@ async def _record_outcome(
             provider_name,
             user_id,
         )
+        # The lease release runs next and needs a session that is not sitting in
+        # pending-rollback, or a failed status write turns into a lease stranded
+        # for its whole deadline.
+        if session.in_transaction():
+            await session.rollback()
 
 
 async def _import_all_pages(
