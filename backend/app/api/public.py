@@ -59,6 +59,17 @@ class InstanceInfoResponse(BaseModel):
     # authenticated course response, where a caller has already identified
     # themselves.
     allow_course_recon: bool = False
+    # A temporary stop on self-serve signup, and the admin's own reason for it.
+    # Published beside `allow_self_signup` rather than folded into it: that flag
+    # says whether the instance offers self-serve signup at all, and collapsing
+    # the two would send the sign-up page down its "not enabled on this
+    # instance" branch — false during a pause, and it would lose the reason,
+    # which is the whole point.
+    #
+    # The reason is admin-written free text served to anyone, so it is a public
+    # notice by construction. The admin console says so where it is typed.
+    signups_halted: bool = False
+    signup_halt_reason: Optional[str] = None
 
 
 @router.get("/instance-info", response_model=InstanceInfoResponse,
@@ -78,17 +89,34 @@ async def get_instance_info(
     result = await session.execute(select(InstanceSettings).limit(1))
     instance = result.scalar_one_or_none()
     email_enabled = get_email_provider().is_configured
+    # What a visitor can actually do, which is the toggle *and* a provider to
+    # send the verification link with. The halt below is reported against this
+    # rather than against the toggle alone.
+    self_signup_offered = bool(instance and instance.allow_self_signup) and email_enabled
     return InstanceInfoResponse(
         admin_contact=instance.admin_contact if instance else None,
         privacy_policy_url=settings.privacy_policy_url,
         email_enabled=email_enabled,
-        allow_self_signup=bool(instance and instance.allow_self_signup) and email_enabled,
+        allow_self_signup=self_signup_offered,
         allow_personal_access_tokens=(
             bool(instance.allow_personal_access_tokens) if instance else True
         ),
         # Absent reads as no, unlike the token switch above: this one defaults
         # off, so an instance that has never been configured has not consented.
         allow_course_recon=bool(instance and instance.allow_course_recon),
+        # Reported only where self-serve signup is otherwise offered, mirroring
+        # `/auth/signup`, where the availability gate answers 404 before the
+        # halt is consulted. An instance that never opened the door is not
+        # "paused", and saying so here would publish the admin's note — and
+        # contradict the page, which shows "not enabled on this instance".
+        signups_halted=self_signup_offered and bool(instance and instance.signups_halted),
+        # Only alongside the flag: a stale reason left over from a previous
+        # pause is not a notice, and publishing it would be one.
+        signup_halt_reason=(
+            instance.signup_halt_reason
+            if self_signup_offered and instance and instance.signups_halted
+            else None
+        ),
     )
 
 

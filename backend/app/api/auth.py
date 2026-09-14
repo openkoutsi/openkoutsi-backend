@@ -62,6 +62,7 @@ from backend.app.schemas.auth import (
     VerifyEmailRequest,
 )
 from backend.app.services import notifications
+from backend.app.services.instance_features import signup_halt
 from backend.app.services.email import (
     EmailError,
     EmailProvider,
@@ -440,6 +441,10 @@ async def reset_password(
 # ── Self-serve signup + email verification (issue #15) ──────────────────────
 
 _SIGNUP_ACK = "If self-serve signup is available, check your inbox to confirm your email."
+# Shown when an admin halted signups without writing a reason. The frontend
+# carries its own localised copy and branches on the code; this is the English
+# fallback for any other client.
+_SIGNUP_HALTED_DEFAULT = "New sign-ups are paused on this instance. Try again later."
 _RESET_ACK = "If an account exists for that email, a password-reset link has been sent."
 
 
@@ -455,12 +460,25 @@ async def signup(
     """Create a pending account and email a verification link.
 
     Guarded by the ``allow_self_signup`` admin toggle and a configured email
-    provider. Always returns the same generic acknowledgement (no account
+    provider, and refused with 503 while an admin has signups halted. Always
+    returns the same generic acknowledgement otherwise (no account
     enumeration): re-signing up an unverified account resends the link with the
     new password; an already-verified email is a silent no-op.
     """
     if not await _self_signup_enabled(session, provider):
         raise HTTPException(status_code=404, detail="Self-serve signup is not available")
+
+    # Checked *after* the gate above, so an instance that does not offer
+    # self-serve signup at all never discloses that it is also halted. 503
+    # rather than 403: the refusal is temporary and about capacity, which is
+    # what 503 means. The structured detail lets the web app own the copy and
+    # render the admin's reason (issue #44 shape).
+    halted, reason = await signup_halt(session)
+    if halted:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "signups_halted", "message": reason or _SIGNUP_HALTED_DEFAULT},
+        )
 
     ack = MessageResponse(detail=_SIGNUP_ACK)
     email = str(body.email).lower()

@@ -3,8 +3,8 @@ Integration tests for self-serve email signup + password reset (issue #15).
 
 Covers the ``/auth/signup``, ``/auth/verify-email`` and
 ``/auth/request-password-reset`` endpoints, login by verified email, the
-``allow_self_signup`` toggle, and graceful degradation when no email provider is
-configured. The email provider is replaced with a recording fake via the
+``allow_self_signup`` toggle, the temporary signup halt, and graceful
+degradation when no email provider is configured. The email provider is replaced with a recording fake via the
 ``get_email_provider_dep`` dependency override.
 """
 import hashlib
@@ -23,6 +23,7 @@ from backend.app.db.user_session import get_user_session_factory
 from backend.app.models.registry_orm import (
     EmailVerificationToken,
     InstanceSettings,
+    Invitation,
     PasswordResetToken,
     User,
 )
@@ -30,6 +31,8 @@ from backend.app.models.user_orm import Athlete
 
 _PREFIX = "/api/auth"
 _GOOD_PW = "Testpass1234"
+# The admin the shared `registry_session` fixture seeds; invitations need a creator.
+_TEST_USER_ID = "test-user-00000000"
 _TOKEN_RE = re.compile(r"token=([A-Za-z0-9_\-]+)")
 
 
@@ -56,9 +59,30 @@ def _use_provider(app, configured: bool = True) -> _FakeProvider:
     return fake
 
 
-async def _enable_signup(registry_session) -> None:
-    registry_session.add(InstanceSettings(id=1, allow_self_signup=True))
+async def _enable_signup(
+    registry_session,
+    *,
+    halted: bool = False,
+    reason: str | None = None,
+) -> None:
+    registry_session.add(InstanceSettings(
+        id=1,
+        allow_self_signup=True,
+        signups_halted=halted,
+        signup_halt_reason=reason,
+    ))
     await registry_session.commit()
+
+
+async def _add_invitation(registry_session, raw_token: str) -> Invitation:
+    inv = Invitation(
+        token_hash=hashlib.sha256(raw_token.encode()).hexdigest(),
+        roles=json.dumps(["user"]),
+        created_by_user_id=_TEST_USER_ID,
+    )
+    registry_session.add(inv)
+    await registry_session.commit()
+    return inv
 
 
 async def _add_verified_user(registry_session, email: str) -> User:
@@ -180,6 +204,147 @@ class TestSignup:
         )
         assert resp.status_code == 202
         assert "detail" in resp.json()
+
+
+# ── the signup halt ─────────────────────────────────────────────────────────
+
+
+class TestSignupHalt:
+    """A temporary stop on the public door, and everything it leaves open.
+
+    The halt exists for capacity — a resource bottleneck, a provider's API
+    application limits — not for policy, which is what `allow_self_signup`
+    already expresses. So most of this suite is about what the switch does
+    *not* refuse, because that is the part a later change is liable to break.
+    """
+
+    async def test_halted_signup_is_refused_with_the_admins_reason(
+        self, client, app, registry_session
+    ):
+        await _enable_signup(
+            registry_session, halted=True, reason="At the Strava app's daily limit."
+        )
+        fake = _use_provider(app)
+
+        resp = await client.post(
+            f"{_PREFIX}/signup", json={"email": "a@example.com", "password": _GOOD_PW}
+        )
+        assert resp.status_code == 503
+        detail = resp.json()["detail"]
+        assert detail["code"] == "signups_halted"
+        assert detail["message"] == "At the Strava app's daily limit."
+        # Nothing was created and nothing was sent.
+        assert fake.sent == []
+        assert (await registry_session.execute(
+            select(func.count()).select_from(User).where(User.email == "a@example.com")
+        )).scalar_one() == 0
+
+    async def test_halted_without_a_reason_still_says_why_it_failed(
+        self, client, app, registry_session
+    ):
+        """The code is the contract; the message is only the fallback copy."""
+        await _enable_signup(registry_session, halted=True)
+        _use_provider(app)
+
+        resp = await client.post(
+            f"{_PREFIX}/signup", json={"email": "a@example.com", "password": _GOOD_PW}
+        )
+        assert resp.status_code == 503
+        assert resp.json()["detail"]["code"] == "signups_halted"
+        assert resp.json()["detail"]["message"]
+
+    async def test_an_instance_that_offers_no_signup_does_not_admit_to_a_halt(
+        self, client, app, registry_session
+    ):
+        """404 wins over 503.
+
+        `allow_self_signup` off means the endpoint is not offered at all. Letting
+        the halt answer first would tell an anonymous caller which of the two it
+        is, and publish the admin's reason on an instance that never opened the
+        door.
+        """
+        registry_session.add(InstanceSettings(
+            id=1,
+            allow_self_signup=False,
+            signups_halted=True,
+            signup_halt_reason="Out of disk.",
+        ))
+        await registry_session.commit()
+        _use_provider(app)
+
+        resp = await client.post(
+            f"{_PREFIX}/signup", json={"email": "a@example.com", "password": _GOOD_PW}
+        )
+        assert resp.status_code == 404
+        assert "Out of disk." not in resp.text
+
+    async def test_invitations_still_redeem(self, client, registry_session):
+        """The deliberate escape hatch: an invite is the admin's own act."""
+        await _enable_signup(registry_session, halted=True, reason="Paused.")
+        raw_token = secrets.token_hex(32)
+        await _add_invitation(registry_session, raw_token)
+
+        resp = await client.post(
+            f"{_PREFIX}/register",
+            json={
+                "username": "invited",
+                "password": _GOOD_PW,
+                "invite_token": raw_token,
+            },
+        )
+        assert resp.status_code == 201
+        assert resp.json()["access_token"]
+
+    async def test_a_link_already_emailed_still_activates(
+        self, client, app, registry_session
+    ):
+        """Somebody who signed up minutes before the halt is not stranded.
+
+        Verification links are single-use and expire in an hour. Refusing them
+        would leave a pending row that can never sign in and no self-serve way
+        out of it.
+        """
+        await _enable_signup(registry_session)
+        fake = _use_provider(app)
+        await client.post(
+            f"{_PREFIX}/signup", json={"email": "intime@example.com", "password": _GOOD_PW}
+        )
+        token = _extract_token(fake.sent[0])
+
+        # The admin halts signups after the link went out.
+        instance = (await registry_session.execute(
+            select(InstanceSettings).limit(1)
+        )).scalar_one()
+        instance.signups_halted = True
+        instance.signup_halt_reason = "Paused."
+        await registry_session.commit()
+
+        resp = await client.post(f"{_PREFIX}/verify-email", json={"token": token})
+        assert resp.status_code == 200
+        user = (await registry_session.execute(
+            select(User).where(User.email == "intime@example.com")
+        )).scalar_one()
+        assert user.email_verified_at is not None
+
+    async def test_lifting_the_halt_restores_signup(self, client, app, registry_session):
+        """The reason the halt is a second column and not a flipped policy flag."""
+        await _enable_signup(registry_session, halted=True, reason="Paused.")
+        fake = _use_provider(app)
+        assert (await client.post(
+            f"{_PREFIX}/signup", json={"email": "a@example.com", "password": _GOOD_PW}
+        )).status_code == 503
+
+        instance = (await registry_session.execute(
+            select(InstanceSettings).limit(1)
+        )).scalar_one()
+        instance.signups_halted = False
+        await registry_session.commit()
+
+        resp = await client.post(
+            f"{_PREFIX}/signup", json={"email": "a@example.com", "password": _GOOD_PW}
+        )
+        assert resp.status_code == 202
+        assert len(fake.sent) == 1
 
 
 # ── /verify-email ───────────────────────────────────────────────────────────

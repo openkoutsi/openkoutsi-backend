@@ -333,6 +333,31 @@ class InstanceSettings(RegistryBase):
     allow_course_recon: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default="0"
     )
+    # A temporary stop on self-serve signup. Distinct from
+    # ``allow_self_signup`` above, and deliberately a second column rather than a
+    # reuse of it: that one is standing policy — whether this instance offers
+    # self-serve signup at all — while this one pauses a door that is otherwise
+    # open, for when the constraint is capacity rather than policy (a resource
+    # bottleneck, a Strava API application limit). Keeping them apart means
+    # lifting the halt restores whatever the instance was doing before, instead
+    # of asking the admin to remember it.
+    #
+    # It also stops at the *front door*, unlike the capability switches above:
+    # invitations keep redeeming, and a verification link already emailed still
+    # activates its account. What it protects is the rate at which strangers
+    # arrive, and an invitation is the admin's own deliberate act.
+    #
+    # Defaults **off** — an instance nobody has configured is not halted.
+    signups_halted: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="0"
+    )
+    # The admin's own sentence, shown verbatim to would-be users beneath a
+    # localised headline. Free text and nullable, like ``admin_contact``: the
+    # reason is always specific to the moment ("we are at the Strava app's daily
+    # limit until the 12th") and no enumeration would carry it. Published
+    # unauthenticated through ``/api/public/instance-info``, so nothing private
+    # belongs in it — the admin console says so where the text is typed.
+    signup_halt_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, onupdate=_now
     )
