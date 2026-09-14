@@ -79,7 +79,10 @@ can never sign in, with no self-serve way out.
 > `GET /api/public/instance-info` — that is how the sign-up page renders it before
 > anyone has logged in. Treat it as a status-page notice: no internal hostnames, no
 > incident detail you would not post publicly. It is capped at 500 characters, and it
-> is only published while the halt is actually on.
+> is published only while the halt is actually on *and* self-serve signup is otherwise
+> on offer — on an instance that has it switched off, or has no email provider, the
+> sign-up page says "not enabled here" and neither the pause nor your reason is
+> published at all.
 
 Write it in whatever language your users read. The page's headline and surrounding copy
 are localised; your sentence is shown as typed.

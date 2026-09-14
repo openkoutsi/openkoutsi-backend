@@ -3,6 +3,24 @@
 Covers admin read/write via /api/admin/settings and the unauthenticated
 GET /api/public/instance-info endpoint.
 """
+import pytest
+
+
+@pytest.fixture
+def email_configured(monkeypatch):
+    """Make the public endpoint see a configured email provider.
+
+    `/public/instance-info` calls `get_email_provider()` directly rather than
+    through a dependency, so the usual override does not reach it. Self-serve
+    signup — and therefore the pause reported against it — is unavailable
+    without a provider, so anything asserting on either needs this.
+    """
+    class _Configured:
+        is_configured = True
+
+    monkeypatch.setattr(
+        "backend.app.api.public.get_email_provider", lambda: _Configured()
+    )
 
 
 class TestAdminContactAdmin:
@@ -161,24 +179,58 @@ class TestSignupHaltSetting:
         )
         assert resp.status_code == 422
 
-    async def test_it_is_published_to_unauthenticated_callers(self, client, auth_headers):
+    async def test_it_is_published_to_unauthenticated_callers(
+        self, client, auth_headers, email_configured
+    ):
         """The sign-up page has to explain the pause before anyone can log in."""
         await client.patch(
             "/api/admin/settings",
-            json={"signups_halted": True, "signup_halt_reason": "Back on Monday."},
+            json={
+                "allow_self_signup": True,
+                "signups_halted": True,
+                "signup_halt_reason": "Back on Monday.",
+            },
             headers=auth_headers,
         )
         resp = await client.get("/api/public/instance-info")
         assert resp.json()["signups_halted"] is True
         assert resp.json()["signup_halt_reason"] == "Back on Monday."
 
-    async def test_the_reason_is_withheld_while_nothing_is_halted(
+    async def test_nothing_is_published_where_signup_is_not_offered(
         self, client, auth_headers
+    ):
+        """No email provider here, so self-serve signup is not on offer at all.
+
+        `/auth/signup` answers 404 in that state and the sign-up page says "not
+        enabled on this instance" — so publishing "paused, because <reason>"
+        beside it would both contradict the page and put the admin's note on an
+        instance that never opened the door.
+        """
+        await client.patch(
+            "/api/admin/settings",
+            json={
+                "allow_self_signup": True,
+                "signups_halted": True,
+                "signup_halt_reason": "Back on Monday.",
+            },
+            headers=auth_headers,
+        )
+        resp = await client.get("/api/public/instance-info")
+        assert resp.json()["allow_self_signup"] is False
+        assert resp.json()["signups_halted"] is False
+        assert resp.json()["signup_halt_reason"] is None
+
+    async def test_the_reason_is_withheld_while_nothing_is_halted(
+        self, client, auth_headers, email_configured
     ):
         """A reason left over from a previous pause is not a public notice."""
         await client.patch(
             "/api/admin/settings",
-            json={"signups_halted": True, "signup_halt_reason": "Back on Monday."},
+            json={
+                "allow_self_signup": True,
+                "signups_halted": True,
+                "signup_halt_reason": "Back on Monday.",
+            },
             headers=auth_headers,
         )
         await client.patch(
