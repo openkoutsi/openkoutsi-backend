@@ -2708,17 +2708,10 @@ class TestAnEarlyFailureKeepsTheCursor:
         assert state.stop_reason == "error"
         assert state.resume_page == 50, "a run that listed nothing has nothing to say"
 
-    async def test_a_run_that_did_list_still_records_where_it_stopped(self, session):
-        """The guard must not swallow a real cursor along with the empty one."""
-        from backend.app.services import sync_state
-
+    async def test_a_first_stop_records_where_it_stopped(self, session):
+        """With nothing recorded, any depth the walk reached is new information."""
         athlete = await _make_athlete(session, user_id="cursor-2")
-        await sync_state.record_stop(
-            session, "strava", reason="throttled", detail="429",
-            imported=0, listed=10, oldest_seen_on=None, resume_page=50,
-        )
 
-        # Page 1 lists and throttles, so this run has something to say: page 1.
         await _sync(
             athlete,
             session,
@@ -2730,3 +2723,72 @@ class TestAnEarlyFailureKeepsTheCursor:
 
         state = await _state(session)
         assert state.resume_page == 1
+
+    async def test_a_front_sweep_failure_does_not_replace_a_deeper_cursor(self, session):
+        """The ordinary way to lose the walk: a blip during the catch-up sweep.
+
+        Every resumed run starts at the front, so a transient failure on page 1
+        or 2 is the *likely* kind — and a cursor that took a dozen throttled runs
+        to establish must not be replaced by the page a blip happened to reach.
+        """
+        from backend.app.services import sync_state
+
+        athlete = await _make_athlete(session, user_id="cursor-3")
+        base = datetime(2024, 6, 10, 10, 0, tzinfo=timezone.utc)
+        await sync_state.record_stop(
+            session, "strava", reason="throttled", detail="429",
+            imported=400, listed=1000, oldest_seen_on=date(2019, 4, 2), resume_page=50,
+        )
+
+        async def _list(_token, page):
+            if page == 1:
+                return [_norm("fresh", start_time=base)]
+            raise RuntimeError("the provider blew up on page 2")
+
+        with pytest.raises(RuntimeError):
+            await _sync(
+                athlete, session, _client(list_activities=AsyncMock(side_effect=_list))
+            )
+
+        state = await _state(session)
+        assert state.stop_reason == "error"
+        assert state.resume_page == 50, "a shallow stop carries no new depth"
+
+    async def test_a_deeper_stop_does_advance_the_cursor(self, session):
+        """Advancing is the whole point — the guard must not freeze the cursor."""
+        from backend.app.services import sync_state
+
+        athlete = await _make_athlete(session, user_id="cursor-4")
+        base = datetime(2024, 6, 10, 10, 0, tzinfo=timezone.utc)
+        await sync_state.record_stop(
+            session, "strava", reason="throttled", detail="429",
+            imported=0, listed=10, oldest_seen_on=None, resume_page=3,
+        )
+
+        # Page 1 settles, the walk jumps to 2 and carries on; page 4 throws it out.
+        await _imported_source(session, athlete, "p1", base)
+        pages = {
+            1: [_norm("p1", start_time=base)],
+            2: [_norm("p2", start_time=base - timedelta(days=1))],
+            3: [_norm("p3", start_time=base - timedelta(days=2))],
+            4: [_norm("p4", start_time=base - timedelta(days=3))],
+        }
+
+        async def _list(_token, page):
+            if page == 4:
+                raise _status_error(429)
+            return pages.get(page, [])
+
+        await _sync(
+            athlete,
+            session,
+            _client(
+                list_activities=AsyncMock(side_effect=_list),
+                get_activity_streams=AsyncMock(
+                    return_value={"power": [200, 210, 220]}
+                ),
+            ),
+        )
+
+        state = await _state(session)
+        assert state.resume_page == 4

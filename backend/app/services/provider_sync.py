@@ -742,12 +742,10 @@ async def _record_outcome(
             imported=progress.count,
             listed=progress.listed,
             oldest_seen_on=progress.oldest_seen,
-            # A run that never listed a page has nothing to say about where to
-            # resume: its `page` is only where it *would* have started. Writing
-            # that notional 1 over a real cursor throws away the saved walk this
-            # whole mechanism exists to preserve — silently, and permanently
-            # after a single blip.
-            resume_page=progress.page if progress.listed else None,
+            # Plainly, because `record_stop` only ever lets the cursor advance:
+            # a run that listed nothing reports page 1, which never beats a real
+            # cursor, so it needs no special case here.
+            resume_page=progress.page,
         )
     except Exception:
         log.exception(
@@ -807,6 +805,13 @@ async def _import_all_pages(
     fast-forward always walks the whole history; so the exposure is one run, and
     closing it properly would cost exactly the page listings the jump exists to
     save.
+
+    The cursor only advancing (``sync_state.record_stop``) keeps a stale one
+    alive across failed runs, which widens that window a little. It does not
+    compound: only a run that settles the front and jumps can act on a stale
+    cursor, and that run either completes — clearing it — or stops deeper,
+    replacing it. The runs that keep one alive are the ones that die in the
+    front sweep, and those never reach the jump.
 
     ``progress`` is how a walk that does not return — a throttle, a lost lease,
     an exception on the way out — still says how far it got.

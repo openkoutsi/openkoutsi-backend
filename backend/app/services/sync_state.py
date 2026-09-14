@@ -136,10 +136,23 @@ async def record_stop(
     state.repeat_count = state.repeat_count + 1 if repeating else 1
     if not repeating:
         state.repeat_since = datetime.now(timezone.utc)
-    # A stop that never got as far as listing a page has nothing to say about
-    # where to resume, and overwriting a good cursor with None would send the
-    # next run back to the front of the history.
-    if resume_page is not None:
+    # **The cursor only ever advances; only a completion clears it.** A stop
+    # shallower than what is recorded carries no new information about how far
+    # the walk has got — a run that died before listing anything, or during the
+    # front sweep every resumed run begins with — and letting it overwrite a
+    # deep cursor throws away the saved walk this whole mechanism exists to
+    # preserve. A front-sweep blip is the ordinary kind of failure, so without
+    # this the cursor is lost routinely rather than rarely.
+    #
+    # It costs a *stale* cursor living longer across failed runs, which slightly
+    # widens the fast-forward's mass-deletion window (see `_import_all_pages`).
+    # That does not compound: only a run that settles the front and jumps can
+    # act on a stale cursor, and such a run either completes — clearing it — or
+    # stops deeper, replacing it. The runs that keep one alive are exactly the
+    # ones that never jump.
+    if resume_page is not None and (
+        state.resume_page is None or resume_page > state.resume_page
+    ):
         state.resume_page = max(1, resume_page)
     _finish(state, imported=imported, listed=listed, oldest_seen_on=oldest_seen_on)
     await session.commit()
