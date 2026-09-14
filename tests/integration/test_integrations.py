@@ -552,6 +552,80 @@ class TestSync:
         await session.refresh(seeded_athlete)
         assert seeded_athlete.achievements_dirty_at is not None
 
+    async def test_a_background_import_that_stopped_early_reaches_the_athlete(
+        self, client, registry_engine, registry_session, user_engine, session,
+        seeded_athlete, auth_headers,
+    ):
+        """End to end: the background run stops, and the athlete can see it did.
+
+        The unit tests cover the writing end. This is the reading end — the
+        whole path from the task that actually runs a backfill to the response
+        the profile page reads — which is the acceptance criterion of issue #68
+        and the one thing that used to be findable only in the server's logs.
+        """
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
+        from backend.app.api import integrations as integrations_api
+        from backend.app.services import sync_state
+
+        await _add_connection(registry_session, _TEST_USER_ID, "strava")
+
+        registry_factory = async_sessionmaker(registry_engine, expire_on_commit=False)
+
+        async def _stopped_by_a_429(athlete, conn, sync_session, **kwargs):
+            """Stand in for a real backfill that a 429 threw out partway."""
+            await sync_state.record_stop(
+                sync_session,
+                "strava",
+                reason="throttled",
+                detail="strava is refusing us (HTTP 429) (page 7)",
+                imported=412,
+                listed=1400,
+                oldest_seen_on=date(2019, 4, 2),
+                resume_page=7,
+            )
+            return 412, date(2019, 4, 2)
+
+        with (
+            patch.object(
+                integrations_api, "_RegistrySessionLocal", registry_factory, create=True
+            ),
+            patch("backend.app.db.registry._RegistrySessionLocal", registry_factory),
+            patch("backend.app.db.user_session.init_user_db", AsyncMock()),
+            patch(
+                "backend.app.db.user_session.get_user_session_factory",
+                _real_session_factory(user_engine),
+            ),
+            patch.object(
+                integrations_api, "ensure_fresh_token",
+                AsyncMock(return_value="token"),
+            ),
+            patch.object(
+                integrations_api, "sync_provider_activities", _stopped_by_a_429
+            ),
+            patch("backend.app.services.metrics_engine.recalculate_from", AsyncMock()),
+            patch(
+                "backend.app.services.weight.backfill_missing_power_best_weights",
+                AsyncMock(),
+            ),
+            patch(
+                "backend.app.services.aerobic_metrics.refit_cp_snapshots", AsyncMock()
+            ),
+        ):
+            await integrations_api._bg_provider_sync(_TEST_USER_ID, "strava")
+
+        body = (
+            await client.get("/api/integrations/status", headers=auth_headers)
+        ).json()
+        strava = body["sync"]["strava"]
+        assert strava["status"] == "stopped"
+        assert strava["stop_reason"] == "throttled"
+        # The part that matters: the import is not finished, and pressing Sync
+        # again is what continues it.
+        assert strava["more_expected"] is True
+        assert strava["imported"] == 412
+        assert strava["oldest_seen_on"] == "2019-04-02"
+
 
 # ── /{provider}/disconnect ─────────────────────────────────────────────────────
 
