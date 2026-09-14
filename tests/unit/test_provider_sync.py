@@ -2549,3 +2549,64 @@ class TestBookkeepingNeverBreaksTheImport:
         )
         assert token is not None
         await leases.release(session, SyncLease, "provider-sync:strava", token)
+
+
+class TestTheDayOfAnActivity:
+    """``Activity.start_time`` is nullable, and three call sites read it.
+
+    The guard was written out longhand at each of them before it became one
+    helper; a ride with no start time must still cost nothing rather than
+    stopping the walk on an ``AttributeError``.
+    """
+
+    def test_a_datetime_gives_its_date(self):
+        from backend.app.services.provider_sync import _day_of
+
+        assert _day_of(datetime(2024, 6, 1, 10, 0, tzinfo=timezone.utc)) == date(2024, 6, 1)
+
+    def test_a_date_is_already_the_answer(self):
+        from backend.app.services.provider_sync import _day_of
+
+        assert _day_of(date(2024, 6, 1)) == date(2024, 6, 1)
+
+    def test_no_start_time_is_no_date(self):
+        from backend.app.services.provider_sync import _day_of
+
+        assert _day_of(None) is None
+
+    async def test_an_activity_with_no_start_time_does_not_stop_the_walk(self, session):
+        """The end-to-end version of the same guard."""
+        athlete = await _make_athlete(session, user_id="dateless-1")
+        undated = _norm("act-1")
+        undated.start_time = None
+
+        count, earliest = await _sync(
+            athlete,
+            session,
+            _client(list_activities=AsyncMock(side_effect=[[undated], []])),
+        )
+
+        assert count == 1
+        assert earliest is None
+        state = await _state(session)
+        assert state.status == "completed"
+        assert state.oldest_seen_on is None
+
+
+class TestAFailedReloadDoesNotMaskTheFailure:
+    async def test_the_original_exception_still_reaches_the_caller(self, session):
+        """The athlete reload on the failure path is a courtesy, not a gate.
+
+        It runs on a session whose transaction just rolled back, so it can fail
+        too — and if it did, the caller would be told about the reload instead of
+        about the sync, losing the only report of what actually went wrong.
+        """
+        athlete = await _make_athlete(session, user_id="reload-1")
+        boom = _client(list_activities=AsyncMock(side_effect=RuntimeError("boom")))
+
+        async def _refresh_fails(*args, **kwargs):
+            raise RuntimeError("the database went away too")
+
+        with patch.object(type(session), "refresh", _refresh_fails):
+            with pytest.raises(RuntimeError, match="boom"):
+                await _sync(athlete, session, boom)
