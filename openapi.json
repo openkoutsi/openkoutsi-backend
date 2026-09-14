@@ -3150,14 +3150,16 @@
           "integrations"
         ],
         "summary": "Status",
-        "description": "Return the list of provider names the current user has connected.\n\n**Personal access token scope:** `integrations:read`",
+        "description": "Which providers are connected, and what each one's last import did.\n\n``sync`` is the answer to \"did my import finish\" (issue #68), which used to\nbe findable only in the server's logs: a backfill that stopped at a rate\nlimit, at its safety limit, at a provider that went quiet or at a lost lease\nreturned exactly what a finished one returned, so an athlete looking at half\ntheir history had no way to know there was more and no reason to press Sync\nagain. Each entry carries the run's outcome, how far back it reached, and \u2014\nthe part no single run can produce \u2014 how many runs in a row have ended the\nsame way.\n\n``more_expected`` is the field to act on without learning the vocabulary:\nthere is history left that pressing Sync again would import.\n\n**Personal access token scope:** `integrations:read`",
         "operationId": "status_api_integrations_status_get",
         "responses": {
           "200": {
             "description": "Successful Response",
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/IntegrationsStatus"
+                }
               }
             }
           }
@@ -13409,6 +13411,30 @@
         ],
         "title": "InstanceSettingsResponse"
       },
+      "IntegrationsStatus": {
+        "properties": {
+          "connected": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Connected"
+          },
+          "sync": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ProviderSyncStatus"
+            },
+            "type": "object",
+            "title": "Sync"
+          }
+        },
+        "type": "object",
+        "required": [
+          "connected",
+          "sync"
+        ],
+        "title": "IntegrationsStatus"
+      },
       "IntensityBand": {
         "properties": {
           "band": {
@@ -15791,6 +15817,110 @@
         },
         "type": "object",
         "title": "PowerModelsResponse"
+      },
+      "ProviderSyncStatus": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "stop_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stop Reason"
+          },
+          "stop_detail": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stop Detail"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "imported": {
+            "type": "integer",
+            "title": "Imported",
+            "default": 0
+          },
+          "listed": {
+            "type": "integer",
+            "title": "Listed",
+            "default": 0
+          },
+          "oldest_seen_on": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oldest Seen On"
+          },
+          "more_expected": {
+            "type": "boolean",
+            "title": "More Expected",
+            "default": false
+          },
+          "repeat_count": {
+            "type": "integer",
+            "title": "Repeat Count",
+            "default": 0
+          },
+          "repeat_since": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Repeat Since"
+          }
+        },
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "title": "ProviderSyncStatus",
+        "description": "What one provider's last import did (issue #68).\n\nTyped rather than a bare dict because this is the surface that answers \"is\nmy history complete\", and a field an athlete's client has to guess at is a\nfield it will get wrong."
       },
       "QuotaHeadroom": {
         "properties": {

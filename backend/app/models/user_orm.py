@@ -751,6 +751,109 @@ class SyncLease(UserBase, LeaseMixin):
     __tablename__ = "sync_leases"
 
 
+class ProviderSyncState(UserBase):
+    """What the last backfill from one provider did, and whether it finished (issue #68).
+
+    A backfill can end four ways short of the athlete's whole history — the
+    safety limit, a provider that stops serving detail data, a 429, or a lost
+    lease — and every one of them used to look exactly like a finished import:
+    the same ``(count, earliest)`` tuple, the same "sync complete" in the log,
+    nothing anywhere saying the history still has a hole in it. This row is what
+    says so.
+
+    One row per provider. The database is already per-user, so the key the issue
+    asks for — one record per (user, provider) — is this table's primary key.
+
+    It is deliberately not a third element on the sync's return tuple: a tuple
+    does not survive the process, and the questions worth asking of it ("did my
+    import finish", "has it stopped in the same place three times running") are
+    about runs, plural.
+    """
+
+    __tablename__ = "provider_sync_states"
+
+    #: Still walking. Set when a run takes the sync lease and left behind if the
+    #: process dies mid-walk, so readers pair it with the lease — a `running`
+    #: row under no lease is the wreckage of a crash, not a live import.
+    STATUS_RUNNING = "running"
+    #: Walked the provider's pages until they ran out. The import is complete.
+    STATUS_COMPLETED = "completed"
+    #: Ended before the history did. ``stop_reason`` says which of the four.
+    STATUS_STOPPED = "stopped"
+    STATUSES = (STATUS_RUNNING, STATUS_COMPLETED, STATUS_STOPPED)
+
+    #: The provider rate-limited us (HTTP 429). The one stop an athlete has a
+    #: reason to care about, and the one that cures itself by waiting.
+    STOP_THROTTLED = "throttled"
+    #: Hit `_MAX_SYNC_ACTIVITIES` / `_MAX_SYNC_PAGES`. Operational: either the
+    #: history is implausible or the provider is not paginating.
+    STOP_SAFETY_LIMIT = "safety_limit"
+    #: The provider stopped serving detail data for activity after activity.
+    STOP_PROVIDER_OUTAGE = "provider_outage"
+    #: Another run took the lease out from under this one, or the deadline
+    #: lapsed. Nothing is wrong with the history; this run simply is not the one
+    #: importing it any more.
+    STOP_LEASE_LOST = "lease_lost"
+    #: The run raised. Distinct from the four because it is a bug report.
+    STOP_ERROR = "error"
+    STOP_REASONS = (
+        STOP_THROTTLED,
+        STOP_SAFETY_LIMIT,
+        STOP_PROVIDER_OUTAGE,
+        STOP_LEASE_LOST,
+        STOP_ERROR,
+    )
+
+    provider: Mapped[str] = mapped_column(String, primary_key=True)
+    status: Mapped[str] = mapped_column(String, nullable=False, default=STATUS_RUNNING)
+    #: One of ``STOP_REASONS`` while ``status`` is ``stopped``; NULL otherwise.
+    stop_reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    #: The same thing in words, for a human reading it: which page, which
+    #: provider message. Short enough to show in a UI.
+    stop_detail: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    started_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    finished_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    #: Activities imported, repaired or restated by the last run — the same
+    #: number the sync returns to its caller.
+    imported: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    #: Activities the provider listed to the last run, which is what the safety
+    #: limit counts and what says whether a run did any walking at all.
+    listed: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    #: Oldest activity start date the walk has reached. "How far it got", in the
+    #: unit an athlete thinks in — a 2019 date on a history that starts in 2012
+    #: is a visibly unfinished import.
+    oldest_seen_on: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+
+    #: Page the next run should continue from, or NULL when there is nothing to
+    #: resume. Set only by a stop, cleared by a completion, and treated as a
+    #: hint rather than a promise: pagination shifts under a growing history, so
+    #: the resume walks back a page and re-checks rather than trusting it.
+    resume_page: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
+    #: Consecutive runs that have ended the same way, this one included. 1 is a
+    #: bad afternoon; 3 is a provider problem or a poisoned range of activities,
+    #: and telling those apart is the thing no single run can do.
+    repeat_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    #: When the current streak of ``stop_reason`` began.
+    repeat_since: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now
+    )
+
+    @property
+    def stopped_early(self) -> bool:
+        return self.status == self.STATUS_STOPPED
+
+
 class Bike(UserBase):
     """A bike the athlete owns, rides and maintains (issues #55, #64).
 

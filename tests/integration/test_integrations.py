@@ -124,14 +124,20 @@ class TestStatus:
     async def test_empty_when_no_connections(self, client, auth_headers):
         resp = await client.get("/api/integrations/status", headers=auth_headers)
         assert resp.status_code == 200
-        assert resp.json() == {"connected": []}
+        assert resp.json() == {"connected": [], "sync": {}}
 
     async def test_lists_connected_providers(self, client, registry_session, auth_headers):
         await _add_connection(registry_session, _TEST_USER_ID, "strava")
 
         resp = await client.get("/api/integrations/status", headers=auth_headers)
         assert resp.status_code == 200
-        assert resp.json() == {"connected": ["strava"]}
+        body = resp.json()
+        assert body["connected"] == ["strava"]
+        # A connection nobody has synced yet is "never", not a null object
+        # (issue #68): a freshly connected account has a state, and it is one an
+        # athlete can act on.
+        assert body["sync"]["strava"]["status"] == "never"
+        assert body["sync"]["strava"]["more_expected"] is False
 
     async def test_lists_multiple_providers(self, client, registry_session, auth_headers):
         await _add_connection(registry_session, _TEST_USER_ID, "strava")
@@ -140,6 +146,95 @@ class TestStatus:
         resp = await client.get("/api/integrations/status", headers=auth_headers)
         assert resp.status_code == 200
         assert set(resp.json()["connected"]) == {"strava", "wahoo"}
+
+    async def test_a_stopped_import_says_so_and_says_why(
+        self, client, registry_session, session, auth_headers
+    ):
+        """The point of issue #68: a stopped import is visible without the logs."""
+        from backend.app.services import sync_state
+
+        await _add_connection(registry_session, _TEST_USER_ID, "strava")
+        await sync_state.record_stop(
+            session,
+            "strava",
+            reason="throttled",
+            detail="strava is refusing us (HTTP 429) (page 7)",
+            imported=412,
+            listed=1400,
+            oldest_seen_on=date(2019, 4, 2),
+            resume_page=7,
+        )
+
+        body = (
+            await client.get("/api/integrations/status", headers=auth_headers)
+        ).json()
+        strava = body["sync"]["strava"]
+        assert strava["status"] == "stopped"
+        assert strava["stop_reason"] == "throttled"
+        assert strava["more_expected"] is True
+        assert strava["imported"] == 412
+        assert strava["oldest_seen_on"] == "2019-04-02"
+        assert strava["repeat_count"] == 1
+
+    async def test_a_repeat_of_the_same_stop_is_visible_as_a_repeat(
+        self, client, registry_session, session, auth_headers
+    ):
+        from backend.app.services import sync_state
+
+        await _add_connection(registry_session, _TEST_USER_ID, "strava")
+        for _ in range(3):
+            await sync_state.record_stop(
+                session, "strava", reason="throttled", detail="429",
+                imported=0, listed=10, oldest_seen_on=None, resume_page=7,
+            )
+
+        body = (
+            await client.get("/api/integrations/status", headers=auth_headers)
+        ).json()
+        assert body["sync"]["strava"]["repeat_count"] == 3
+
+    async def test_a_run_that_never_finished_is_not_reported_as_running(
+        self, client, registry_session, session, auth_headers
+    ):
+        """A row left saying `running` by a dead process is not a live import.
+
+        The lease is what decides, and nothing holds one here.
+        """
+        from backend.app.services import sync_state
+
+        await _add_connection(registry_session, _TEST_USER_ID, "strava")
+        await sync_state.begin_run(session, "strava")
+
+        body = (
+            await client.get("/api/integrations/status", headers=auth_headers)
+        ).json()
+        assert body["sync"]["strava"]["status"] == "interrupted"
+        assert body["sync"]["strava"]["more_expected"] is True
+
+    async def test_a_live_import_reports_itself_as_running(
+        self, client, registry_session, session, auth_headers
+    ):
+        from datetime import timedelta
+
+        from backend.app.db import leases
+        from backend.app.models.user_orm import SyncLease
+        from backend.app.services import sync_state
+
+        await _add_connection(registry_session, _TEST_USER_ID, "strava")
+        await sync_state.begin_run(session, "strava")
+        held = await leases.acquire(
+            session, SyncLease, "provider-sync:strava",
+            ttl=timedelta(minutes=15), wait=0.0,
+        )
+        try:
+            body = (
+                await client.get("/api/integrations/status", headers=auth_headers)
+            ).json()
+        finally:
+            await leases.release(session, SyncLease, "provider-sync:strava", held)
+
+        assert body["sync"]["strava"]["status"] == "running"
+        assert body["sync"]["strava"]["more_expected"] is False
 
     async def test_unauthenticated_returns_401(self, client):
         resp = await client.get("/api/integrations/status")
@@ -456,6 +551,80 @@ class TestSync:
 
         await session.refresh(seeded_athlete)
         assert seeded_athlete.achievements_dirty_at is not None
+
+    async def test_a_background_import_that_stopped_early_reaches_the_athlete(
+        self, client, registry_engine, registry_session, user_engine, session,
+        seeded_athlete, auth_headers,
+    ):
+        """End to end: the background run stops, and the athlete can see it did.
+
+        The unit tests cover the writing end. This is the reading end — the
+        whole path from the task that actually runs a backfill to the response
+        the profile page reads — which is the acceptance criterion of issue #68
+        and the one thing that used to be findable only in the server's logs.
+        """
+        from sqlalchemy.ext.asyncio import async_sessionmaker
+
+        from backend.app.api import integrations as integrations_api
+        from backend.app.services import sync_state
+
+        await _add_connection(registry_session, _TEST_USER_ID, "strava")
+
+        registry_factory = async_sessionmaker(registry_engine, expire_on_commit=False)
+
+        async def _stopped_by_a_429(athlete, conn, sync_session, **kwargs):
+            """Stand in for a real backfill that a 429 threw out partway."""
+            await sync_state.record_stop(
+                sync_session,
+                "strava",
+                reason="throttled",
+                detail="strava is refusing us (HTTP 429) (page 7)",
+                imported=412,
+                listed=1400,
+                oldest_seen_on=date(2019, 4, 2),
+                resume_page=7,
+            )
+            return 412, date(2019, 4, 2)
+
+        with (
+            patch.object(
+                integrations_api, "_RegistrySessionLocal", registry_factory, create=True
+            ),
+            patch("backend.app.db.registry._RegistrySessionLocal", registry_factory),
+            patch("backend.app.db.user_session.init_user_db", AsyncMock()),
+            patch(
+                "backend.app.db.user_session.get_user_session_factory",
+                _real_session_factory(user_engine),
+            ),
+            patch.object(
+                integrations_api, "ensure_fresh_token",
+                AsyncMock(return_value="token"),
+            ),
+            patch.object(
+                integrations_api, "sync_provider_activities", _stopped_by_a_429
+            ),
+            patch("backend.app.services.metrics_engine.recalculate_from", AsyncMock()),
+            patch(
+                "backend.app.services.weight.backfill_missing_power_best_weights",
+                AsyncMock(),
+            ),
+            patch(
+                "backend.app.services.aerobic_metrics.refit_cp_snapshots", AsyncMock()
+            ),
+        ):
+            await integrations_api._bg_provider_sync(_TEST_USER_ID, "strava")
+
+        body = (
+            await client.get("/api/integrations/status", headers=auth_headers)
+        ).json()
+        strava = body["sync"]["strava"]
+        assert strava["status"] == "stopped"
+        assert strava["stop_reason"] == "throttled"
+        # The part that matters: the import is not finished, and pressing Sync
+        # again is what continues it.
+        assert strava["more_expected"] is True
+        assert strava["imported"] == 412
+        assert strava["oldest_seen_on"] == "2019-04-02"
 
 
 # ── /{provider}/disconnect ─────────────────────────────────────────────────────

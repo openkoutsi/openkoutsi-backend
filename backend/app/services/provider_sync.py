@@ -19,6 +19,7 @@ import asyncio
 import dataclasses
 import io
 import logging
+import time
 import uuid
 from collections import OrderedDict
 from contextlib import asynccontextmanager
@@ -41,8 +42,10 @@ from backend.app.models.user_orm import (
     ActivitySource,
     ActivityStream,
     Athlete,
+    ProviderSyncState,
     SyncLease,
 )
+from backend.app.services import sync_state
 from backend.app.services.api_usage import attribute_to_user
 from backend.app.services.stranded_runs import begin_activity_analysis_run
 from openkoutsi.categorization import classify_workout
@@ -118,6 +121,107 @@ _MAX_CONSECUTIVE_UNRESOLVED = 25
 # `backend.app.db.leases` for why a lease is a crash-recovery bound rather than
 # a timeout.
 _SYNC_LEASE_TTL = timedelta(minutes=15)
+
+# ── Pacing the backfill (issue #68) ──────────────────────────────────────────
+
+
+class _ActivityPacer:
+    """Spaces out the activities a backfill works on, process-wide.
+
+    A backfill is the heaviest thing this server does to itself. Each new ride
+    is a provider round trip, a FIT parse, a stream decode and a bests
+    computation, and the parse and the computation are *synchronous CPU on the
+    event loop* — so an unpaced import of a long history makes every other
+    request on the instance wait behind it. Spacing the work out is what keeps a
+    12 000-ride import from being an outage.
+
+    Two properties it has to have, and the reason it is shaped like this:
+
+    * **Process-wide**, not per sync. Two athletes importing at once is twice
+      the CPU, and a bound each of them gets in full is not a bound. One
+      module-level instance, shared.
+    * **No lock.** The read-modify-write below has no ``await`` inside it, so on
+      one event loop it is already atomic, and a lock would bind this to the
+      loop that first used it — which a module-level object outlives (the same
+      trap ``_get_activity_lock`` exists to dodge).
+
+    The clock is :func:`time.monotonic`, so the pacer means the same thing
+    across event loops and is immune to the system clock moving.
+    """
+
+    def __init__(self) -> None:
+        self._next_at = 0.0
+
+    async def wait(self) -> None:
+        """Hold until this process may start work on another activity."""
+        rate = settings.sync_activities_per_minute
+        if rate <= 0:  # pacing off
+            return
+        interval = 60.0 / rate
+        now = time.monotonic()
+        start_at = max(now, self._next_at)
+        self._next_at = start_at + interval
+        delay = start_at - now
+        if delay > 0:
+            # `asyncio.sleep`, which is the whole point: the import yields the
+            # loop for this long instead of holding it.
+            await asyncio.sleep(delay)
+
+    def reset(self) -> None:
+        """Forget the schedule. For tests, and for nothing else."""
+        self._next_at = 0.0
+
+
+#: The one pacer. See :class:`_ActivityPacer` for why it is not per sync.
+activity_pacer = _ActivityPacer()
+
+
+# ── What a walk did, readable from outside it (issue #68) ────────────────────
+
+
+@dataclasses.dataclass
+class _WalkProgress:
+    """How far one backfill got, and why it stopped.
+
+    Filled in by :func:`_import_all_pages` and read by
+    :func:`sync_provider_activities`, which turns it into the durable
+    ``ProviderSyncState`` row. A mutable object rather than a return value
+    because the interesting cases are the ones where the walk does not return:
+    a throttle, a lost lease, or an exception on the way out still have to be
+    able to say how far they got.
+    """
+
+    #: Activities imported, repaired or restated — the sync's own return count.
+    count: int = 0
+    #: Earliest date *changed*, which is where metrics must be recalculated from.
+    earliest: date | None = None
+    #: Activities the provider listed to this run. What the safety limit counts.
+    listed: int = 0
+    #: The page the walk is on. On a stop, the page to resume from.
+    page: int = 1
+    #: Oldest activity start the walk reached. "How far back did it get."
+    oldest_seen: date | None = None
+    #: Set only when the provider ran out of pages — a genuinely finished import.
+    completed: bool = False
+    #: One of ``ProviderSyncState.STOP_REASONS`` when the walk ended early.
+    stop_reason: str | None = None
+    stop_detail: str | None = None
+
+    def stopped(self, reason: str, detail: str) -> None:
+        """Record why this walk is ending early. First reason wins.
+
+        The first, because a stop can cascade — a throttle that ends the walk
+        can be followed by the lease lapsing while the rollback runs — and the
+        reason worth recording is the one that actually stopped it.
+        """
+        if self.stop_reason is None:
+            self.stop_reason = reason
+            self.stop_detail = detail
+
+    def saw(self, day: date | None) -> None:
+        if day is not None and (self.oldest_seen is None or day < self.oldest_seen):
+            self.oldest_seen = day
+
 
 # Per-(user_id, athlete_id) lock serialising the dedup-window query and the
 # create/attach that follows, so two concurrent syncs cannot both see "no
@@ -477,6 +581,14 @@ async def sync_provider_activities(
     A second call while one is running returns ``(0, None)`` rather than
     starting one.
 
+    **Every run says what it did** (issue #68), in the ``ProviderSyncState`` row
+    for this provider: whether it finished, which of the ways to stop early
+    stopped it, how far back it reached, and how many runs in a row have ended
+    the same way. Deliberately *not* a third element on the return tuple — a
+    tuple does not survive the process, and the questions worth asking ("did my
+    import finish", "has it stopped in the same place three times") are about
+    runs, plural. See :mod:`backend.app.services.sync_state`.
+
     Returns (count_created_or_updated, earliest_start_date).
     """
     provider_name = connection.provider
@@ -504,6 +616,16 @@ async def sync_provider_activities(
         return 0, None
 
     failed = False
+    progress = _WalkProgress()
+    try:
+        await sync_state.begin_run(session, provider_name)
+    except Exception:
+        # Bookkeeping must never be the reason an import does not happen — and
+        # the lease is already held, so raising here would strand it. The
+        # recovery is half of that promise: this failure is a failed *insert*,
+        # which leaves the session unusable for the walk unless it is undone.
+        log.exception("Could not mark the %s sync as started", provider_name)
+        await _recover_session(session, athlete)
     try:
         # Attribute every outbound provider request this backfill makes to the
         # athlete whose history it is walking (issue #66). The quota is
@@ -520,9 +642,16 @@ async def sync_provider_activities(
                 provider_name=provider_name,
                 lease_name=lease_name,
                 lease_token=lease_token,
+                progress=progress,
             )
-    except BaseException:
+    except BaseException as exc:
         failed = True
+        # An exception is a fifth way to stop, and the one the four named
+        # reasons do not cover: a bug rather than a provider saying no. Recorded
+        # under the same roof so "did my import finish" has one answer.
+        progress.stopped(
+            ProviderSyncState.STOP_ERROR, f"{type(exc).__name__}: {exc}"
+        )
         raise
     finally:
         try:
@@ -532,10 +661,103 @@ async def sync_provider_activities(
             # ``leases.hold``.
             if failed and session.in_transaction():
                 await session.rollback()
+            await _record_outcome(session, provider_name, progress, user_id=user_id)
             await leases.release(session, SyncLease, lease_name, lease_token)
         except Exception:
             # The deadline covers this: the lease frees itself shortly.
             log.exception("Could not release the %s sync lease", provider_name)
+        if failed:
+            # The rollback above expired every object the session had loaded,
+            # and async SQLAlchemy raises on an expired attribute rather than
+            # quietly reloading it. The caller handed us this athlete and can
+            # still be holding it, so give it back readable — the same courtesy
+            # the throttle path already extends, in its own block so a failure
+            # here cannot be mistaken for the lease not releasing.
+            try:
+                await session.refresh(athlete)
+            except Exception:
+                log.exception(
+                    "Could not reload the athlete after the failed %s sync",
+                    provider_name,
+                )
+
+
+async def _recover_session(session: AsyncSession, athlete: Athlete) -> None:
+    """Undo a failed bookkeeping read or write so the import can carry on anyway.
+
+    Two things have to be put back, and missing either one turns "the status row
+    was unwritable" into "nothing was imported":
+
+    * **The transaction.** A failed flush leaves the session in pending-rollback,
+      where every later statement fails too — so the walk that follows would die
+      of the bookkeeping's injury rather than its own.
+    * **The athlete.** The rollback expires every loaded object, and async
+      SQLAlchemy raises on an expired attribute instead of reloading it. The walk
+      reads this athlete on its very next statement.
+
+    Never raises, for the same reason its callers catch: a sync that could not
+    keep its own notes has still got an athlete's history to import.
+    """
+    try:
+        if session.in_transaction():
+            await session.rollback()
+        await session.refresh(athlete)
+    except Exception:
+        log.exception("Could not recover the session after a failed state write")
+
+
+async def _record_outcome(
+    session: AsyncSession,
+    provider_name: str,
+    progress: _WalkProgress,
+    *,
+    user_id: str,
+) -> None:
+    """Write what this run did into its durable state row (issue #68).
+
+    Runs on every exit, the failure paths included, because the runs worth
+    recording are exactly the ones that did not finish. It never raises: a sync
+    that imported an athlete's history and then could not write a status row has
+    still imported the history, and turning that into a failed sync would be the
+    bookkeeping breaking the thing it books.
+    """
+    try:
+        if progress.completed:
+            await sync_state.record_completion(
+                session,
+                provider_name,
+                imported=progress.count,
+                listed=progress.listed,
+                oldest_seen_on=progress.oldest_seen,
+            )
+            return
+        # A walk that neither finished nor named a reason ended in a way nothing
+        # here anticipated; "error" is the honest label rather than silently
+        # recording a completion.
+        await sync_state.record_stop(
+            session,
+            provider_name,
+            reason=progress.stop_reason or ProviderSyncState.STOP_ERROR,
+            detail=progress.stop_detail or "the walk ended without saying why",
+            imported=progress.count,
+            listed=progress.listed,
+            oldest_seen_on=progress.oldest_seen,
+            # Plainly, because `record_stop` only ever lets the cursor advance:
+            # a run that listed nothing reports page 1, which never beats a real
+            # cursor, so it needs no special case here.
+            resume_page=progress.page,
+        )
+    except Exception:
+        log.exception(
+            "Could not record the %s sync outcome for user %s",
+            provider_name,
+            user_id,
+        )
+        # The lease release runs next and needs a session that is not sitting in
+        # pending-rollback, or a failed status write turns into a lease stranded
+        # for its whole deadline.
+        if session.in_transaction():
+            await session.rollback()
 
 
 async def _import_all_pages(
@@ -548,6 +770,7 @@ async def _import_all_pages(
     provider_name: str,
     lease_name: str,
     lease_token: str,
+    progress: _WalkProgress,
 ) -> tuple[int, date | None]:
     """Walk the provider's pages and import what is not here yet.
 
@@ -560,6 +783,38 @@ async def _import_all_pages(
     merely existing. Stopping costs the rest of *this* run; the next sync picks
     up where it left off, since everything imported so far is committed and
     everything half-done is rolled back.
+
+    **And the next run steps over what this one already walked** (issue #68).
+    "Picks up where it left off" used to mean re-listing every page from the
+    front and skipping thousands of activities one at a time to reach the point
+    the 429 stopped at — correct, but it spent the fresh quota on pages it had
+    already seen, which on a long history is how the second run hits the same
+    wall in the same place. A stop records the page it stopped on; the run after
+    it walks the front until a page comes back with nothing to do on it, and
+    then jumps to the recorded page. The front sweep is what keeps new rides
+    from being skipped over, and the "nothing to do" condition is what makes the
+    jump safe: it only fires once this run has caught up with everything newer.
+
+    **The jump's one window, and why it is left open.** Growth shifts activities
+    *later* in pagination, so a recorded page number lands earlier in history
+    than it did — always safe. Deletions shift them earlier, and the page of
+    overlap absorbs up to one page of those. Past that — a mass deletion on the
+    provider between two runs — the jump steps over history that was never
+    imported, and the run then reports itself `completed`. It heals on the very
+    next run, because a completion clears the cursor and the run after a
+    fast-forward always walks the whole history; so the exposure is one run, and
+    closing it properly would cost exactly the page listings the jump exists to
+    save.
+
+    The cursor only advancing (``sync_state.record_stop``) keeps a stale one
+    alive across failed runs, which widens that window a little. It does not
+    compound: only a run that settles the front and jumps can act on a stale
+    cursor, and that run either completes — clearing it — or stops deeper,
+    replacing it. The runs that keep one alive are the ones that die in the
+    front sweep, and those never reach the jump.
+
+    ``progress`` is how a walk that does not return — a throttle, a lost lease,
+    an exception on the way out — still says how far it got.
     """
     count = 0
     earliest: date | None = None
@@ -568,18 +823,51 @@ async def _import_all_pages(
     consecutive_unresolved = 0
     stop = False
 
+    # Both reads under one guard, because the resume cursor is an *optimisation*
+    # and failing to read it must therefore cost a slow walk rather than the
+    # import. They run against the same new table, on the same session, moments
+    # after `begin_run` — so whatever makes that fail makes these raise, and
+    # unguarded they would carry the whole sync out with them. That is the exact
+    # invariant `begin_run`'s own guard states; it has to hold for every read of
+    # this table, not just the first.
+    try:
+        resume_page = await sync_state.resume_page_for(session, provider_name)
+        # One page of overlap. Pagination shifts under a history that is still
+        # growing, and it shifts *backwards* — new rides at the front push older
+        # ones onto later pages — so the recorded page can only ever re-show
+        # activities. Deletions on the provider shift the other way, and a page
+        # of slack is what absorbs those without opening a hole.
+        resume_target = max(1, resume_page - 1) if resume_page else None
+        may_fast_forward = (
+            resume_target is not None
+            and not await _has_unresolved_source(session, athlete.id, provider_name)
+        )
+    except Exception:
+        log.exception(
+            "Could not read the %s resume cursor for user %s — walking from the front",
+            provider_name,
+            user_id,
+        )
+        await _recover_session(session, athlete)
+        resume_target = None
+        may_fast_forward = False
+
     try:
         while not stop:
             if listed >= _MAX_SYNC_ACTIVITIES or page > _MAX_SYNC_PAGES:
                 log.error(
                     "%s sync for user %s stopped at its safety limit — %d "
-                    "activities over %d pages. Either the history is "
+                    "activities, on page %d. Either the history is "
                     "implausibly long or the provider is not paginating; either "
                     "way this is not a loop to keep running.",
                     provider_name,
                     user_id,
                     listed,
-                    page - 1,
+                    page,
+                )
+                progress.stopped(
+                    ProviderSyncState.STOP_SAFETY_LIMIT,
+                    f"stopped at the safety limit: {listed} activities, page {page}",
                 )
                 break
 
@@ -591,10 +879,20 @@ async def _import_all_pages(
                 what=f"activity list page {page}",
             )
             if not activities:
+                # The provider has run out of history. This, and only this, is a
+                # finished import.
+                progress.completed = True
                 break
             listed += len(activities)
 
+            # Whether this page turned out to hold nothing but activities that
+            # are already here, complete. That is the condition the fast-forward
+            # below waits for: it means the run has caught up with everything
+            # newer than the page it is on.
+            page_settled = True
+
             for norm in activities:
+                progress.saw(_day_of(norm.start_time))
                 # Renewed per activity, not per page: a Strava page is 200
                 # activities, and a deadline that only moves once a page has
                 # finished is tracking "a sync that finished a page" rather than
@@ -609,6 +907,10 @@ async def _import_all_pages(
                         user_id,
                         page,
                     )
+                    progress.stopped(
+                        ProviderSyncState.STOP_LEASE_LOST,
+                        f"another sync took over at page {page}",
+                    )
                     stop = True
                     break
 
@@ -621,6 +923,11 @@ async def _import_all_pages(
                         provider_name,
                         consecutive_unresolved,
                         user_id,
+                    )
+                    progress.stopped(
+                        ProviderSyncState.STOP_PROVIDER_OUTAGE,
+                        f"{provider_name} served no detail data for "
+                        f"{consecutive_unresolved} activities in a row",
                     )
                     stop = True
                     break
@@ -680,6 +987,11 @@ async def _import_all_pages(
                     # attach path, because the repair can replace this activity's
                     # streams wholesale.
                     if existing_src.streams_fetched_at is None:
+                        page_settled = False
+                        # Paced *outside* the guard: sleeping inside one spends
+                        # a deadline sized for a FIT download, and a merely slow
+                        # holder is how the same lease reaches two callers.
+                        await activity_pacer.wait()
                         async with activity_create_guard(session, user_id, athlete.id):
                             repaired = await _repair_source(
                                 act,
@@ -701,15 +1013,18 @@ async def _import_all_pages(
                         # instead of leaving them on the hollow ride's figures.
                         if repaired:
                             count += 1
-                            if act.start_time:
-                                day = (
-                                    act.start_time.date()
-                                    if hasattr(act.start_time, "date")
-                                    else act.start_time
-                                )
-                                if earliest is None or day < earliest:
-                                    earliest = day
+                            day = _day_of(act.start_time)
+                            if day is not None and (earliest is None or day < earliest):
+                                earliest = day
                     continue
+
+                # Everything below is real work — a provider round trip, a FIT
+                # parse, a stream decode — which is what the pacer bounds
+                # (issue #68). The skip above is not, and is deliberately not
+                # paced: a run resuming through history it already holds must
+                # walk back to where it left off at full speed.
+                page_settled = False
+                await activity_pacer.wait()
 
                 # ── Find-or-create under the activity-create guard ────────────
                 # The attach branch below downloads a FIT inside the block, which is
@@ -791,14 +1106,9 @@ async def _import_all_pages(
                             consecutive_unresolved = _track_resolution(
                                 new_src, consecutive_unresolved
                             )
-                            if existing_act.start_time:
-                                day = (
-                                    existing_act.start_time.date()
-                                    if hasattr(existing_act.start_time, "date")
-                                    else existing_act.start_time
-                                )
-                                if earliest is None or day < earliest:
-                                    earliest = day
+                            day = _day_of(existing_act.start_time)
+                            if day is not None and (earliest is None or day < earliest):
+                                earliest = day
                         else:
                             # Lower priority — just record the source, don't touch
                             # metrics. Its detail data is settled by that decision:
@@ -877,14 +1187,9 @@ async def _import_all_pages(
                 count += 1
                 consecutive_unresolved = _track_resolution(src, consecutive_unresolved)
 
-                if activity.start_time:
-                    day = (
-                        activity.start_time.date()
-                        if hasattr(activity.start_time, "date")
-                        else activity.start_time
-                    )
-                    if earliest is None or day < earliest:
-                        earliest = day
+                day = _day_of(activity.start_time)
+                if day is not None and (earliest is None or day < earliest):
+                    earliest = day
 
                 app_cfg = athlete.app_settings or {}
                 if app_cfg.get("auto_analyze"):
@@ -908,7 +1213,30 @@ async def _import_all_pages(
                             )
                         )
 
-            page += 1
+            if stop:
+                # The page the walk gave up on is the page to resume from, not
+                # the one after it.
+                break
+
+            next_page = page + 1
+            if (
+                may_fast_forward
+                and page_settled
+                and resume_target is not None
+                and next_page < resume_target
+            ):
+                log.info(
+                    "%s sync for user %s has caught up at page %d — continuing "
+                    "from page %d, where the last run stopped",
+                    provider_name,
+                    user_id,
+                    page,
+                    resume_target,
+                )
+                next_page = resume_target
+                # Once only: a second jump could only go backwards or nowhere.
+                may_fast_forward = False
+            page = next_page
     except ProviderThrottled as exc:
         # Nothing half-written survives: the guard rolls its own block back, and
         # this covers the paths outside it.
@@ -928,8 +1256,52 @@ async def _import_all_pages(
             count,
             exc,
         )
+        progress.stopped(ProviderSyncState.STOP_THROTTLED, f"{exc} (page {page})")
+    finally:
+        # In a `finally` so the paths that leave by raising — anything that is
+        # not a throttle — still say how far they got.
+        progress.count = count
+        progress.earliest = earliest
+        progress.listed = listed
+        progress.page = page
 
     return count, earliest
+
+
+def _day_of(start_time) -> date | None:
+    """The calendar date of an activity's start, whatever shape it arrived in.
+
+    Providers and the ORM between them hand back both ``datetime`` and ``date``,
+    and this walk compares them against each other.
+    """
+    if start_time is None:
+        return None
+    return start_time.date() if hasattr(start_time, "date") else start_time
+
+
+async def _has_unresolved_source(
+    session: AsyncSession, athlete_id: str, provider_name: str
+) -> bool:
+    """Whether any of this provider's sources is still missing its detail data.
+
+    The fast-forward's one hazard: it skips pages, and a source left unresolved
+    on one of them would never get the repair the next walk past it would give
+    it. So while any exist, the walk takes the long way round. They are rare and
+    short-lived — a source is settled one way or the other by the first sync
+    that reaches it — so this disables the jump for a run or two rather than for
+    good, which is the right way round for a cache that must not lose data.
+    """
+    result = await session.execute(
+        select(ActivitySource.id)
+        .join(Activity, ActivitySource.activity_id == Activity.id)
+        .where(
+            Activity.athlete_id == athlete_id,
+            ActivitySource.provider == provider_name,
+            ActivitySource.streams_fetched_at.is_(None),
+        )
+        .limit(1)
+    )
+    return result.first() is not None
 
 
 def _track_resolution(src: ActivitySource, consecutive_unresolved: int) -> int:
