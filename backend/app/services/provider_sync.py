@@ -621,8 +621,11 @@ async def sync_provider_activities(
         await sync_state.begin_run(session, provider_name)
     except Exception:
         # Bookkeeping must never be the reason an import does not happen — and
-        # the lease is already held, so raising here would strand it.
+        # the lease is already held, so raising here would strand it. The
+        # recovery is half of that promise: this failure is a failed *insert*,
+        # which leaves the session unusable for the walk unless it is undone.
         log.exception("Could not mark the %s sync as started", provider_name)
+        await _recover_session(session, athlete)
     try:
         # Attribute every outbound provider request this backfill makes to the
         # athlete whose history it is walking (issue #66). The quota is
@@ -679,6 +682,30 @@ async def sync_provider_activities(
                 )
 
 
+async def _recover_session(session: AsyncSession, athlete: Athlete) -> None:
+    """Undo a failed bookkeeping read or write so the import can carry on anyway.
+
+    Two things have to be put back, and missing either one turns "the status row
+    was unwritable" into "nothing was imported":
+
+    * **The transaction.** A failed flush leaves the session in pending-rollback,
+      where every later statement fails too — so the walk that follows would die
+      of the bookkeeping's injury rather than its own.
+    * **The athlete.** The rollback expires every loaded object, and async
+      SQLAlchemy raises on an expired attribute instead of reloading it. The walk
+      reads this athlete on its very next statement.
+
+    Never raises, for the same reason its callers catch: a sync that could not
+    keep its own notes has still got an athlete's history to import.
+    """
+    try:
+        if session.in_transaction():
+            await session.rollback()
+        await session.refresh(athlete)
+    except Exception:
+        log.exception("Could not recover the session after a failed state write")
+
+
 async def _record_outcome(
     session: AsyncSession,
     provider_name: str,
@@ -715,7 +742,12 @@ async def _record_outcome(
             imported=progress.count,
             listed=progress.listed,
             oldest_seen_on=progress.oldest_seen,
-            resume_page=progress.page,
+            # A run that never listed a page has nothing to say about where to
+            # resume: its `page` is only where it *would* have started. Writing
+            # that notional 1 over a real cursor throws away the saved walk this
+            # whole mechanism exists to preserve — silently, and permanently
+            # after a single blip.
+            resume_page=progress.page if progress.listed else None,
         )
     except Exception:
         log.exception(
@@ -765,6 +797,17 @@ async def _import_all_pages(
     from being skipped over, and the "nothing to do" condition is what makes the
     jump safe: it only fires once this run has caught up with everything newer.
 
+    **The jump's one window, and why it is left open.** Growth shifts activities
+    *later* in pagination, so a recorded page number lands earlier in history
+    than it did — always safe. Deletions shift them earlier, and the page of
+    overlap absorbs up to one page of those. Past that — a mass deletion on the
+    provider between two runs — the jump steps over history that was never
+    imported, and the run then reports itself `completed`. It heals on the very
+    next run, because a completion clears the cursor and the run after a
+    fast-forward always walks the whole history; so the exposure is one run, and
+    closing it properly would cost exactly the page listings the jump exists to
+    save.
+
     ``progress`` is how a walk that does not return — a throttle, a lost lease,
     an exception on the way out — still says how far it got.
     """
@@ -775,16 +818,34 @@ async def _import_all_pages(
     consecutive_unresolved = 0
     stop = False
 
-    resume_page = await sync_state.resume_page_for(session, provider_name)
-    # One page of overlap. Pagination shifts under a history that is still
-    # growing, and it shifts *backwards* — new rides at the front push older
-    # ones onto later pages — so the recorded page can only ever re-show
-    # activities. Deletions on the provider shift the other way, and a page of
-    # slack is what absorbs those without opening a hole.
-    resume_target = max(1, resume_page - 1) if resume_page else None
-    may_fast_forward = resume_target is not None and not await _has_unresolved_source(
-        session, athlete.id, provider_name
-    )
+    # Both reads under one guard, because the resume cursor is an *optimisation*
+    # and failing to read it must therefore cost a slow walk rather than the
+    # import. They run against the same new table, on the same session, moments
+    # after `begin_run` — so whatever makes that fail makes these raise, and
+    # unguarded they would carry the whole sync out with them. That is the exact
+    # invariant `begin_run`'s own guard states; it has to hold for every read of
+    # this table, not just the first.
+    try:
+        resume_page = await sync_state.resume_page_for(session, provider_name)
+        # One page of overlap. Pagination shifts under a history that is still
+        # growing, and it shifts *backwards* — new rides at the front push older
+        # ones onto later pages — so the recorded page can only ever re-show
+        # activities. Deletions on the provider shift the other way, and a page
+        # of slack is what absorbs those without opening a hole.
+        resume_target = max(1, resume_page - 1) if resume_page else None
+        may_fast_forward = (
+            resume_target is not None
+            and not await _has_unresolved_source(session, athlete.id, provider_name)
+        )
+    except Exception:
+        log.exception(
+            "Could not read the %s resume cursor for user %s — walking from the front",
+            provider_name,
+            user_id,
+        )
+        await _recover_session(session, athlete)
+        resume_target = None
+        may_fast_forward = False
 
     try:
         while not stop:

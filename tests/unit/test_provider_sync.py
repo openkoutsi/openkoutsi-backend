@@ -2610,3 +2610,123 @@ class TestAFailedReloadDoesNotMaskTheFailure:
         with patch.object(type(session), "refresh", _refresh_fails):
             with pytest.raises(RuntimeError, match="boom"):
                 await _sync(athlete, session, boom)
+
+
+class TestAFailedStateReadNeverStopsTheImport:
+    """The state row describes the sync; it must never be able to prevent one.
+
+    ``begin_run`` was guarded for exactly this reason. The reads inside the walk
+    run against the same new table on the same session moments later, so
+    whatever makes one fail makes the others fail — and an unguarded one turns a
+    bookkeeping problem into "imported nothing at all".
+    """
+
+    async def test_an_unreadable_resume_cursor_still_imports(self, session):
+        from backend.app.services import sync_state
+
+        athlete = await _make_athlete(session, user_id="state-read-1")
+
+        async def _boom(*args, **kwargs):
+            raise RuntimeError("no such table: provider_sync_states")
+
+        with patch.object(sync_state, "resume_page_for", _boom):
+            count, _ = await _sync(
+                athlete,
+                session,
+                _client(list_activities=AsyncMock(side_effect=[[_norm("act-1")], []])),
+            )
+
+        assert count == 1, "the history still imports when the cursor cannot be read"
+
+    async def test_an_unreadable_repair_probe_still_imports(self, session):
+        """The same guarantee for the second read, which only runs with a cursor."""
+        from backend.app.services import sync_state
+        from backend.app.services import provider_sync as ps
+
+        athlete = await _make_athlete(session, user_id="state-read-2")
+        await sync_state.record_stop(
+            session, "strava", reason="throttled", detail="429",
+            imported=0, listed=10, oldest_seen_on=None, resume_page=9,
+        )
+
+        async def _boom(*args, **kwargs):
+            raise RuntimeError("database is locked")
+
+        with patch.object(ps, "_has_unresolved_source", _boom):
+            count, _ = await _sync(
+                athlete,
+                session,
+                _client(list_activities=AsyncMock(side_effect=[[_norm("act-1")], []])),
+            )
+
+        assert count == 1
+
+    async def test_a_failed_start_marker_leaves_the_session_usable(self, session):
+        """The guard must un-poison the session, or everything after it fails too."""
+        from backend.app.services import sync_state
+
+        athlete = await _make_athlete(session, user_id="state-read-3")
+
+        async def _boom(failing_session, *args, **kwargs):
+            # A *failed statement*, not a bare raise: that is what writing to a
+            # missing table actually does, and it leaves the session unusable
+            # for everything after it until someone rolls it back.
+            from sqlalchemy import text
+
+            await failing_session.execute(text("INSERT INTO nope VALUES (1)"))
+
+        with patch.object(sync_state, "begin_run", _boom):
+            count, _ = await _sync(
+                athlete,
+                session,
+                _client(list_activities=AsyncMock(side_effect=[[_norm("act-1")], []])),
+            )
+
+        assert count == 1
+
+
+class TestAnEarlyFailureKeepsTheCursor:
+    async def test_a_run_that_listed_nothing_does_not_clobber_the_cursor(self, session):
+        """Losing the cursor costs the whole point of resuming: the next run
+        re-lists every page it already walked to get back to where it stopped."""
+        from backend.app.services import sync_state
+
+        athlete = await _make_athlete(session, user_id="cursor-1")
+        await sync_state.record_stop(
+            session, "strava", reason="throttled", detail="429",
+            imported=400, listed=1000, oldest_seen_on=date(2019, 4, 2), resume_page=50,
+        )
+
+        with pytest.raises(RuntimeError):
+            await _sync(
+                athlete,
+                session,
+                _client(list_activities=AsyncMock(side_effect=RuntimeError("boom"))),
+            )
+
+        state = await _state(session)
+        assert state.stop_reason == "error"
+        assert state.resume_page == 50, "a run that listed nothing has nothing to say"
+
+    async def test_a_run_that_did_list_still_records_where_it_stopped(self, session):
+        """The guard must not swallow a real cursor along with the empty one."""
+        from backend.app.services import sync_state
+
+        athlete = await _make_athlete(session, user_id="cursor-2")
+        await sync_state.record_stop(
+            session, "strava", reason="throttled", detail="429",
+            imported=0, listed=10, oldest_seen_on=None, resume_page=50,
+        )
+
+        # Page 1 lists and throttles, so this run has something to say: page 1.
+        await _sync(
+            athlete,
+            session,
+            _client(
+                list_activities=AsyncMock(side_effect=[[_norm("act-1")], []]),
+                get_activity_streams=AsyncMock(side_effect=_status_error(429)),
+            ),
+        )
+
+        state = await _state(session)
+        assert state.resume_page == 1
