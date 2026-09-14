@@ -109,6 +109,108 @@ class TestAllowCourseReconSetting:
         assert resp.json()["allow_course_recon"] is True
 
 
+class TestSignupHaltSetting:
+    """The temporary stop on self-serve signup, and the reason that goes with it.
+
+    Separate from `allow_self_signup` on purpose: that one is standing policy,
+    this one pauses a door otherwise open. The tests pin that they move
+    independently, because collapsing them is the obvious "simplification" a
+    later reader will reach for.
+    """
+
+    async def test_defaults_off_and_round_trips(self, client, auth_headers):
+        resp = await client.get("/api/admin/settings", headers=auth_headers)
+        assert resp.json()["signups_halted"] is False
+        assert resp.json()["signup_halt_reason"] is None
+
+        resp = await client.patch(
+            "/api/admin/settings",
+            json={"signups_halted": True, "signup_halt_reason": "Strava API limits."},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        assert resp.json()["signups_halted"] is True
+        assert resp.json()["signup_halt_reason"] == "Strava API limits."
+
+        resp = await client.get("/api/admin/settings", headers=auth_headers)
+        assert resp.json()["signups_halted"] is True
+        assert resp.json()["signup_halt_reason"] == "Strava API limits."
+
+    async def test_empty_reason_clears_it(self, client, auth_headers):
+        """The `admin_contact` convention: an empty string means none."""
+        await client.patch(
+            "/api/admin/settings",
+            json={"signups_halted": True, "signup_halt_reason": "Out of disk."},
+            headers=auth_headers,
+        )
+        resp = await client.patch(
+            "/api/admin/settings",
+            json={"signup_halt_reason": ""},
+            headers=auth_headers,
+        )
+        assert resp.json()["signup_halt_reason"] is None
+        # Clearing the reason does not lift the halt.
+        assert resp.json()["signups_halted"] is True
+
+    async def test_a_too_long_reason_is_refused(self, client, auth_headers):
+        """It is rendered on a public page, so the limit belongs at the edge."""
+        resp = await client.patch(
+            "/api/admin/settings",
+            json={"signups_halted": True, "signup_halt_reason": "x" * 501},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 422
+
+    async def test_it_is_published_to_unauthenticated_callers(self, client, auth_headers):
+        """The sign-up page has to explain the pause before anyone can log in."""
+        await client.patch(
+            "/api/admin/settings",
+            json={"signups_halted": True, "signup_halt_reason": "Back on Monday."},
+            headers=auth_headers,
+        )
+        resp = await client.get("/api/public/instance-info")
+        assert resp.json()["signups_halted"] is True
+        assert resp.json()["signup_halt_reason"] == "Back on Monday."
+
+    async def test_the_reason_is_withheld_while_nothing_is_halted(
+        self, client, auth_headers
+    ):
+        """A reason left over from a previous pause is not a public notice."""
+        await client.patch(
+            "/api/admin/settings",
+            json={"signups_halted": True, "signup_halt_reason": "Back on Monday."},
+            headers=auth_headers,
+        )
+        await client.patch(
+            "/api/admin/settings",
+            json={"signups_halted": False},
+            headers=auth_headers,
+        )
+        resp = await client.get("/api/public/instance-info")
+        assert resp.json()["signups_halted"] is False
+        assert resp.json()["signup_halt_reason"] is None
+        # Still on the admin's own view, so turning the halt back on does not
+        # cost them the sentence they wrote.
+        resp = await client.get("/api/admin/settings", headers=auth_headers)
+        assert resp.json()["signup_halt_reason"] == "Back on Monday."
+
+    async def test_it_does_not_disturb_allow_self_signup(self, client, auth_headers):
+        """The two switches are independent; lifting one restores the other."""
+        await client.patch(
+            "/api/admin/settings",
+            json={"allow_self_signup": True},
+            headers=auth_headers,
+        )
+        await client.patch(
+            "/api/admin/settings",
+            json={"signups_halted": True},
+            headers=auth_headers,
+        )
+        resp = await client.get("/api/admin/settings", headers=auth_headers)
+        assert resp.json()["allow_self_signup"] is True
+        assert resp.json()["signups_halted"] is True
+
+
 class TestLlmModelPresetStructuredOutputs:
     async def test_defaults_on_and_round_trips_opt_out(self, client, auth_headers):
         resp = await client.patch(
@@ -177,4 +279,6 @@ class TestPublicInstanceInfo:
             "allow_self_signup",
             "allow_personal_access_tokens",
             "allow_course_recon",
+            "signups_halted",
+            "signup_halt_reason",
         }

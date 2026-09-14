@@ -33,6 +33,57 @@ If no email provider is configured, self-serve signup stays unavailable even whe
 the toggle is on (the sign-up page hides itself), so accounts can never get stuck
 un-verifiable.
 
+### Pausing sign-ups temporarily
+
+Self-serve signup has a second switch beside `allow_self_signup`: **`signups_halted`**,
+with a free-text **`signup_halt_reason`** shown to anyone who opens the sign-up page.
+
+Reach for it when the constraint is **capacity, not policy** — the box is under load, or
+the instance is up against its Strava API application limits. Using `allow_self_signup`
+for that would tell would-be users "self-serve signup isn't enabled on this instance",
+which is untrue during a pause and offers them nothing; and you would then have to
+remember what the instance was set to before. The halt leaves that setting alone.
+
+Turn it on from the **Settings** tab of the admin console, or via the API:
+
+```bash
+curl -X PATCH https://api.your-domain/api/admin/settings \
+  -H "Authorization: Bearer <admin-access-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"signups_halted": true,
+       "signup_halt_reason": "We are at our Strava API limit until the 12th."}'
+```
+
+Send `{"signups_halted": false}` to lift it. The reason is kept, so turning the halt
+back on later does not cost you the sentence you wrote; send
+`{"signup_halt_reason": ""}` to clear it.
+
+#### What it stops, and what it deliberately does not
+
+| | While halted |
+|---|---|
+| `POST /api/auth/signup` | **Refused**, 503 `{"code": "signups_halted", "message": …}` |
+| The sign-up page | Explains the pause, and shows your reason verbatim |
+| Invitations (`POST /api/auth/register`) | **Still redeem** |
+| Minting invitations | **Still works** |
+| Verification links already emailed | **Still activate** |
+| Existing accounts | Untouched — login, sync, everything |
+
+The two exemptions are the point rather than an oversight. An invitation is your own
+deliberate act, so it stays the way to let a specific person in while the public door is
+shut. And someone who signed up minutes before you flipped the switch holds a single-use
+link that expires within the hour; refusing it would leave them a pending account that
+can never sign in, with no self-serve way out.
+
+> ⚠️ **The reason is public.** It is served to **unauthenticated** callers through
+> `GET /api/public/instance-info` — that is how the sign-up page renders it before
+> anyone has logged in. Treat it as a status-page notice: no internal hostnames, no
+> incident detail you would not post publicly. It is capped at 500 characters, and it
+> is only published while the halt is actually on.
+
+Write it in whatever language your users read. The page's headline and surrounding copy
+are localised; your sentence is shown as typed.
+
 ### Which addresses are confirmed
 
 Step 2 above writes the account row *before* the address is confirmed, so a signup

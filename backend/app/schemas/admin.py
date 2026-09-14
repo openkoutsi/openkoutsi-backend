@@ -204,6 +204,10 @@ class InstanceSettingsResponse(BaseModel):
     # bike endpoint, the background matcher and the plan generator. It never
     # refuses the data export, and it deletes nothing.
     allow_course_recon: bool = False
+    # A temporary stop on self-serve signup, separate from the standing
+    # `allow_self_signup` policy above, plus the admin's own reason for it.
+    signups_halted: bool = False
+    signup_halt_reason: Optional[str] = None
 
 
 class InstanceSettingsPatch(BaseModel):
@@ -217,6 +221,11 @@ class InstanceSettingsPatch(BaseModel):
     allow_personal_access_tokens: Optional[bool] = None
     allow_mcp_server: Optional[bool] = None
     allow_course_recon: Optional[bool] = None
+    signups_halted: Optional[bool] = None
+    # Bounded here rather than in the database: the reason is rendered on an
+    # unauthenticated page, so the limit belongs at the edge that accepts it.
+    # An empty string clears it, like `admin_contact`.
+    signup_halt_reason: Optional[str] = Field(default=None, max_length=500)
 
 
 # ── LLM usage stats (instance admin, issue #9) ──────────────────────────────

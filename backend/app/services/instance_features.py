@@ -15,6 +15,8 @@ the entry point.
 
 from __future__ import annotations
 
+from typing import Optional
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,3 +35,26 @@ async def course_recon_enabled(session: AsyncSession) -> bool:
     """
     instance = (await session.execute(select(InstanceSettings).limit(1))).scalar_one_or_none()
     return bool(instance and instance.allow_course_recon)
+
+
+async def signup_halt(session: AsyncSession) -> tuple[bool, Optional[str]]:
+    """Whether self-serve signup is paused right now, and the admin's reason.
+
+    The exception to this module's rule. Every gate above refuses a *capability*
+    wherever it is reachable; this one refuses a single door and says so out
+    loud. ``allow_self_signup`` already decides whether the instance offers
+    self-serve signup at all — a standing policy — and what this adds is a
+    temporary stop for when the constraint is capacity instead: a resource
+    bottleneck, a provider's API application limits. Invitations keep redeeming
+    and verification links already emailed still activate, because what a halt
+    protects is the rate at which strangers arrive, and an invitation is the
+    admin's own deliberate act.
+
+    Returns the flag and the reason together so a caller that needs both — and
+    the only one that refuses is the only one that needs them — pays for one
+    query rather than two.
+    """
+    instance = (await session.execute(select(InstanceSettings).limit(1))).scalar_one_or_none()
+    if instance is None or not instance.signups_halted:
+        return False, None
+    return True, instance.signup_halt_reason

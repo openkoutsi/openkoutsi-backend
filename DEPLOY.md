@@ -404,6 +404,14 @@ migration loop, or by the helper script above.
 > If you are upgrading an instance whose athletes use course recon, flip the switch as
 > part of the deploy rather than after somebody reports a 404.
 
+> **Note:** registry migration `019_signup_halt` adds
+> `instance_settings.signups_halted` (boolean, non-null, **default false**) and
+> `instance_settings.signup_halt_reason` (nullable text). Unlike `018` above,
+> **nothing is visible on upgrade**: an instance currently accepting signups
+> carries on accepting them. It is a temporary pause an admin reaches for under
+> load, not a policy default, so arriving halted would close every deployment at
+> once and the admin would hear about it from their users.
+
 > **Note:** per-user migration `031_garage` adds five nullable columns —
 > `bikes.odometer_base_km`, `bikes.default_sports`, `bikes.retired_at`,
 > `activities.bike_id` and `activities.bike_source` — plus an index on
@@ -511,6 +519,8 @@ running when a backfill is not.
 On a fresh deployment, navigate to the frontend URL. The setup wizard will appear and guide you through creating the first administrator account. Thereafter, an administrator issues an instance-wide invite from the Admin dashboard and new users register with that invite token.
 
 Optionally, admins can enable **self-serve email signup** (Settings tab, or `allow_self_signup` via `PATCH /api/admin/settings`). It requires a configured email provider (see *Email* above): users register with an email address, verify it via an emailed link, and the account activates. Invites keep working regardless. With email configured, users can also reset their own passwords via the "Forgot password?" page, and change the email address on their account (or set one, on an invite-created account that never had one) — that change needs an emailed approval from the *old* address as well as the new one before anything moves, so this too stays unavailable while no provider is configured. An admin can set or clear an address directly (`PATCH /api/admin/users/{id}/email`) for the case where the old mailbox is unreachable. See [ADMIN.md](ADMIN.md) for the full account and password-reset flows.
+
+Self-serve signup can also be **paused** without changing that policy — `signups_halted`, with a free-text `signup_halt_reason` shown on the sign-up page. It is the switch to reach for when the constraint is capacity (a resource bottleneck, a provider's API application limits) rather than policy: invitations keep redeeming and verification links already emailed still activate, so it stops new strangers arriving without stranding anyone mid-flight. See [ADMIN.md](ADMIN.md).
 
 ### Run
 

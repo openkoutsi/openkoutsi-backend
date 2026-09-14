@@ -534,6 +534,8 @@ def _settings_response(instance: InstanceSettings) -> InstanceSettingsResponse:
         allow_personal_access_tokens=bool(instance.allow_personal_access_tokens),
         allow_mcp_server=bool(instance.allow_mcp_server),
         allow_course_recon=bool(instance.allow_course_recon),
+        signups_halted=bool(instance.signups_halted),
+        signup_halt_reason=instance.signup_halt_reason,
     )
 
 
@@ -572,6 +574,11 @@ async def update_instance_settings(
         instance.allow_mcp_server = bool(body.allow_mcp_server)
     if body.allow_course_recon is not None:
         instance.allow_course_recon = bool(body.allow_course_recon)
+    if body.signups_halted is not None:
+        instance.signups_halted = bool(body.signups_halted)
+    if body.signup_halt_reason is not None:
+        # Empty string clears, as with `admin_contact` above.
+        instance.signup_halt_reason = body.signup_halt_reason or None
 
     await session.commit()
     await session.refresh(instance)

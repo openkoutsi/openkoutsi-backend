@@ -284,7 +284,7 @@
           "auth"
         ],
         "summary": "Sign up with an email address",
-        "description": "Create a pending account and email a verification link.\n\nGuarded by the ``allow_self_signup`` admin toggle and a configured email\nprovider. Always returns the same generic acknowledgement (no account\nenumeration): re-signing up an unverified account resends the link with the\nnew password; an already-verified email is a silent no-op.",
+        "description": "Create a pending account and email a verification link.\n\nGuarded by the ``allow_self_signup`` admin toggle and a configured email\nprovider, and refused with 503 while an admin has signups halted. Always\nreturns the same generic acknowledgement otherwise (no account\nenumeration): re-signing up an unverified account resends the link with the\nnew password; an already-verified email is a silent no-op.",
         "operationId": "signup",
         "requestBody": {
           "content": {
@@ -13240,6 +13240,22 @@
             "type": "boolean",
             "title": "Allow Course Recon",
             "default": false
+          },
+          "signups_halted": {
+            "type": "boolean",
+            "title": "Signups Halted",
+            "default": false
+          },
+          "signup_halt_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Signup Halt Reason"
           }
         },
         "type": "object",
@@ -13341,6 +13357,29 @@
               }
             ],
             "title": "Allow Course Recon"
+          },
+          "signups_halted": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Signups Halted"
+          },
+          "signup_halt_reason": {
+            "anyOf": [
+              {
+                "type": "string",
+                "maxLength": 500
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Signup Halt Reason"
           }
         },
         "type": "object",
@@ -13402,6 +13441,22 @@
             "type": "boolean",
             "title": "Allow Course Recon",
             "default": false
+          },
+          "signups_halted": {
+            "type": "boolean",
+            "title": "Signups Halted",
+            "default": false
+          },
+          "signup_halt_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Signup Halt Reason"
           }
         },
         "type": "object",
