@@ -2493,3 +2493,59 @@ class TestPacingTheBackfill:
             activity_pacer.reset()
 
         assert elapsed >= 0.03
+
+
+class TestBookkeepingNeverBreaksTheImport:
+    """The status row exists to describe the sync, never to be able to stop it."""
+
+    async def test_a_failed_start_marker_does_not_stop_the_import(self, session):
+        from backend.app.services import sync_state
+
+        athlete = await _make_athlete(session, user_id="bookkeeping-1")
+
+        async def _boom(*args, **kwargs):
+            raise RuntimeError("status table is unwritable")
+
+        with patch.object(sync_state, "begin_run", _boom):
+            count, _ = await _sync(
+                athlete,
+                session,
+                _client(list_activities=AsyncMock(side_effect=[[_norm("act-1")], []])),
+            )
+
+        assert count == 1, "the ride still imports when the bookkeeping fails"
+
+    async def test_a_failed_outcome_write_still_releases_the_lease(self, session):
+        """Otherwise a status-write failure locks the next sync out for 15 minutes.
+
+        ``record_stop`` leaves the session in pending-rollback when it fails
+        mid-flush, and the lease release that follows runs on that same session.
+        """
+        from datetime import timedelta as _timedelta
+
+        from backend.app.db import leases
+        from backend.app.models.user_orm import SyncLease
+        from backend.app.services import sync_state
+
+        athlete = await _make_athlete(session, user_id="bookkeeping-2")
+
+        async def _boom(failing_session, *args, **kwargs):
+            # Reads first, so the failure leaves an open transaction behind it —
+            # which is the state that used to strand the lease.
+            await failing_session.execute(select(Activity))
+            raise RuntimeError("status table is unwritable")
+
+        with patch.object(sync_state, "record_completion", _boom):
+            await _sync(
+                athlete,
+                session,
+                _client(list_activities=AsyncMock(side_effect=[[_norm("act-1")], []])),
+            )
+
+        # The lease is free, so the next sync can take it.
+        token = await leases.acquire(
+            session, SyncLease, "provider-sync:strava",
+            ttl=_timedelta(minutes=15), wait=0.0,
+        )
+        assert token is not None
+        await leases.release(session, SyncLease, "provider-sync:strava", token)
