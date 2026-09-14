@@ -219,6 +219,17 @@ LLM_ALLOWED_SERVERS=               # e.g. http://localhost:11434/v1,https://api.
 # fe80::/10) stay blocked either way. Refusals return 403 naming this variable.
 LLM_ALLOW_PRIVATE_NETWORKS=false
 
+# Optional: how many activities a provider backfill may work on per minute,
+# process-wide (issue #68). Importing a long history is a provider round trip, a
+# FIT parse, a stream decode and a bests computation per ride, and the parse and
+# the computation are synchronous CPU on the event loop — so an unpaced import
+# of a 12 000-ride history makes the instance feel broken for as long as it
+# lasts. Process-wide rather than per sync: two athletes importing at once is
+# twice the CPU. Activities already imported are skipped without a provider call
+# or a parse and are not paced, so resuming a stopped import is not slowed by
+# this. Set 0 to disable pacing and let imports finish sooner.
+SYNC_ACTIVITIES_PER_MINUTE=60
+
 # Optional: how many agentic Koutsi runs may be in flight at once in this
 # process. An agent loop is 3–5 completions instead of one, so concurrent runs
 # against a local model that serialises requests become an unwatched queue. A run
@@ -846,6 +857,29 @@ The frontend has its own `build-images.yml` in the
 - [ ] Completed first-run setup wizard (creates the first admin account)
 - [ ] Strava app callback domain updated to production domain (if using Strava)
 - [ ] Wahoo webhook URL registered in the developer portal (if using Wahoo)
+- [ ] `SYNC_ACTIVITIES_PER_MINUTE` considered — the default of 60 trades a slower first import for an instance that stays responsive during one; `0` disables pacing
+
+### Upgrading: sync status and backfill pacing (added in this release)
+
+Two changes to how provider history is imported (issue #68), neither of which
+needs anything of you beyond deploying:
+
+- A new per-user table `provider_sync_states` records what each provider's last
+  import did — whether it finished, which of the four early stops ended it, how
+  far back it reached, and how many runs in a row have ended the same way. It is
+  created automatically for new per-user databases and picked up by existing ones
+  through the per-user Alembic migration step (`035_provider_sync_state`). There
+  is no backfill: an instance upgrading from before this simply has no run
+  history, and the first sync after the upgrade writes the first row. Athletes
+  see it on the profile page; `GET /api/integrations/status` is the API.
+- Historical imports are now paced to `SYNC_ACTIVITIES_PER_MINUTE` activities a
+  minute (default 60, process-wide). **This makes a first-time import of a long
+  history take longer in wall-clock time** — deliberately: importing a
+  12 000-ride history is FIT parsing and bests computation on the event loop, and
+  unpaced it makes everything else on the instance wait behind it. Raise it, or
+  set `0` to disable pacing, if your instance would rather have the import finish
+  sooner. Activities already imported are skipped without pacing, so an import
+  that stopped and is resumed walks back to where it left off at full speed.
 
 ### Upgrading: zone sync (added in this release)
 

@@ -30,6 +30,7 @@ from backend.app.db import leases
 from backend.app.db.registry import get_registry_session
 from backend.app.models.registry_orm import ProviderConnection
 from backend.app.models.user_orm import Activity, ActivitySource, Athlete, SyncLease
+from backend.app.services import sync_state
 from backend.app.services.provider_sync import (
     ensure_fresh_token,
     sync_lease_name,
@@ -120,18 +121,83 @@ async def available(ctx_session=Depends(get_ctx_and_session)):
     return {"available": configured}
 
 
-@router.get("/status")
+class ProviderSyncStatus(BaseModel):
+    """What one provider's last import did (issue #68).
+
+    Typed rather than a bare dict because this is the surface that answers "is
+    my history complete", and a field an athlete's client has to guess at is a
+    field it will get wrong.
+    """
+
+    #: ``never`` (connected, never synced), ``running``, ``completed``,
+    #: ``stopped`` or ``interrupted`` (a run whose process died mid-walk).
+    status: str
+    #: Why a ``stopped`` run stopped: ``throttled``, ``safety_limit``,
+    #: ``provider_outage``, ``lease_lost`` or ``error``. On a ``running`` row
+    #: this describes the run before it.
+    stop_reason: str | None = None
+    #: The same thing in words, for showing to a human.
+    stop_detail: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    #: Activities imported, repaired or restated by that run.
+    imported: int = 0
+    #: Activities the provider listed to it.
+    listed: int = 0
+    #: Oldest activity date the import has ever reached — how far back it got.
+    oldest_seen_on: date | None = None
+    #: There is history left that pressing Sync again would import. The one
+    #: field worth acting on without learning the vocabulary above.
+    more_expected: bool = False
+    #: Runs in a row that have ended the same way. 1 is a bad afternoon; 3 is a
+    #: provider problem or a poisoned range of activities.
+    repeat_count: int = 0
+    repeat_since: datetime | None = None
+
+
+class IntegrationsStatus(BaseModel):
+    connected: list[str]
+    #: Keyed by provider name. Only connected providers appear.
+    sync: dict[str, ProviderSyncStatus]
+
+
+@router.get("/status", response_model=IntegrationsStatus)
 async def status(
     ctx_session=Depends(get_ctx_and_session),
     registry_session: AsyncSession = Depends(get_registry_session),
 ):
-    """Return the list of provider names the current user has connected."""
-    ctx, _ = ctx_session
+    """Which providers are connected, and what each one's last import did.
+
+    ``sync`` is the answer to "did my import finish" (issue #68), which used to
+    be findable only in the server's logs: a backfill that stopped at a rate
+    limit, at its safety limit, at a provider that went quiet or at a lost lease
+    returned exactly what a finished one returned, so an athlete looking at half
+    their history had no way to know there was more and no reason to press Sync
+    again. Each entry carries the run's outcome, how far back it reached, and —
+    the part no single run can produce — how many runs in a row have ended the
+    same way.
+
+    ``more_expected`` is the field to act on without learning the vocabulary:
+    there is history left that pressing Sync again would import.
+    """
+    ctx, session = ctx_session
     result = await registry_session.execute(
         select(ProviderConnection).where(ProviderConnection.user_id == ctx.user_id)
     )
     connections = result.scalars().all()
-    return {"connected": [c.provider for c in connections]}
+
+    sync: dict[str, dict] = {}
+    for conn in connections:
+        # The lease, not the row, decides whether a run is live: a process that
+        # died mid-walk leaves a row claiming to be running for good.
+        running = await leases.is_held(
+            session, SyncLease, sync_lease_name(conn.provider)
+        )
+        sync[conn.provider] = sync_state.as_dict(
+            await sync_state.get_state(session, conn.provider), running=running
+        )
+
+    return {"connected": [c.provider for c in connections], "sync": sync}
 
 
 # ── OAuth connect / callback ───────────────────────────────────────────────
@@ -341,10 +407,23 @@ async def _bg_provider_sync(user_id: str, provider: str) -> None:
                 # the whole imported history, and the next read settles it.
                 await mark_achievements_dirty(athlete.id, session)
 
-            log.info(
-                "%s sync complete: %d new activities for user %s",
-                provider, count, user_id,
-            )
+            # "Complete" is a claim, and for four of the ways a walk can end it
+            # is a false one (issue #68). The recorded state is what knows the
+            # difference, so the line that gets read at 2 a.m. says which it was.
+            state = await sync_state.get_state(session, provider)
+            if state is not None and state.stopped_early:
+                log.warning(
+                    "%s sync for user %s stopped early after %d activities "
+                    "(%s: %s) — run %d in a row to end this way. The next sync "
+                    "continues from here.",
+                    provider, user_id, count, state.stop_reason,
+                    state.stop_detail, state.repeat_count,
+                )
+            else:
+                log.info(
+                    "%s sync complete: %d new activities for user %s",
+                    provider, count, user_id,
+                )
     except Exception:
         log.exception("%s sync failed for user %s", provider, user_id)
 

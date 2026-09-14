@@ -106,6 +106,32 @@ def _allow_private_llm_hosts():
     settings.llm_allow_private_networks = original
 
 
+@pytest.fixture(autouse=True)
+def _unpaced_backfill():
+    """Run provider backfills at full speed for the whole suite.
+
+    Production paces a historical import to ``sync_activities_per_minute``
+    activities a minute so a 12 000-ride backfill does not hold the event loop
+    against everyone else (issue #68). At the default of 60 that is a real
+    second of sleeping between activities, and the suite imports activities in
+    almost every sync test — so left on, this alone would add minutes to a run
+    and tell us nothing.
+
+    The pacer is process-wide and keeps its schedule between calls, so it is
+    also reset here: a test that *does* exercise pacing must not leave the next
+    one waiting out its interval.
+    """
+    from backend.app.core.config import settings
+    from backend.app.services.provider_sync import activity_pacer
+
+    original = settings.sync_activities_per_minute
+    settings.sync_activities_per_minute = 0
+    activity_pacer.reset()
+    yield
+    settings.sync_activities_per_minute = original
+    activity_pacer.reset()
+
+
 @pytest.fixture(scope="session")
 def _test_password_hash(_cheap_bcrypt):
     """Hash the shared test password once for the whole session and reuse it."""

@@ -85,6 +85,26 @@ class Settings(BaseSettings):
     # provider. Lower it (1–2) for a single local GPU.
     agent_max_concurrent_runs: int = 4
 
+    # ── Provider backfill pacing (issue #68) ──────────────────────────────────
+
+    # How many activities one historical import may *work on* per minute,
+    # process-wide. A backfill is the heaviest thing this server does to itself:
+    # every new ride is a FIT download, a parse, a stream decode and a bests
+    # computation, and all of that is synchronous CPU on the same event loop
+    # that is serving the athlete's page requests. Left to run flat out, a
+    # 12 000-ride import makes the instance feel broken for as long as it lasts.
+    #
+    # Counted in activities per minute because that is the unit the work comes
+    # in, and applied only to activities that actually cost something — an
+    # activity already imported is skipped without a provider call or a parse,
+    # so a resumed import walks back to where it left off at full speed.
+    #
+    # Process-wide rather than per sync: two athletes backfilling at once is
+    # twice the CPU, and a bound that each of them gets in full is not a bound.
+    # 0 disables pacing entirely, for an instance that would rather have the
+    # import finish sooner.
+    sync_activities_per_minute: float = 60.0
+
     # ── Conversational Koutsi (issue #44) ─────────────────────────────────────
     # Chat is the first LLM surface the *athlete* can trigger arbitrarily often,
     # and every turn is a full agent run rather than one completion. Everything

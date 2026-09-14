@@ -452,6 +452,39 @@ different from "no data".
 is shown per service. A 429 is the only unambiguous evidence that a quota was
 exceeded, so it is the thing worth watching.
 
+### Did an athlete's import actually finish?
+
+Adjacent to the headroom question, and a different one: headroom says how much
+budget is left, this says whether a particular athlete's history made it in
+(issue #68). A backfill has four ways to end before the history does — the
+safety limit, a provider that stops serving detail data, a `429`, and a lost
+lease — and until this landed all four looked exactly like a finished import
+from the outside.
+
+Each run now records its outcome in the athlete's own database, one row per
+provider, readable through `GET /api/integrations/status` as that athlete (the
+profile page shows it to them directly). What it holds:
+
+| Field | What it answers |
+|---|---|
+| `status` | `never`, `running`, `completed`, `stopped`, or `interrupted` — a run whose process died mid-walk |
+| `stop_reason` | `throttled`, `safety_limit`, `provider_outage`, `lease_lost` or `error` |
+| `imported` / `listed` | What the run did, and how much history it had to walk to do it |
+| `oldest_seen_on` | How far back the import has ever reached |
+| `more_expected` | There is history left that pressing Sync again would import |
+| `repeat_count` | **Runs in a row that ended the same way** |
+
+`repeat_count` is the one worth watching, and the reason this is a stored row
+rather than a log line. One throttle stop is an athlete who synced during a busy
+15 minutes. Three in a row is a history that does not fit inside the quota the
+instance has, and the fix is on this page rather than in their hands. Three
+`provider_outage` stops in a row is either the provider or a poisoned range of
+activities — and which one it is, the headroom panel above will usually tell you.
+
+A stopped import is not lost work: the run records the page it stopped on, and
+the next sync walks the front of the history and then continues from there rather
+than re-listing everything it already holds.
+
 ### Volume — "what are we spending, and on what?"
 
 Counts of our own calls, grouped by day, week, month, service, endpoint, status,

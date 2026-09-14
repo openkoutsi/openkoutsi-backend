@@ -1993,3 +1993,503 @@ class TestAGuessIsNotAnAnswer:
             )
         ).scalar_one()
         assert src.streams_fetched_at is None
+
+
+# ── Recording what a run did, and resuming it (issue #68) ─────────────────────
+
+
+async def _state(session, provider: str = "strava"):
+    from backend.app.services.sync_state import get_state
+
+    return await get_state(session, provider)
+
+
+async def _imported_source(session, athlete, ext_id: str, start_time: datetime):
+    """An activity already fully imported from Strava, as a finished run leaves it."""
+    act = Activity(
+        athlete_id=athlete.id,
+        start_time=start_time,
+        duration_s=3600,
+        status="processed",
+    )
+    session.add(act)
+    await session.flush()
+    session.add(
+        ActivitySource(
+            activity_id=act.id,
+            provider="strava",
+            external_id=ext_id,
+            streams_fetched_at=start_time,
+        )
+    )
+    await session.commit()
+    return act
+
+
+class TestRecordingHowARunEnded:
+    """The four ways to stop are four different recorded facts, not one log line."""
+
+    async def test_a_finished_walk_records_a_completion(self, session):
+        athlete = await _make_athlete(session, user_id="state-complete")
+        await _sync(
+            athlete,
+            session,
+            _client(
+                list_activities=AsyncMock(
+                    side_effect=[[_norm("act-1", start_time=datetime(2024, 6, 1, 10, 0, tzinfo=timezone.utc))], []]
+                )
+            ),
+        )
+
+        state = await _state(session)
+        assert state.status == "completed"
+        assert state.stop_reason is None
+        assert state.imported == 1
+        assert state.listed == 1
+        assert state.oldest_seen_on == date(2024, 6, 1)
+        # Nothing to resume: the next run starts from the front and walks the lot.
+        assert state.resume_page is None
+
+    async def test_a_throttle_stop_is_recorded_with_its_reason(self, session):
+        athlete = await _make_athlete(session, user_id="state-throttle")
+        first = _norm("act-1", start_time=datetime(2024, 6, 2, 10, 0, tzinfo=timezone.utc))
+        second = _norm("act-2", start_time=datetime(2024, 6, 1, 10, 0, tzinfo=timezone.utc))
+
+        await _sync(
+            athlete,
+            session,
+            _client(
+                list_activities=AsyncMock(side_effect=[[first, second], []]),
+                get_activity_streams=AsyncMock(
+                    side_effect=[{"power": [200, 210, 220]}, _status_error(429)]
+                ),
+            ),
+        )
+
+        state = await _state(session)
+        assert state.status == "stopped"
+        assert state.stop_reason == "throttled"
+        assert "429" in state.stop_detail
+        assert state.imported == 1
+        # The page it gave up on, so the next run can continue from there.
+        assert state.resume_page == 1
+        assert state.repeat_count == 1
+        assert state.repeat_since is not None
+
+    async def test_the_safety_limit_stop_is_recorded(self, session):
+        athlete = await _make_athlete(session, user_id="state-bound")
+        await _imported_source(
+            session, athlete, "act-1", datetime(2024, 6, 1, 10, 0, tzinfo=timezone.utc)
+        )
+
+        client = _client(list_activities=AsyncMock(return_value=[_norm("act-1")]))
+        with patch("backend.app.services.provider_sync._MAX_SYNC_PAGES", 3):
+            await _sync(athlete, session, client)
+
+        state = await _state(session)
+        assert state.status == "stopped"
+        assert state.stop_reason == "safety_limit"
+        assert state.resume_page == 4  # the page the cap refused to list
+
+    async def test_a_provider_serving_nothing_is_recorded_as_an_outage(self, session):
+        athlete = await _make_athlete(session, user_id="state-outage")
+        activities = [
+            _norm(f"act-{i}", start_time=datetime(2024, 6, 1, 10, 0, tzinfo=timezone.utc)
+                  + timedelta(days=i))
+            for i in range(4)
+        ]
+        client = _client(
+            list_activities=AsyncMock(side_effect=[activities, []]),
+            get_activity_streams=AsyncMock(side_effect=_status_error(500)),
+        )
+        with patch("backend.app.services.provider_sync._MAX_CONSECUTIVE_UNRESOLVED", 2):
+            await _sync(athlete, session, client)
+
+        state = await _state(session)
+        assert state.status == "stopped"
+        assert state.stop_reason == "provider_outage"
+        assert "detail data" in state.stop_detail
+
+    async def test_a_lost_lease_is_recorded(self, session):
+        from backend.app.db import leases as lease_mod
+
+        athlete = await _make_athlete(session, user_id="state-lease")
+        client = _client(
+            list_activities=AsyncMock(side_effect=[[_norm("act-1"), _norm("act-2")], []])
+        )
+
+        async def _lost(*args, **kwargs):
+            return False
+
+        with patch.object(lease_mod, "renew", _lost):
+            await _sync(athlete, session, client)
+
+        state = await _state(session)
+        assert state.status == "stopped"
+        assert state.stop_reason == "lease_lost"
+        assert state.imported == 0
+
+    async def test_an_exception_is_recorded_as_an_error(self, session):
+        athlete = await _make_athlete(session, user_id="state-error")
+        boom = _client(list_activities=AsyncMock(side_effect=RuntimeError("boom")))
+
+        with pytest.raises(RuntimeError):
+            await _sync(athlete, session, boom)
+
+        state = await _state(session)
+        assert state.status == "stopped"
+        assert state.stop_reason == "error"
+        assert "boom" in state.stop_detail
+
+    async def test_a_refused_duplicate_run_records_nothing(self, session):
+        """"Already running" is not this run's outcome to record."""
+        from datetime import timedelta as _timedelta
+
+        from backend.app.db import leases
+        from backend.app.models.user_orm import SyncLease
+
+        athlete = await _make_athlete(session, user_id="state-duplicate")
+        held = await leases.acquire(
+            session, SyncLease, "provider-sync:strava",
+            ttl=_timedelta(minutes=15), wait=0.0,
+        )
+        try:
+            await _sync(athlete, session, _client())
+        finally:
+            await leases.release(session, SyncLease, "provider-sync:strava", held)
+
+        assert await _state(session) is None
+
+
+class TestSeeingARepeatAsARepeat:
+    """A sync stopping in the same place three runs running is one fact, not three."""
+
+    async def test_the_same_stop_twice_counts_as_a_repeat(self, session):
+        athlete = await _make_athlete(session, user_id="repeat-1")
+        norm = _norm("act-1", start_time=datetime(2024, 6, 1, 10, 0, tzinfo=timezone.utc))
+
+        for _ in range(3):
+            await _sync(
+                athlete,
+                session,
+                _client(
+                    list_activities=AsyncMock(side_effect=[[norm], []]),
+                    get_activity_streams=AsyncMock(side_effect=_status_error(429)),
+                ),
+            )
+
+        state = await _state(session)
+        assert state.stop_reason == "throttled"
+        assert state.repeat_count == 3
+
+    async def test_a_different_stop_starts_a_new_streak(self, session):
+        athlete = await _make_athlete(session, user_id="repeat-2")
+        norm = _norm("act-1", start_time=datetime(2024, 6, 1, 10, 0, tzinfo=timezone.utc))
+
+        await _sync(
+            athlete,
+            session,
+            _client(
+                list_activities=AsyncMock(side_effect=[[norm], []]),
+                get_activity_streams=AsyncMock(side_effect=_status_error(429)),
+            ),
+        )
+        with pytest.raises(RuntimeError):
+            await _sync(
+                athlete,
+                session,
+                _client(list_activities=AsyncMock(side_effect=RuntimeError("boom"))),
+            )
+
+        state = await _state(session)
+        assert state.stop_reason == "error"
+        assert state.repeat_count == 1
+
+    async def test_a_completion_clears_the_streak(self, session):
+        athlete = await _make_athlete(session, user_id="repeat-3")
+        norm = _norm("act-1", start_time=datetime(2024, 6, 1, 10, 0, tzinfo=timezone.utc))
+
+        await _sync(
+            athlete,
+            session,
+            _client(
+                list_activities=AsyncMock(side_effect=[[norm], []]),
+                get_activity_streams=AsyncMock(side_effect=_status_error(429)),
+            ),
+        )
+        await _sync(
+            athlete,
+            session,
+            _client(list_activities=AsyncMock(side_effect=[[norm], []])),
+        )
+
+        state = await _state(session)
+        assert state.status == "completed"
+        assert state.stop_reason is None
+        assert state.repeat_count == 0
+        assert state.resume_page is None
+
+
+class TestResumingWhereItStopped:
+    """A stopped run leaves the next one somewhere to start."""
+
+    async def test_the_next_run_skips_the_pages_it_already_walked(self, session):
+        """The whole point: fresh quota goes on new history, not on re-listing old.
+
+        Three pages of activities that are already imported, then a fourth the
+        run never reaches because it is throttled. The run after it walks page 1,
+        finds nothing to do, and jumps straight to where the stop was recorded
+        rather than paying for pages 2 and 3 again.
+        """
+        athlete = await _make_athlete(session, user_id="resume-1")
+        base = datetime(2024, 6, 1, 10, 0, tzinfo=timezone.utc)
+        pages = {
+            1: [_norm("p1", start_time=base)],
+            2: [_norm("p2", start_time=base - timedelta(days=1))],
+            3: [_norm("p3", start_time=base - timedelta(days=2))],
+            4: [_norm("p4", start_time=base - timedelta(days=3))],
+        }
+        for page, (norm,) in pages.items():
+            if page < 4:
+                await _imported_source(session, athlete, norm.external_id, norm.start_time)
+
+        async def _list(_token, page):
+            return pages.get(page, [])
+
+        # Run one: reaches the new activity on page 4 and is thrown out.
+        await _sync(
+            athlete,
+            session,
+            _client(
+                list_activities=AsyncMock(side_effect=_list),
+                get_activity_streams=AsyncMock(side_effect=_status_error(429)),
+            ),
+        )
+        assert (await _state(session)).resume_page == 4
+
+        # Run two: page 1 settles the front, then the jump.
+        second = _client(list_activities=AsyncMock(side_effect=_list))
+        count, _ = await _sync(athlete, session, second)
+
+        listed_pages = [call.args[1] for call in second.list_activities.await_args_list]
+        assert listed_pages == [1, 3, 4, 5], "pages 2 was already walked; 3 is the overlap"
+        assert count == 1  # the activity the throttle stopped
+
+    async def test_a_new_ride_at_the_front_is_never_skipped(self, session):
+        """The front sweep runs before the jump, so new history still lands."""
+        athlete = await _make_athlete(session, user_id="resume-2")
+        base = datetime(2024, 6, 10, 10, 0, tzinfo=timezone.utc)
+        old = _norm("old", start_time=base - timedelta(days=30))
+        await _imported_source(session, athlete, "old", old.start_time)
+        fresh = _norm("fresh", start_time=base)
+
+        async def _list(_token, page):
+            return {1: [fresh, old]}.get(page, [])
+
+        # Pretend a previous run stopped far down the history.
+        from backend.app.services import sync_state
+
+        await sync_state.record_stop(
+            session, "strava", reason="throttled", detail="429",
+            imported=0, listed=0, oldest_seen_on=None, resume_page=9,
+        )
+
+        count, _ = await _sync(athlete, session, _client(list_activities=AsyncMock(side_effect=_list)))
+        assert count == 1
+        sources = (await session.execute(select(ActivitySource))).scalars().all()
+        assert {s.external_id for s in sources} == {"old", "fresh"}
+
+    async def test_an_unresolved_source_holds_the_jump_back(self, session):
+        """A source still owed its detail data is only repaired by walking past it.
+
+        The fast-forward's one hazard, and the reason it asks first.
+        """
+        athlete = await _make_athlete(session, user_id="resume-3")
+        base = datetime(2024, 6, 1, 10, 0, tzinfo=timezone.utc)
+        pages = {
+            1: [_norm("p1", start_time=base)],
+            2: [_norm("p2", start_time=base - timedelta(days=1))],
+            3: [_norm("p3", start_time=base - timedelta(days=2))],
+        }
+        await _imported_source(session, athlete, "p1", base)
+        # p2 is here but hollow — no streams were ever fetched for it.
+        act = Activity(
+            athlete_id=athlete.id,
+            start_time=base - timedelta(days=1),
+            duration_s=3600,
+            status="processed",
+        )
+        session.add(act)
+        await session.flush()
+        session.add(
+            ActivitySource(activity_id=act.id, provider="strava", external_id="p2")
+        )
+        await session.commit()
+
+        from backend.app.services import sync_state
+
+        await sync_state.record_stop(
+            session, "strava", reason="throttled", detail="429",
+            imported=0, listed=0, oldest_seen_on=None, resume_page=6,
+        )
+
+        client = _client(list_activities=AsyncMock(side_effect=lambda _t, page: pages.get(page, [])))
+        await _sync(athlete, session, client)
+
+        listed_pages = [call.args[1] for call in client.list_activities.await_args_list]
+        assert listed_pages == [1, 2, 3, 4], "no jump while a source is still owed data"
+
+    async def test_how_far_back_the_import_reached_only_ever_grows(self, session):
+        """A run that stops on its first page must not erase what an earlier one reached."""
+        from backend.app.services import sync_state
+
+        athlete = await _make_athlete(session, user_id="resume-4")
+        await sync_state.record_stop(
+            session, "strava", reason="throttled", detail="429",
+            imported=0, listed=0, oldest_seen_on=date(2012, 3, 1), resume_page=40,
+        )
+
+        await _sync(
+            athlete,
+            session,
+            _client(
+                list_activities=AsyncMock(
+                    side_effect=[[_norm("act-1", start_time=datetime(2024, 6, 1, tzinfo=timezone.utc))], []]
+                )
+            ),
+        )
+
+        assert (await _state(session)).oldest_seen_on == date(2012, 3, 1)
+
+
+class TestPacingTheBackfill:
+    """A historical import is throttled so it does not hog the instance."""
+
+    async def test_activities_are_spaced_by_the_configured_rate(self, session):
+        from backend.app.core.config import settings
+        from backend.app.services.provider_sync import activity_pacer
+
+        athlete = await _make_athlete(session, user_id="pace-1")
+        base = datetime(2024, 6, 1, 10, 0, tzinfo=timezone.utc)
+        norms = [_norm(f"act-{i}", start_time=base + timedelta(days=i)) for i in range(3)]
+
+        slept: list[float] = []
+
+        async def _record(delay):
+            slept.append(delay)
+
+        settings.sync_activities_per_minute = 600  # 0.1 s apart
+        activity_pacer.reset()
+        try:
+            with patch("backend.app.services.provider_sync.asyncio.sleep", _record):
+                count, _ = await _sync(
+                    athlete,
+                    session,
+                    _client(list_activities=AsyncMock(side_effect=[norms, []])),
+                )
+        finally:
+            settings.sync_activities_per_minute = 0
+            activity_pacer.reset()
+
+        assert count == 3
+        # The first activity starts immediately; the two after it each wait for
+        # a slot. (The waits grow rather than being 0.1 apiece because the clock
+        # does not advance when the sleep itself is a mock — the count is the
+        # claim here, and the interval is measured for real below.)
+        assert len(slept) == 2
+        assert all(delay > 0 for delay in slept)
+
+    async def test_a_rate_of_zero_paces_nothing(self, session):
+        from backend.app.core.config import settings
+        from backend.app.services.provider_sync import activity_pacer
+
+        athlete = await _make_athlete(session, user_id="pace-2")
+        slept: list[float] = []
+
+        async def _record(delay):
+            slept.append(delay)
+
+        settings.sync_activities_per_minute = 0
+        activity_pacer.reset()
+        with patch("backend.app.services.provider_sync.asyncio.sleep", _record):
+            await _sync(
+                athlete,
+                session,
+                _client(list_activities=AsyncMock(side_effect=[[_norm("a"), _norm("b")], []])),
+            )
+
+        assert slept == []
+
+    async def test_an_activity_already_imported_is_not_paced(self, session):
+        """A resumed run walks back through history it holds at full speed."""
+        from backend.app.core.config import settings
+        from backend.app.services.provider_sync import activity_pacer
+
+        athlete = await _make_athlete(session, user_id="pace-3")
+        base = datetime(2024, 6, 1, 10, 0, tzinfo=timezone.utc)
+        await _imported_source(session, athlete, "act-1", base)
+
+        slept: list[float] = []
+
+        async def _record(delay):
+            slept.append(delay)
+
+        settings.sync_activities_per_minute = 60
+        activity_pacer.reset()
+        try:
+            with patch("backend.app.services.provider_sync.asyncio.sleep", _record):
+                await _sync(
+                    athlete,
+                    session,
+                    _client(
+                        list_activities=AsyncMock(
+                            side_effect=[[_norm("act-1", start_time=base)], []]
+                        )
+                    ),
+                )
+        finally:
+            settings.sync_activities_per_minute = 0
+            activity_pacer.reset()
+
+        assert slept == []
+
+    async def test_the_pacer_hands_out_one_slot_per_interval(self):
+        """Measured against the real clock, at a rate fast enough to be cheap."""
+        import time as _time
+
+        from backend.app.core.config import settings
+        from backend.app.services.provider_sync import _ActivityPacer
+
+        pacer = _ActivityPacer()
+        original = settings.sync_activities_per_minute
+        settings.sync_activities_per_minute = 6000  # 10 ms apart
+        try:
+            start = _time.monotonic()
+            for _ in range(4):
+                await pacer.wait()
+            elapsed = _time.monotonic() - start
+        finally:
+            settings.sync_activities_per_minute = original
+
+        # Four slots: the first is free, the other three cost an interval each.
+        assert elapsed >= 0.03
+
+    async def test_two_backfills_share_one_budget(self):
+        """The bound is process-wide, so concurrent imports do not each get it in full."""
+        import time as _time
+
+        from backend.app.core.config import settings
+        from backend.app.services.provider_sync import activity_pacer
+
+        original = settings.sync_activities_per_minute
+        settings.sync_activities_per_minute = 6000  # 10 ms apart
+        activity_pacer.reset()
+        try:
+            start = _time.monotonic()
+            await asyncio.gather(*(activity_pacer.wait() for _ in range(4)))
+            elapsed = _time.monotonic() - start
+        finally:
+            settings.sync_activities_per_minute = original
+            activity_pacer.reset()
+
+        assert elapsed >= 0.03
