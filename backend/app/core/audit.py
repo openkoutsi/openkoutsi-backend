@@ -41,8 +41,9 @@ TOOL_ERROR = "tool_error"
 OVERSIZED = "oversized"
 FAILED = "failed"
 
-# Proposal-decision outcomes (issue #72). A refusal reuses `tool_error` above:
-# it is the same kind of event — a thing that was asked for and did not happen.
+# Plan-proposal outcomes (issue #72). A refusal reuses `tool_error` above: it is
+# the same kind of event — a thing that was asked for and did not happen.
+DRAFTED = "drafted"
 APPROVED = "approved"
 DECLINED = "declined"
 
@@ -169,7 +170,7 @@ def pat_admin_revoke(
     )
 
 
-def plan_proposal_decision(
+def plan_proposal(
     *,
     outcome: str,
     proposal_id: str,
@@ -178,19 +179,24 @@ def plan_proposal_decision(
     plan_id: Optional[str] = None,
     refusal_code: Optional[str] = None,
 ) -> None:
-    """Record an athlete deciding on a drafted plan change (issue #72).
+    """Record a plan proposal being drafted, and then answered (issue #72).
 
-    ``mcp_tool_call`` already records the *drafting*: the propose tools go
-    through ``call_tool`` like everything else, and the proposal id rides in the
-    result the model reads back. The **approval** is not a tool call — it is an
-    HTTP action in the athlete's own session — so it needs its own record, or the
-    log would show every offer and none of the answers.
+    ``mcp_tool_call`` records the tool invocation that drafted it — caller, tool,
+    arguments, duration — but the proposal's **id** exists only in the result,
+    and results are never logged. So drafting writes one record here too,
+    :data:`DRAFTED`, keyed on that id.
 
-    Keyed on the proposal, the decision, and the plan it produced. The plan's
-    *contents* are not logged: what was written is the athlete's training data,
-    and the same rule that keeps tool results out of the audit log keeps this out
-    of it. ``outcome`` is :data:`APPROVED`, :data:`DECLINED` or the shared
-    :data:`TOOL_ERROR` for a refusal, with ``refusal_code`` naming which.
+    The **answer** is not a tool call at all: it is an HTTP action in the
+    athlete's own session, so without a record of its own the log would show
+    every offer and none of the decisions. Sharing the key with the draft is the
+    point — the two records join, and "what did this account agree to?" is one
+    question rather than two half-answers.
+
+    The plan's *contents* are never logged. What was written is the athlete's
+    training data, and the same rule that keeps tool results out of the audit log
+    keeps this out of it. ``outcome`` is :data:`DRAFTED`, :data:`APPROVED`,
+    :data:`DECLINED`, or the shared :data:`TOOL_ERROR` for a refusal, with
+    ``refusal_code`` naming which.
     """
     log.info(
         "plan_proposal %s proposal=%s kind=%s user=%s plan=%s",
@@ -200,7 +206,7 @@ def plan_proposal_decision(
         _safe(user_id),
         _safe(plan_id),
         extra={
-            "event": "plan_proposal_decision",
+            "event": "plan_proposal",
             "proposal_outcome": outcome,
             "proposal_id": proposal_id,
             "proposal_kind": kind,

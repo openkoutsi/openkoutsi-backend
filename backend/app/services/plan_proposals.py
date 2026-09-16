@@ -46,6 +46,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from ..core import audit
 from ..models.user_orm import Athlete, PlanProposal, PlannedWorkout, TrainingPlan
 from ..schemas.plan_proposals import (
     KIND_CREATE_PLAN,
@@ -87,6 +88,30 @@ class ProposalError(Exception):
         super().__init__(message)
 
 
+def _record(
+    outcome: str,
+    proposal: PlanProposal,
+    user_id: str,
+    *,
+    plan_id: Optional[str] = None,
+    refusal_code: Optional[str] = None,
+) -> None:
+    """One audit line for whatever just happened to this proposal.
+
+    Written here rather than at the routes, for the same reason the draft record
+    is: this module is the one place a proposal is minted, applied, refused or
+    declined, so a caller cannot produce any of those without a record of it.
+    """
+    audit.plan_proposal(
+        outcome=outcome,
+        proposal_id=proposal.id,
+        kind=proposal.kind,
+        user_id=user_id,
+        plan_id=plan_id,
+        refusal_code=refusal_code,
+    )
+
+
 def _now() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -108,6 +133,7 @@ async def draft_proposal(
     payload: dict,
     summary: PlanProposalSummary,
     built_by: str,
+    user_id: str = "",
     conversation_id: Optional[str] = None,
     message_id: Optional[str] = None,
     target_plan_id: Optional[str] = None,
@@ -119,6 +145,10 @@ async def draft_proposal(
     **Superseded only by another proposal**, never by an ordinary question: an
     athlete asking "what would that do to my Saturdays?" must still be able to
     come back and click yes on the offer they were asking about.
+
+    The audit record is written here rather than by the caller, because this is
+    the one place a proposal is minted: a tool that forgot to log would otherwise
+    produce an offer with no record of having been made.
     """
     at = now or _now()
     if conversation_id:
@@ -140,6 +170,7 @@ async def draft_proposal(
     session.add(proposal)
     await session.commit()
     await session.refresh(proposal)
+    _record(audit.DRAFTED, proposal, user_id, plan_id=target_plan_id)
     return proposal
 
 
@@ -346,6 +377,7 @@ async def apply_proposal(
     *,
     today: date,
     now: Optional[datetime] = None,
+    user_id: str = "",
 ) -> Optional[TrainingPlan]:
     """Write the change the athlete has just approved. **The only write path.**
 
@@ -354,20 +386,33 @@ async def apply_proposal(
     500.
 
     Every invariant is re-run here rather than trusted from drafting time — see
-    the module docstring on staleness.
+    the module docstring on staleness. A refusal is audited on its way out, so
+    the log carries the offers that were *not* taken up as well as the ones that
+    were.
     """
     at = now or _now()
 
+    def refuse(code: str, message: str) -> ProposalError:
+        _record(audit.TOOL_ERROR, proposal, user_id, refusal_code=code)
+        return ProposalError(code, message)
+
     if proposal.status == STATUS_APPLIED:
-        return await _load_plan(session, athlete, proposal.applied_plan_id)
+        applied = await _load_plan(session, athlete, proposal.applied_plan_id)
+        _record(
+            audit.APPROVED,
+            proposal,
+            user_id,
+            plan_id=applied.id if applied is not None else None,
+        )
+        return applied
     if proposal.status == STATUS_EXPIRED:
-        raise ProposalError(
+        raise refuse(
             CODE_EXPIRED,
             "This offer has expired. Ask Koutsi again and it will draft a fresh "
             "one against your training as it stands now.",
         )
     if proposal.status != STATUS_PENDING:
-        raise ProposalError(
+        raise refuse(
             CODE_DECIDED,
             "This offer has already been dealt with, so there is nothing left to "
             "apply.",
@@ -378,27 +423,34 @@ async def apply_proposal(
         proposal.status = STATUS_EXPIRED
         proposal.decided_at = at
         await session.commit()
-        raise ProposalError(
+        raise refuse(
             CODE_EXPIRED,
             "This offer has expired. Ask Koutsi again and it will draft a fresh "
             "one against your training as it stands now.",
         )
 
-    if proposal.kind == KIND_CREATE_PLAN:
-        plan = await _apply_create_plan(session, athlete, proposal, today=today)
-    elif proposal.kind == KIND_UPDATE_PLAN:
-        plan = await _apply_update_plan(session, athlete, proposal, now=at)
-    elif proposal.kind == KIND_UPDATE_WORKOUT:
-        plan = await _apply_update_workout(session, athlete, proposal)
-    else:  # pragma: no cover - a kind no version of this code ever wrote
-        raise ProposalError(
-            CODE_STALE, "Koutsi cannot apply this offer; ask it again."
-        )
+    try:
+        if proposal.kind == KIND_CREATE_PLAN:
+            plan = await _apply_create_plan(session, athlete, proposal, today=today)
+        elif proposal.kind == KIND_UPDATE_PLAN:
+            plan = await _apply_update_plan(session, athlete, proposal, now=at)
+        elif proposal.kind == KIND_UPDATE_WORKOUT:
+            plan = await _apply_update_workout(session, athlete, proposal)
+        else:  # pragma: no cover - a kind no version of this code ever wrote
+            raise ProposalError(
+                CODE_STALE, "Koutsi cannot apply this offer; ask it again."
+            )
+    except ProposalError as exc:
+        # Every invariant above refuses by raising, so this is the one place
+        # that can record all of them without each check remembering to.
+        _record(audit.TOOL_ERROR, proposal, user_id, refusal_code=exc.code)
+        raise
 
     proposal.status = STATUS_APPLIED
     proposal.decided_at = at
     proposal.applied_plan_id = plan.id if plan is not None else None
     await session.commit()
+    _record(audit.APPROVED, proposal, user_id, plan_id=proposal.applied_plan_id)
 
     # The same two follow-ups the REST write paths run: a plan's dates decide
     # whether the plan achievements have moved, and adherence is redrawn from
@@ -477,6 +529,10 @@ async def _apply_update_plan(
             "nothing to change.",
         )
 
+    # Captured before anything moves: only a plan that *becomes* active files
+    # another away, which is what `POST /plans/{id}/unarchive` does. A plan that
+    # was already active and is merely renamed archives nothing.
+    was_active = plan.status == "active"
     changes = (proposal.payload or {}).get("changes") or {}
     if "name" in changes:
         plan.name = changes["name"]
@@ -502,7 +558,7 @@ async def _apply_update_plan(
         if changes["status"] == "completed" and plan.completed_at is None:
             plan.completed_at = now
 
-    if plan.status == "active":
+    if plan.status == "active" and not was_active:
         # Reopening a plan must not leave two overlapping plans active, exactly
         # as `POST /plans/{id}/unarchive` would not. The set was previewed and
         # is re-checked here against what is actually there — and the plan
@@ -567,13 +623,19 @@ async def _apply_update_workout(
 
 
 async def decline_proposal(
-    session: AsyncSession, proposal: PlanProposal, *, now: Optional[datetime] = None
+    session: AsyncSession,
+    proposal: PlanProposal,
+    *,
+    now: Optional[datetime] = None,
+    user_id: str = "",
 ) -> PlanProposal:
     """The other answer. Writes nothing but the decision."""
     at = now or _now()
     if proposal.status == STATUS_DECLINED:
+        _record(audit.DECLINED, proposal, user_id)
         return proposal
     if proposal.status != STATUS_PENDING:
+        _record(audit.TOOL_ERROR, proposal, user_id, refusal_code=CODE_DECIDED)
         raise ProposalError(
             CODE_DECIDED,
             "This offer has already been dealt with.",
@@ -581,6 +643,7 @@ async def decline_proposal(
     proposal.status = STATUS_DECLINED
     proposal.decided_at = at
     await session.commit()
+    _record(audit.DECLINED, proposal, user_id)
     return proposal
 
 

@@ -816,6 +816,7 @@ async def propose_training_plan(
         },
         summary=summary,
         built_by=built_by,
+        user_id=run.caller.user_id,
         conversation_id=run.conversation_id,
         message_id=run.message_id,
     )
@@ -899,6 +900,7 @@ async def propose_plan_change(
         payload=payload,
         summary=summary,
         built_by=BUILT_BY_RULES,
+        user_id=run.caller.user_id,
         conversation_id=run.conversation_id,
         message_id=run.message_id,
         target_plan_id=plan.id,
@@ -963,9 +965,13 @@ async def _draft_plan_update(
     reopens = status_after == "active" and plan.status != "active"
 
     archives: list[TrainingPlan] = []
-    if status_after == "active":
-        # Only what a *reopen* would file away, and never the plan itself: a
-        # plan always overlaps its own dates.
+    if reopens:
+        # Only a **reopen** files anything away, exactly as
+        # `POST /plans/{id}/unarchive` does. A plan that is already active and is
+        # merely being renamed archives nothing — computing the overlap set for
+        # every change would quietly turn "fix this typo" into "archive the plan
+        # you are also following". And never the plan itself: a plan always
+        # overlaps its own dates.
         archives = [
             other
             for other in await overlapping_active_plans(

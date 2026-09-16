@@ -20,7 +20,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.plans import plan_response_with_adherence
-from backend.app.core import audit
 from backend.app.core.auth import UserContext, get_current_user
 from backend.app.core.config import settings
 from backend.app.core.limiter import limiter
@@ -649,26 +648,15 @@ async def approve_proposal(
 
     today = local_now((athlete.app_settings or {}).get("timezone")).date()
     try:
+        # Both outcomes are audited inside the service, which is the one place a
+        # proposal can be applied or refused — so a route cannot produce either
+        # without a record of it.
         plan = await plan_proposals.apply_proposal(
-            session, athlete, proposal, today=today
+            session, athlete, proposal, today=today, user_id=ctx.user_id
         )
     except ProposalError as exc:
-        audit.plan_proposal_decision(
-            outcome=audit.TOOL_ERROR,
-            proposal_id=proposal.id,
-            kind=proposal.kind,
-            user_id=ctx.user_id,
-            refusal_code=exc.code,
-        )
         raise _proposal_refusal(exc) from exc
 
-    audit.plan_proposal_decision(
-        outcome=audit.APPROVED,
-        proposal_id=proposal.id,
-        kind=proposal.kind,
-        user_id=ctx.user_id,
-        plan_id=plan.id if plan is not None else None,
-    )
     return ChatProposalDecision(
         proposal=ChatProposal.model_validate(proposal),
         plan=plan_response_with_adherence(plan) if plan is not None else None,
@@ -695,21 +683,10 @@ async def decline_proposal(
     proposal = await _pending_proposal(session, conversation_id, message_id)
 
     try:
-        await plan_proposals.decline_proposal(session, proposal)
-    except ProposalError as exc:
-        audit.plan_proposal_decision(
-            outcome=audit.TOOL_ERROR,
-            proposal_id=proposal.id,
-            kind=proposal.kind,
-            user_id=ctx.user_id,
-            refusal_code=exc.code,
+        await plan_proposals.decline_proposal(
+            session, proposal, user_id=ctx.user_id
         )
+    except ProposalError as exc:
         raise _proposal_refusal(exc) from exc
 
-    audit.plan_proposal_decision(
-        outcome=audit.DECLINED,
-        proposal_id=proposal.id,
-        kind=proposal.kind,
-        user_id=ctx.user_id,
-    )
     return ChatProposalDecision(proposal=ChatProposal.model_validate(proposal))
