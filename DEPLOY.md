@@ -891,6 +891,35 @@ needs anything of you beyond deploying:
   sooner. Activities already imported are skipped without pacing, so an import
   that stopped and is resumed walks back to where it left off at full speed.
 
+### Upgrading: training-plan proposals (added in this release)
+
+Koutsi can now draft a training plan in chat and offer it to the athlete as a
+yes/no card (issue #72). Nothing is required of you beyond deploying:
+
+- A new per-user table `plan_proposals` holds a draft between being offered and
+  being decided. It is created automatically for new per-user databases and
+  picked up by existing ones through the per-user Alembic migration step
+  (`036_plan_proposals`). **No rows added or deleted, nothing backfilled, no new
+  environment variables**, and nothing is visible on upgrade until an athlete
+  asks Koutsi for a plan.
+- **No new scope, and no new toggle.** The MCP tool surface is unchanged:
+  `tools/list` still returns the same ten read-only tools, and the two proposal
+  tools are registered but not served over `/mcp` at all. `allow_mcp_server`
+  behaves exactly as before.
+- The draft is a **second LLM call**, billed to the athlete's usage under
+  `plan_generate` — the same bucket `POST /api/plans` spends into — and outside
+  the chat turn budget, which counts turns rather than completions. An instance
+  paying for its athletes' models should expect a proposal to cost roughly what
+  generating a plan from the plan page costs, because it is the same call.
+- A proposal holds one of `AGENT_MAX_CONCURRENT_RUNS` agent slots for up to
+  120 seconds while the weeks are written. That is the one place a chat turn can
+  occupy a slot for two minutes; raise `AGENT_MAX_CONCURRENT_RUNS` if your
+  instance has several athletes chatting at once and a slow model.
+- Approving or declining is an ordinary authenticated request under the existing
+  limiter and is recorded in the audit log as a `plan_proposal_decision` event —
+  the proposal id, the decision and the plan it produced, never the plan's
+  contents.
+
 ### Upgrading: zone sync (added in this release)
 
 Zone syncing requires new OAuth scopes. **Existing users who already connected Strava or Wahoo must disconnect and reconnect** to grant the new permissions:

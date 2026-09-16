@@ -41,6 +41,11 @@ TOOL_ERROR = "tool_error"
 OVERSIZED = "oversized"
 FAILED = "failed"
 
+# Proposal-decision outcomes (issue #72). A refusal reuses `tool_error` above:
+# it is the same kind of event — a thing that was asked for and did not happen.
+APPROVED = "approved"
+DECLINED = "declined"
+
 
 #: Longer than any real tool name or UUID, short enough that a forged record
 #: cannot be padded out to hide behind a scroll.
@@ -160,5 +165,47 @@ def pat_admin_revoke(
             "pat_token_id": token_id,
             "pat_user_id": user_id,
             "admin_user_id": admin_user_id,
+        },
+    )
+
+
+def plan_proposal_decision(
+    *,
+    outcome: str,
+    proposal_id: str,
+    kind: str,
+    user_id: str,
+    plan_id: Optional[str] = None,
+    refusal_code: Optional[str] = None,
+) -> None:
+    """Record an athlete deciding on a drafted plan change (issue #72).
+
+    ``mcp_tool_call`` already records the *drafting*: the propose tools go
+    through ``call_tool`` like everything else, and the proposal id rides in the
+    result the model reads back. The **approval** is not a tool call — it is an
+    HTTP action in the athlete's own session — so it needs its own record, or the
+    log would show every offer and none of the answers.
+
+    Keyed on the proposal, the decision, and the plan it produced. The plan's
+    *contents* are not logged: what was written is the athlete's training data,
+    and the same rule that keeps tool results out of the audit log keeps this out
+    of it. ``outcome`` is :data:`APPROVED`, :data:`DECLINED` or the shared
+    :data:`TOOL_ERROR` for a refusal, with ``refusal_code`` naming which.
+    """
+    log.info(
+        "plan_proposal %s proposal=%s kind=%s user=%s plan=%s",
+        _safe(outcome),
+        _safe(proposal_id),
+        _safe(kind),
+        _safe(user_id),
+        _safe(plan_id),
+        extra={
+            "event": "plan_proposal_decision",
+            "proposal_outcome": outcome,
+            "proposal_id": proposal_id,
+            "proposal_kind": kind,
+            "proposal_plan_id": plan_id,
+            "proposal_refusal_code": refusal_code,
+            "pat_user_id": user_id,
         },
     )

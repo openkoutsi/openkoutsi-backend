@@ -1183,3 +1183,72 @@ class CourseSegment(UserBase):
     crr_used: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     course: Mapped["Course"] = relationship("Course", back_populates="segments")
+
+
+class PlanProposal(UserBase):
+    """A training-plan change Koutsi has drafted and the athlete has not decided
+    (issue #72).
+
+    **A proposal is not a plan.** It is not a ``TrainingPlan`` row, so it does
+    not appear on the plan page, accrues no ``plan_adherence_daily``, is
+    invisible to the activity matcher and to the achievements, and cannot be
+    followed by accident. Inert by construction rather than by a flag someone
+    has to remember to check.
+
+    It lives in the database rather than in the turn that produced it for the
+    same reason the assistant row does: a decision the athlete has not made yet
+    has to survive a reload and a restart. And ``payload`` holds the **resolved**
+    change — the built weeks, not the model's arguments — so applying it cannot
+    depend on replaying those arguments through a second, differently-behaving
+    completion. What the athlete approved is what they get.
+
+    ``chat_orm``'s "storage is dialogue only" rule stands: this is deliberately
+    not stored there, because a proposal is not a tool result. It is the one
+    thing in a turn that is neither dialogue nor evidence.
+    """
+
+    __tablename__ = "plan_proposals"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    #: The turn that offered it. Nullable because a proposal drafted outside a
+    #: conversation has nowhere to be answered — it is unreachable rather than
+    #: invalid, which is the honest shape for a row that nothing can approve.
+    conversation_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    message_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    #: ``create_plan`` | ``update_plan`` | ``update_workout``.
+    kind: Mapped[str] = mapped_column(String, nullable=False)
+    target_plan_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    target_workout_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    #: The resolved change, ready to apply. Never the model's own arguments.
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    #: The compact preview both the model and the card read — including the
+    #: plans an approval would archive, which is what makes the yes informed.
+    summary: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    #: ``pending`` | ``applied`` | ``declined`` | ``expired`` | ``superseded``.
+    status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
+    #: ``llm`` or ``rule_based``, so a draft that fell back to the deterministic
+    #: builder is visible rather than silently worse.
+    built_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    #: 24 hours out: long enough to sleep on, short enough that the apply-time
+    #: re-validation is rarely the thing that catches a stale proposal.
+    expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    decided_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    #: Where to link the athlete once they have said yes.
+    applied_plan_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+
+#: The thread read resolves every message's proposal in one query, and the
+#: supersede pass looks for this conversation's pending ones.
+Index(
+    "ix_plan_proposals_conversation",
+    PlanProposal.conversation_id,
+    PlanProposal.status,
+)
+Index("ix_plan_proposals_message", PlanProposal.message_id)

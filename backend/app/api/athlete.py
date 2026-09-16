@@ -37,6 +37,7 @@ from backend.app.models.user_orm import (
     Course,
     DailyMetric,
     Goal,
+    PlanProposal,
     TrainingPlan,
     WeightLog,
     WorkoutDefinition,
@@ -858,6 +859,20 @@ async def _export_chat(session: AsyncSession) -> list[dict]:
     ]
 
 
+async def _export_plan_proposals(session: AsyncSession) -> list[dict]:
+    """Plans Koutsi offered and the athlete decided on (issue #72).
+
+    Exported in full, ``payload`` included: a proposal the athlete *declined* is
+    the only record anywhere of a plan that was put in front of them and turned
+    down, and an export that dropped it would quietly be a record of agreements
+    only. The applied ones are in ``plans.json`` as well, as plans — which is the
+    point: this file says what was offered and what they answered.
+    """
+    return await _export_rows(
+        session, select(PlanProposal).order_by(PlanProposal.created_at)
+    )
+
+
 async def _export_weight_log(athlete: Athlete, session: AsyncSession) -> list[dict]:
     return await _export_rows(
         session,
@@ -966,6 +981,7 @@ async def export_athlete(
         "personal_records.json": personal_records,
         "inbox.json": await _export_inbox(session),
         "chat.json": await _export_chat(session),
+        "plan_proposals.json": await _export_plan_proposals(session),
         "weight_log.json": await _export_weight_log(athlete, session),
         "achievements.json": await _export_achievements(athlete, session),
         "bikes.json": await _export_bikes(athlete, session),

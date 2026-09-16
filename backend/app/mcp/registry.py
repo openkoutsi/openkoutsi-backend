@@ -35,13 +35,24 @@ Scopes are an **AND**: the caller must hold all of them, which lets
 interpret them rather than serving profile data under a metrics grant. No
 ``mcp:*`` scope exists — a scope named after the transport would tell the person
 ticking the box nothing about what it hands over.
+
+Registered is not the same as published (issue #72)
+---------------------------------------------------
+:func:`all_tools` is what the in-process agent may call; :func:`published_tools`
+is what ``POST /mcp`` lists *and dispatches*. The two differ by
+``internal_only``, and the asymmetry is deliberate rather than a hiding place:
+the proposal tools put a yes/no in front of the athlete in openkoutsi's own
+thread, and an external client drafting one would leave it sitting in a
+conversation nobody has open — a worse experience than not offering it. An
+unpublished tool is refused by name at the transport, not merely omitted from
+the listing, so "hidden" never means "callable if you guess it".
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, TYPE_CHECKING
+from typing import Any, Awaitable, Callable, Optional, TYPE_CHECKING
 
 from pydantic import BaseModel, ConfigDict
 
@@ -109,6 +120,17 @@ class Tool:
     #: ``tools/list`` so a client that cached a schema can notice.
     version: int = 1
     annotations: dict[str, Any] = field(default_factory=dict)
+    #: Registered, but not served over ``POST /mcp`` — neither listed nor
+    #: callable there (issue #72). The in-process agent still reaches it, which
+    #: is the whole distinction: a tool whose result is only meaningful inside
+    #: openkoutsi's own UI has no honest external form yet.
+    internal_only: bool = False
+    #: Seconds this tool may run before the agent loop cancels it. ``None``
+    #: means the loop's default (:data:`~..services.llm_agent.TOOL_TIMEOUT_S`),
+    #: which assumes a tool is an aggregate read over one SQLite file. A tool
+    #: that makes a nested model call is not, and says so here rather than
+    #: pushing the global up for the nine tools that take milliseconds.
+    timeout_s: Optional[float] = None
 
     def input_schema(self) -> dict:
         return _clean_schema(self.arguments.model_json_schema())
@@ -169,6 +191,8 @@ def tool(
     returns: type[BaseModel],
     version: int = 1,
     annotations: dict[str, Any] | None = None,
+    internal_only: bool = False,
+    timeout_s: float | None = None,
 ):
     """Register a tool. Refuses anything that has not declared itself.
 
@@ -221,6 +245,8 @@ def tool(
             handler=handler,
             version=version,
             annotations=annotations or {},
+            internal_only=internal_only,
+            timeout_s=timeout_s,
         )
         return handler
 
@@ -228,9 +254,18 @@ def tool(
 
 
 def all_tools() -> list[Tool]:
-    """Every registered tool, in a stable (alphabetical) order."""
+    """Every registered tool, in a stable (alphabetical) order.
+
+    The *callable* set, which is what the in-process agent is offered. See
+    :func:`published_tools` for the narrower set ``POST /mcp`` serves.
+    """
     _load_tools()
     return [_REGISTRY[name] for name in sorted(_REGISTRY)]
+
+
+def published_tools() -> list[Tool]:
+    """The tools ``POST /mcp`` lists and dispatches (issue #72)."""
+    return [t for t in all_tools() if not t.internal_only]
 
 
 def get_tool(name: str) -> Tool | None:
@@ -238,9 +273,23 @@ def get_tool(name: str) -> Tool | None:
     return _REGISTRY.get(name)
 
 
+def get_published_tool(name: str) -> Tool | None:
+    """:func:`get_tool`, but an unpublished tool resolves to nothing.
+
+    So a ``tools/call`` naming one is refused as an unknown tool rather than
+    executed — omitting a tool from the listing is not on its own a control.
+    """
+    found = get_tool(name)
+    return None if found is None or found.internal_only else found
+
+
 def tool_names() -> list[str]:
     _load_tools()
     return sorted(_REGISTRY)
+
+
+def published_tool_names() -> list[str]:
+    return [t.name for t in published_tools()]
 
 
 def _load_tools() -> None:

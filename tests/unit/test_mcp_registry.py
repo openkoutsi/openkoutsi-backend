@@ -25,13 +25,15 @@ from backend.app.mcp.registry import (
     TOOL_SCOPES,
     ToolArgs,
     all_tools,
+    get_published_tool,
     get_tool,
+    published_tools,
     tool,
 )
 
-#: Every tool the issue specifies. Listed literally so dropping one is a test
+#: Every tool an MCP client is served. Listed literally so dropping one is a test
 #: failure rather than a silently smaller server.
-EXPECTED_TOOLS = {
+PUBLISHED_TOOLS = {
     "find_activity",
     "get_activity_detail",
     "get_athlete_profile",
@@ -44,14 +46,39 @@ EXPECTED_TOOLS = {
     "list_recent_activities",
 }
 
+#: Registered but **not** published (issue #72): the in-process agent reaches
+#: these, ``POST /mcp`` neither lists nor dispatches them. The asymmetry is the
+#: feature — a proposal is an approval control in openkoutsi's own UI, and an
+#: external client drafting one would leave it in a thread nobody has open.
+INTERNAL_TOOLS = {"propose_training_plan", "propose_plan_change"}
+
+EXPECTED_TOOLS = PUBLISHED_TOOLS | INTERNAL_TOOLS
+
 
 def test_the_expected_tools_are_registered():
     assert {t.name for t in all_tools()} == EXPECTED_TOOLS
 
 
+def test_the_published_set_is_the_read_only_ten():
+    """What an existing MCP client sees, byte-for-byte unchanged by issue #72."""
+    assert {t.name for t in published_tools()} == PUBLISHED_TOOLS
+
+
+def test_an_internal_tool_is_not_merely_hidden():
+    """Omitting a tool from the listing is not on its own a control.
+
+    ``tools/call`` resolves through :func:`get_published_tool`, so naming an
+    unpublished tool is an unknown name rather than a quiet execution.
+    """
+    for name in INTERNAL_TOOLS:
+        assert get_tool(name) is not None, name
+        assert get_published_tool(name) is None, name
+
+
 def test_there_are_tools_to_check():
     """Guards the rest of this module against passing vacuously."""
-    assert len(all_tools()) == 10
+    assert len(all_tools()) == 12
+    assert len(published_tools()) == 10
 
 
 # ── Default deny ─────────────────────────────────────────────────────────────
@@ -100,7 +127,15 @@ def test_a_tool_cannot_ask_for_a_scope_outside_the_vocabulary():
 
 def test_a_tool_cannot_ask_for_a_write_scope():
     """This iteration publishes no mutating tools, so a write grant would be
-    one nothing could spend — and one a user might tick believing otherwise."""
+    one nothing could spend — and one a user might tick believing otherwise.
+
+    Untouched by issue #72 on purpose. The propose tools declare **read**
+    scopes, because a scope could never have been the control here: Koutsi calls
+    tools as a session credential, which carries every scope implicitly, so
+    ``plans:write`` would gate an external client and gate Koutsi by one
+    sentence of prompt. The control is that no tool can reach the plan tables at
+    all — see ``test_no_tool_writes_to_the_plan_tables``.
+    """
 
     class Args(ToolArgs):
         pass
@@ -377,7 +412,9 @@ def test_every_collection_argument_is_bounded():
 
 
 def test_the_published_descriptor_is_what_an_mcp_client_expects():
-    for t in all_tools():
+    # Over the *published* set: the read-only hints below are a promise made to
+    # an MCP client, and the two internal tools are never served to one.
+    for t in published_tools():
         described = t.describe()
         assert described["name"] == t.name
         assert described["inputSchema"]["type"] == "object"
@@ -431,6 +468,31 @@ def test_the_coaching_styles_match_the_prompts_that_implement_them():
     )
 
     assert set(_COACHING_STYLE_PROMPTS) == set(VALID_COACHING_STYLES)
+
+
+def test_the_internal_tools_declare_read_scopes_like_everything_else():
+    """Issue #72 adds no write scope anywhere, and needed none."""
+    for name in INTERNAL_TOOLS:
+        scopes = get_tool(name).scopes
+        assert scopes
+        assert all(scope.endswith(":read") for scope in scopes), name
+
+
+def test_a_tool_that_calls_a_model_says_how_long_it_may_take():
+    """The loop's 30 s default assumes an aggregate read over one SQLite file.
+
+    Drafting a plan is a schema-constrained completion, so it declares its own
+    budget rather than pushing the global up for the ten tools that take
+    milliseconds.
+    """
+    from backend.app.services.llm_agent import TOOL_TIMEOUT_S, _timeout_for
+
+    for name in INTERNAL_TOOLS:
+        assert get_tool(name).timeout_s == 120.0, name
+        assert _timeout_for(name) == 120.0, name
+    # And nothing else moved.
+    assert _timeout_for("get_plan_status") == TOOL_TIMEOUT_S
+    assert _timeout_for("a_tool_that_does_not_exist") == TOOL_TIMEOUT_S
 
 
 def test_the_profile_tool_returns_no_identifying_fields():

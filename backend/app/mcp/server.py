@@ -66,7 +66,7 @@ from backend.app.core.auth import authenticate_bearer
 from backend.app.core.limiter import limiter
 from backend.app.db.registry import get_registry_session
 from backend.app.mcp.dispatch import ToolCaller, call_tool
-from backend.app.mcp.registry import all_tools
+from backend.app.mcp.registry import published_tools
 
 log = logging.getLogger(__name__)
 
@@ -330,11 +330,18 @@ def create_mcp_router() -> APIRouter:
         caller = ToolCaller.from_context(ctx)
 
         if method == "tools/list":
-            # Every tool is listed, including ones this credential cannot call.
-            # Hiding them would make a scope refusal look like a missing feature,
-            # and the scopes each tool needs are in its `_meta` so a client can
-            # explain the gap rather than discover it by failing.
-            return _result(request_id, {"tools": [t.describe() for t in all_tools()]})
+            # Every *published* tool is listed, including ones this credential
+            # cannot call. Hiding a tool behind a scope would make a refusal look
+            # like a missing feature, and the scopes each tool needs are in its
+            # `_meta` so a client can explain the gap rather than discover it by
+            # failing.
+            #
+            # `internal_only` is the one thing genuinely absent here (issue #72),
+            # and it is absent from `tools/call` as well — see `published_tools`
+            # for why a proposal has no honest external form yet.
+            return _result(
+                request_id, {"tools": [t.describe() for t in published_tools()]}
+            )
 
         if method == "tools/call":
             name = params.get("name")
@@ -347,7 +354,13 @@ def create_mcp_router() -> APIRouter:
                 return _error(request_id, INVALID_PARAMS, "'arguments' must be an object.")
 
             result = await call_tool(
-                caller, name, arguments, registry_session=registry_session
+                caller,
+                name,
+                arguments,
+                registry_session=registry_session,
+                # An unpublished tool is refused here as an unknown name, not
+                # merely left out of the listing (issue #72).
+                published_only=True,
             )
             content = {
                 "content": [{"type": "text", "text": result.text()}],

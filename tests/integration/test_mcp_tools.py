@@ -259,16 +259,50 @@ async def training_data(session, seeded_athlete):
 # ── Every tool runs ──────────────────────────────────────────────────────────
 
 
+#: Arguments for the tools that cannot say anything without an identifier or a
+#: request. Everything else runs on its defaults, which is the shape an agent's
+#: first call takes.
+SEEDED_ARGS: dict[str, dict] = {
+    "get_activity_detail": {"activity_id": "act-endurance"},
+    "propose_training_plan": {
+        "name": "Autumn build",
+        "start_date": (date.today() + timedelta(days=3)).isoformat(),
+        "weeks": 4,
+        "goal": "A hilly gran fondo in October",
+    },
+    "propose_plan_change": {
+        "plan_id": "plan-1",
+        "change": "update_plan",
+        "goal": "Build aerobic base, then sharpen",
+    },
+}
+
+#: Tools whose answer is *about* something the athlete must already have. A
+#: brand-new account has none of it, so a refusal there is the right answer
+#: rather than a failure — and the refusal is prose the model can act on.
+NEEDS_SOMETHING_TO_EXIST = {"get_activity_detail", "propose_plan_change"}
+
+
+def _seeded_args(tool_name: str) -> dict:
+    return dict(SEEDED_ARGS.get(tool_name, {}))
+
+
+def _empty_args(tool_name: str) -> dict:
+    args = _seeded_args(tool_name)
+    if tool_name == "get_activity_detail":
+        args["activity_id"] = "nope"
+    if tool_name == "propose_plan_change":
+        args["plan_id"] = "nope"
+    return args
+
+
 @pytest.mark.parametrize("tool_name", [t.name for t in all_tools()])
 async def test_every_tool_answers_over_a_seeded_athlete(
     tool_name, caller, session, training_data, registry_session
 ):
-    """One execution of each listed tool. The arguments are the defaults except
-    where a tool needs an identifier, which is the shape an agent's first call
-    takes."""
-    args = {"activity_id": "act-endurance"} if tool_name == "get_activity_detail" else {}
+    """One execution of each registered tool, published or not."""
     result = await run(
-        tool_name, args, caller=caller, session=session,
+        tool_name, _seeded_args(tool_name), caller=caller, session=session,
         athlete=training_data, registry_session=registry_session,
     )
     assert result.ok, result.error
@@ -281,13 +315,13 @@ async def test_every_tool_answers_over_an_empty_athlete(
 ):
     """A brand-new user has no rides, no plan and no metrics. Every tool must
     still answer — an exception there would be the model's first impression."""
-    args = {"activity_id": "nope"} if tool_name == "get_activity_detail" else {}
     result = await run(
-        tool_name, args, caller=caller, session=session,
+        tool_name, _empty_args(tool_name), caller=caller, session=session,
         athlete=seeded_athlete, registry_session=registry_session,
     )
-    if tool_name == "get_activity_detail":
+    if tool_name in NEEDS_SOMETHING_TO_EXIST:
         assert not result.ok  # an unknown id, reported as prose
+        assert "nope" in (result.error or "")
     else:
         assert result.ok, result.error
 
@@ -298,12 +332,33 @@ async def test_every_tool_stays_inside_the_response_bound(
     from backend.app.mcp.dispatch import MAX_RESULT_BYTES
 
     for t in all_tools():
-        args = {"activity_id": "act-endurance"} if t.name == "get_activity_detail" else {}
         result = await run(
-            t.name, args, caller=caller, session=session,
+            t.name, _seeded_args(t.name), caller=caller, session=session,
             athlete=training_data, registry_session=registry_session,
         )
         assert len(result.text().encode()) < MAX_RESULT_BYTES, t.name
+
+
+async def test_a_proposal_fits_the_context_budget_the_loop_allows(
+    caller, session, training_data, registry_session
+):
+    """``MAX_RESULT_BYTES`` is 64 KiB; the agent loop truncates at 6 000 *chars*.
+
+    A proposal is the longest thing any tool returns — a week table, a week of
+    sessions and the plans an approval would archive — so the bound that
+    actually applies to it is the tighter one, and a truncated proposal would
+    hand the model a plan it can only half describe.
+    """
+    from backend.app.services.llm_agent import MAX_TOOL_RESULT_CHARS
+
+    args = _seeded_args("propose_training_plan")
+    args["weeks"] = 24  # the longest plan a proposal may draft
+    result = await run(
+        "propose_training_plan", args, caller=caller, session=session,
+        athlete=training_data, registry_session=registry_session,
+    )
+    assert result.ok, result.error
+    assert len(result.text()) < MAX_TOOL_RESULT_CHARS, len(result.text())
 
 
 # ── The content each tool owes ───────────────────────────────────────────────

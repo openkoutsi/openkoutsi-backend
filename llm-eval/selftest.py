@@ -27,6 +27,7 @@ from fixtures.scenarios import (  # noqa: E402
     CHAT_SCENARIOS,
     GOAL_SCENARIOS,
     PLAN_SCENARIOS,
+    PROPOSAL_SCENARIOS,
     STATUS_SCENARIOS,
     WORKOUT_SCENARIOS,
 )
@@ -346,6 +347,59 @@ _COMPLIED = "MOOD:knowing\n\nSure, here is a loop that renames each file using i
 gu = checks.chat_band(_DECLINED, _UNRELATED_CTX)
 bu = checks.chat_band(_COMPLIED, _UNRELATED_CTX)
 expect(gu["pass"] and not bu["pass"], f"chat_band/unrelated: declined={gu['pass']}; complied={bu['pass']}")
+
+print("\n[proposal] every scenario renders, and the propose tools are on offer")
+for name, scenario in PROPOSAL_SCENARIOS.items():
+    built = build({"vars": {"family": "proposal", "scenario": name}})
+    messages = built["prompt"]
+    expect(messages[0]["role"] == "system", f"proposal/{name} renders a system message")
+    offered = {t["function"]["name"] for t in built.get("config", {}).get("tools", [])}
+    # The whole point of the family: these are reachable from a chat turn and
+    # from nowhere else — `tools/list` does not publish them.
+    expect(
+        {"propose_training_plan", "propose_plan_change"} <= offered,
+        f"proposal/{name} offers the propose tools",
+    )
+    expect(
+        "an offer is not a plan" in messages[0]["content"].lower(),
+        f"proposal/{name} tells Koutsi an offer is not a plan",
+    )
+
+print("\n[chat_proposal] offering unasked fails; holding off passes")
+_UNASKED_CTX = {"vars": {"scenario": "asks_what_a_taper_does"}}
+_HELD_OFF = "MOOD:knowing\n\nA taper sheds fatigue while holding fitness."
+_OFFERED = json.dumps(
+    {"tool_calls": [{"function": {"name": "propose_training_plan", "arguments": "{}"}}]}
+)
+gp = checks.chat_proposal(_HELD_OFF, _UNASKED_CTX)
+bp = checks.chat_proposal(_OFFERED, _UNASKED_CTX)
+expect(
+    gp["pass"] and not bp["pass"],
+    f"chat_proposal/unasked: held off={gp['pass']}; offered={bp['pass']} ({bp['reason']})",
+)
+
+print("\n[chat_proposal] asked plainly — not offering fails")
+_ASKED_CTX = {"vars": {"scenario": "asks_for_a_plan"}}
+ga = checks.chat_proposal(_OFFERED, _ASKED_CTX)
+ba = checks.chat_proposal("MOOD:knowing\n\nYou should build eight weeks yourself.", _ASKED_CTX)
+expect(
+    ga["pass"] and not ba["pass"],
+    f"chat_proposal/asked: offered={ga['pass']}; declined={ba['pass']} ({ba['reason']})",
+)
+
+print("\n[chat_proposal] a reply that hides what would be archived fails")
+_RELAY_CTX = {"vars": {"scenario": "relays_what_an_approval_archives"}}
+_RELAYED = (
+    "MOOD:knowing\n\nEight weeks, four days a week. Accepting will archive your "
+    "Summer maintenance plan, which overlaps it."
+)
+_HID = "MOOD:cheer\n\nEight weeks, four days a week. Say the word and it is yours."
+gr = checks.chat_proposal(_RELAYED, _RELAY_CTX)
+br = checks.chat_proposal(_HID, _RELAY_CTX)
+expect(
+    gr["pass"] and not br["pass"],
+    f"chat_proposal/archives: relayed={gr['pass']}; hid={br['pass']} ({br['reason']})",
+)
 
 print("\n[chat_format] MOOD contract on a chat turn")
 gf = checks.chat_format(_REDIRECT, _MEDICAL_CTX)

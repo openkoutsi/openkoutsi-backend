@@ -30,6 +30,7 @@ from .intensity_distribution import (
 )
 from .llm_access import record_llm_usage
 from .llm_client import (
+    ResolvedLlm,
     call_llm_with_optional_schema,
     extract_json,
     resolve_llm_config,
@@ -196,26 +197,41 @@ def _parse_response(raw: str, num_weeks: int) -> list[list[dict]]:
     return result
 
 
-async def generate_plan_weeks_llm(
+async def generate_plan_weeks_with_cfg(
     athlete: Athlete,
     config: PlanConfig,
     num_weeks: int,
     goal: Optional[str],
     session: AsyncSession,
-    instance: InstanceSettings | None = None,
+    cfg: ResolvedLlm,
+    *,
     user_id: str = "",
-    allow_instance_fallback: bool = True,
+    today: Optional[date] = None,
+    allow_retry: bool = True,
 ) -> list[list[dict]]:
-    """Call the LLM and return parsed weeks (list of weeks, each a list of day dicts).
+    """Generate weeks against an **already-resolved** LLM config.
 
-    Persistence-free so callers can build PlannedWorkout rows for either a new or
-    an existing plan. ``allow_instance_fallback=False`` (issue #9, BYOK-mode on a
-    gated instance) forbids falling back to the instance credentials.
+    Split out of :func:`generate_plan_weeks_llm` for issue #72: resolving a
+    config reads ``instance_settings`` from the registry database, and no MCP
+    tool module may so much as name that module
+    (``test_no_tool_module_reaches_the_registry_database``). The proposal tool
+    therefore arrives with a :class:`ResolvedLlm` the agent loop resolved on its
+    behalf — it holds the config only because the loop that resolved it was
+    entitled to — and calls this.
+
+    ``today`` is the calendar date the recent-training window is measured back
+    from. **The athlete's**, not the server's: it is handed down from
+    ``ToolRun.today`` / the caller, and only falls back to the process date for
+    callers that have no athlete-local date to give.
+
+    ``allow_retry=False`` skips the correction round-trip. One completion may
+    take the client's full 120 s, so two can outlast the proposal tool's own
+    120 s budget — and a tool cancelled mid-retry produces *nothing*, where a
+    skipped retry falls back to the deterministic builder and still produces a
+    proposal. The retry stays on for ``POST /api/plans``, which has no such cap.
+
+    Persistence-free, like its wrapper: it returns week dicts and builds nothing.
     """
-    cfg = _resolve_llm_config(
-        athlete, instance, user_id, allow_instance_fallback=allow_instance_fallback
-    )
-
     # Fetch athlete's latest Fitness for context
     fitness: Optional[float] = None
     result = await session.execute(
@@ -229,13 +245,13 @@ async def generate_plan_weeks_llm(
         fitness = latest_metric.fitness
 
     # What the athlete has actually been doing over the last block (issue #38).
-    today = date.today()
+    window_end = today or date.today()
     distribution = summarize_for_prompt(
         await compute_intensity_distribution(
             athlete,
             session,
-            start=today - timedelta(days=DEFAULT_WINDOW_DAYS),
-            end=today,
+            start=window_end - timedelta(days=DEFAULT_WINDOW_DAYS),
+            end=window_end,
         )
     )
 
@@ -254,6 +270,8 @@ async def generate_plan_weeks_llm(
     try:
         return _parse_response(raw, num_weeks)
     except (json.JSONDecodeError, KeyError, ValueError):
+        if not allow_retry:
+            raise
         # Retry with a correction nudge. If the provider already rejected the
         # schema on the first call, don't re-send it (skip the wasted round-trip).
         correction = (
@@ -269,6 +287,43 @@ async def generate_plan_weeks_llm(
         )
         await record_llm_usage(user_id=user_id, feature="plan_generate", cfg=cfg, usage=usage)
         return _parse_response(raw, num_weeks)  # raises HTTP 503 if still invalid
+
+
+async def generate_plan_weeks_llm(
+    athlete: Athlete,
+    config: PlanConfig,
+    num_weeks: int,
+    goal: Optional[str],
+    session: AsyncSession,
+    instance: InstanceSettings | None = None,
+    user_id: str = "",
+    allow_instance_fallback: bool = True,
+    today: Optional[date] = None,
+) -> list[list[dict]]:
+    """Call the LLM and return parsed weeks (list of weeks, each a list of day dicts).
+
+    Persistence-free so callers can build PlannedWorkout rows for either a new or
+    an existing plan. ``allow_instance_fallback=False`` (issue #9, BYOK-mode on a
+    gated instance) forbids falling back to the instance credentials.
+
+    The thin config-resolving half of the pair: it reads the registry-backed
+    instance settings and hands the result to
+    :func:`generate_plan_weeks_with_cfg`, which is what a caller that already
+    holds a resolved config calls instead.
+    """
+    cfg = _resolve_llm_config(
+        athlete, instance, user_id, allow_instance_fallback=allow_instance_fallback
+    )
+    return await generate_plan_weeks_with_cfg(
+        athlete,
+        config,
+        num_weeks,
+        goal,
+        session,
+        cfg,
+        user_id=user_id,
+        today=today,
+    )
 
 
 async def generate_plan_llm(

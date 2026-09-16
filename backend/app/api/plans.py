@@ -31,7 +31,15 @@ from backend.app.services.plan_adherence import (
 from backend.app.services.plan_generator import (
     generate_plan, build_workout_rows, week_meta_for,
 )
-from backend.app.services.plan_lifecycle import close_finished_plans
+# The overlap rule lives in `plan_lifecycle` since issue #72: the proposal
+# preview has to name the plans an approval would archive, and a second copy
+# of that rule is what would make the preview a lie.
+from backend.app.services.plan_lifecycle import (
+    archive_overlapping_active_plans as _archive_overlapping_active_plans,
+    close_finished_plans,
+    plan_end_date as _plan_end_date,
+    plans_overlap as _plans_overlap,  # noqa: F401  (kept for existing callers/tests)
+)
 from openkoutsi.plan_schema import clamp_plan_params
 from openkoutsi.plan_builder import week_meta_from_weeks
 
@@ -92,42 +100,6 @@ def _plan_response_with_adherence(plan: TrainingPlan) -> TrainingPlanResponse:
     for workout in response.workouts:
         workout.match_score = ps.match_scores.get(workout.id)
     return response
-
-
-def _plans_overlap(a_start, a_end, b_start, b_end) -> bool:
-    """Whether two plan date ranges overlap.
-
-    Ranges are inclusive [start, end]. If any endpoint is unknown (None) we
-    treat the ranges as overlapping, so a plan with incomplete dates is still
-    archived when a new one is created (the conservative, pre-existing
-    behaviour).
-    """
-    if a_start is None or a_end is None or b_start is None or b_end is None:
-        return True
-    return a_start <= b_end and b_start <= a_end
-
-
-def _plan_end_date(start_date, weeks):
-    """Inclusive end date for a plan of ``weeks`` weeks starting on ``start_date``."""
-    if start_date is None or not weeks:
-        return None
-    return start_date + timedelta(weeks=weeks) - timedelta(days=1)
-
-
-async def _archive_overlapping_active_plans(session, athlete_id, start_date, end_date):
-    """Archive active plans whose date range overlaps [start_date, end_date].
-
-    Non-overlapping active plans are left active, so several plans covering
-    different time periods can coexist.
-    """
-    result = await session.execute(
-        select(TrainingPlan)
-        .where(TrainingPlan.athlete_id == athlete_id, TrainingPlan.status == "active")
-    )
-    for old in result.scalars().all():
-        if _plans_overlap(old.start_date, old.end_date, start_date, end_date):
-            old.status = "archived"
-    await session.flush()
 
 
 # ── Path-scoped dependencies ─────────────────────────────────────────────────
@@ -199,6 +171,12 @@ async def get_owned_workout(
     if not workout:
         raise HTTPException(404, "Planned workout not found")
     return WorkoutCtx(*plan_ctx, workout)
+
+
+#: The plan response the proposal-approval route in ``api.chat`` returns too
+#: (issue #72). Public alias rather than a second implementation: an approved
+#: proposal has to come back looking exactly like the plan page's own plan.
+plan_response_with_adherence = _plan_response_with_adherence
 
 
 @router.get("", response_model=Page[TrainingPlanResponse],

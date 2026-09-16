@@ -7118,6 +7118,126 @@
         }
       }
     },
+    "/api/chat/conversations/{conversation_id}/messages/{message_id}/proposal/approve": {
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Accept a plan Koutsi proposed",
+        "description": "Apply what Koutsi drafted, after re-checking that it still holds.\n\nIdempotent by proposal id: a double-click produces one plan, and the second\ncall answers with the plan the first created.\n\nEvery invariant is re-run against the database *now* rather than trusted\nfrom when the draft was made \u2014 the start date, the target plan or session,\nand above all the set of plans an approval would archive, since that set is\nwhat the athlete actually consented to. A proposal that no longer holds is\nrefused with a sentence instead of applied.\n\n**Not available to personal access tokens.**",
+        "operationId": "approveChatProposal",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "conversation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Conversation Id"
+            }
+          },
+          {
+            "name": "message_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Message Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatProposalDecision"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-personal-access-token": {
+          "allowed": false
+        }
+      }
+    },
+    "/api/chat/conversations/{conversation_id}/messages/{message_id}/proposal/decline": {
+      "post": {
+        "tags": [
+          "chat"
+        ],
+        "summary": "Turn down a plan Koutsi proposed",
+        "description": "Mark the offer turned down. Nothing is written but the decision itself.\n\n**Not available to personal access tokens.**",
+        "operationId": "declineChatProposal",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "conversation_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Conversation Id"
+            }
+          },
+          {
+            "name": "message_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Message Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatProposalDecision"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-personal-access-token": {
+          "allowed": false
+        }
+      }
+    },
     "/api/tokens/scopes": {
       "get": {
         "tags": [
@@ -10069,6 +10189,53 @@
         ],
         "title": "ApiUsageSummaryResponse"
       },
+      "ArchivedPlanPreview": {
+        "properties": {
+          "plan_id": {
+            "type": "string",
+            "title": "Plan Id",
+            "description": "Identifier of the plan that would be archived."
+          },
+          "name": {
+            "type": "string",
+            "title": "Name",
+            "description": "Plan name as the athlete sees it."
+          },
+          "start_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Date",
+            "description": "First calendar date of that plan."
+          },
+          "end_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Date",
+            "description": "Last calendar date of that plan."
+          }
+        },
+        "type": "object",
+        "required": [
+          "plan_id",
+          "name"
+        ],
+        "title": "ArchivedPlanPreview",
+        "description": "A plan an approval would file away."
+      },
       "AssignHistoryResponse": {
         "properties": {
           "scanned": {
@@ -11066,6 +11233,16 @@
             ],
             "title": "Tool Names"
           },
+          "proposal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ChatProposal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "created_at": {
             "type": "string",
             "format": "date-time",
@@ -11080,6 +11257,109 @@
           "created_at"
         ],
         "title": "ChatMessageResponse"
+      },
+      "ChatProposal": {
+        "properties": {
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "status": {
+            "type": "string",
+            "title": "Status"
+          },
+          "built_by": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Built By"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/PlanProposalSummary"
+          },
+          "created_at": {
+            "type": "string",
+            "format": "date-time",
+            "title": "Created At"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "decided_at": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date-time"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided At"
+          },
+          "applied_plan_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Applied Plan Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "kind",
+          "status",
+          "summary",
+          "created_at"
+        ],
+        "title": "ChatProposal",
+        "description": "A training-plan change Koutsi has offered on this turn (issue #72).\n\nPresent on the assistant turn that drafted it and nowhere else. The card the\nweb app renders from this **is** the prompt: the athlete answers with a\nbutton, never by typing \"yes\", because a typed yes would put the decision\nback inside the thing being gated.\n\nNothing here has been applied. ``status`` says where the offer stands, and\nonly ``pending`` has anything left to answer."
+      },
+      "ChatProposalDecision": {
+        "properties": {
+          "proposal": {
+            "$ref": "#/components/schemas/ChatProposal"
+          },
+          "plan": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TrainingPlanResponse"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "proposal"
+        ],
+        "title": "ChatProposalDecision",
+        "description": "What came of the athlete answering an offer (issue #72).\n\nThe proposal in its settled state, and \u2014 on an approval \u2014 the plan that now\nexists, in exactly the shape the plan page serves. A decision deliberately\nspends no chat turn and asks no model anything: the outcome the athlete\nneeds is *your plan is live, here it is*, which is a fact the backend knows\nexactly."
       },
       "ChatRetryBody": {
         "properties": {
@@ -15332,6 +15612,194 @@
         ],
         "title": "PlanConfig"
       },
+      "PlanProposalSummary": {
+        "properties": {
+          "kind": {
+            "type": "string",
+            "title": "Kind",
+            "description": "'create_plan' for a new plan, 'update_plan' for whole-plan fields, 'update_workout' for one planned session (including skip and unskip)."
+          },
+          "built_by": {
+            "type": "string",
+            "title": "Built By",
+            "description": "'llm' when a model wrote the weeks, 'rule_based' when the deterministic builder did \u2014 which happens when the model call failed or could not be parsed."
+          },
+          "fallback_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fallback Reason",
+            "description": "Why the deterministic builder was used, when it was. Null on the ordinary path."
+          },
+          "plan_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Plan Name",
+            "description": "Name of the plan being created or changed."
+          },
+          "goal": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Goal",
+            "description": "What the plan is built towards, in words."
+          },
+          "start_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start Date",
+            "description": "First calendar date the plan would run."
+          },
+          "end_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End Date",
+            "description": "Last calendar date the plan would run."
+          },
+          "weeks": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weeks",
+            "description": "Planned length in weeks (count)."
+          },
+          "weekly": {
+            "items": {
+              "$ref": "#/components/schemas/ProposedWeek"
+            },
+            "type": "array",
+            "title": "Weekly",
+            "description": "Week-by-week summary of a drafted plan."
+          },
+          "first_week": {
+            "items": {
+              "$ref": "#/components/schemas/ProposedSession"
+            },
+            "type": "array",
+            "title": "First Week",
+            "description": "The seven days of week 1, so the shape of the plan is readable."
+          },
+          "remaining_weeks": {
+            "type": "integer",
+            "title": "Remaining Weeks",
+            "description": "How many further weeks the draft holds beyond the one listed day by day (count). Their totals are in 'weekly'.",
+            "default": 0
+          },
+          "changes": {
+            "items": {
+              "$ref": "#/components/schemas/ProposedChange"
+            },
+            "type": "array",
+            "title": "Changes",
+            "description": "The fields a change would move. Empty for a new plan."
+          },
+          "target_plan_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Plan Id",
+            "description": "Identifier of the plan a change applies to."
+          },
+          "target_workout_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Workout Id",
+            "description": "Identifier of the planned session a change applies to."
+          },
+          "target_date": {
+            "anyOf": [
+              {
+                "type": "string",
+                "format": "date"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Date",
+            "description": "Calendar date the targeted session falls on."
+          },
+          "target_label": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Label",
+            "description": "How to name the targeted session in a sentence, e.g. 'Thursday's threshold'."
+          },
+          "reopens_plan": {
+            "type": "boolean",
+            "title": "Reopens Plan",
+            "description": "True when approving would reactivate a finished or filed-away plan, which is itself something the athlete should be told.",
+            "default": false
+          },
+          "archives": {
+            "items": {
+              "$ref": "#/components/schemas/ArchivedPlanPreview"
+            },
+            "type": "array",
+            "title": "Archives",
+            "description": "Plans an approval would archive, because their dates overlap. Creating a plan files away every active plan it overlaps \u2014 say so in your reply; a yes that did not know this is not consent. Archiving is reversible from the plan page."
+          }
+        },
+        "type": "object",
+        "required": [
+          "kind",
+          "built_by"
+        ],
+        "title": "PlanProposalSummary",
+        "description": "Everything the athlete needs in order to answer yes or no."
+      },
       "PlanWeekMeta": {
         "properties": {
           "week_number": {
@@ -15872,6 +16340,165 @@
         },
         "type": "object",
         "title": "PowerModelsResponse"
+      },
+      "ProposedChange": {
+        "properties": {
+          "field": {
+            "type": "string",
+            "title": "Field",
+            "description": "Which field would change, e.g. start_date, duration_min."
+          },
+          "before": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Before",
+            "description": "What it is now, rendered as text."
+          },
+          "after": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "After",
+            "description": "What it would become, rendered as text."
+          }
+        },
+        "type": "object",
+        "required": [
+          "field"
+        ],
+        "title": "ProposedChange",
+        "description": "One field a change would move, and what it would move from and to."
+      },
+      "ProposedSession": {
+        "properties": {
+          "day_of_week": {
+            "type": "integer",
+            "title": "Day Of Week",
+            "description": "1 = Monday through 7 = Sunday."
+          },
+          "workout_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workout Type",
+            "description": "Session type, e.g. endurance, threshold, rest."
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description",
+            "description": "What the session asks for, in the draft's own words."
+          },
+          "duration_min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Duration Min",
+            "description": "Prescribed duration in minutes (min). Null on a rest day."
+          },
+          "target_load": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Load",
+            "description": "Prescribed Load (unitless Load points). Null on a rest day."
+          }
+        },
+        "type": "object",
+        "required": [
+          "day_of_week"
+        ],
+        "title": "ProposedSession",
+        "description": "One day of a drafted plan."
+      },
+      "ProposedWeek": {
+        "properties": {
+          "week_number": {
+            "type": "integer",
+            "title": "Week Number",
+            "description": "Which week of the plan this is, 1-based (count)."
+          },
+          "week_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Week Type",
+            "description": "'build', 'recovery' or 'taper', where the draft says. A machine key rather than a sentence: the card localises it, and the preview has to read the same in Finnish as in English."
+          },
+          "sessions": {
+            "type": "integer",
+            "title": "Sessions",
+            "description": "Training sessions this week, rest days excluded (count).",
+            "default": 0
+          },
+          "total_load": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Load",
+            "description": "Prescribed Load for the whole week (unitless Load points)."
+          },
+          "total_duration_min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Duration Min",
+            "description": "Prescribed riding time for the whole week, in minutes (min)."
+          }
+        },
+        "type": "object",
+        "required": [
+          "week_number"
+        ],
+        "title": "ProposedWeek",
+        "description": "One week of a drafted plan, summarised."
       },
       "ProviderSyncStatus": {
         "properties": {
