@@ -354,6 +354,116 @@ async def test_moving_a_plan_shows_what_it_moves_from_and_to(
     assert changes["start_date"]["before"] == (date.today() - timedelta(days=7)).isoformat()
 
 
+async def test_a_stated_training_week_is_the_week_the_plan_is_built_on(
+    caller, session, planned_athlete, registry_session
+):
+    """When the athlete says which days they train, those are the days.
+
+    The fallback week is a guess about their life; this is the path where they
+    have actually told Koutsi, and the draft has to honour it rather than
+    quietly using the default spread.
+    """
+    args = dict(TOOL_ARGS["propose_training_plan"])
+    args["weeks"] = 2
+    args["training_days"] = [
+        {"day_of_week": 1, "workout_type": "threshold", "notes": "before work"},
+        {"day_of_week": 3, "workout_type": "endurance"},
+        {"day_of_week": 5, "workout_type": "long", "notes": "club ride"},
+    ]
+    result = await _run(
+        "propose_training_plan", args, caller=caller, session=session,
+        athlete=planned_athlete, registry_session=registry_session,
+    )
+    assert result.ok, result.error
+
+    riding = {
+        s["day_of_week"]
+        for s in result.data["summary"]["first_week"]
+        if s["workout_type"] != "rest"
+    }
+    assert riding == {1, 3, 5}
+    # Saturday and Sunday are theirs, because they did not ask for them.
+    assert {6, 7} & riding == set()
+
+
+async def test_a_long_session_description_is_trimmed_for_the_preview(
+    caller, session, planned_athlete, registry_session
+):
+    """The preview has to fit the loop's tool-result budget, so a session's own
+    words are cut — with an ellipsis, so nobody reads a truncation as the whole
+    prescription."""
+    from backend.app.mcp.tools.plans import MAX_DESCRIPTION_CHARS, _trim
+
+    long = "Ride steadily " * 40
+    trimmed = _trim(long)
+    assert len(trimmed) == MAX_DESCRIPTION_CHARS
+    assert trimmed.endswith("…")
+    # Short enough already: returned untouched, with no ellipsis to mislead.
+    assert _trim("2x12 min at threshold") == "2x12 min at threshold"
+    assert _trim(None) is None
+
+
+@pytest.mark.parametrize(
+    "args, expected",
+    [
+        (
+            {"change": "update_workout", "duration_min": 55},
+            "'workout_id' is required",
+        ),
+        (
+            {"change": "update_workout", "workout_id": "nope", "duration_min": 55},
+            "No planned session with id 'nope'",
+        ),
+        (
+            {"change": "unskip_workout", "workout_id": "pw-thursday"},
+            "not marked as skipped",
+        ),
+        (
+            {"change": "update_workout", "workout_id": "pw-thursday", "duration_min": 75},
+            "exactly as it is",
+        ),
+    ],
+)
+async def test_a_change_koutsi_cannot_make_comes_back_as_a_sentence(
+    args, expected, caller, session, planned_athlete, registry_session
+):
+    """Issue #42's error shaping, on the write-adjacent tools too: a refusal the
+    model can read and act on, rather than an exception that ends the turn.
+
+    The last case matters most — 75 minutes is what that session already is, so
+    "changing" it to 75 is a change that would leave the athlete with a decision
+    to make about nothing.
+    """
+    result = await _run(
+        "propose_plan_change", {"plan_id": "plan-1", **args}, caller=caller,
+        session=session, athlete=planned_athlete, registry_session=registry_session,
+    )
+    assert not result.ok
+    assert expected in result.error
+    # And nothing was drafted, so there is no card with nothing on it.
+    assert (
+        await session.execute(select(func.count()).select_from(PlanProposal))
+    ).scalar_one() == 0
+
+
+def test_a_plan_with_unknown_dates_overlaps_everything():
+    """The conservative reading, and the one the REST path has always taken: a
+    plan whose dates were never recorded is archived by a new one rather than
+    left active beside it on the strength of a `None`."""
+    from backend.app.services.plan_lifecycle import plan_end_date, plans_overlap
+
+    today = date.today()
+    assert plans_overlap(None, None, today, today + timedelta(days=7)) is True
+    assert plans_overlap(today, None, today, today) is True
+    assert plans_overlap(
+        today, today + timedelta(days=3), today + timedelta(days=30), today + timedelta(days=40)
+    ) is False
+    # An open-ended plan has no last day to compute.
+    assert plan_end_date(None, 4) is None
+    assert plan_end_date(today, None) is None
+    assert plan_end_date(today, 1) == today + timedelta(days=6)
+
+
 # ── Superseding ─────────────────────────────────────────────────────────────
 
 
@@ -677,6 +787,198 @@ async def test_a_skip_and_then_an_unskip_round_trip(
     )
     await session.refresh(workout)
     assert workout.skip_reason is None
+
+
+async def _decide_change(session, athlete, caller, registry_session, args):
+    """Draft one plan change and apply it, returning the reloaded plan."""
+    result = await _run(
+        "propose_plan_change", args, caller=caller, session=session,
+        athlete=athlete, registry_session=registry_session,
+    )
+    assert result.ok, result.error
+    proposal = (
+        await session.execute(
+            select(PlanProposal).where(PlanProposal.id == result.data["proposal_id"])
+        )
+    ).scalar_one()
+    return result, await apply_proposal(
+        session, athlete, proposal, today=date.today()
+    )
+
+
+async def test_pushing_the_whole_plan_back_a_week_moves_its_dates(
+    caller, session, planned_athlete, registry_session
+):
+    """The issue's own headline example, end to end.
+
+    Moving the start date moves every session with it, because a planned
+    workout's calendar date is derived from the plan's start plus its week and
+    day — so the end date has to move with it or the plan is a week short.
+    """
+    before = (
+        await session.execute(select(TrainingPlan).where(TrainingPlan.id == "plan-1"))
+    ).scalar_one()
+    old_start, old_end = before.start_date, before.end_date
+    new_start = old_start + timedelta(days=7)
+
+    result, plan = await _decide_change(
+        session, planned_athlete, caller, registry_session,
+        {
+            "plan_id": "plan-1", "change": "update_plan",
+            "start_date": new_start.isoformat(),
+        },
+    )
+    assert plan.start_date == new_start
+    assert plan.end_date == old_end + timedelta(days=7)
+    # The sessions ride along rather than being rewritten: the same week and day
+    # now land a week later.
+    thursday = (
+        await session.execute(
+            select(PlannedWorkout).where(PlannedWorkout.id == "pw-thursday")
+        )
+    ).scalar_one()
+    assert thursday.week_number == 2 and thursday.day_of_week == 4
+
+
+async def test_changing_a_plans_goal_and_length_applies_both(
+    caller, session, planned_athlete, registry_session
+):
+    _, plan = await _decide_change(
+        session, planned_athlete, caller, registry_session,
+        {
+            "plan_id": "plan-1", "change": "update_plan",
+            "goal": "Sharpen for the October fondo", "weeks": 6,
+        },
+    )
+    assert plan.goal == "Sharpen for the October fondo"
+    assert plan.weeks == 6
+    # Six weeks from the same start, inclusive.
+    assert plan.end_date == plan.start_date + timedelta(weeks=6) - timedelta(days=1)
+
+
+async def test_re_dating_a_finished_plan_unfinishes_it(
+    caller, session, planned_athlete, registry_session
+):
+    """The same rule `PUT /plans/{id}` applies: the plan's last day moved, so
+    whether it has finished is an open question again — and the stamp that stops
+    the auto-closer shutting it straight back has to be cleared with it."""
+    plan = (
+        await session.execute(select(TrainingPlan).where(TrainingPlan.id == "plan-1"))
+    ).scalar_one()
+    plan.status = "completed"
+    plan.completed_at = datetime.now(timezone.utc)
+    await session.commit()
+
+    _, applied = await _decide_change(
+        session, planned_athlete, caller, registry_session,
+        {"plan_id": "plan-1", "change": "update_plan", "weeks": 8},
+    )
+    assert applied.status == "active"
+    assert applied.completed_at is None
+
+
+async def test_archiving_a_plan_by_hand_stamps_nothing_and_files_it(
+    caller, session, planned_athlete, registry_session
+):
+    _, plan = await _decide_change(
+        session, planned_athlete, caller, registry_session,
+        {"plan_id": "plan-1", "change": "update_plan", "status": "archived"},
+    )
+    assert plan.status == "archived"
+    assert plan.completed_at is None
+
+
+async def test_marking_a_plan_finished_records_when(
+    caller, session, planned_athlete, registry_session
+):
+    """`completed_at` is what stops a hand-finished plan being reopened by the
+    auto-closer on the next read, so a status change has to set it."""
+    _, plan = await _decide_change(
+        session, planned_athlete, caller, registry_session,
+        {"plan_id": "plan-1", "change": "update_plan", "status": "completed"},
+    )
+    assert plan.status == "completed"
+    assert plan.completed_at is not None
+
+
+async def test_a_plan_change_whose_target_is_gone_is_refused(
+    caller, session, planned_athlete, registry_session
+):
+    """The `update_plan` twin of the workout case: the plan itself has been
+    deleted since the offer was drafted."""
+    result = await _run(
+        "propose_plan_change",
+        {"plan_id": "plan-1", "change": "update_plan", "name": "Renamed"},
+        caller=caller, session=session, athlete=planned_athlete,
+        registry_session=registry_session,
+    )
+    proposal = (
+        await session.execute(
+            select(PlanProposal).where(PlanProposal.id == result.data["proposal_id"])
+        )
+    ).scalar_one()
+    plan = (
+        await session.execute(select(TrainingPlan).where(TrainingPlan.id == "plan-1"))
+    ).scalar_one()
+    await session.delete(plan)
+    await session.commit()
+
+    with pytest.raises(ProposalError) as exc:
+        await apply_proposal(session, planned_athlete, proposal, today=date.today())
+    assert exc.value.code == "proposal_stale"
+
+
+async def test_a_session_that_has_gone_from_the_plan_is_refused(
+    caller, session, planned_athlete, registry_session
+):
+    result = await _run(
+        "propose_plan_change", TOOL_ARGS["propose_plan_change"], caller=caller,
+        session=session, athlete=planned_athlete, registry_session=registry_session,
+    )
+    proposal = (
+        await session.execute(
+            select(PlanProposal).where(PlanProposal.id == result.data["proposal_id"])
+        )
+    ).scalar_one()
+    workout = (
+        await session.execute(
+            select(PlannedWorkout).where(PlannedWorkout.id == "pw-thursday")
+        )
+    ).scalar_one()
+    await session.delete(workout)
+    await session.commit()
+
+    with pytest.raises(ProposalError) as exc:
+        await apply_proposal(session, planned_athlete, proposal, today=date.today())
+    assert exc.value.code == "proposal_stale"
+    assert "no longer in the plan" in str(exc.value)
+
+
+async def test_declining_twice_is_the_same_decline(
+    caller, session, planned_athlete, registry_session
+):
+    """A double-click on **No** is one decline, not an error — the same
+    courtesy applying is given by being idempotent."""
+    proposal = await _draft(session, planned_athlete, caller, registry_session)
+    await plan_proposals.decline_proposal(session, proposal)
+    decided_at = proposal.decided_at
+    await plan_proposals.decline_proposal(session, proposal)
+    assert proposal.status == "declined"
+    assert proposal.decided_at == decided_at
+
+
+async def test_an_applied_offer_cannot_then_be_declined(
+    caller, session, planned_athlete, registry_session
+):
+    """Declining after accepting would claim the athlete had turned down a plan
+    they are now following."""
+    proposal = await _draft(session, planned_athlete, caller, registry_session)
+    await apply_proposal(session, planned_athlete, proposal, today=date.today())
+
+    with pytest.raises(ProposalError) as exc:
+        await plan_proposals.decline_proposal(session, proposal)
+    assert exc.value.code == "proposal_decided"
+    assert proposal.status == "applied"
 
 
 async def test_renaming_an_active_plan_archives_nothing(
@@ -1004,6 +1306,32 @@ class TestDecidingOverHttp:
         assert resp.status_code == 409
         assert resp.json()["detail"]["code"] == "proposal_stale"
         assert await _plans() == []
+
+    async def test_declining_an_offer_already_accepted_is_refused(
+        self, client, auth_headers
+    ):
+        """Two tabs, one offer: accepted in the first, declined in the second.
+
+        The second must not record that the athlete turned down a plan they are
+        now following — it comes back as a refusal the UI can put a sentence to.
+        """
+        await _seed_file_backed(with_plan=False)
+        conversation_id, message_id = await _seed_turn()
+        await _attach_proposal(conversation_id, message_id)
+        base = (
+            f"{_PREFIX}/conversations/{conversation_id}/messages/{message_id}/proposal"
+        )
+
+        assert (
+            await client.post(f"{base}/approve", headers=auth_headers)
+        ).status_code == 200
+
+        resp = await client.post(f"{base}/decline", headers=auth_headers)
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["code"] == "proposal_decided"
+        # The plan the first tab created is untouched.
+        assert [p.name for p in await _plans()] == ["October fondo"]
+        assert [p.status for p in await _proposal_rows()] == ["applied"]
 
     async def test_an_offer_on_a_turn_that_never_made_one_is_a_404(
         self, client, auth_headers
