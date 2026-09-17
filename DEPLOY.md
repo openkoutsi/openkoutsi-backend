@@ -912,9 +912,13 @@ yes/no card (issue #72). Nothing is required of you beyond deploying:
   paying for its athletes' models should expect a proposal to cost roughly what
   generating a plan from the plan page costs, because it is the same call.
 - A proposal holds one of `AGENT_MAX_CONCURRENT_RUNS` agent slots for up to
-  120 seconds while the weeks are written. That is the one place a chat turn can
-  occupy a slot for two minutes; raise `AGENT_MAX_CONCURRENT_RUNS` if your
-  instance has several athletes chatting at once and a slow model.
+  150 seconds while the weeks are written. That is the one place a chat turn can
+  occupy a slot for two and a half minutes; raise `AGENT_MAX_CONCURRENT_RUNS` if
+  your instance has several athletes chatting at once and a slow model. The 150
+  is not a number to tune back down on its own: it has to outlast the nested
+  model call's own 120-second budget, or the tool's wrapper wins the race and
+  cancels a draft that has already been written to `plan_proposals` — leaving a
+  proposal the answer never mentions.
 - Drafting, approving, declining and refusing are all recorded in the audit log
   as a **`plan_proposal`** event, keyed on the proposal id so a draft and its
   answer join up. `proposal_outcome` is what separates them: `drafted`,

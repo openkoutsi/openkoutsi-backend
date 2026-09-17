@@ -505,6 +505,37 @@ def test_a_tool_that_calls_a_model_says_how_long_it_may_take():
     assert _timeout_for("a_tool_that_does_not_exist") == TOOL_TIMEOUT_S
 
 
+def test_the_deployment_guide_quotes_the_slot_time_a_proposal_actually_takes():
+    """The operator-facing number has to move when the budget does.
+
+    ``DEPLOY.md`` tells an operator how long a proposal can hold one of
+    ``AGENT_MAX_CONCURRENT_RUNS`` slots, which is what they size that setting
+    against. It went stale the first time the budget moved — raising it to clear
+    ``CALL_TIMEOUT_S`` left the guide under-reporting by 30 s, so an instance
+    sized for the documented worst case was sized a quarter short.
+
+    Prose cannot be kept in step by hand, so the number is read back from the
+    guide here rather than trusted.
+    """
+    from pathlib import Path
+
+    from backend.app.mcp.tools.plans import PROPOSE_TIMEOUT_S
+
+    guide = (Path(__file__).resolve().parents[2] / "DEPLOY.md").read_text(
+        encoding="utf-8"
+    )
+    bullets = [
+        block
+        for block in guide.split("\n- ")
+        if block.startswith("A proposal holds one of `AGENT_MAX_CONCURRENT_RUNS`")
+    ]
+    assert len(bullets) == 1, "the slot-time bullet moved or was renamed"
+    assert f"{int(PROPOSE_TIMEOUT_S)} seconds" in bullets[0]
+    # And every propose tool is actually declared at the documented figure.
+    for name in INTERNAL_TOOLS:
+        assert get_tool(name).timeout_s == PROPOSE_TIMEOUT_S, name
+
+
 def test_the_profile_tool_returns_no_identifying_fields():
     """The line between a profile tool and ``athlete:export``.
 

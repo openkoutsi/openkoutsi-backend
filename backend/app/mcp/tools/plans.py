@@ -381,6 +381,26 @@ MAX_ARCHIVES_IN_RESULT = 4
 #: the payload keep it whole; this is a context-window bound, not a data one.
 MAX_GOAL_CHARS_IN_RESULT = 200
 
+#: How long a propose tool may run. Drafting makes a second, schema-constrained
+#: model call, which is seconds rather than milliseconds, so the loop's 30 s
+#: default would cancel a healthy draft; see ``Tool.timeout_s``.
+#:
+#: Deliberately **longer than the nested client's own** ``CALL_TIMEOUT_S``, and
+#: that relationship is the whole point of the number — asserted by
+#: ``test_a_tool_that_calls_a_model_says_how_long_it_may_take`` rather than left
+#: to whoever next tunes one of them. Equal budgets race: a provider that hangs
+#: trips both at once, and if this one wins the tool is cancelled *after*
+#: ``draft_proposal`` has committed but before its result reaches the model —
+#: leaving a card under a reply that never mentions a plan. With the inner
+#: timeout firing first the nested call raises, the fallback builder runs, and
+#: the athlete gets a proposal the model has actually described.
+#:
+#: ``chat_stuck_minutes`` is 10, so this is still far inside what
+#: ``settle_stuck_turns`` allows. It is also the slot time ``DEPLOY.md`` quotes
+#: to operators sizing ``AGENT_MAX_CONCURRENT_RUNS``, pinned by
+#: ``test_the_deployment_guide_quotes_the_slot_time_a_proposal_actually_takes``.
+PROPOSE_TIMEOUT_S = 150.0
+
 #: A reasonable week when the athlete has not said which days they train. Taken
 #: in order and then sorted, so "four days" lands on Tue/Thu/Sat/Sun rather than
 #: Mon–Thu, which is what an athlete with a job and a weekend actually rides.
@@ -813,19 +833,9 @@ def _note(summary: PlanProposalSummary) -> str:
     arguments=ProposePlanArgs,
     returns=PlanProposalResult,
     internal_only=True,
-    # Drafting makes a second, schema-constrained model call, which is seconds
-    # rather than milliseconds. The loop's 30 s default would cancel a healthy
-    # draft; see `Tool.timeout_s`.
-    #
-    # Deliberately **longer than the nested client's own 120 s** (`call_llm`).
-    # Equal budgets race: a provider that hangs trips both at once, and if this
-    # one wins the tool is cancelled *after* `draft_proposal` has committed but
-    # before its result reaches the model — leaving a card under a reply that
-    # never mentions a plan. With the inner timeout firing first, the nested call
-    # raises, the fallback builder runs, and the athlete gets a proposal the
-    # model has actually described. `chat_stuck_minutes` is 10, so this is still
-    # far inside what `settle_stuck_turns` allows.
-    timeout_s=150.0,
+    # Longer than the nested client's own budget, on purpose; see
+    # `PROPOSE_TIMEOUT_S` for why that ordering is load-bearing.
+    timeout_s=PROPOSE_TIMEOUT_S,
     annotations={"readOnlyHint": False, "idempotentHint": False},
 )
 async def propose_training_plan(
@@ -966,7 +976,7 @@ def _change_str(value) -> Optional[str]:
     internal_only=True,
     # No nested model call on this path, but the same headroom: a change is
     # drafted against a plan whose every session has to be loaded.
-    timeout_s=150.0,
+    timeout_s=PROPOSE_TIMEOUT_S,
     annotations={"readOnlyHint": False, "idempotentHint": False},
 )
 async def propose_plan_change(
