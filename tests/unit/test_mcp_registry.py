@@ -506,7 +506,7 @@ def test_a_tool_that_calls_a_model_says_how_long_it_may_take():
 
 
 def test_the_deployment_guide_quotes_the_slot_time_a_proposal_actually_takes():
-    """The operator-facing number has to move when the budget does.
+    """The operator-facing numbers have to move when the budgets do.
 
     ``DEPLOY.md`` tells an operator how long a proposal can hold one of
     ``AGENT_MAX_CONCURRENT_RUNS`` slots, which is what they size that setting
@@ -514,12 +514,22 @@ def test_the_deployment_guide_quotes_the_slot_time_a_proposal_actually_takes():
     ``CALL_TIMEOUT_S`` left the guide under-reporting by 30 s, so an instance
     sized for the documented worst case was sized a quarter short.
 
-    Prose cannot be kept in step by hand, so the number is read back from the
-    guide here rather than trusted.
+    Prose cannot be kept in step by hand, so both figures are read back out of
+    the guide here rather than trusted, and in **both** directions: the bullet
+    must quote them, and the tools must declare them. Either assertion alone
+    lets the same drift back in from the other side.
+
+    The last assertion is why the bullet states the slot time once, in seconds,
+    and does not restate it in minutes. A restatement cannot be derived from the
+    constant, so a retune to 180 would leave the guide reading "180 seconds …
+    two and a half minutes" — self-contradictory, and green. Every number in the
+    bullet therefore has to be one of the two that are pinned.
     """
+    import re
     from pathlib import Path
 
     from backend.app.mcp.tools.plans import PROPOSE_TIMEOUT_S
+    from backend.app.services.llm_client import CALL_TIMEOUT_S
 
     guide = (Path(__file__).resolve().parents[2] / "DEPLOY.md").read_text(
         encoding="utf-8"
@@ -530,7 +540,17 @@ def test_the_deployment_guide_quotes_the_slot_time_a_proposal_actually_takes():
         if block.startswith("A proposal holds one of `AGENT_MAX_CONCURRENT_RUNS`")
     ]
     assert len(bullets) == 1, "the slot-time bullet moved or was renamed"
-    assert f"{int(PROPOSE_TIMEOUT_S)} seconds" in bullets[0]
+    bullet = bullets[0]
+    assert f"{int(PROPOSE_TIMEOUT_S)} seconds" in bullet
+    assert f"{int(CALL_TIMEOUT_S)}-second" in bullet
+    assert set(re.findall(r"\d+", bullet)) == {
+        str(int(PROPOSE_TIMEOUT_S)),
+        str(int(CALL_TIMEOUT_S)),
+    }, "the bullet states a duration that is not pinned to a constant"
+    assert "minute" not in bullet, (
+        "the slot time is stated once, in seconds: a spelled-out restatement "
+        "cannot be derived from the constant, so it would go stale silently"
+    )
     # And every propose tool is actually declared at the documented figure.
     for name in INTERNAL_TOOLS:
         assert get_tool(name).timeout_s == PROPOSE_TIMEOUT_S, name
