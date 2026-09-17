@@ -180,6 +180,32 @@ class PlanProposalSummary(BaseModel):
             "Archiving is reversible from the plan page."
         ),
     )
+    archives_omitted: int = Field(
+        0,
+        description=(
+            "How many further plans an approval would archive beyond the ones "
+            "listed (count). Non-zero only in a tool result, which is capped to "
+            "fit a model's context; the card the athlete sees lists them all."
+        ),
+    )
+    weeks_omitted: int = Field(
+        0,
+        description=(
+            "How many weeks of the table are not listed here (count). Non-zero "
+            "only in a tool result, which sheds detail to fit a model's context; "
+            "the card the athlete sees carries every week."
+        ),
+    )
+    stranded_sessions: int = Field(
+        0,
+        description=(
+            "Sessions that would fall beyond the plan's new last day if this "
+            "change shortens it (count). They are not deleted, and they go on "
+            "being scored — as missed — so say so: approving a shorter plan "
+            "otherwise drags the athlete's adherence down with the very "
+            "sessions they cut."
+        ),
+    )
 
 
 class PlanProposalResult(BaseModel):

@@ -33,6 +33,7 @@ drafting a proposal would leave it in a thread nobody has open.
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import date
 from typing import Literal, Optional
@@ -59,6 +60,7 @@ from backend.app.schemas.plan_proposals import (
     ProposedSession,
     ProposedWeek,
 )
+from backend.app.services.llm_agent import MAX_TOOL_RESULT_CHARS
 from backend.app.services.llm_plan_generator import generate_plan_weeks_with_cfg
 from backend.app.services.plan_adherence import score_plan, workout_date
 from backend.app.services.plan_lifecycle import (
@@ -66,7 +68,12 @@ from backend.app.services.plan_lifecycle import (
     overlapping_active_plans,
     plan_end_date,
 )
-from backend.app.services.plan_proposals import draft_proposal, session_date
+from backend.app.services.plan_proposals import (
+    draft_proposal,
+    occupant_of,
+    session_date,
+    stranded_sessions,
+)
 from openkoutsi.plan_builder import build_week_from_config, week_meta_from_weeks
 from openkoutsi.plan_schema import DayConfig, PlanConfig, clamp_plan_params
 from openkoutsi.sport_matching import is_rest_workout
@@ -363,6 +370,16 @@ MAX_PROPOSAL_WEEKS = 24
 #: that actually applies here, far tighter than ``call_tool``'s 64 KiB.
 MAX_DESCRIPTION_CHARS = 140
 
+
+#: Archived plans named individually in a **tool result**. The card shows them
+#: all; this caps only what the model is handed, because `archives` is the last
+#: field of the summary and `note` the last of the result — so an overflow is
+#: truncated exactly where the consent instruction lives. See `_for_model`.
+MAX_ARCHIVES_IN_RESULT = 4
+
+#: How much of the goal survives into a **tool result**. The stored summary and
+#: the payload keep it whole; this is a context-window bound, not a data one.
+MAX_GOAL_CHARS_IN_RESULT = 200
 
 #: A reasonable week when the athlete has not said which days they train. Taken
 #: in order and then sorted, so "four days" lands on Tue/Thu/Sat/Sun rather than
@@ -672,6 +689,89 @@ def _archives(plans: list[TrainingPlan]) -> list[ArchivedPlanPreview]:
     ]
 
 
+def _rendered_size(summary: PlanProposalSummary) -> int:
+    """How many characters this summary costs the model, near enough.
+
+    The result wrapper and the note add a few hundred on top, which
+    :data:`_RESULT_OVERHEAD` covers — measuring the real thing would mean
+    building a `PlanProposalResult` per candidate, and the point is to be
+    conservative rather than exact.
+    """
+    return len(
+        json.dumps(summary.model_dump(mode="json"), default=str, ensure_ascii=False)
+    )
+
+
+#: Headroom left for the result wrapper (ids, status, expiry) and `_note`, whose
+#: length varies with how many plans it names.
+_RESULT_OVERHEAD = 1200
+
+
+def _for_model(summary: PlanProposalSummary) -> PlanProposalSummary:
+    """The preview, shed down until it fits the loop's tool-result budget.
+
+    The card reads the **stored** summary and carries every week and every plan
+    an approval would archive. This is the copy the *model* gets, and it has a
+    hard bound: `MAX_TOOL_RESULT_CHARS` is 6 000, while the tool's own arguments
+    allow a 120-character name, a 500-character goal and 24 weeks at once, and
+    `archives` grows with the athlete's plans.
+
+    Left uncapped it overflows — and because `archives` is the summary's last
+    field and `note` the result's last, the truncation lands precisely on the
+    list of what would be filed away and on the sentence telling the model to say
+    so. The informed-consent claim failing in the one case where it is
+    load-bearing.
+
+    So detail is shed in a deliberate order, cheapest first, and each reduction
+    *says* it happened rather than quietly shrinking the answer:
+
+    1. the archive list is capped and the rest counted (`archives_omitted`);
+    2. the goal is trimmed — the payload keeps it whole;
+    3. the week table is cut from the end (`weeks_omitted`), since the shape of
+       the first weeks is what prose needs;
+    4. the first week's descriptions are trimmed hard.
+
+    A test drives the tool at its own declared maxima and asserts the bound, so
+    this is checked rather than reasoned about.
+    """
+    named = summary.archives[:MAX_ARCHIVES_IN_RESULT]
+    capped = summary.model_copy(
+        update={
+            "goal": _trim(summary.goal, MAX_GOAL_CHARS_IN_RESULT),
+            "archives": named,
+            "archives_omitted": len(summary.archives) - len(named),
+        }
+    )
+
+    budget = MAX_TOOL_RESULT_CHARS - _RESULT_OVERHEAD
+    if _rendered_size(capped) <= budget:
+        return capped
+
+    # 3. Shed weeks from the end until it fits, keeping at least the first.
+    weekly = list(capped.weekly)
+    while len(weekly) > 1 and _rendered_size(capped) > budget:
+        weekly = weekly[:-1]
+        capped = capped.model_copy(
+            update={
+                "weekly": weekly,
+                "weeks_omitted": len(summary.weekly) - len(weekly),
+            }
+        )
+    if _rendered_size(capped) <= budget:
+        return capped
+
+    # 4. Last resort: the first week's own words. The type, duration and Load
+    #    stay, so the shape of the week survives even here.
+    return capped.model_copy(
+        update={
+            "first_week": [
+                day.model_copy(update={"description": _trim(day.description, 40)})
+                for day in capped.first_week
+            ]
+        }
+    )
+
+
 def _note(summary: PlanProposalSummary) -> str:
     """What the model must understand before it writes its reply."""
     lines = [
@@ -683,10 +783,19 @@ def _note(summary: PlanProposalSummary) -> str:
     ]
     if summary.archives:
         names = ", ".join(f"'{entry.name}'" for entry in summary.archives)
+        if summary.archives_omitted:
+            names += f" and {summary.archives_omitted} more"
         lines.append(
             f"Say plainly that accepting would archive {names}. They can "
             "unarchive a plan afterwards, but they should know before they click, "
             "not after."
+        )
+    if summary.stranded_sessions:
+        lines.append(
+            f"Say that {summary.stranded_sessions} planned session(s) fall "
+            "beyond the plan's new last day. They are not deleted and they keep "
+            "being scored, as missed — so a shorter plan costs the athlete "
+            "adherence unless they clear those days themselves."
         )
     if summary.built_by == BUILT_BY_RULES and summary.kind == KIND_CREATE_PLAN:
         lines.append(
@@ -707,7 +816,16 @@ def _note(summary: PlanProposalSummary) -> str:
     # Drafting makes a second, schema-constrained model call, which is seconds
     # rather than milliseconds. The loop's 30 s default would cancel a healthy
     # draft; see `Tool.timeout_s`.
-    timeout_s=120.0,
+    #
+    # Deliberately **longer than the nested client's own 120 s** (`call_llm`).
+    # Equal budgets race: a provider that hangs trips both at once, and if this
+    # one wins the tool is cancelled *after* `draft_proposal` has committed but
+    # before its result reaches the model — leaving a card under a reply that
+    # never mentions a plan. With the inner timeout firing first, the nested call
+    # raises, the fallback builder runs, and the athlete gets a proposal the
+    # model has actually described. `chat_stuck_minutes` is 10, so this is still
+    # far inside what `settle_stuck_turns` allows.
+    timeout_s=150.0,
     annotations={"readOnlyHint": False, "idempotentHint": False},
 )
 async def propose_training_plan(
@@ -821,12 +939,13 @@ async def propose_training_plan(
         message_id=run.message_id,
     )
 
+    for_model = _for_model(summary)
     return PlanProposalResult(
         proposal_id=proposal.id,
         status=proposal.status,
         expires_at=proposal.expires_at,
-        summary=summary,
-        note=_note(summary),
+        summary=for_model,
+        note=_note(for_model),
     )
 
 
@@ -845,7 +964,9 @@ def _change_str(value) -> Optional[str]:
     arguments=ProposePlanChangeArgs,
     returns=PlanProposalResult,
     internal_only=True,
-    timeout_s=120.0,
+    # No nested model call on this path, but the same headroom: a change is
+    # drafted against a plan whose every session has to be loaded.
+    timeout_s=150.0,
     annotations={"readOnlyHint": False, "idempotentHint": False},
 )
 async def propose_plan_change(
@@ -907,12 +1028,13 @@ async def propose_plan_change(
         target_workout_id=workout_id,
     )
 
+    for_model = _for_model(summary)
     return PlanProposalResult(
         proposal_id=proposal.id,
         status=proposal.status,
         expires_at=proposal.expires_at,
-        summary=summary,
-        note=_note(summary),
+        summary=for_model,
+        note=_note(for_model),
     )
 
 
@@ -992,6 +1114,13 @@ async def _draft_plan_update(
         target_plan_id=plan.id,
         reopens_plan=reopens,
         archives=_archives(archives),
+        # Shortening a plan leaves its later sessions where they are — the REST
+        # path does the same — and `score_plan` has no end-date filter, so they
+        # go on being scored as misses once their dates pass. The write is not
+        # this feature's to change, but a preview that showed "weeks: 4 → 1" and
+        # said nothing about the sessions that become misses would be collecting
+        # exactly the uninformed yes this design exists to prevent.
+        stranded_sessions=len(stranded_sessions(plan, weeks)),
     )
     return summary, {"changes": changes}, None
 
@@ -1060,12 +1189,50 @@ def _draft_workout_update(
                 "should be different — its type, description, duration, target "
                 "Load, or the day it falls on."
             )
+        moved_to = changes.get("day_of_week")
+        if moved_to is not None:
+            # Nothing stops two sessions sharing a day — there is no unique key
+            # on (plan, week, day) and no REST endpoint that edits these fields,
+            # so no precedent quietly covers it. Stacked, both get prescribed and
+            # `score_plan` counts both, which is not what "move Thursday to
+            # Saturday" means. Refused with a sentence naming the occupant, the
+            # same posture the completed-session refusal above takes.
+            occupant = occupant_of(plan, workout.week_number, moved_to, workout.id)
+            if occupant is not None:
+                raise ToolError(
+                    f"There is already a {occupant.workout_type or 'session'} on "
+                    f"{_DAY_NAMES.get(moved_to, 'that day')} of that week, and a "
+                    "plan does not stack two sessions on one day. Move or clear "
+                    "that one first, or pick a free day — get_plan_status shows "
+                    "which are free."
+                )
 
-    when = session_date(plan, workout)
+    # The day the session would end up on — not the one it is on now. Both the
+    # date and the name are derived from it, because a card showing the old
+    # slot's date under the new slot's name describes two different sessions and
+    # neither is the one being agreed to.
     day_after = changes.get("day_of_week", workout.day_of_week)
-    label = (
-        f"{_DAY_NAMES.get(day_after, '')} {workout.workout_type or 'session'}"
-    ).strip()
+    when = (
+        workout_date(plan.start_date, workout.week_number, day_after)
+        if plan.start_date is not None
+        else None
+    )
+
+    # The weekday name comes from that computed date rather than from the
+    # integer. `day_of_week` is documented as 1 = Monday, but `workout_date`
+    # treats it as an offset from `plan.start_date`, which `create_plan` takes as
+    # given and never normalises to a Monday — so on a Wednesday-started plan the
+    # two readings disagree. This is the first place a weekday name is rendered
+    # for the **athlete** rather than for a model, and deriving it from the date
+    # is right under either reading.
+    label = " ".join(
+        part
+        for part in (
+            when.strftime("%A") if when is not None else None,
+            workout.workout_type or "session",
+        )
+        if part
+    )
 
     summary = PlanProposalSummary(
         kind=KIND_UPDATE_WORKOUT,

@@ -97,7 +97,11 @@ from .llm_agent import (
 )
 from .llm_streaming import AgentProgress, failure_recovery, stream_into_db
 from .llm_training_status_analyzer import _decorate
-from .plan_proposals import decision_note, proposals_by_message
+from .plan_proposals import (
+    decision_note,
+    discard_for_message,
+    proposals_by_message,
+)
 
 log = logging.getLogger(__name__)
 
@@ -494,6 +498,11 @@ async def settle_stuck_turns(session: AsyncSession, *, now: datetime) -> int:
         row.progress = None
         row.error_code = row.error_code or "stalled"
         row.updated_at = now.astimezone(timezone.utc)
+        # And whatever that turn offered goes with it (issue #72). A run that
+        # died with the process may well have committed a proposal first — each
+        # tool call commits in its own session — and leaving it pending would put
+        # an approvable card under a turn the athlete is being shown as failed.
+        await discard_for_message(session, row.id)
     return len(stuck)
 
 
@@ -781,4 +790,27 @@ async def run_chat_turn_bg(
                 feature=FEATURE,
                 label=label,
             )
+
+            # A turn that died takes its offer with it (issue #72). The hazard is
+            # the one `retry_message` already guards: each tool call commits in
+            # its **own** session (see `_dispatch`), so a proposal drafted
+            # mid-turn outlives the turn that drafted it — and an error bubble
+            # with an empty body, carrying a yes/no card, is exactly the "plan
+            # created out of a context the athlete can no longer read" this
+            # feature exists to prevent.
+            #
+            # Done here rather than in `_fail`, which `stream_into_db` calls
+            # synchronously and which therefore cannot await. Read from the file
+            # rather than from `row`: an abandoned run's copy is stale, and the
+            # row may be gone entirely.
+            settled = (
+                await session.execute(
+                    select(ChatMessage.status).where(
+                        ChatMessage.id == assistant_message_id
+                    )
+                )
+            ).scalar_one_or_none()
+            if settled != STATUS_COMPLETE:
+                if await discard_for_message(session, assistant_message_id):
+                    await session.commit()
 

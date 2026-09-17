@@ -484,12 +484,22 @@ def test_a_tool_that_calls_a_model_says_how_long_it_may_take():
     Drafting a plan is a schema-constrained completion, so it declares its own
     budget rather than pushing the global up for the ten tools that take
     milliseconds.
+
+    And that budget must be **longer than the nested client's own**, asserted as
+    a relationship rather than as a number: equal budgets race, and if the tool's
+    wrapper wins it cancels the call after ``draft_proposal`` has committed and
+    before its result reaches the model — an offer in front of the athlete that
+    the reply never mentions. The inner timeout has to fire first so the fallback
+    builder runs.
     """
+    from backend.app.services.llm_client import CALL_TIMEOUT_S
     from backend.app.services.llm_agent import TOOL_TIMEOUT_S, _timeout_for
 
     for name in INTERNAL_TOOLS:
-        assert get_tool(name).timeout_s == 120.0, name
-        assert _timeout_for(name) == 120.0, name
+        declared = get_tool(name).timeout_s
+        assert declared is not None, name
+        assert _timeout_for(name) == declared, name
+        assert declared > CALL_TIMEOUT_S, name
     # And nothing else moved.
     assert _timeout_for("get_plan_status") == TOOL_TIMEOUT_S
     assert _timeout_for("a_tool_that_does_not_exist") == TOOL_TIMEOUT_S

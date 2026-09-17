@@ -145,6 +145,14 @@ async def planned_athlete(session, seeded_athlete):
     return seeded_athlete
 
 
+async def _proposals_in(session) -> int:
+    return int(
+        (
+            await session.execute(select(func.count()).select_from(PlanProposal))
+        ).scalar_one()
+    )
+
+
 async def _plan_rows(session) -> tuple[int, int]:
     plans = (
         await session.execute(select(func.count()).select_from(TrainingPlan))
@@ -462,6 +470,382 @@ def test_a_plan_with_unknown_dates_overlaps_everything():
     assert plan_end_date(None, 4) is None
     assert plan_end_date(today, None) is None
     assert plan_end_date(today, 1) == today + timedelta(days=6)
+
+
+# ── Review findings (openkoutsi-backend#147) ────────────────────────────────
+
+
+async def test_a_proposal_fits_the_budget_at_the_tools_own_declared_maxima(
+    caller, session, planned_athlete, registry_session
+):
+    """The bound asserted, not computed in a comment.
+
+    `archives` is one entry per overlapping active plan and `_note` names each
+    again; `goal` is athlete-written up to its schema maximum. Left uncapped the
+    result overflows `MAX_TOOL_RESULT_CHARS`, and because `archives` is the
+    summary's last field and `note` the result's last, the truncation lands
+    exactly on the list of what would be archived and on the sentence telling the
+    model to say so — the consent instruction, gone in the case where consent
+    matters most.
+    """
+    import json
+
+    from backend.app.services.llm_agent import MAX_TOOL_RESULT_CHARS
+
+    start = date.today()
+    for i in range(10):
+        session.add(
+            TrainingPlan(
+                id=f"plan-overlap-{i}",
+                athlete_id=planned_athlete.id,
+                name=f"A plan with a deliberately long name number {i}"[:120],
+                start_date=start,
+                end_date=start + timedelta(days=180),
+                weeks=26,
+                status="active",
+            )
+        )
+    await session.commit()
+
+    result = await _run(
+        "propose_training_plan",
+        {
+            "name": "N" * 120,
+            "start_date": start.isoformat(),
+            "weeks": 24,
+            "goal": "G" * 500,
+        },
+        caller=caller, session=session, athlete=planned_athlete,
+        registry_session=registry_session,
+    )
+    assert result.ok, result.error
+    text = result.text()
+    assert len(text) <= MAX_TOOL_RESULT_CHARS, len(text)
+    # Still valid JSON, which a truncated result would not be.
+    json.loads(text)
+
+    # The model is told the truth about the overflow rather than silently shown
+    # a short list: some are named, the rest are counted, and the instruction to
+    # relay it survives.
+    data = result.data
+    assert len(data["summary"]["archives"]) == 4
+    assert data["summary"]["archives_omitted"] == 7
+    assert "more" in data["note"]
+    assert "archive" in data["note"]
+
+    # And the athlete's card gets the whole list — the cap is a context-window
+    # bound on what the model reads, not on what they are shown.
+    stored = (
+        await session.execute(select(PlanProposal).order_by(PlanProposal.created_at))
+    ).scalars().all()[-1]
+    assert len(stored.summary["archives"]) == 11
+    assert stored.summary["archives_omitted"] == 0
+    assert stored.summary["weeks_omitted"] == 0
+    assert len(stored.summary["weekly"]) == 24
+
+
+def test_the_preview_fits_the_budget_across_the_whole_argument_space():
+    """The bound as a property, not one measured example.
+
+    A single worst case passes for as long as nobody finds a worse one. The
+    tool's arguments allow 24 weeks, a 120-character name and a 500-character
+    goal at once, and `archives` grows with the athlete's plans — so this sweeps
+    the corners and asserts the result is always inside `MAX_TOOL_RESULT_CHARS`
+    *and* always valid JSON, which a truncated one would not be.
+    """
+    import json
+
+    from backend.app.mcp.tools.plans import _for_model, _note
+    from backend.app.schemas.plan_proposals import (
+        ArchivedPlanPreview,
+        PlanProposalResult,
+        PlanProposalSummary,
+    )
+    from backend.app.services.llm_agent import MAX_TOOL_RESULT_CHARS
+
+    def render(archives: int, weeks: int, description: int) -> tuple[int, str]:
+        summary = PlanProposalSummary(
+            kind="create_plan",
+            built_by="llm",
+            plan_name="N" * 120,          # the argument's own max_length
+            goal="G" * 500,               # ditto
+            start_date=date(2026, 9, 1),
+            end_date=date(2027, 2, 14),
+            weeks=weeks,
+            weekly=[
+                {
+                    "week_number": w, "week_type": "recovery", "sessions": 5,
+                    "total_load": 300 + w, "total_duration_min": 400,
+                }
+                for w in range(1, weeks + 1)
+            ],
+            first_week=[
+                {
+                    "day_of_week": d, "workout_type": "cross-training",
+                    "description": "D" * description, "duration_min": 90,
+                    "target_load": 95,
+                }
+                for d in range(1, 8)
+            ],
+            remaining_weeks=weeks - 1,
+            archives=[
+                ArchivedPlanPreview(
+                    plan_id="p" * 36, name="A" * 120,
+                    start_date=date(2026, 6, 1), end_date=date(2027, 1, 1),
+                )
+                for _ in range(archives)
+            ],
+            stranded_sessions=3,
+        )
+        capped = _for_model(summary)
+        result = PlanProposalResult(
+            proposal_id="p" * 36, status="pending",
+            expires_at=datetime(2026, 9, 17, tzinfo=timezone.utc),
+            summary=capped, note=_note(capped),
+        )
+        text = json.dumps(
+            result.model_dump(mode="json"), default=str, ensure_ascii=False
+        )
+        return len(text), text
+
+    for archives in (0, 1, 4, 10, 25):
+        for weeks in (1, 8, 24):
+            for description in (0, 140):
+                size, text = render(archives, weeks, description)
+                where = f"archives={archives} weeks={weeks} description={description}"
+                assert size <= MAX_TOOL_RESULT_CHARS, f"{where}: {size}"
+                json.loads(text)  # a truncated result would not parse
+                # The instruction to relay what would be archived is the thing
+                # the overflow used to eat, so it is asserted present at every
+                # corner rather than only where it is comfortable.
+                assert '"note"' in text, where
+
+
+async def test_a_failed_turn_takes_its_offer_with_it(
+    caller, session, planned_athlete, registry_session
+):
+    """Each tool call commits in its own session, so a proposal outlives the turn
+    that drafted it. Under a failed turn that is an error bubble with an empty
+    body and a live yes/no card beneath it."""
+    now = datetime.now(timezone.utc)
+    conversation = ChatConversation(created_at=now, updated_at=now)
+    session.add(conversation)
+    await session.flush()
+    answer = ChatMessage(
+        conversation_id=conversation.id, role=ROLE_ASSISTANT, content="",
+        status=STATUS_ERROR, error_code="unavailable", created_at=now, updated_at=now,
+    )
+    session.add(answer)
+    await session.commit()
+
+    result = await _run(
+        "propose_training_plan", TOOL_ARGS["propose_training_plan"], caller=caller,
+        session=session, athlete=planned_athlete, registry_session=registry_session,
+        conversation_id=conversation.id, message_id=answer.id,
+    )
+    assert result.ok, result.error
+    proposal = (
+        await session.execute(
+            select(PlanProposal).where(PlanProposal.id == result.data["proposal_id"])
+        )
+    ).scalar_one()
+
+    # Even before any cleanup runs, the apply gate refuses it: the turn that
+    # offered it never finished saying what it was offering.
+    with pytest.raises(ProposalError) as exc:
+        await apply_proposal(session, planned_athlete, proposal, today=date.today())
+    assert exc.value.code == "proposal_stale"
+    assert "did not finish" in str(exc.value)
+    assert (await _plan_rows(session))[0] == 1  # only the fixture's plan
+
+
+async def test_the_stuck_turn_settler_discards_the_offer_too(
+    caller, session, planned_athlete, registry_session
+):
+    """A run that died with the process is settled on the next thread read, and
+    whatever it offered has to go with it."""
+    from backend.app.models.chat_orm import STATUS_PENDING
+    from backend.app.services.llm_chat import settle_stuck_turns
+
+    now = datetime.now(timezone.utc)
+    conversation = ChatConversation(created_at=now, updated_at=now)
+    session.add(conversation)
+    await session.flush()
+    stale = now - timedelta(hours=2)
+    answer = ChatMessage(
+        conversation_id=conversation.id, role=ROLE_ASSISTANT, content="",
+        status=STATUS_PENDING, created_at=stale, updated_at=stale,
+    )
+    session.add(answer)
+    await session.commit()
+
+    await _run(
+        "propose_training_plan", TOOL_ARGS["propose_training_plan"], caller=caller,
+        session=session, athlete=planned_athlete, registry_session=registry_session,
+        conversation_id=conversation.id, message_id=answer.id,
+    )
+    assert await _proposals_in(session) == 1
+
+    assert await settle_stuck_turns(session, now=now) == 1
+    await session.commit()
+    assert await _proposals_in(session) == 0
+
+
+async def test_moving_a_session_onto_an_occupied_day_is_refused(
+    caller, session, planned_athlete, registry_session
+):
+    """"Move Thursday's threshold to Saturday" is the most ordinary ask there is,
+    and Saturday already has the long ride on it.
+
+    Nothing in the schema stops two sessions sharing a day — no unique key, and
+    no REST endpoint edits these fields — so stacking them would prescribe both
+    and score both.
+    """
+    result = await _run(
+        "propose_plan_change",
+        {
+            "plan_id": "plan-1", "change": "update_workout",
+            "workout_id": "pw-thursday", "day_of_week": 6,
+        },
+        caller=caller, session=session, athlete=planned_athlete,
+        registry_session=registry_session,
+    )
+    assert not result.ok
+    assert "already a long" in result.error
+    assert await _proposals_in(session) == 0
+
+    # Both sessions are where they were.
+    days = {
+        w.id: w.day_of_week
+        for w in (await session.execute(select(PlannedWorkout))).scalars().all()
+    }
+    assert days == {"pw-thursday": 4, "pw-saturday": 6}
+
+
+async def test_a_day_that_fills_after_drafting_is_refused_at_apply(
+    caller, session, planned_athlete, registry_session
+):
+    """The slot can fill between the offer and the yes — by hand, or by another
+    offer — so it is re-checked like every other invariant."""
+    result = await _run(
+        "propose_plan_change",
+        {
+            "plan_id": "plan-1", "change": "update_workout",
+            "workout_id": "pw-thursday", "day_of_week": 5,
+        },
+        caller=caller, session=session, athlete=planned_athlete,
+        registry_session=registry_session,
+    )
+    assert result.ok, result.error
+    proposal = (
+        await session.execute(
+            select(PlanProposal).where(PlanProposal.id == result.data["proposal_id"])
+        )
+    ).scalar_one()
+
+    session.add(
+        PlannedWorkout(
+            id="pw-friday", plan_id="plan-1", week_number=2, day_of_week=5,
+            workout_type="recovery", duration_min=45, target_load=30,
+        )
+    )
+    await session.commit()
+
+    with pytest.raises(ProposalError) as exc:
+        await apply_proposal(session, planned_athlete, proposal, today=date.today())
+    assert exc.value.code == "proposal_stale"
+    assert "stacked" in str(exc.value)
+
+
+async def test_the_previewed_date_and_name_describe_the_same_session(
+    caller, session, planned_athlete, registry_session
+):
+    """A move is the one change where "the day it is on" and "the day it would be
+    on" differ, so a card built from both describes two different sessions and
+    neither is the one being agreed to.
+
+    The weekday name is derived from the computed date rather than from the
+    integer, which also sidesteps `day_of_week` being documented as 1 = Monday
+    while `workout_date` treats it as an offset from a start date nothing
+    normalises to a Monday.
+    """
+    plan = (
+        await session.execute(select(TrainingPlan).where(TrainingPlan.id == "plan-1"))
+    ).scalar_one()
+
+    result = await _run(
+        "propose_plan_change",
+        {
+            "plan_id": "plan-1", "change": "update_workout",
+            "workout_id": "pw-thursday", "day_of_week": 7,
+        },
+        caller=caller, session=session, athlete=planned_athlete,
+        registry_session=registry_session,
+    )
+    assert result.ok, result.error
+    summary = result.data["summary"]
+
+    moved_to = date.fromisoformat(summary["target_date"])
+    # The date is the one the session would land on, not the one it leaves.
+    assert moved_to == plan.start_date + timedelta(days=(2 - 1) * 7 + (7 - 1))
+    # And the name agrees with that date rather than with the raw integer.
+    assert moved_to.strftime("%A") in summary["target_label"]
+
+
+async def test_shortening_a_plan_says_how_many_sessions_it_strands(
+    caller, session, planned_athlete, registry_session
+):
+    """`score_plan` has no end-date filter, so sessions beyond a shortened plan's
+    last day go on scoring as misses. The write matches `PUT /plans/{id}` and is
+    not this feature's to change — but a preview showing "weeks: 4 → 1" and
+    nothing else would collect exactly the uninformed yes this design forbids.
+    """
+    result = await _run(
+        "propose_plan_change",
+        {"plan_id": "plan-1", "change": "update_plan", "weeks": 1},
+        caller=caller, session=session, athlete=planned_athlete,
+        registry_session=registry_session,
+    )
+    assert result.ok, result.error
+    # Both fixture sessions live in week 2, so both fall beyond a one-week plan.
+    assert result.data["summary"]["stranded_sessions"] == 2
+    assert "beyond the plan's new last day" in result.data["note"]
+    assert "missed" in result.data["note"]
+
+
+async def test_lengthening_a_plan_strands_nothing(
+    caller, session, planned_athlete, registry_session
+):
+    result = await _run(
+        "propose_plan_change",
+        {"plan_id": "plan-1", "change": "update_plan", "weeks": 8},
+        caller=caller, session=session, athlete=planned_athlete,
+        registry_session=registry_session,
+    )
+    assert result.ok, result.error
+    assert result.data["summary"]["stranded_sessions"] == 0
+    assert "beyond the plan" not in result.data["note"]
+
+
+async def test_the_draft_budget_outlasts_the_nested_calls_own_timeout(
+    caller, session, planned_athlete, registry_session
+):
+    """Equal budgets race.
+
+    A provider that hangs trips the tool's `asyncio.wait_for` and the nested
+    client's own timeout at once. If the tool's fires first it is cancelled
+    *after* `draft_proposal` has committed and before its result reaches the
+    model — a card under a reply that never mentions a plan. The inner timeout
+    has to win, so the fallback builder runs and the athlete is offered something
+    the model has actually described.
+    """
+    from backend.app.mcp.registry import get_tool
+    from backend.app.services.llm_agent import _timeout_for
+    from backend.app.services.llm_client import CALL_TIMEOUT_S
+
+    for name in ("propose_training_plan", "propose_plan_change"):
+        assert _timeout_for(name) == get_tool(name).timeout_s
+        assert _timeout_for(name) > CALL_TIMEOUT_S, name
 
 
 # ── Superseding ─────────────────────────────────────────────────────────────

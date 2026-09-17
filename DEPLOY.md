@@ -915,10 +915,14 @@ yes/no card (issue #72). Nothing is required of you beyond deploying:
   120 seconds while the weeks are written. That is the one place a chat turn can
   occupy a slot for two minutes; raise `AGENT_MAX_CONCURRENT_RUNS` if your
   instance has several athletes chatting at once and a slow model.
-- Approving or declining is an ordinary authenticated request under the existing
-  limiter and is recorded in the audit log as a `plan_proposal_decision` event —
-  the proposal id, the decision and the plan it produced, never the plan's
-  contents.
+- Drafting, approving, declining and refusing are all recorded in the audit log
+  as a **`plan_proposal`** event, keyed on the proposal id so a draft and its
+  answer join up. `proposal_outcome` is what separates them: `drafted`,
+  `approved`, `declined`, or `tool_error` for a refusal (with
+  `proposal_refusal_code` naming which invariant stopped it). The record carries
+  the proposal id, the decision and the plan it produced — never the plan's
+  contents. Approving and declining are otherwise ordinary authenticated
+  requests under the existing limiter.
 
 ### Upgrading: zone sync (added in this release)
 

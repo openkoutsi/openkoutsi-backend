@@ -418,6 +418,29 @@ async def apply_proposal(
             "apply.",
         )
 
+    # The turn that offered this must have finished saying what it was offering.
+    # `llm_chat` discards a failed turn's proposal, and `settle_stuck_turns` does
+    # the same for one that died with the process — but both are housekeeping
+    # that runs elsewhere, and this is the gate. A card under an error bubble is
+    # the exact failure the feature exists to prevent, so it is refused here too
+    # rather than relying on the cleanup having happened.
+    if proposal.message_id is not None:
+        from ..models.chat_orm import STATUS_COMPLETE, ChatMessage
+
+        turn = (
+            await session.execute(
+                select(ChatMessage.status).where(
+                    ChatMessage.id == proposal.message_id
+                )
+            )
+        ).scalar_one_or_none()
+        if turn is not None and turn != STATUS_COMPLETE:
+            raise refuse(
+                CODE_STALE,
+                "The answer that offered this did not finish, so there is no "
+                "explanation of it to read. Ask Koutsi again.",
+            )
+
     deadline = _aware(proposal.expires_at)
     if deadline is not None and deadline <= at:
         proposal.status = STATUS_EXPIRED
@@ -604,13 +627,30 @@ async def _apply_update_workout(
         )
 
     changes = (proposal.payload or {}).get("changes") or {}
+
+    # The slot may have filled since the draft — the athlete could have added a
+    # session there by hand, or approved another offer. Re-checked here like
+    # every other invariant, because the preview named an empty day.
+    moved_to = changes.get("day_of_week")
+    if moved_to is not None and moved_to != workout.day_of_week:
+        occupant = occupant_of(plan, workout.week_number, moved_to, workout.id)
+        if occupant is not None:
+            raise ProposalError(
+                CODE_STALE,
+                f"There is already a {occupant.workout_type or 'session'} on "
+                "that day, so moving this one there would leave two sessions "
+                "stacked on it. Ask Koutsi again against the plan as it stands.",
+            )
+
+    # `week_number` is deliberately absent: nothing can propose a change to it,
+    # so writing it here would be an untestable line in the one function that
+    # writes to `planned_workouts`.
     for field in (
         "workout_type",
         "description",
         "duration_min",
         "target_load",
         "day_of_week",
-        "week_number",
     ):
         if field in changes:
             setattr(workout, field, changes[field])
@@ -648,6 +688,43 @@ async def decline_proposal(
 
 
 # ── Shared rendering helpers ────────────────────────────────────────────────
+
+
+def occupant_of(
+    plan: TrainingPlan, week_number: int, day_of_week: int, ignore_id: str
+) -> Optional[PlannedWorkout]:
+    """Whatever already sits in this plan's (week, day) slot, if anything.
+
+    There is no unique constraint on ``(plan_id, week_number, day_of_week)`` and
+    no REST endpoint that edits a planned session's fields, so nothing else in
+    the codebase has ever had to ask this question. Moving a session onto an
+    occupied day would stack two prescriptions on one date, and ``score_plan``
+    would count both.
+    """
+    for other in plan.workouts:
+        if (
+            other.id != ignore_id
+            and other.week_number == week_number
+            and other.day_of_week == day_of_week
+        ):
+            return other
+    return None
+
+
+def stranded_sessions(
+    plan: TrainingPlan, weeks: Optional[int]
+) -> list[PlannedWorkout]:
+    """Sessions that would fall beyond a plan shortened to ``weeks``.
+
+    They are not deleted — ``PUT /plans/{id}`` leaves them too — but
+    ``score_plan`` walks ``plan.workouts`` with no end-date filter, so once their
+    dates pass they score as **misses**. Shortening a plan therefore drags the
+    athlete's adherence down with the very sessions they cut, which is something
+    they have to be told *before* they approve it.
+    """
+    if not weeks:
+        return []
+    return [w for w in plan.workouts if w.week_number > weeks]
 
 
 def session_date(plan: TrainingPlan, workout: PlannedWorkout) -> Optional[date]:
