@@ -1,0 +1,2013 @@
+"""Koutsi drafts, the athlete approves, and only an approval writes (issue #72).
+
+The two load-bearing tests are first, and they are the whole feature:
+
+* **No tool reaches the plan tables.** Over every registered tool, published or
+  not, the ``training_plans`` and ``planned_workouts`` row counts are identical
+  either side of every call. This is the control — not a scope, and not the
+  prompt. Koutsi calls tools as a session credential, which carries every scope
+  implicitly, so ``plans:write`` would gate an external client and gate Koutsi by
+  one sentence; and ``llm_chat`` says in its own words why a system prompt is a
+  first line rather than a boundary.
+* **Only the approval writes.** A pending proposal left alone — through a
+  restart, through a later turn — never becomes a plan.
+
+The rest is what has to be true for those two to mean anything: the apply path
+re-runs its invariants, a decided offer cannot be applied twice, and a proposal
+minted in one athlete's database does not exist in another's.
+"""
+import asyncio
+from datetime import date, datetime, timedelta, timezone
+from unittest.mock import patch
+
+import pytest
+from sqlalchemy import func, select
+
+from backend.app.db.user_session import get_user_session_factory, init_user_db
+from backend.app.mcp.dispatch import ToolCaller, call_tool
+from backend.app.mcp.limits import tool_limiter
+from backend.app.mcp.registry import all_tools
+from backend.app.models.chat_orm import (
+    ROLE_ASSISTANT,
+    ROLE_USER,
+    STATUS_COMPLETE,
+    STATUS_ERROR,
+    ChatConversation,
+    ChatMessage,
+)
+from backend.app.models.user_orm import (
+    Athlete,
+    PlanProposal,
+    PlannedWorkout,
+    TrainingPlan,
+)
+from backend.app.services import plan_proposals
+from backend.app.services.plan_proposals import (
+    PROPOSAL_TTL,
+    ProposalError,
+    apply_proposal,
+)
+
+_PREFIX = "/api/chat"
+_TEST_USER_ID = "test-user-00000000"
+_OTHER_USER_ID = "other-user-11111111"
+
+
+@pytest.fixture(autouse=True)
+def _clean_rate_limiter():
+    tool_limiter.reset()
+    yield
+    tool_limiter.reset()
+
+
+@pytest.fixture
+def caller() -> ToolCaller:
+    return ToolCaller(user_id=_TEST_USER_ID, scopes=None, kind="session")
+
+
+@pytest.fixture
+def scripted_turn(monkeypatch):
+    """Drive a real turn against the scripted provider from the agent tests.
+
+    The same fixture ``test_chat.py`` defines; duplicated rather than moved to
+    ``conftest`` because it is two test modules' worth of use and moving it would
+    put a stack of ``llm_agent`` internals in front of every test in the suite.
+    """
+    from backend.app.services import llm_agent
+    from tests.unit.test_llm_agent import FakeDispatch, FakeProvider, FakeTool, _setup
+
+    def _install(provider, dispatch=None, setup=None):
+        resolved = setup or _setup(house_style=None)
+
+        async def _resolve(athlete, user_id, *, usage_out=None):
+            if usage_out is not None:
+                usage_out["cfg"] = resolved.cfg
+            return resolved
+
+        monkeypatch.setattr(llm_agent, "stream_completion_events", provider)
+        monkeypatch.setattr(llm_agent, "resolve_stream_setup", _resolve)
+        monkeypatch.setattr(llm_agent, "call_tool", dispatch or FakeDispatch())
+
+    _install.provider = FakeProvider
+    _install.dispatch = FakeDispatch
+    _install.tool = FakeTool
+    _install.setup = _setup
+    return _install
+
+
+@pytest.fixture
+def no_turns():
+    """Accept turns without running them — these are not model tests."""
+    with patch("backend.app.api.chat.run_chat_turn_bg") as spawn:
+        async def _noop(*args, **kwargs):
+            return None
+
+        spawn.side_effect = _noop
+        yield spawn
+
+
+async def _run(name, args, *, caller, session, athlete, registry_session, **kwargs):
+    return await call_tool(
+        caller, name, args, session=session, athlete=athlete,
+        registry_session=registry_session, **kwargs,
+    )
+
+
+@pytest.fixture
+async def planned_athlete(session, seeded_athlete):
+    """An athlete with one active plan, so a change has something to change."""
+    today = date.today()
+    plan = TrainingPlan(
+        id="plan-1",
+        athlete_id=seeded_athlete.id,
+        name="Spring base",
+        goal="Build aerobic base",
+        start_date=today - timedelta(days=7),
+        end_date=today + timedelta(days=20),
+        weeks=4,
+        status="active",
+    )
+    session.add(plan)
+    session.add_all(
+        [
+            PlannedWorkout(
+                id="pw-thursday", plan_id=plan.id, week_number=2, day_of_week=4,
+                workout_type="threshold", description="4x8", duration_min=75,
+                target_load=95,
+            ),
+            PlannedWorkout(
+                id="pw-saturday", plan_id=plan.id, week_number=2, day_of_week=6,
+                workout_type="long", duration_min=180, target_load=150,
+            ),
+        ]
+    )
+    await session.commit()
+    return seeded_athlete
+
+
+async def _proposals_in(session) -> int:
+    return int(
+        (
+            await session.execute(select(func.count()).select_from(PlanProposal))
+        ).scalar_one()
+    )
+
+
+async def _plan_rows(session) -> tuple[int, int]:
+    plans = (
+        await session.execute(select(func.count()).select_from(TrainingPlan))
+    ).scalar_one()
+    workouts = (
+        await session.execute(select(func.count()).select_from(PlannedWorkout))
+    ).scalar_one()
+    return plans, workouts
+
+
+#: The arguments each tool needs to do its job over ``planned_athlete``. Kept in
+#: one place so the sweep below cannot quietly skip a tool by failing to call it.
+TOOL_ARGS: dict[str, dict] = {
+    "get_activity_detail": {"activity_id": "nope"},
+    "propose_training_plan": {
+        "name": "October fondo",
+        "start_date": (date.today() + timedelta(days=7)).isoformat(),
+        "weeks": 6,
+        "goal": "Hilly gran fondo",
+    },
+    "propose_plan_change": {
+        "plan_id": "plan-1",
+        "change": "update_workout",
+        "workout_id": "pw-thursday",
+        "duration_min": 55,
+    },
+}
+
+
+# ── The control ─────────────────────────────────────────────────────────────
+
+
+async def test_no_tool_writes_to_the_plan_tables(
+    caller, session, planned_athlete, registry_session
+):
+    """**The load-bearing test.**
+
+    Every registered tool, called in turn. Whatever any of them does, the plan
+    tables are byte-identical afterwards — which is what makes "the model never
+    performs the write" a fact about the code rather than an instruction.
+
+    Guarded against passing vacuously three ways: the propose tools must be in
+    the swept set, their calls must have succeeded, and they must have inserted
+    the ``plan_proposals`` rows they exist to insert.
+    """
+    swept = {t.name for t in all_tools()}
+    assert {"propose_training_plan", "propose_plan_change"} <= swept
+
+    before = await _plan_rows(session)
+    outcomes = {}
+    for name in sorted(swept):
+        outcomes[name] = await _run(
+            name, TOOL_ARGS.get(name, {}), caller=caller, session=session,
+            athlete=planned_athlete, registry_session=registry_session,
+        )
+        assert await _plan_rows(session) == before, f"{name} touched the plan tables"
+
+    assert outcomes["propose_training_plan"].ok, outcomes["propose_training_plan"].error
+    assert outcomes["propose_plan_change"].ok, outcomes["propose_plan_change"].error
+
+    proposals = (
+        (await session.execute(select(PlanProposal))).scalars().all()
+    )
+    assert {p.kind for p in proposals} == {"create_plan", "update_workout"}
+
+
+async def test_a_proposal_is_not_a_plan_anywhere_it_could_be_mistaken_for_one(
+    caller, session, seeded_athlete, registry_session
+):
+    """Inert by construction rather than by a flag someone must remember.
+
+    A proposal is not a ``TrainingPlan`` row, so the plan page, the adherence
+    snapshots, the activity matcher and the achievements cannot see it — none of
+    them has to be taught to exclude it.
+    """
+    result = await _run(
+        "propose_training_plan", TOOL_ARGS["propose_training_plan"], caller=caller,
+        session=session, athlete=seeded_athlete, registry_session=registry_session,
+    )
+    assert result.ok, result.error
+    assert (await _plan_rows(session)) == (0, 0)
+    assert (
+        await session.execute(select(func.count()).select_from(PlanProposal))
+    ).scalar_one() == 1
+
+
+# ── The draft ───────────────────────────────────────────────────────────────
+
+
+async def test_the_preview_names_the_plans_an_approval_would_archive(
+    caller, session, planned_athlete, registry_session
+):
+    """Uninformed consent is the failure this exists to prevent.
+
+    ``create_plan`` archives every active plan whose dates overlap the new one,
+    so a yes/no that did not say so would be a yes to something the athlete was
+    never told about.
+    """
+    args = dict(TOOL_ARGS["propose_training_plan"])
+    args["start_date"] = date.today().isoformat()  # overlaps the existing plan
+    result = await _run(
+        "propose_training_plan", args, caller=caller, session=session,
+        athlete=planned_athlete, registry_session=registry_session,
+    )
+    archives = result.data["summary"]["archives"]
+    assert [a["plan_id"] for a in archives] == ["plan-1"]
+    assert archives[0]["name"] == "Spring base"
+    # And the model is told, in words, to pass it on.
+    assert "Spring base" in result.data["note"]
+
+
+async def test_a_plan_that_overlaps_nothing_archives_nothing(
+    caller, session, planned_athlete, registry_session
+):
+    args = dict(TOOL_ARGS["propose_training_plan"])
+    args["start_date"] = (date.today() + timedelta(days=60)).isoformat()
+    result = await _run(
+        "propose_training_plan", args, caller=caller, session=session,
+        athlete=planned_athlete, registry_session=registry_session,
+    )
+    assert result.data["summary"]["archives"] == []
+
+
+async def test_a_plan_cannot_be_drafted_to_start_in_the_past(
+    caller, session, seeded_athlete, registry_session
+):
+    args = dict(TOOL_ARGS["propose_training_plan"])
+    args["start_date"] = (date.today() - timedelta(days=1)).isoformat()
+    result = await _run(
+        "propose_training_plan", args, caller=caller, session=session,
+        athlete=seeded_athlete, registry_session=registry_session,
+    )
+    assert not result.ok
+    assert "in the past" in result.error
+
+
+async def test_a_change_to_a_completed_session_is_refused_with_a_sentence(
+    caller, session, planned_athlete, registry_session
+):
+    """A completed session is not edited or skipped — the REST routes say so
+    with a 409, and the model has to be told the same thing in prose."""
+    from backend.app.models.user_orm import Activity, PlannedWorkoutActivity
+
+    session.add(
+        Activity(
+            id="act-1", athlete_id=planned_athlete.id,
+            start_time=datetime.now(timezone.utc), sport_type="Ride",
+        )
+    )
+    await session.flush()
+    session.add(
+        PlannedWorkoutActivity(planned_workout_id="pw-thursday", activity_id="act-1")
+    )
+    await session.commit()
+
+    result = await _run(
+        "propose_plan_change", TOOL_ARGS["propose_plan_change"], caller=caller,
+        session=session, athlete=planned_athlete, registry_session=registry_session,
+    )
+    assert not result.ok
+    assert "completed" in result.error
+
+
+async def test_a_change_that_changes_nothing_is_refused(
+    caller, session, planned_athlete, registry_session
+):
+    result = await _run(
+        "propose_plan_change",
+        {"plan_id": "plan-1", "change": "update_plan", "name": "Spring base"},
+        caller=caller, session=session, athlete=planned_athlete,
+        registry_session=registry_session,
+    )
+    assert not result.ok
+    assert "exactly as it is" in result.error
+
+
+async def test_a_skip_needs_a_reason(
+    caller, session, planned_athlete, registry_session
+):
+    result = await _run(
+        "propose_plan_change",
+        {"plan_id": "plan-1", "change": "skip_workout", "workout_id": "pw-thursday"},
+        caller=caller, session=session, athlete=planned_athlete,
+        registry_session=registry_session,
+    )
+    assert not result.ok
+    assert "reason" in result.error
+
+
+async def test_moving_a_plan_shows_what_it_moves_from_and_to(
+    caller, session, planned_athlete, registry_session
+):
+    new_start = date.today() + timedelta(days=7)
+    result = await _run(
+        "propose_plan_change",
+        {
+            "plan_id": "plan-1",
+            "change": "update_plan",
+            "start_date": new_start.isoformat(),
+        },
+        caller=caller, session=session, athlete=planned_athlete,
+        registry_session=registry_session,
+    )
+    assert result.ok, result.error
+    changes = {c["field"]: c for c in result.data["summary"]["changes"]}
+    assert changes["start_date"]["after"] == new_start.isoformat()
+    assert changes["start_date"]["before"] == (date.today() - timedelta(days=7)).isoformat()
+
+
+async def test_a_stated_training_week_is_the_week_the_plan_is_built_on(
+    caller, session, planned_athlete, registry_session
+):
+    """When the athlete says which days they train, those are the days.
+
+    The fallback week is a guess about their life; this is the path where they
+    have actually told Koutsi, and the draft has to honour it rather than
+    quietly using the default spread.
+    """
+    args = dict(TOOL_ARGS["propose_training_plan"])
+    args["weeks"] = 2
+    args["training_days"] = [
+        {"day_of_week": 1, "workout_type": "threshold", "notes": "before work"},
+        {"day_of_week": 3, "workout_type": "endurance"},
+        {"day_of_week": 5, "workout_type": "long", "notes": "club ride"},
+    ]
+    result = await _run(
+        "propose_training_plan", args, caller=caller, session=session,
+        athlete=planned_athlete, registry_session=registry_session,
+    )
+    assert result.ok, result.error
+
+    riding = {
+        s["day_of_week"]
+        for s in result.data["summary"]["first_week"]
+        if s["workout_type"] != "rest"
+    }
+    assert riding == {1, 3, 5}
+    # Saturday and Sunday are theirs, because they did not ask for them.
+    assert {6, 7} & riding == set()
+
+
+async def test_a_long_session_description_is_trimmed_for_the_preview(
+    caller, session, planned_athlete, registry_session
+):
+    """The preview has to fit the loop's tool-result budget, so a session's own
+    words are cut — with an ellipsis, so nobody reads a truncation as the whole
+    prescription."""
+    from backend.app.mcp.tools.plans import MAX_DESCRIPTION_CHARS, _trim
+
+    long = "Ride steadily " * 40
+    trimmed = _trim(long)
+    assert len(trimmed) == MAX_DESCRIPTION_CHARS
+    assert trimmed.endswith("…")
+    # Short enough already: returned untouched, with no ellipsis to mislead.
+    assert _trim("2x12 min at threshold") == "2x12 min at threshold"
+    assert _trim(None) is None
+
+
+@pytest.mark.parametrize(
+    "args, expected",
+    [
+        (
+            {"change": "update_workout", "duration_min": 55},
+            "'workout_id' is required",
+        ),
+        (
+            {"change": "update_workout", "workout_id": "nope", "duration_min": 55},
+            "No planned session with id 'nope'",
+        ),
+        (
+            {"change": "unskip_workout", "workout_id": "pw-thursday"},
+            "not marked as skipped",
+        ),
+        (
+            {"change": "update_workout", "workout_id": "pw-thursday", "duration_min": 75},
+            "exactly as it is",
+        ),
+    ],
+)
+async def test_a_change_koutsi_cannot_make_comes_back_as_a_sentence(
+    args, expected, caller, session, planned_athlete, registry_session
+):
+    """Issue #42's error shaping, on the write-adjacent tools too: a refusal the
+    model can read and act on, rather than an exception that ends the turn.
+
+    The last case matters most — 75 minutes is what that session already is, so
+    "changing" it to 75 is a change that would leave the athlete with a decision
+    to make about nothing.
+    """
+    result = await _run(
+        "propose_plan_change", {"plan_id": "plan-1", **args}, caller=caller,
+        session=session, athlete=planned_athlete, registry_session=registry_session,
+    )
+    assert not result.ok
+    assert expected in result.error
+    # And nothing was drafted, so there is no card with nothing on it.
+    assert (
+        await session.execute(select(func.count()).select_from(PlanProposal))
+    ).scalar_one() == 0
+
+
+def test_a_plan_with_unknown_dates_overlaps_everything():
+    """The conservative reading, and the one the REST path has always taken: a
+    plan whose dates were never recorded is archived by a new one rather than
+    left active beside it on the strength of a `None`."""
+    from backend.app.services.plan_lifecycle import plan_end_date, plans_overlap
+
+    today = date.today()
+    assert plans_overlap(None, None, today, today + timedelta(days=7)) is True
+    assert plans_overlap(today, None, today, today) is True
+    assert plans_overlap(
+        today, today + timedelta(days=3), today + timedelta(days=30), today + timedelta(days=40)
+    ) is False
+    # An open-ended plan has no last day to compute.
+    assert plan_end_date(None, 4) is None
+    assert plan_end_date(today, None) is None
+    assert plan_end_date(today, 1) == today + timedelta(days=6)
+
+
+# ── Review findings (openkoutsi-backend#147) ────────────────────────────────
+
+
+async def test_a_proposal_fits_the_budget_at_the_tools_own_declared_maxima(
+    caller, session, planned_athlete, registry_session
+):
+    """The bound asserted, not computed in a comment.
+
+    `archives` is one entry per overlapping active plan and `_note` names each
+    again; `goal` is athlete-written up to its schema maximum. Left uncapped the
+    result overflows `MAX_TOOL_RESULT_CHARS`, and because `archives` is the
+    summary's last field and `note` the result's last, the truncation lands
+    exactly on the list of what would be archived and on the sentence telling the
+    model to say so — the consent instruction, gone in the case where consent
+    matters most.
+    """
+    import json
+
+    from backend.app.services.llm_agent import MAX_TOOL_RESULT_CHARS
+
+    start = date.today()
+    for i in range(10):
+        session.add(
+            TrainingPlan(
+                id=f"plan-overlap-{i}",
+                athlete_id=planned_athlete.id,
+                name=f"A plan with a deliberately long name number {i}"[:120],
+                start_date=start,
+                end_date=start + timedelta(days=180),
+                weeks=26,
+                status="active",
+            )
+        )
+    await session.commit()
+
+    result = await _run(
+        "propose_training_plan",
+        {
+            "name": "N" * 120,
+            "start_date": start.isoformat(),
+            "weeks": 24,
+            "goal": "G" * 500,
+        },
+        caller=caller, session=session, athlete=planned_athlete,
+        registry_session=registry_session,
+    )
+    assert result.ok, result.error
+    text = result.text()
+    assert len(text) <= MAX_TOOL_RESULT_CHARS, len(text)
+    # Still valid JSON, which a truncated result would not be.
+    json.loads(text)
+
+    # The model is told the truth about the overflow rather than silently shown
+    # a short list: some are named, the rest are counted, and the instruction to
+    # relay it survives.
+    data = result.data
+    assert len(data["summary"]["archives"]) == 4
+    assert data["summary"]["archives_omitted"] == 7
+    assert "more" in data["note"]
+    assert "archive" in data["note"]
+
+    # And the athlete's card gets the whole list — the cap is a context-window
+    # bound on what the model reads, not on what they are shown.
+    stored = (
+        await session.execute(select(PlanProposal).order_by(PlanProposal.created_at))
+    ).scalars().all()[-1]
+    assert len(stored.summary["archives"]) == 11
+    assert stored.summary["archives_omitted"] == 0
+    assert stored.summary["weeks_omitted"] == 0
+    assert len(stored.summary["weekly"]) == 24
+
+
+def test_the_preview_fits_the_budget_across_the_whole_argument_space():
+    """The bound as a property, not one measured example.
+
+    A single worst case passes for as long as nobody finds a worse one. The
+    tool's arguments allow 24 weeks, a 120-character name and a 500-character
+    goal at once, and `archives` grows with the athlete's plans — so this sweeps
+    the corners and asserts the result is always inside `MAX_TOOL_RESULT_CHARS`
+    *and* always valid JSON, which a truncated one would not be.
+    """
+    import json
+
+    from backend.app.mcp.tools.plans import _for_model, _note
+    from backend.app.schemas.plan_proposals import (
+        ArchivedPlanPreview,
+        PlanProposalResult,
+        PlanProposalSummary,
+    )
+    from backend.app.services.llm_agent import MAX_TOOL_RESULT_CHARS
+
+    def render(archives: int, weeks: int, description: int) -> tuple[int, str]:
+        summary = PlanProposalSummary(
+            kind="create_plan",
+            built_by="llm",
+            plan_name="N" * 120,          # the argument's own max_length
+            goal="G" * 500,               # ditto
+            start_date=date(2026, 9, 1),
+            end_date=date(2027, 2, 14),
+            weeks=weeks,
+            weekly=[
+                {
+                    "week_number": w, "week_type": "recovery", "sessions": 5,
+                    "total_load": 300 + w, "total_duration_min": 400,
+                }
+                for w in range(1, weeks + 1)
+            ],
+            first_week=[
+                {
+                    "day_of_week": d, "workout_type": "cross-training",
+                    "description": "D" * description, "duration_min": 90,
+                    "target_load": 95,
+                }
+                for d in range(1, 8)
+            ],
+            remaining_weeks=weeks - 1,
+            archives=[
+                ArchivedPlanPreview(
+                    plan_id="p" * 36, name="A" * 120,
+                    start_date=date(2026, 6, 1), end_date=date(2027, 1, 1),
+                )
+                for _ in range(archives)
+            ],
+            stranded_sessions=3,
+        )
+        capped = _for_model(summary)
+        result = PlanProposalResult(
+            proposal_id="p" * 36, status="pending",
+            expires_at=datetime(2026, 9, 17, tzinfo=timezone.utc),
+            summary=capped, note=_note(capped),
+        )
+        text = json.dumps(
+            result.model_dump(mode="json"), default=str, ensure_ascii=False
+        )
+        return len(text), text
+
+    for archives in (0, 1, 4, 10, 25):
+        for weeks in (1, 8, 24):
+            for description in (0, 140):
+                size, text = render(archives, weeks, description)
+                where = f"archives={archives} weeks={weeks} description={description}"
+                assert size <= MAX_TOOL_RESULT_CHARS, f"{where}: {size}"
+                json.loads(text)  # a truncated result would not parse
+                # The instruction to relay what would be archived is the thing
+                # the overflow used to eat, so it is asserted present at every
+                # corner rather than only where it is comfortable.
+                assert '"note"' in text, where
+
+
+async def test_a_failed_turn_takes_its_offer_with_it(
+    caller, session, planned_athlete, registry_session
+):
+    """Each tool call commits in its own session, so a proposal outlives the turn
+    that drafted it. Under a failed turn that is an error bubble with an empty
+    body and a live yes/no card beneath it."""
+    now = datetime.now(timezone.utc)
+    conversation = ChatConversation(created_at=now, updated_at=now)
+    session.add(conversation)
+    await session.flush()
+    answer = ChatMessage(
+        conversation_id=conversation.id, role=ROLE_ASSISTANT, content="",
+        status=STATUS_ERROR, error_code="unavailable", created_at=now, updated_at=now,
+    )
+    session.add(answer)
+    await session.commit()
+
+    result = await _run(
+        "propose_training_plan", TOOL_ARGS["propose_training_plan"], caller=caller,
+        session=session, athlete=planned_athlete, registry_session=registry_session,
+        conversation_id=conversation.id, message_id=answer.id,
+    )
+    assert result.ok, result.error
+    proposal = (
+        await session.execute(
+            select(PlanProposal).where(PlanProposal.id == result.data["proposal_id"])
+        )
+    ).scalar_one()
+
+    # Even before any cleanup runs, the apply gate refuses it: the turn that
+    # offered it never finished saying what it was offering.
+    with pytest.raises(ProposalError) as exc:
+        await apply_proposal(session, planned_athlete, proposal, today=date.today())
+    assert exc.value.code == "proposal_stale"
+    assert "did not finish" in str(exc.value)
+    assert (await _plan_rows(session))[0] == 1  # only the fixture's plan
+
+
+async def test_the_stuck_turn_settler_discards_the_offer_too(
+    caller, session, planned_athlete, registry_session
+):
+    """A run that died with the process is settled on the next thread read, and
+    whatever it offered has to go with it."""
+    from backend.app.models.chat_orm import STATUS_PENDING
+    from backend.app.services.llm_chat import settle_stuck_turns
+
+    now = datetime.now(timezone.utc)
+    conversation = ChatConversation(created_at=now, updated_at=now)
+    session.add(conversation)
+    await session.flush()
+    stale = now - timedelta(hours=2)
+    answer = ChatMessage(
+        conversation_id=conversation.id, role=ROLE_ASSISTANT, content="",
+        status=STATUS_PENDING, created_at=stale, updated_at=stale,
+    )
+    session.add(answer)
+    await session.commit()
+
+    await _run(
+        "propose_training_plan", TOOL_ARGS["propose_training_plan"], caller=caller,
+        session=session, athlete=planned_athlete, registry_session=registry_session,
+        conversation_id=conversation.id, message_id=answer.id,
+    )
+    assert await _proposals_in(session) == 1
+
+    assert await settle_stuck_turns(session, now=now) == 1
+    await session.commit()
+    assert await _proposals_in(session) == 0
+
+
+async def test_moving_a_session_onto_an_occupied_day_is_refused(
+    caller, session, planned_athlete, registry_session
+):
+    """"Move Thursday's threshold to Saturday" is the most ordinary ask there is,
+    and Saturday already has the long ride on it.
+
+    Nothing in the schema stops two sessions sharing a day — no unique key, and
+    no REST endpoint edits these fields — so stacking them would prescribe both
+    and score both.
+    """
+    result = await _run(
+        "propose_plan_change",
+        {
+            "plan_id": "plan-1", "change": "update_workout",
+            "workout_id": "pw-thursday", "day_of_week": 6,
+        },
+        caller=caller, session=session, athlete=planned_athlete,
+        registry_session=registry_session,
+    )
+    assert not result.ok
+    assert "already a long" in result.error
+    assert await _proposals_in(session) == 0
+
+    # Both sessions are where they were.
+    days = {
+        w.id: w.day_of_week
+        for w in (await session.execute(select(PlannedWorkout))).scalars().all()
+    }
+    assert days == {"pw-thursday": 4, "pw-saturday": 6}
+
+
+async def test_a_day_that_fills_after_drafting_is_refused_at_apply(
+    caller, session, planned_athlete, registry_session
+):
+    """The slot can fill between the offer and the yes — by hand, or by another
+    offer — so it is re-checked like every other invariant."""
+    result = await _run(
+        "propose_plan_change",
+        {
+            "plan_id": "plan-1", "change": "update_workout",
+            "workout_id": "pw-thursday", "day_of_week": 5,
+        },
+        caller=caller, session=session, athlete=planned_athlete,
+        registry_session=registry_session,
+    )
+    assert result.ok, result.error
+    proposal = (
+        await session.execute(
+            select(PlanProposal).where(PlanProposal.id == result.data["proposal_id"])
+        )
+    ).scalar_one()
+
+    session.add(
+        PlannedWorkout(
+            id="pw-friday", plan_id="plan-1", week_number=2, day_of_week=5,
+            workout_type="recovery", duration_min=45, target_load=30,
+        )
+    )
+    await session.commit()
+
+    with pytest.raises(ProposalError) as exc:
+        await apply_proposal(session, planned_athlete, proposal, today=date.today())
+    assert exc.value.code == "proposal_stale"
+    assert "stacked" in str(exc.value)
+
+
+async def test_the_previewed_date_and_name_describe_the_same_session(
+    caller, session, planned_athlete, registry_session
+):
+    """A move is the one change where "the day it is on" and "the day it would be
+    on" differ, so a card built from both describes two different sessions and
+    neither is the one being agreed to.
+
+    The weekday name is derived from the computed date rather than from the
+    integer, which also sidesteps `day_of_week` being documented as 1 = Monday
+    while `workout_date` treats it as an offset from a start date nothing
+    normalises to a Monday.
+    """
+    plan = (
+        await session.execute(select(TrainingPlan).where(TrainingPlan.id == "plan-1"))
+    ).scalar_one()
+
+    result = await _run(
+        "propose_plan_change",
+        {
+            "plan_id": "plan-1", "change": "update_workout",
+            "workout_id": "pw-thursday", "day_of_week": 7,
+        },
+        caller=caller, session=session, athlete=planned_athlete,
+        registry_session=registry_session,
+    )
+    assert result.ok, result.error
+    summary = result.data["summary"]
+
+    moved_to = date.fromisoformat(summary["target_date"])
+    # The date is the one the session would land on, not the one it leaves.
+    assert moved_to == plan.start_date + timedelta(days=(2 - 1) * 7 + (7 - 1))
+    # And the name agrees with that date rather than with the raw integer.
+    assert moved_to.strftime("%A") in summary["target_label"]
+
+
+async def test_shortening_a_plan_says_how_many_sessions_it_strands(
+    caller, session, planned_athlete, registry_session
+):
+    """`score_plan` has no end-date filter, so sessions beyond a shortened plan's
+    last day go on scoring as misses. The write matches `PUT /plans/{id}` and is
+    not this feature's to change — but a preview showing "weeks: 4 → 1" and
+    nothing else would collect exactly the uninformed yes this design forbids.
+    """
+    result = await _run(
+        "propose_plan_change",
+        {"plan_id": "plan-1", "change": "update_plan", "weeks": 1},
+        caller=caller, session=session, athlete=planned_athlete,
+        registry_session=registry_session,
+    )
+    assert result.ok, result.error
+    # Both fixture sessions live in week 2, so both fall beyond a one-week plan.
+    assert result.data["summary"]["stranded_sessions"] == 2
+    assert "beyond the plan's new last day" in result.data["note"]
+    assert "missed" in result.data["note"]
+
+
+async def test_lengthening_a_plan_strands_nothing(
+    caller, session, planned_athlete, registry_session
+):
+    result = await _run(
+        "propose_plan_change",
+        {"plan_id": "plan-1", "change": "update_plan", "weeks": 8},
+        caller=caller, session=session, athlete=planned_athlete,
+        registry_session=registry_session,
+    )
+    assert result.ok, result.error
+    assert result.data["summary"]["stranded_sessions"] == 0
+    assert "beyond the plan" not in result.data["note"]
+
+
+async def test_the_draft_budget_outlasts_the_nested_calls_own_timeout(
+    caller, session, planned_athlete, registry_session
+):
+    """Equal budgets race.
+
+    A provider that hangs trips the tool's `asyncio.wait_for` and the nested
+    client's own timeout at once. If the tool's fires first it is cancelled
+    *after* `draft_proposal` has committed and before its result reaches the
+    model — a card under a reply that never mentions a plan. The inner timeout
+    has to win, so the fallback builder runs and the athlete is offered something
+    the model has actually described.
+    """
+    from backend.app.mcp.registry import get_tool
+    from backend.app.services.llm_agent import _timeout_for
+    from backend.app.services.llm_client import CALL_TIMEOUT_S
+
+    for name in ("propose_training_plan", "propose_plan_change"):
+        assert _timeout_for(name) == get_tool(name).timeout_s
+        assert _timeout_for(name) > CALL_TIMEOUT_S, name
+
+
+# ── Superseding ─────────────────────────────────────────────────────────────
+
+
+async def test_a_second_proposal_supersedes_the_first(
+    caller, session, planned_athlete, registry_session
+):
+    for _ in range(2):
+        result = await _run(
+            "propose_training_plan", TOOL_ARGS["propose_training_plan"],
+            caller=caller, session=session, athlete=planned_athlete,
+            registry_session=registry_session,
+            conversation_id="conv-1", message_id="msg-1",
+        )
+        assert result.ok, result.error
+
+    rows = (
+        (
+            await session.execute(
+                select(PlanProposal).order_by(PlanProposal.created_at)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert [r.status for r in rows] == ["superseded", "pending"]
+
+
+async def test_a_proposal_in_another_conversation_is_left_alone(
+    caller, session, planned_athlete, registry_session
+):
+    """Superseding is per thread. Two conversations are two separate offers."""
+    for conversation in ("conv-1", "conv-2"):
+        await _run(
+            "propose_training_plan", TOOL_ARGS["propose_training_plan"],
+            caller=caller, session=session, athlete=planned_athlete,
+            registry_session=registry_session,
+            conversation_id=conversation, message_id=f"msg-{conversation}",
+        )
+    rows = (await session.execute(select(PlanProposal))).scalars().all()
+    assert {r.status for r in rows} == {"pending"}
+
+
+# ── Applying ────────────────────────────────────────────────────────────────
+
+
+async def _draft(session, athlete, caller, registry_session, **overrides):
+    args = dict(TOOL_ARGS["propose_training_plan"])
+    args.update(overrides)
+    result = await _run(
+        "propose_training_plan", args, caller=caller, session=session,
+        athlete=athlete, registry_session=registry_session,
+        conversation_id="conv-1", message_id="msg-1",
+    )
+    assert result.ok, result.error
+    return (
+        await session.execute(
+            select(PlanProposal).where(PlanProposal.id == result.data["proposal_id"])
+        )
+    ).scalar_one()
+
+
+async def test_only_the_approval_writes(
+    caller, session, planned_athlete, registry_session
+):
+    """**The second load-bearing test.**
+
+    A pending proposal, left alone, is not a plan — not after the turn that
+    drafted it, not after a later turn, not after the process that wrote it has
+    gone. Nothing in the system turns it into one except an athlete's yes.
+    """
+    proposal = await _draft(session, planned_athlete, caller, registry_session)
+    before = await _plan_rows(session)
+
+    # A later turn, and every read path anyone might expect to settle it.
+    for name in ("get_plan_status", "get_training_status"):
+        await _run(
+            name, {}, caller=caller, session=session, athlete=planned_athlete,
+            registry_session=registry_session,
+        )
+    await plan_proposals.expire_lapsed(session)
+    await session.commit()
+    assert await _plan_rows(session) == before
+
+    # And then the approval, which is the one thing that does.
+    plan = await apply_proposal(
+        session, planned_athlete, proposal, today=date.today()
+    )
+    assert plan is not None
+    assert (await _plan_rows(session))[0] == before[0] + 1
+
+
+async def test_applying_twice_produces_one_plan(
+    caller, session, planned_athlete, registry_session
+):
+    """A double-click is one plan, and the second call answers with it."""
+    proposal = await _draft(session, planned_athlete, caller, registry_session)
+    first = await apply_proposal(session, planned_athlete, proposal, today=date.today())
+    after_first = await _plan_rows(session)
+    second = await apply_proposal(session, planned_athlete, proposal, today=date.today())
+    assert second is not None
+    assert second.id == first.id
+    assert await _plan_rows(session) == after_first
+
+
+async def test_an_approval_archives_exactly_what_the_preview_named(
+    caller, session, planned_athlete, registry_session
+):
+    proposal = await _draft(
+        session, planned_athlete, caller, registry_session,
+        start_date=date.today().isoformat(),
+    )
+    assert [a["plan_id"] for a in proposal.summary["archives"]] == ["plan-1"]
+
+    await apply_proposal(session, planned_athlete, proposal, today=date.today())
+    old = (
+        await session.execute(select(TrainingPlan).where(TrainingPlan.id == "plan-1"))
+    ).scalar_one()
+    assert old.status == "archived"
+
+
+@pytest.mark.parametrize("status", ["declined", "expired", "superseded"])
+async def test_a_decided_proposal_cannot_be_applied(
+    status, caller, session, planned_athlete, registry_session
+):
+    proposal = await _draft(session, planned_athlete, caller, registry_session)
+    proposal.status = status
+    await session.commit()
+
+    with pytest.raises(ProposalError) as exc:
+        await apply_proposal(session, planned_athlete, proposal, today=date.today())
+    assert exc.value.code in {"proposal_decided", "proposal_expired"}
+    assert (await _plan_rows(session))[0] == 1  # only the fixture's plan
+
+
+async def test_an_offer_past_its_deadline_is_refused_even_unread(
+    caller, session, planned_athlete, registry_session
+):
+    """``expires_at`` is checked at apply, not merely swept on a thread read.
+
+    An offer that lapsed while the page sat open must not be applicable because
+    nobody happened to reload it.
+    """
+    proposal = await _draft(session, planned_athlete, caller, registry_session)
+    proposal.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+    await session.commit()
+
+    with pytest.raises(ProposalError) as exc:
+        await apply_proposal(session, planned_athlete, proposal, today=date.today())
+    assert exc.value.code == "proposal_expired"
+    assert proposal.status == "expired"
+
+
+async def test_the_offer_stands_for_a_day(
+    caller, session, planned_athlete, registry_session
+):
+    proposal = await _draft(session, planned_athlete, caller, registry_session)
+    assert PROPOSAL_TTL == timedelta(hours=24)
+    delta = proposal.expires_at - proposal.created_at
+    assert delta == PROPOSAL_TTL
+
+
+# ── Staleness, re-checked at apply ──────────────────────────────────────────
+
+
+async def test_a_plan_whose_start_has_passed_is_refused(
+    caller, session, planned_athlete, registry_session
+):
+    proposal = await _draft(session, planned_athlete, caller, registry_session)
+    later = date.fromisoformat(proposal.payload["start_date"]) + timedelta(days=1)
+
+    with pytest.raises(ProposalError) as exc:
+        await apply_proposal(session, planned_athlete, proposal, today=later)
+    assert exc.value.code == "proposal_stale"
+    assert "in the past" in str(exc.value)
+
+
+async def test_an_archive_set_that_moved_since_the_preview_is_refused(
+    caller, session, planned_athlete, registry_session
+):
+    """The athlete consented to archiving a *named* set of plans.
+
+    A plan created since would be filed away without ever having been mentioned,
+    which is exactly the consent the preview exists to obtain.
+    """
+    proposal = await _draft(
+        session, planned_athlete, caller, registry_session,
+        start_date=date.today().isoformat(),
+    )
+    session.add(
+        TrainingPlan(
+            id="plan-2", athlete_id=planned_athlete.id, name="Sneaky block",
+            start_date=date.today(), end_date=date.today() + timedelta(days=30),
+            weeks=4, status="active",
+        )
+    )
+    await session.commit()
+
+    with pytest.raises(ProposalError) as exc:
+        await apply_proposal(session, planned_athlete, proposal, today=date.today())
+    assert exc.value.code == "proposal_stale"
+    assert (await _plan_rows(session))[0] == 2  # nothing created, nothing archived
+
+
+async def test_a_change_whose_target_plan_is_gone_is_refused(
+    caller, session, planned_athlete, registry_session
+):
+    result = await _run(
+        "propose_plan_change", TOOL_ARGS["propose_plan_change"], caller=caller,
+        session=session, athlete=planned_athlete, registry_session=registry_session,
+    )
+    proposal = (
+        await session.execute(
+            select(PlanProposal).where(PlanProposal.id == result.data["proposal_id"])
+        )
+    ).scalar_one()
+
+    plan = (
+        await session.execute(select(TrainingPlan).where(TrainingPlan.id == "plan-1"))
+    ).scalar_one()
+    await session.delete(plan)
+    await session.commit()
+
+    with pytest.raises(ProposalError) as exc:
+        await apply_proposal(session, planned_athlete, proposal, today=date.today())
+    assert exc.value.code == "proposal_stale"
+
+
+async def test_a_session_completed_since_drafting_is_not_edited(
+    caller, session, planned_athlete, registry_session
+):
+    from backend.app.models.user_orm import Activity, PlannedWorkoutActivity
+
+    result = await _run(
+        "propose_plan_change", TOOL_ARGS["propose_plan_change"], caller=caller,
+        session=session, athlete=planned_athlete, registry_session=registry_session,
+    )
+    proposal = (
+        await session.execute(
+            select(PlanProposal).where(PlanProposal.id == result.data["proposal_id"])
+        )
+    ).scalar_one()
+
+    session.add(
+        Activity(
+            id="act-1", athlete_id=planned_athlete.id,
+            start_time=datetime.now(timezone.utc), sport_type="Ride",
+        )
+    )
+    await session.flush()
+    session.add(
+        PlannedWorkoutActivity(planned_workout_id="pw-thursday", activity_id="act-1")
+    )
+    await session.commit()
+
+    with pytest.raises(ProposalError) as exc:
+        await apply_proposal(session, planned_athlete, proposal, today=date.today())
+    assert exc.value.code == "proposal_stale"
+
+
+async def test_a_workout_change_is_applied_to_the_right_session(
+    caller, session, planned_athlete, registry_session
+):
+    result = await _run(
+        "propose_plan_change", TOOL_ARGS["propose_plan_change"], caller=caller,
+        session=session, athlete=planned_athlete, registry_session=registry_session,
+    )
+    proposal = (
+        await session.execute(
+            select(PlanProposal).where(PlanProposal.id == result.data["proposal_id"])
+        )
+    ).scalar_one()
+    await apply_proposal(session, planned_athlete, proposal, today=date.today())
+
+    workout = (
+        await session.execute(
+            select(PlannedWorkout).where(PlannedWorkout.id == "pw-thursday")
+        )
+    ).scalar_one()
+    assert workout.duration_min == 55
+    untouched = (
+        await session.execute(
+            select(PlannedWorkout).where(PlannedWorkout.id == "pw-saturday")
+        )
+    ).scalar_one()
+    assert untouched.duration_min == 180
+
+
+async def test_a_skip_and_then_an_unskip_round_trip(
+    caller, session, planned_athlete, registry_session
+):
+    async def decide(args):
+        result = await _run(
+            "propose_plan_change", args, caller=caller, session=session,
+            athlete=planned_athlete, registry_session=registry_session,
+        )
+        assert result.ok, result.error
+        proposal = (
+            await session.execute(
+                select(PlanProposal).where(
+                    PlanProposal.id == result.data["proposal_id"]
+                )
+            )
+        ).scalar_one()
+        await apply_proposal(session, planned_athlete, proposal, today=date.today())
+
+    await decide(
+        {
+            "plan_id": "plan-1", "change": "skip_workout",
+            "workout_id": "pw-thursday", "skip_reason": "Woke up ill",
+        }
+    )
+    workout = (
+        await session.execute(
+            select(PlannedWorkout).where(PlannedWorkout.id == "pw-thursday")
+        )
+    ).scalar_one()
+    assert workout.skip_reason == "Woke up ill"
+
+    await decide(
+        {"plan_id": "plan-1", "change": "unskip_workout", "workout_id": "pw-thursday"}
+    )
+    await session.refresh(workout)
+    assert workout.skip_reason is None
+
+
+async def _decide_change(session, athlete, caller, registry_session, args):
+    """Draft one plan change and apply it, returning the reloaded plan."""
+    result = await _run(
+        "propose_plan_change", args, caller=caller, session=session,
+        athlete=athlete, registry_session=registry_session,
+    )
+    assert result.ok, result.error
+    proposal = (
+        await session.execute(
+            select(PlanProposal).where(PlanProposal.id == result.data["proposal_id"])
+        )
+    ).scalar_one()
+    return result, await apply_proposal(
+        session, athlete, proposal, today=date.today()
+    )
+
+
+async def test_pushing_the_whole_plan_back_a_week_moves_its_dates(
+    caller, session, planned_athlete, registry_session
+):
+    """The issue's own headline example, end to end.
+
+    Moving the start date moves every session with it, because a planned
+    workout's calendar date is derived from the plan's start plus its week and
+    day — so the end date has to move with it or the plan is a week short.
+    """
+    before = (
+        await session.execute(select(TrainingPlan).where(TrainingPlan.id == "plan-1"))
+    ).scalar_one()
+    old_start, old_end = before.start_date, before.end_date
+    new_start = old_start + timedelta(days=7)
+
+    result, plan = await _decide_change(
+        session, planned_athlete, caller, registry_session,
+        {
+            "plan_id": "plan-1", "change": "update_plan",
+            "start_date": new_start.isoformat(),
+        },
+    )
+    assert plan.start_date == new_start
+    assert plan.end_date == old_end + timedelta(days=7)
+    # The sessions ride along rather than being rewritten: the same week and day
+    # now land a week later.
+    thursday = (
+        await session.execute(
+            select(PlannedWorkout).where(PlannedWorkout.id == "pw-thursday")
+        )
+    ).scalar_one()
+    assert thursday.week_number == 2 and thursday.day_of_week == 4
+
+
+async def test_changing_a_plans_goal_and_length_applies_both(
+    caller, session, planned_athlete, registry_session
+):
+    _, plan = await _decide_change(
+        session, planned_athlete, caller, registry_session,
+        {
+            "plan_id": "plan-1", "change": "update_plan",
+            "goal": "Sharpen for the October fondo", "weeks": 6,
+        },
+    )
+    assert plan.goal == "Sharpen for the October fondo"
+    assert plan.weeks == 6
+    # Six weeks from the same start, inclusive.
+    assert plan.end_date == plan.start_date + timedelta(weeks=6) - timedelta(days=1)
+
+
+async def test_re_dating_a_finished_plan_unfinishes_it(
+    caller, session, planned_athlete, registry_session
+):
+    """The same rule `PUT /plans/{id}` applies: the plan's last day moved, so
+    whether it has finished is an open question again — and the stamp that stops
+    the auto-closer shutting it straight back has to be cleared with it."""
+    plan = (
+        await session.execute(select(TrainingPlan).where(TrainingPlan.id == "plan-1"))
+    ).scalar_one()
+    plan.status = "completed"
+    plan.completed_at = datetime.now(timezone.utc)
+    await session.commit()
+
+    _, applied = await _decide_change(
+        session, planned_athlete, caller, registry_session,
+        {"plan_id": "plan-1", "change": "update_plan", "weeks": 8},
+    )
+    assert applied.status == "active"
+    assert applied.completed_at is None
+
+
+async def test_archiving_a_plan_by_hand_stamps_nothing_and_files_it(
+    caller, session, planned_athlete, registry_session
+):
+    _, plan = await _decide_change(
+        session, planned_athlete, caller, registry_session,
+        {"plan_id": "plan-1", "change": "update_plan", "status": "archived"},
+    )
+    assert plan.status == "archived"
+    assert plan.completed_at is None
+
+
+async def test_marking_a_plan_finished_records_when(
+    caller, session, planned_athlete, registry_session
+):
+    """`completed_at` is what stops a hand-finished plan being reopened by the
+    auto-closer on the next read, so a status change has to set it."""
+    _, plan = await _decide_change(
+        session, planned_athlete, caller, registry_session,
+        {"plan_id": "plan-1", "change": "update_plan", "status": "completed"},
+    )
+    assert plan.status == "completed"
+    assert plan.completed_at is not None
+
+
+async def test_a_plan_change_whose_target_is_gone_is_refused(
+    caller, session, planned_athlete, registry_session
+):
+    """The `update_plan` twin of the workout case: the plan itself has been
+    deleted since the offer was drafted."""
+    result = await _run(
+        "propose_plan_change",
+        {"plan_id": "plan-1", "change": "update_plan", "name": "Renamed"},
+        caller=caller, session=session, athlete=planned_athlete,
+        registry_session=registry_session,
+    )
+    proposal = (
+        await session.execute(
+            select(PlanProposal).where(PlanProposal.id == result.data["proposal_id"])
+        )
+    ).scalar_one()
+    plan = (
+        await session.execute(select(TrainingPlan).where(TrainingPlan.id == "plan-1"))
+    ).scalar_one()
+    await session.delete(plan)
+    await session.commit()
+
+    with pytest.raises(ProposalError) as exc:
+        await apply_proposal(session, planned_athlete, proposal, today=date.today())
+    assert exc.value.code == "proposal_stale"
+
+
+async def test_a_session_that_has_gone_from_the_plan_is_refused(
+    caller, session, planned_athlete, registry_session
+):
+    result = await _run(
+        "propose_plan_change", TOOL_ARGS["propose_plan_change"], caller=caller,
+        session=session, athlete=planned_athlete, registry_session=registry_session,
+    )
+    proposal = (
+        await session.execute(
+            select(PlanProposal).where(PlanProposal.id == result.data["proposal_id"])
+        )
+    ).scalar_one()
+    workout = (
+        await session.execute(
+            select(PlannedWorkout).where(PlannedWorkout.id == "pw-thursday")
+        )
+    ).scalar_one()
+    await session.delete(workout)
+    await session.commit()
+
+    with pytest.raises(ProposalError) as exc:
+        await apply_proposal(session, planned_athlete, proposal, today=date.today())
+    assert exc.value.code == "proposal_stale"
+    assert "no longer in the plan" in str(exc.value)
+
+
+async def test_declining_twice_is_the_same_decline(
+    caller, session, planned_athlete, registry_session
+):
+    """A double-click on **No** is one decline, not an error — the same
+    courtesy applying is given by being idempotent."""
+    proposal = await _draft(session, planned_athlete, caller, registry_session)
+    await plan_proposals.decline_proposal(session, proposal)
+    decided_at = proposal.decided_at
+    await plan_proposals.decline_proposal(session, proposal)
+    assert proposal.status == "declined"
+    assert proposal.decided_at == decided_at
+
+
+async def test_an_applied_offer_cannot_then_be_declined(
+    caller, session, planned_athlete, registry_session
+):
+    """Declining after accepting would claim the athlete had turned down a plan
+    they are now following."""
+    proposal = await _draft(session, planned_athlete, caller, registry_session)
+    await apply_proposal(session, planned_athlete, proposal, today=date.today())
+
+    with pytest.raises(ProposalError) as exc:
+        await plan_proposals.decline_proposal(session, proposal)
+    assert exc.value.code == "proposal_decided"
+    assert proposal.status == "applied"
+
+
+async def test_renaming_an_active_plan_archives_nothing(
+    caller, session, planned_athlete, registry_session
+):
+    """Only a **reopen** files another plan away, as `unarchive_plan` does.
+
+    Computing the overlap set for every change would quietly turn "fix this
+    typo" into "archive the other plan you are following" — the plan is already
+    active, so nothing about its place in the athlete's training has moved.
+    """
+    session.add(
+        TrainingPlan(
+            id="plan-2", athlete_id=planned_athlete.id, name="Parallel block",
+            start_date=date.today(), end_date=date.today() + timedelta(days=30),
+            weeks=4, status="active",
+        )
+    )
+    await session.commit()
+
+    result = await _run(
+        "propose_plan_change",
+        {"plan_id": "plan-1", "change": "update_plan", "name": "Spring base II"},
+        caller=caller, session=session, athlete=planned_athlete,
+        registry_session=registry_session,
+    )
+    assert result.ok, result.error
+    assert result.data["summary"]["archives"] == []
+    assert result.data["summary"]["reopens_plan"] is False
+
+    proposal = (
+        await session.execute(
+            select(PlanProposal).where(PlanProposal.id == result.data["proposal_id"])
+        )
+    ).scalar_one()
+    await apply_proposal(session, planned_athlete, proposal, today=date.today())
+
+    other = (
+        await session.execute(select(TrainingPlan).where(TrainingPlan.id == "plan-2"))
+    ).scalar_one()
+    assert other.status == "active"
+
+
+async def test_reopening_a_plan_says_so_and_names_what_it_would_archive(
+    caller, session, planned_athlete, registry_session
+):
+    """Reactivating a filed-away plan *is* something the athlete should be told,
+    and it archives whatever it overlaps — exactly as unarchiving does."""
+    plan = (
+        await session.execute(select(TrainingPlan).where(TrainingPlan.id == "plan-1"))
+    ).scalar_one()
+    plan.status = "archived"
+    session.add(
+        TrainingPlan(
+            id="plan-2", athlete_id=planned_athlete.id, name="Parallel block",
+            start_date=date.today(), end_date=date.today() + timedelta(days=30),
+            weeks=4, status="active",
+        )
+    )
+    await session.commit()
+
+    result = await _run(
+        "propose_plan_change",
+        {"plan_id": "plan-1", "change": "update_plan", "status": "active"},
+        caller=caller, session=session, athlete=planned_athlete,
+        registry_session=registry_session,
+    )
+    assert result.ok, result.error
+    assert result.data["summary"]["reopens_plan"] is True
+    assert [a["plan_id"] for a in result.data["summary"]["archives"]] == ["plan-2"]
+
+    proposal = (
+        await session.execute(
+            select(PlanProposal).where(PlanProposal.id == result.data["proposal_id"])
+        )
+    ).scalar_one()
+    await apply_proposal(session, planned_athlete, proposal, today=date.today())
+
+    statuses = {
+        row.id: row.status
+        for row in (await session.execute(select(TrainingPlan))).scalars().all()
+    }
+    assert statuses == {"plan-1": "active", "plan-2": "archived"}
+
+
+async def test_declining_writes_nothing_but_the_decision(
+    caller, session, planned_athlete, registry_session
+):
+    proposal = await _draft(session, planned_athlete, caller, registry_session)
+    before = await _plan_rows(session)
+    await plan_proposals.decline_proposal(session, proposal)
+    assert proposal.status == "declined"
+    assert proposal.decided_at is not None
+    assert await _plan_rows(session) == before
+
+
+# ── The decision, over HTTP ─────────────────────────────────────────────────
+#
+# The chat routes resolve their own per-user session rather than the in-memory
+# override, so these drive the real file-backed database the app uses — which is
+# also where cross-user isolation stops being a predicate and becomes a file.
+
+
+async def _seed_file_backed(user_id: str = _TEST_USER_ID, *, with_plan: bool = True):
+    await init_user_db(user_id)
+    async with get_user_session_factory(user_id)() as s:
+        athlete = Athlete(
+            global_user_id=user_id, ftp_tests=[],
+            app_settings={"agentic_koutsi": True},
+        )
+        s.add(athlete)
+        await s.flush()
+        if with_plan:
+            plan = TrainingPlan(
+                id="plan-1", athlete_id=athlete.id, name="Spring base",
+                start_date=date.today() - timedelta(days=7),
+                end_date=date.today() + timedelta(days=20),
+                weeks=4, status="active",
+            )
+            s.add(plan)
+            s.add(
+                PlannedWorkout(
+                    id="pw-thursday", plan_id=plan.id, week_number=2, day_of_week=4,
+                    workout_type="threshold", duration_min=75, target_load=95,
+                )
+            )
+        await s.commit()
+        return athlete.id
+
+
+async def _seed_turn(user_id: str = _TEST_USER_ID, *, content: str = "Here you go."):
+    """A finished assistant turn, ready for a proposal to hang off."""
+    now = datetime.now(timezone.utc)
+    async with get_user_session_factory(user_id)() as s:
+        conversation = ChatConversation(created_at=now, updated_at=now)
+        s.add(conversation)
+        await s.flush()
+        question = ChatMessage(
+            conversation_id=conversation.id, role=ROLE_USER,
+            content="Build me something for October", created_at=now, updated_at=now,
+        )
+        answer = ChatMessage(
+            conversation_id=conversation.id, role=ROLE_ASSISTANT, content=content,
+            status=STATUS_COMPLETE, created_at=now, updated_at=now,
+        )
+        s.add_all([question, answer])
+        await s.commit()
+        return conversation.id, answer.id
+
+
+def _create_payload(start: date, weeks: int = 4, archives=()) -> dict:
+    days = [
+        {
+            "day_of_week": day,
+            "workout_type": "endurance" if day in (2, 6) else "rest",
+            "description": "Steady Zone 2" if day in (2, 6) else None,
+            "duration_min": 90 if day in (2, 6) else None,
+            "target_load": 80 if day in (2, 6) else None,
+        }
+        for day in range(1, 8)
+    ]
+    return {
+        "name": "October fondo",
+        "goal": "Hilly gran fondo",
+        "start_date": start.isoformat(),
+        "weeks": weeks,
+        "config": None,
+        "week_meta": None,
+        "weeks_data": [days for _ in range(weeks)],
+        "generation_method": "rule_based",
+    }
+
+
+def _create_summary(start: date, weeks: int = 4, archives=()) -> dict:
+    return {
+        "kind": "create_plan",
+        "built_by": "rule_based",
+        "fallback_reason": None,
+        "plan_name": "October fondo",
+        "goal": "Hilly gran fondo",
+        "start_date": start.isoformat(),
+        "end_date": (start + timedelta(weeks=weeks) - timedelta(days=1)).isoformat(),
+        "weeks": weeks,
+        "weekly": [],
+        "first_week": [],
+        "remaining_weeks": weeks - 1,
+        "changes": [],
+        "target_plan_id": None,
+        "target_workout_id": None,
+        "target_date": None,
+        "target_label": None,
+        "reopens_plan": False,
+        "archives": list(archives),
+    }
+
+
+async def _attach_proposal(
+    conversation_id: str,
+    message_id: str,
+    *,
+    user_id: str = _TEST_USER_ID,
+    start: date | None = None,
+    status: str = "pending",
+    archives=(),
+):
+    start = start or (date.today() + timedelta(days=7))
+    now = datetime.now(timezone.utc)
+    async with get_user_session_factory(user_id)() as s:
+        proposal = PlanProposal(
+            conversation_id=conversation_id,
+            message_id=message_id,
+            kind="create_plan",
+            payload=_create_payload(start),
+            summary=_create_summary(start, archives=archives),
+            status=status,
+            built_by="rule_based",
+            created_at=now,
+            expires_at=now + PROPOSAL_TTL,
+        )
+        s.add(proposal)
+        await s.commit()
+        return proposal.id
+
+
+async def _proposal_rows(user_id: str = _TEST_USER_ID):
+    async with get_user_session_factory(user_id)() as s:
+        result = await s.execute(select(PlanProposal))
+        return list(result.scalars().all())
+
+
+async def _plans(user_id: str = _TEST_USER_ID):
+    async with get_user_session_factory(user_id)() as s:
+        result = await s.execute(select(TrainingPlan))
+        return list(result.scalars().all())
+
+
+class TestDecidingOverHttp:
+    async def test_the_thread_carries_the_offer_under_the_turn_that_made_it(
+        self, client, auth_headers
+    ):
+        await _seed_file_backed()
+        conversation_id, message_id = await _seed_turn()
+        proposal_id = await _attach_proposal(conversation_id, message_id)
+
+        body = (
+            await client.get(
+                f"{_PREFIX}/conversations/{conversation_id}", headers=auth_headers
+            )
+        ).json()
+        question, answer = body["messages"]
+        assert question["proposal"] is None
+        assert answer["proposal"]["id"] == proposal_id
+        assert answer["proposal"]["status"] == "pending"
+        assert answer["proposal"]["summary"]["plan_name"] == "October fondo"
+
+    async def test_an_approval_creates_the_plan_and_hands_it_back(
+        self, client, auth_headers
+    ):
+        await _seed_file_backed(with_plan=False)
+        conversation_id, message_id = await _seed_turn()
+        await _attach_proposal(conversation_id, message_id)
+
+        resp = await client.post(
+            f"{_PREFIX}/conversations/{conversation_id}/messages/{message_id}"
+            "/proposal/approve",
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["proposal"]["status"] == "applied"
+        assert body["plan"]["name"] == "October fondo"
+        # The athlete's next step is a link to the thing they just accepted.
+        assert body["proposal"]["applied_plan_id"] == body["plan"]["id"]
+        assert len(await _plans()) == 1
+
+    async def test_a_decline_writes_nothing(self, client, auth_headers):
+        await _seed_file_backed(with_plan=False)
+        conversation_id, message_id = await _seed_turn()
+        await _attach_proposal(conversation_id, message_id)
+
+        resp = await client.post(
+            f"{_PREFIX}/conversations/{conversation_id}/messages/{message_id}"
+            "/proposal/decline",
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["proposal"]["status"] == "declined"
+        assert resp.json()["plan"] is None
+        assert await _plans() == []
+
+    async def test_a_decision_spends_no_chat_turn(self, client, auth_headers):
+        """Approving is not a question. It costs nothing from the daily budget,
+        cannot fail on a slow model, and asks nothing of one."""
+        await _seed_file_backed(with_plan=False)
+        conversation_id, message_id = await _seed_turn()
+        await _attach_proposal(conversation_id, message_id)
+
+        before = (
+            await client.get(f"{_PREFIX}/availability", headers=auth_headers)
+        ).json()["turns_remaining_today"]
+        await client.post(
+            f"{_PREFIX}/conversations/{conversation_id}/messages/{message_id}"
+            "/proposal/approve",
+            headers=auth_headers,
+        )
+        after = (
+            await client.get(f"{_PREFIX}/availability", headers=auth_headers)
+        ).json()["turns_remaining_today"]
+        assert after == before
+
+    async def test_a_stale_offer_is_refused_with_a_code_the_ui_can_render(
+        self, client, auth_headers
+    ):
+        await _seed_file_backed(with_plan=False)
+        conversation_id, message_id = await _seed_turn()
+        await _attach_proposal(
+            conversation_id, message_id, start=date.today() - timedelta(days=1)
+        )
+
+        resp = await client.post(
+            f"{_PREFIX}/conversations/{conversation_id}/messages/{message_id}"
+            "/proposal/approve",
+            headers=auth_headers,
+        )
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["code"] == "proposal_stale"
+        assert await _plans() == []
+
+    async def test_declining_an_offer_already_accepted_is_refused(
+        self, client, auth_headers
+    ):
+        """Two tabs, one offer: accepted in the first, declined in the second.
+
+        The second must not record that the athlete turned down a plan they are
+        now following — it comes back as a refusal the UI can put a sentence to.
+        """
+        await _seed_file_backed(with_plan=False)
+        conversation_id, message_id = await _seed_turn()
+        await _attach_proposal(conversation_id, message_id)
+        base = (
+            f"{_PREFIX}/conversations/{conversation_id}/messages/{message_id}/proposal"
+        )
+
+        assert (
+            await client.post(f"{base}/approve", headers=auth_headers)
+        ).status_code == 200
+
+        resp = await client.post(f"{base}/decline", headers=auth_headers)
+        assert resp.status_code == 409
+        assert resp.json()["detail"]["code"] == "proposal_decided"
+        # The plan the first tab created is untouched.
+        assert [p.name for p in await _plans()] == ["October fondo"]
+        assert [p.status for p in await _proposal_rows()] == ["applied"]
+
+    async def test_an_offer_on_a_turn_that_never_made_one_is_a_404(
+        self, client, auth_headers
+    ):
+        await _seed_file_backed(with_plan=False)
+        conversation_id, message_id = await _seed_turn()
+
+        resp = await client.post(
+            f"{_PREFIX}/conversations/{conversation_id}/messages/{message_id}"
+            "/proposal/approve",
+            headers=auth_headers,
+        )
+        assert resp.status_code == 404
+
+    async def test_a_proposal_from_another_athletes_database_does_not_exist_here(
+        self, client, auth_headers
+    ):
+        """Isolation is the database file, not a predicate.
+
+        A conversation and a proposal minted in another user's DB are simply not
+        in this one, so an approval carrying them 404s without anything here
+        having to remember to filter.
+        """
+        await _seed_file_backed(with_plan=False)
+        await _seed_file_backed(_OTHER_USER_ID, with_plan=False)
+        other_conversation, other_message = await _seed_turn(_OTHER_USER_ID)
+        await _attach_proposal(
+            other_conversation, other_message, user_id=_OTHER_USER_ID
+        )
+
+        resp = await client.post(
+            f"{_PREFIX}/conversations/{other_conversation}/messages/{other_message}"
+            "/proposal/approve",
+            headers=auth_headers,
+        )
+        assert resp.status_code == 404
+        assert await _plans() == []
+        # And the other athlete's offer is untouched.
+        assert [p.status for p in await _proposal_rows(_OTHER_USER_ID)] == ["pending"]
+
+    async def test_deleting_a_conversation_deletes_its_offers(
+        self, client, auth_headers, no_turns
+    ):
+        await _seed_file_backed(with_plan=False)
+        conversation_id, message_id = await _seed_turn()
+        await _attach_proposal(conversation_id, message_id)
+
+        resp = await client.delete(
+            f"{_PREFIX}/conversations/{conversation_id}", headers=auth_headers
+        )
+        assert resp.status_code == 204
+        assert await _proposal_rows() == []
+
+    async def test_an_applied_offers_plan_survives_the_conversation(
+        self, client, auth_headers, no_turns
+    ):
+        """The plan is the athlete's training, not part of the thread."""
+        await _seed_file_backed(with_plan=False)
+        conversation_id, message_id = await _seed_turn()
+        await _attach_proposal(conversation_id, message_id)
+        await client.post(
+            f"{_PREFIX}/conversations/{conversation_id}/messages/{message_id}"
+            "/proposal/approve",
+            headers=auth_headers,
+        )
+        await client.delete(
+            f"{_PREFIX}/conversations/{conversation_id}", headers=auth_headers
+        )
+        assert await _proposal_rows() == []
+        assert [p.name for p in await _plans()] == ["October fondo"]
+
+    async def test_retrying_a_failed_turn_discards_its_pending_offer(
+        self, client, auth_headers, no_turns
+    ):
+        """Otherwise a retried turn leaves an orphan the athlete can approve out
+        of context — a plan created from a reply that no longer exists."""
+        await _seed_file_backed(with_plan=False)
+        conversation_id, message_id = await _seed_turn(content="")
+        await _attach_proposal(conversation_id, message_id)
+        async with get_user_session_factory(_TEST_USER_ID)() as s:
+            row = (
+                await s.execute(
+                    select(ChatMessage).where(ChatMessage.id == message_id)
+                )
+            ).scalar_one()
+            row.status = STATUS_ERROR
+            row.error_code = "upstream"
+            await s.commit()
+
+        resp = await client.post(
+            f"{_PREFIX}/conversations/{conversation_id}/messages/{message_id}/retry",
+            json={}, headers=auth_headers,
+        )
+        assert resp.status_code == 202, resp.text
+        assert await _proposal_rows() == []
+
+    async def test_an_offer_nobody_answered_lapses_on_the_next_read(
+        self, client, auth_headers
+    ):
+        await _seed_file_backed(with_plan=False)
+        conversation_id, message_id = await _seed_turn()
+        await _attach_proposal(conversation_id, message_id)
+        async with get_user_session_factory(_TEST_USER_ID)() as s:
+            row = (await s.execute(select(PlanProposal))).scalar_one()
+            row.expires_at = datetime.now(timezone.utc) - timedelta(minutes=1)
+            await s.commit()
+
+        body = (
+            await client.get(
+                f"{_PREFIX}/conversations/{conversation_id}", headers=auth_headers
+            )
+        ).json()
+        assert body["messages"][1]["proposal"]["status"] == "expired"
+
+    async def test_an_approval_is_audited_without_the_plans_contents(
+        self, client, auth_headers, caplog
+    ):
+        import logging
+
+        await _seed_file_backed(with_plan=False)
+        conversation_id, message_id = await _seed_turn()
+        proposal_id = await _attach_proposal(conversation_id, message_id)
+
+        with caplog.at_level(logging.INFO, logger="openkoutsi.audit"):
+            await client.post(
+                f"{_PREFIX}/conversations/{conversation_id}/messages/{message_id}"
+                "/proposal/approve",
+                headers=auth_headers,
+            )
+
+        record = next(
+            r for r in caplog.records
+            if getattr(r, "event", None) == "plan_proposal"
+        )
+        assert record.proposal_outcome == "approved"
+        assert record.proposal_id == proposal_id
+        assert record.proposal_plan_id
+        # The decision and what it produced — never what the plan says.
+        assert "October fondo" not in record.getMessage()
+        assert not hasattr(record, "proposal_payload")
+
+
+async def test_drafting_and_deciding_share_a_key_in_the_audit_log(
+    caller, session, planned_athlete, registry_session, caplog
+):
+    """`mcp_tool_call` records the invocation but never the result, and the
+    proposal id lives only in the result — so drafting writes its own record,
+    keyed on that id, and the decision joins to it.
+
+    Without the join, "what did this account agree to?" is two half-answers: a
+    tool call with no outcome, and an outcome with no provenance.
+    """
+    import logging
+
+    with caplog.at_level(logging.INFO, logger="openkoutsi.audit"):
+        proposal = await _draft(session, planned_athlete, caller, registry_session)
+        await apply_proposal(session, planned_athlete, proposal, today=date.today())
+
+    records = [
+        r for r in caplog.records if getattr(r, "event", None) == "plan_proposal"
+    ]
+    assert [r.proposal_outcome for r in records] == ["drafted", "approved"]
+    assert {r.proposal_id for r in records} == {proposal.id}
+    assert all(r.proposal_kind == "create_plan" for r in records)
+    # The tool invocation is still recorded separately, by the dispatcher.
+    tool_calls = [
+        r for r in caplog.records if getattr(r, "event", None) == "mcp_tool_call"
+    ]
+    assert any(r.mcp_tool == "propose_training_plan" for r in tool_calls)
+
+
+async def test_a_refused_approval_says_why_in_the_audit_log(
+    caller, session, planned_athlete, registry_session, caplog
+):
+    """An offer that was put up and *not* taken up is as much a part of the
+    record as one that was — and the refusal names which invariant stopped it."""
+    import logging
+
+    proposal = await _draft(session, planned_athlete, caller, registry_session)
+    later = date.fromisoformat(proposal.payload["start_date"]) + timedelta(days=1)
+
+    with caplog.at_level(logging.INFO, logger="openkoutsi.audit"):
+        with pytest.raises(ProposalError):
+            await apply_proposal(session, planned_athlete, proposal, today=later)
+
+    record = next(
+        r
+        for r in caplog.records
+        if getattr(r, "event", None) == "plan_proposal"
+        and r.proposal_outcome != "drafted"
+    )
+    assert record.proposal_outcome == "tool_error"
+    assert record.proposal_refusal_code == "proposal_stale"
+    assert record.proposal_id == proposal.id
+
+
+async def test_consent_is_checked_before_a_proposal_is_drafted(
+    caller, session, planned_athlete, registry_session
+):
+    """Writing an athlete's health data deserves at least the check reading it
+    gets. Consent fires per invocation in `call_tool`, for these tools as for
+    every other."""
+    from sqlalchemy import update
+
+    from backend.app.models.registry_orm import User
+
+    await registry_session.execute(
+        update(User).where(User.id == _TEST_USER_ID).values(consented_at=None)
+    )
+    await registry_session.commit()
+
+    result = await _run(
+        "propose_training_plan", TOOL_ARGS["propose_training_plan"], caller=caller,
+        session=session, athlete=planned_athlete, registry_session=registry_session,
+    )
+    assert not result.ok
+    assert "data-processing policy" in result.error
+    assert (await session.execute(select(func.count()).select_from(PlanProposal))).scalar_one() == 0
+
+
+# ── What the next turn is told ──────────────────────────────────────────────
+
+
+class TestTheNextTurnKnowsWhatWasDecided:
+    """The decision is a button, so it is not in the dialogue at all.
+
+    Without replaying it, Koutsi's next turn sees an offer it made and no answer
+    to it, and offers the same plan again — to an athlete who already has it.
+    """
+
+    async def _run_second_turn(self, client, auth_headers, scripted_turn, usage_db):
+        from tests.unit.test_llm_agent import text
+        from backend.app.services.llm_chat import run_chat_turn_bg
+
+        provider = scripted_turn.provider(
+            text("MOOD:knowing\n\nGood. Start on Monday.")
+        )
+        scripted_turn(provider)
+        resp = await client.post(
+            f"{_PREFIX}/conversations", json={"message": "Build me something"},
+            headers=auth_headers,
+        )
+        body = resp.json()
+        conversation_id, first_answer = body["id"], body["messages"][1]["id"]
+
+        # The first turn answered and offered a plan; the athlete approved it.
+        async with get_user_session_factory(_TEST_USER_ID)() as s:
+            row = (
+                await s.execute(
+                    select(ChatMessage).where(ChatMessage.id == first_answer)
+                )
+            ).scalar_one()
+            row.status = STATUS_COMPLETE
+            row.content = "MOOD:knowing\n\nHere is eight weeks for October."
+            await s.commit()
+        await _attach_proposal(conversation_id, first_answer, status="applied")
+
+        second = await client.post(
+            f"{_PREFIX}/conversations/{conversation_id}/messages",
+            json={"message": "When do I start?"}, headers=auth_headers,
+        )
+        second_answer = second.json()["id"]
+        await run_chat_turn_bg(_TEST_USER_ID, conversation_id, second_answer)
+        return provider
+
+    async def test_the_decision_is_replayed_into_the_next_turns_history(
+        self, client, auth_headers, no_turns, scripted_turn, usage_db
+    ):
+        await _seed_file_backed(with_plan=False)
+        provider = await self._run_second_turn(
+            client, auth_headers, scripted_turn, usage_db
+        )
+        sent = provider.sent[0]["messages"]
+        offered = next(m for m in sent if m["role"] == "assistant")
+        assert "The athlete approved this" in offered["content"]
+        # And the turn is still a turn: the note rides inside it rather than
+        # becoming a message of its own.
+        assert [m["role"] for m in sent if m["role"] != "system"] == [
+            "user", "assistant", "user",
+        ]
+
+    async def test_the_dialogue_itself_is_left_exactly_as_it_was(
+        self, client, auth_headers, no_turns, scripted_turn, usage_db
+    ):
+        """Derived at render time, so it can never be stale — and
+        ``chat_messages`` stays the conversation rather than a log of state."""
+        await _seed_file_backed(with_plan=False)
+        await self._run_second_turn(client, auth_headers, scripted_turn, usage_db)
+        async with get_user_session_factory(_TEST_USER_ID)() as s:
+            rows = (
+                (await s.execute(select(ChatMessage).order_by(ChatMessage.created_at)))
+                .scalars()
+                .all()
+            )
+        assert all("approved this" not in row.content for row in rows)

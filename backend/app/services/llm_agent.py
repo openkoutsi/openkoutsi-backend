@@ -69,7 +69,7 @@ import httpx
 
 from ..core.config import settings
 from ..mcp.dispatch import ToolCaller, ToolResult, call_tool
-from ..mcp.registry import Tool, all_tools
+from ..mcp.registry import Tool, all_tools, get_tool
 from ..models.user_orm import Athlete
 from .llm_access import merge_usage
 from .llm_client import (
@@ -149,11 +149,23 @@ MAX_CALLS_PER_TURN = 4
 #: cheapest defence against blowing a small self-hosted context window.
 MAX_RUN_RESULT_CHARS = 24_000
 
-#: One tool call may not exceed this. The tools are aggregate reads over one
+#: One tool call may not exceed this. Most tools are aggregate reads over one
 #: user's SQLite file, so anything approaching it is pathological rather than
 #: slow, and a hung call must not pin the run on ``pending`` until the 30-minute
 #: timeout.
+#:
+#: A tool that is *not* such a read says so with ``Tool.timeout_s`` (issue #72)
+#: rather than pushing this number up for the nine that take milliseconds. See
+#: :func:`_timeout_for`.
 TOOL_TIMEOUT_S = 30.0
+
+
+def _timeout_for(name: str) -> float:
+    """How long ``name`` may run: its own budget, else :data:`TOOL_TIMEOUT_S`."""
+    found = get_tool(name)
+    if found is not None and found.timeout_s:
+        return float(found.timeout_s)
+    return TOOL_TIMEOUT_S
 
 #: A tool result longer than this is truncated before it enters the context,
 #: with the marker below. `call_tool` refuses anything over 64 KiB as a shaping
@@ -517,6 +529,13 @@ class AgentRequest:
     #: How long an interactive turn may sit queued before giving up.
     slot_wait_s: float = 0.0
 
+    #: Which stored turn this run is writing (issue #72). Handed to every tool
+    #: call so a tool that leaves the athlete something to decide can attach it
+    #: to the turn that offered it; ``None`` on the card surfaces, which have no
+    #: thread and nowhere to put a decision.
+    conversation_id: Optional[str] = None
+    message_id: Optional[str] = None
+
 
 def _final_reminder(format_rule: str) -> dict:
     """The format rule, restated as a system message on the answering turn.
@@ -792,7 +811,7 @@ async def _drive(
         history.append(_assistant_message(turn.text, turn.calls))
         for call in run:
             yield AgentProgress(progress_code_for_tool(call.name))
-            content = await _dispatch(request, caller, call)
+            content = await _dispatch(request, caller, call, setup.cfg)
             spent += len(content)
             history.append(_tool_message(call, content))
         for call in dropped:
@@ -963,6 +982,7 @@ async def _dispatch(
     request: AgentRequest,
     caller: ToolCaller,
     call: PendingToolCall,
+    cfg: Optional[ResolvedLlm] = None,
 ) -> str:
     """Run one tool call and return the content of its ``role: "tool"`` message.
 
@@ -995,6 +1015,7 @@ async def _dispatch(
         _log_call(request, call, "bad_json", 0.0, arguments=None)
         return parse_error
 
+    timeout_s = _timeout_for(call.name)
     try:
         result: ToolResult = await asyncio.wait_for(
             call_tool(
@@ -1011,13 +1032,22 @@ async def _dispatch(
                 # timezone"), and a tool answering from a different one turns
                 # "not due yet" into "missed" for anyone far enough from UTC.
                 today=request.today,
+                # The config this run already resolved, so a tool that needs a
+                # model can reach one without reaching the registry database
+                # itself (issue #72). `None` from any caller that resolved
+                # none, and every such tool degrades rather than refusing.
+                llm=cfg,
+                # Which turn asked, so anything the tool leaves for the athlete
+                # to decide is attached to the turn that offered it.
+                conversation_id=request.conversation_id,
+                message_id=request.message_id,
             ),
-            timeout=TOOL_TIMEOUT_S,
+            timeout=timeout_s,
         )
     except asyncio.TimeoutError:
         _log_call(request, call, "timeout", (time.perf_counter() - started) * 1000, arguments)
         return (
-            f"'{call.name}' took longer than {TOOL_TIMEOUT_S:.0f} seconds and was "
+            f"'{call.name}' took longer than {timeout_s:.0f} seconds and was "
             "stopped. Try a narrower request — a shorter date range or a smaller "
             "limit — or answer with what you already have."
         )

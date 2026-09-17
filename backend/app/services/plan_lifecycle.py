@@ -34,7 +34,7 @@ directly so the plan page is never the stale one.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import select
@@ -109,3 +109,71 @@ async def close_finished_plans(
         "Closed %d finished training plan(s) for athlete %s", len(closed), athlete_id
     )
     return closed
+
+
+# ── Overlap, and what a new plan supersedes ─────────────────────────────────
+#
+# Lived in ``api.plans`` until issue #72, which needed the same rule in a second
+# place: a proposal has to *tell the athlete* which plans an approval would
+# archive, and then archive exactly those when they say yes. Two copies of
+# "which plans does this one supersede" is the kind of drift that makes a
+# preview a lie, so the rule moved here and both callers import it.
+
+
+def plans_overlap(a_start, a_end, b_start, b_end) -> bool:
+    """Whether two plan date ranges overlap.
+
+    Ranges are inclusive [start, end]. If any endpoint is unknown (None) we
+    treat the ranges as overlapping, so a plan with incomplete dates is still
+    archived when a new one is created (the conservative, pre-existing
+    behaviour).
+    """
+    if a_start is None or a_end is None or b_start is None or b_end is None:
+        return True
+    return a_start <= b_end and b_start <= a_end
+
+
+def plan_end_date(start_date, weeks):
+    """Inclusive end date for a plan of ``weeks`` weeks starting on ``start_date``."""
+    if start_date is None or not weeks:
+        return None
+    return start_date + timedelta(weeks=weeks) - timedelta(days=1)
+
+
+async def overlapping_active_plans(
+    session: AsyncSession, athlete_id: str, start_date, end_date
+) -> list[TrainingPlan]:
+    """The athlete's active plans a plan over [start, end] would supersede.
+
+    Read-only, and deliberately separate from the archiving below: the preview
+    an athlete approves has to name these *before* anything is written, and the
+    set is recomputed against the database again at apply time rather than
+    trusted from when the draft was made.
+    """
+    result = await session.execute(
+        select(TrainingPlan).where(
+            TrainingPlan.athlete_id == athlete_id, TrainingPlan.status == "active"
+        )
+    )
+    return [
+        plan
+        for plan in result.scalars().all()
+        if plans_overlap(plan.start_date, plan.end_date, start_date, end_date)
+    ]
+
+
+async def archive_overlapping_active_plans(
+    session: AsyncSession, athlete_id: str, start_date, end_date
+) -> list[TrainingPlan]:
+    """Archive active plans whose date range overlaps [start_date, end_date].
+
+    Non-overlapping active plans are left active, so several plans covering
+    different time periods can coexist. Returns the plans archived by this call.
+    """
+    overlapping = await overlapping_active_plans(
+        session, athlete_id, start_date, end_date
+    )
+    for old in overlapping:
+        old.status = "archived"
+    await session.flush()
+    return overlapping

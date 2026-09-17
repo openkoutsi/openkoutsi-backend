@@ -35,6 +35,7 @@ from fixtures.scenarios import (  # noqa: E402
     AGENTIC_SCENARIOS,
     CHAT_NOW,
     CHAT_SCENARIOS,
+    PROPOSAL_SCENARIOS,
     GOAL_SCENARIOS,
     PLAN_SCENARIOS,
     STATUS_SCENARIOS,
@@ -96,8 +97,12 @@ def _chat(scenario: dict) -> dict:
     being paraphrased into staleness.
 
     Tools are offered, because a chat turn always has them and refusing a medical
-    question is *different* behaviour when the model could have looked first. The
-    history carries no tool results, since chat stores dialogue only.
+    question is *different* behaviour when the model could have looked first.
+
+    The stored history carries no tool results, since chat stores dialogue only —
+    but a scenario may supply them anyway, because *within* a turn the loop does
+    replay them, and that is where the proposal scenarios put the athlete-authored
+    free text an injection would hide in (issue #72).
 
     ``now`` is passed explicitly rather than left to the builder's
     ``datetime.now()`` fallback: a prompt whose text changes every run is one
@@ -185,6 +190,15 @@ def build(context: dict):
                 f"unknown chat scenario {scenario!r} (have {sorted(CHAT_SCENARIOS)})"
             )
         return _chat(CHAT_SCENARIOS[scenario])
+    if family == "proposal":
+        # Built exactly as a chat turn is — the proposal scenarios are chat
+        # turns; what differs is only what they are graded on (issue #72).
+        if scenario not in PROPOSAL_SCENARIOS:
+            raise ValueError(
+                f"unknown proposal scenario {scenario!r} "
+                f"(have {sorted(PROPOSAL_SCENARIOS)})"
+            )
+        return _chat(PROPOSAL_SCENARIOS[scenario])
     if family == "agentic":
         if scenario not in AGENTIC_SCENARIOS:
             raise ValueError(

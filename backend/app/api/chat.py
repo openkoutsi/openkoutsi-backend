@@ -19,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.api.plans import plan_response_with_adherence
 from backend.app.core.auth import UserContext, get_current_user
 from backend.app.core.config import settings
 from backend.app.core.limiter import limiter
@@ -43,9 +44,12 @@ from backend.app.schemas.chat import (
     ChatConversationDetail,
     ChatConversationSummary,
     ChatMessageResponse,
+    ChatProposal,
+    ChatProposalDecision,
     ChatRetryBody,
     ChatTurnBody,
 )
+from backend.app.services import plan_proposals
 from backend.app.services.llm_access import check_llm_access, subscription_required_error
 from backend.app.services.llm_agent import agentic_enabled
 from backend.app.services.llm_chat import (
@@ -55,6 +59,7 @@ from backend.app.services.llm_chat import (
     turns_in_conversation,
     turns_used_today,
 )
+from backend.app.services.plan_proposals import ProposalError
 
 router = APIRouter(prefix="/chat", tags=["chat"], dependencies=[pat_forbidden()])
 
@@ -185,6 +190,28 @@ async def _messages_of(
         .order_by(ChatMessage.created_at.asc())
     )
     return list(result.scalars().all())
+
+
+async def _render(
+    session: AsyncSession, messages: list[ChatMessage]
+) -> list[ChatMessageResponse]:
+    """The thread as the client sees it, with each turn's proposal attached.
+
+    One query for the whole thread rather than one per turn: almost no turn has
+    a proposal, and the ones that do are the reason the athlete is still on the
+    page.
+    """
+    attached = await plan_proposals.proposals_by_message(
+        session, [m.id for m in messages]
+    )
+    rendered: list[ChatMessageResponse] = []
+    for message in messages:
+        response = ChatMessageResponse.model_validate(message)
+        found = attached.get(message.id)
+        if found is not None:
+            response.proposal = ChatProposal.model_validate(found)
+        rendered.append(response)
+    return rendered
 
 
 async def _start_turn(
@@ -348,7 +375,7 @@ async def create_conversation(
     messages = await _messages_of(session, conversation.id)
     return ChatConversationDetail(
         **ChatConversationSummary.model_validate(conversation).model_dump(),
-        messages=[ChatMessageResponse.model_validate(m) for m in messages],
+        messages=await _render(session, messages),
     )
 
 
@@ -369,15 +396,19 @@ async def get_conversation(
     conversation = await _get_conversation(conversation_id, session)
     athlete = await _athlete(session)
 
-    if await settle_stuck_turns(
-        session, now=local_now((athlete.app_settings or {}).get("timezone"))
-    ):
+    now = local_now((athlete.app_settings or {}).get("timezone"))
+    settled = await settle_stuck_turns(session, now=now)
+    # An offer nobody answered inside its 24 hours is settled on the same read,
+    # for the same reason: this is the only moment anybody cares. Nothing
+    # depends on it having run — the apply path checks the deadline itself.
+    lapsed = await plan_proposals.expire_lapsed(session, now=now)
+    if settled or lapsed:
         await session.commit()
 
     messages = await _messages_of(session, conversation_id)
     return ChatConversationDetail(
         **ChatConversationSummary.model_validate(conversation).model_dump(),
-        messages=[ChatMessageResponse.model_validate(m) for m in messages],
+        messages=await _render(session, messages),
     )
 
 
@@ -402,6 +433,10 @@ async def delete_conversation(
     conversation = await _get_conversation(conversation_id, session)
     for message in await _messages_of(session, conversation_id):
         await session.delete(message)
+    # Proposals go with the thread, explicitly and for the same reason the
+    # messages do. An *applied* one's plan survives: the plan is not part of the
+    # conversation, it is the athlete's training.
+    await plan_proposals.delete_for_conversation(session, conversation_id)
     await session.delete(conversation)
     await session.commit()
 
@@ -526,9 +561,132 @@ async def retry_message(
     answer.prompt_tokens = None
     answer.completion_tokens = None
     answer.updated_at = now
+    # The turn is being run again from the question, so whatever it offered last
+    # time goes with the answer it belonged to. Left behind, it would sit under
+    # a reply that no longer exists and still be approvable — a plan created out
+    # of a context the athlete can no longer read.
+    await plan_proposals.discard_for_message(session, answer.id)
     await session.commit()
 
     asyncio.create_task(
         run_chat_turn_bg(ctx.user_id, conversation_id, answer.id, body.locale)
     )
     return ChatMessageResponse.model_validate(answer)
+
+
+# ── Deciding on a proposal (issue #72) ──────────────────────────────────────
+#
+# The athlete's yes is what writes. Koutsi drafted it, the athlete answers with a
+# button, and *this* is the only code path in the application that turns a draft
+# into a plan — `services.plan_proposals.apply_proposal`, reached from here, in
+# their own session, carrying a proposal id. No tool can reach it, through any
+# door.
+#
+# Both routes inherit the router's `pat_forbidden()`: a personal access token
+# cannot answer for the athlete any more than it can ask a question as them.
+#
+# A decision deliberately spends **no chat turn**. It costs nothing from the
+# daily budget, cannot fail on a slow model, and `_require_chat_access` is not
+# consulted — an athlete who has since switched the agentic coach off is still
+# entitled to answer an offer they were already given. The outcome they need is
+# "your plan is live, here it is", which is a fact this code knows exactly;
+# nothing is gained by asking a model to say it.
+
+
+async def _pending_proposal(
+    session: AsyncSession, conversation_id: str, message_id: str
+):
+    """The proposal on this turn, or a 404.
+
+    Isolation is the database file, as it is for the conversation itself: a
+    proposal id minted in another user's DB simply is not in this one.
+    """
+    await _get_conversation(conversation_id, session)
+    proposal = await plan_proposals.proposal_for_message(
+        session, conversation_id, message_id
+    )
+    if proposal is None:
+        raise HTTPException(status_code=404, detail="Proposal not found")
+    return proposal
+
+
+def _proposal_refusal(exc: ProposalError) -> HTTPException:
+    return HTTPException(
+        status_code=409, detail={"code": exc.code, "message": str(exc)}
+    )
+
+
+@router.post(
+    "/conversations/{conversation_id}/messages/{message_id}/proposal/approve",
+    response_model=ChatProposalDecision,
+    operation_id="approveChatProposal",
+    summary="Accept a plan Koutsi proposed",
+)
+@limiter.limit("60/hour")
+async def approve_proposal(
+    # slowapi reads the key off the request, so the parameter is required by
+    # the decorator even though the handler never touches it.
+    request: Request,
+    conversation_id: str,
+    message_id: str,
+    ctx_session=Depends(get_chat_session),
+):
+    """Apply what Koutsi drafted, after re-checking that it still holds.
+
+    Idempotent by proposal id: a double-click produces one plan, and the second
+    call answers with the plan the first created.
+
+    Every invariant is re-run against the database *now* rather than trusted
+    from when the draft was made — the start date, the target plan or session,
+    and above all the set of plans an approval would archive, since that set is
+    what the athlete actually consented to. A proposal that no longer holds is
+    refused with a sentence instead of applied.
+    """
+    ctx, session = ctx_session
+    athlete = await _athlete(session)
+    proposal = await _pending_proposal(session, conversation_id, message_id)
+
+    today = local_now((athlete.app_settings or {}).get("timezone")).date()
+    try:
+        # Both outcomes are audited inside the service, which is the one place a
+        # proposal can be applied or refused — so a route cannot produce either
+        # without a record of it.
+        plan = await plan_proposals.apply_proposal(
+            session, athlete, proposal, today=today, user_id=ctx.user_id
+        )
+    except ProposalError as exc:
+        raise _proposal_refusal(exc) from exc
+
+    return ChatProposalDecision(
+        proposal=ChatProposal.model_validate(proposal),
+        plan=plan_response_with_adherence(plan) if plan is not None else None,
+    )
+
+
+@router.post(
+    "/conversations/{conversation_id}/messages/{message_id}/proposal/decline",
+    response_model=ChatProposalDecision,
+    operation_id="declineChatProposal",
+    summary="Turn down a plan Koutsi proposed",
+)
+@limiter.limit("60/hour")
+async def decline_proposal(
+    # slowapi reads the key off the request, so the parameter is required by
+    # the decorator even though the handler never touches it.
+    request: Request,
+    conversation_id: str,
+    message_id: str,
+    ctx_session=Depends(get_chat_session),
+):
+    """Mark the offer turned down. Nothing is written but the decision itself."""
+    ctx, session = ctx_session
+    proposal = await _pending_proposal(session, conversation_id, message_id)
+
+    try:
+        await plan_proposals.decline_proposal(
+            session, proposal, user_id=ctx.user_id
+        )
+    except ProposalError as exc:
+        raise _proposal_refusal(exc) from exc
+
+    return ChatProposalDecision(proposal=ChatProposal.model_validate(proposal))

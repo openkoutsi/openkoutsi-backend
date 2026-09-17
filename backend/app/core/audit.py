@@ -41,6 +41,12 @@ TOOL_ERROR = "tool_error"
 OVERSIZED = "oversized"
 FAILED = "failed"
 
+# Plan-proposal outcomes (issue #72). A refusal reuses `tool_error` above: it is
+# the same kind of event — a thing that was asked for and did not happen.
+DRAFTED = "drafted"
+APPROVED = "approved"
+DECLINED = "declined"
+
 
 #: Longer than any real tool name or UUID, short enough that a forged record
 #: cannot be padded out to hide behind a scroll.
@@ -160,5 +166,52 @@ def pat_admin_revoke(
             "pat_token_id": token_id,
             "pat_user_id": user_id,
             "admin_user_id": admin_user_id,
+        },
+    )
+
+
+def plan_proposal(
+    *,
+    outcome: str,
+    proposal_id: str,
+    kind: str,
+    user_id: str,
+    plan_id: Optional[str] = None,
+    refusal_code: Optional[str] = None,
+) -> None:
+    """Record a plan proposal being drafted, and then answered (issue #72).
+
+    ``mcp_tool_call`` records the tool invocation that drafted it — caller, tool,
+    arguments, duration — but the proposal's **id** exists only in the result,
+    and results are never logged. So drafting writes one record here too,
+    :data:`DRAFTED`, keyed on that id.
+
+    The **answer** is not a tool call at all: it is an HTTP action in the
+    athlete's own session, so without a record of its own the log would show
+    every offer and none of the decisions. Sharing the key with the draft is the
+    point — the two records join, and "what did this account agree to?" is one
+    question rather than two half-answers.
+
+    The plan's *contents* are never logged. What was written is the athlete's
+    training data, and the same rule that keeps tool results out of the audit log
+    keeps this out of it. ``outcome`` is :data:`DRAFTED`, :data:`APPROVED`,
+    :data:`DECLINED`, or the shared :data:`TOOL_ERROR` for a refusal, with
+    ``refusal_code`` naming which.
+    """
+    log.info(
+        "plan_proposal %s proposal=%s kind=%s user=%s plan=%s",
+        _safe(outcome),
+        _safe(proposal_id),
+        _safe(kind),
+        _safe(user_id),
+        _safe(plan_id),
+        extra={
+            "event": "plan_proposal",
+            "proposal_outcome": outcome,
+            "proposal_id": proposal_id,
+            "proposal_kind": kind,
+            "proposal_plan_id": plan_id,
+            "proposal_refusal_code": refusal_code,
+            "pat_user_id": user_id,
         },
     )

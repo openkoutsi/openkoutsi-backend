@@ -63,6 +63,14 @@ class LlmConfigError(ValueError):
         super().__init__(message)
 
 
+#: How long one blocking completion may take. Named rather than inline because a
+#: caller that wraps this call in a timeout of its own has to be able to set a
+#: *longer* one: equal budgets race, and a wrapper that wins cancels the call
+#: after its side effects have landed but before its result is returned. Issue
+#: #72's proposal tools are that caller — see their ``Tool.timeout_s``.
+CALL_TIMEOUT_S = 120.0
+
+
 # HTTP status each :class:`LlmConfigError` code maps to (used by API layers).
 LLM_ERROR_STATUS: dict[str, int] = {
     "no_base_url": 400,
@@ -573,7 +581,7 @@ async def call_llm(
 
     url = f"{base_url.rstrip('/')}/chat/completions"
     check_url_safe(url)
-    async with guarded_async_client(timeout=120.0) as client:
+    async with guarded_async_client(timeout=CALL_TIMEOUT_S) as client:
         resp = await client.post(url, headers=headers, json=payload)
         await raise_for_llm_status(resp, url)
 

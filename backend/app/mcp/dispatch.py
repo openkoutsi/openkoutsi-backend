@@ -41,7 +41,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Any, Optional
+from typing import Any, Optional, TYPE_CHECKING
 
 from pydantic import BaseModel, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,8 +51,17 @@ from backend.app.core.deps import load_athlete, open_user_session
 from backend.app.core.encryption import set_user_encryption_context
 from backend.app.mcp.errors import ToolAccessError, ToolError, ToolNotFound
 from backend.app.mcp.limits import tool_limiter
-from backend.app.mcp.registry import Tool, get_tool, tool_names
+from backend.app.mcp.registry import (
+    Tool,
+    get_published_tool,
+    get_tool,
+    published_tool_names,
+    tool_names,
+)
 from backend.app.models.user_orm import Athlete
+
+if TYPE_CHECKING:  # pragma: no cover - typing only, and a cycle if imported
+    from backend.app.services.llm_client import ResolvedLlm
 
 log = logging.getLogger(__name__)
 
@@ -116,6 +125,43 @@ class ToolRun:
     session: AsyncSession
     athlete: Athlete
     today: date = field(default_factory=date.today)
+
+    #: The athlete's own resolved LLM, when the caller that dispatched this run
+    #: had already resolved one and was entitled to (issue #72).
+    #:
+    #: The seam exists because ``resolve_llm_config`` and ``check_llm_access``
+    #: both read the **registry** database, which no tool module may so much as
+    #: name (``test_no_tool_module_reaches_the_registry_database``) — that test
+    #: is what keeps an administrator's session from being served more than an
+    #: ordinary athlete's, and it must not be weakened to fit a feature. So the
+    #: config arrives already resolved, by the loop that was entitled to resolve
+    #: it: ``llm_agent._run`` does it once per run via ``resolve_stream_setup``.
+    #:
+    #: ``None`` is the ordinary case and must always be handled — an external
+    #: MCP caller has no entitled loop in front of it, so a tool that can use a
+    #: model degrades to a deterministic answer rather than refusing.
+    llm: Optional["ResolvedLlm"] = None
+
+    #: The chat turn this call belongs to, when there is one (issue #72). A
+    #: proposal has to be attached to the turn that offered it, or the athlete
+    #: has nowhere to answer it. ``None`` everywhere else, and a proposal drafted
+    #: without one is simply unreachable from the UI rather than an error.
+    conversation_id: Optional[str] = None
+    message_id: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ToolContext:
+    """What the caller knew and a tool cannot resolve for itself (issue #72).
+
+    Carried from :func:`call_tool` to :class:`ToolRun` as one object so adding a
+    second thing the caller must hand down does not mean threading a fourth
+    positional argument through :func:`_run`.
+    """
+
+    llm: Optional["ResolvedLlm"] = None
+    conversation_id: Optional[str] = None
+    message_id: Optional[str] = None
 
 
 @dataclass
@@ -183,6 +229,10 @@ async def call_tool(
     athlete: Optional[Athlete] = None,
     registry_session: Optional[AsyncSession] = None,
     today: Optional[date] = None,
+    llm: Optional["ResolvedLlm"] = None,
+    conversation_id: Optional[str] = None,
+    message_id: Optional[str] = None,
+    published_only: bool = False,
 ) -> ToolResult:
     """Run one tool for one caller. Never raises for an ordinary failure.
 
@@ -199,13 +249,24 @@ async def call_tool(
     date-boundary-sensitive ones where being a day out turns "not due yet" into
     "missed". Callers that know the athlete's timezone should pass their local
     date; omitted, it falls back to the process's own.
+
+    ``llm``, ``conversation_id`` and ``message_id`` are handed straight to
+    :class:`ToolRun` — see its fields for why a tool cannot resolve any of them
+    for itself.
+
+    ``published_only`` narrows the resolvable set to
+    :func:`~backend.app.mcp.registry.published_tools`, so the MCP transport
+    refuses an internal tool by name instead of running something it does not
+    list (issue #72).
     """
     started = time.perf_counter()
     arguments = arguments or {}
 
-    tool = get_tool(name)
+    tool = get_published_tool(name) if published_only else get_tool(name)
     if tool is None:
-        error = ToolNotFound(name, tool_names())
+        error = ToolNotFound(
+            name, published_tool_names() if published_only else tool_names()
+        )
         audit.mcp_tool_call(
             tool=name,
             outcome=audit.UNKNOWN_TOOL,
@@ -270,6 +331,9 @@ async def call_tool(
         return fail(audit.BAD_ARGUMENTS, _format_validation_error(tool, exc))
 
     # ── 6–7. Context, run, record ────────────────────────────────────────────
+    context = ToolContext(
+        llm=llm, conversation_id=conversation_id, message_id=message_id
+    )
     try:
         if session is not None:
             # A caller-supplied session is the caller's responsibility, but it
@@ -281,10 +345,14 @@ async def call_tool(
             # HKDF derivation; the `else` branch gets the same thing from
             # `open_user_session`.
             set_user_encryption_context(caller.user_id)
-            result = await _run(tool, caller, session, athlete, parsed, today)
+            result = await _run(
+                tool, caller, session, athlete, parsed, today, context
+            )
         else:
             async with open_user_session(caller.user_id) as owned:
-                result = await _run(tool, caller, owned, None, parsed, today)
+                result = await _run(
+                    tool, caller, owned, None, parsed, today, context
+                )
     except ToolError as exc:
         return fail(audit.TOOL_ERROR, exc.rendered())
     except Exception:  # pragma: no cover - defensive; a handler bug, not a miss
@@ -322,6 +390,7 @@ async def _run(
     athlete: Optional[Athlete],
     parsed: BaseModel,
     today: Optional[date] = None,
+    context: Optional[ToolContext] = None,
 ) -> BaseModel:
     """Resolve the athlete and hand the handler its :class:`ToolRun`."""
     from fastapi import HTTPException
@@ -339,7 +408,15 @@ async def _run(
                 "wizard in the web app."
             ) from exc
 
-    run = ToolRun(caller=caller, session=session, athlete=athlete)
+    context = context or ToolContext()
+    run = ToolRun(
+        caller=caller,
+        session=session,
+        athlete=athlete,
+        llm=context.llm,
+        conversation_id=context.conversation_id,
+        message_id=context.message_id,
+    )
     if today is not None:
         run.today = today
     return await tool.handler(run, parsed)

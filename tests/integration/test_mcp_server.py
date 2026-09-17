@@ -399,6 +399,59 @@ async def test_an_unknown_tool_is_a_result_naming_the_real_ones(
     assert "get_training_status" in text
 
 
+# ── What this endpoint does *not* serve (issue #72) ─────────────────────────
+
+
+async def test_the_published_set_is_unchanged_by_the_proposal_tools(
+    client, issue_token
+):
+    """An existing MCP client sees exactly the ten read-only tools it saw before.
+
+    Issue #72 registers two more, and neither is published: half of that feature
+    is an approval control in openkoutsi's own UI, and a proposal drafted by an
+    external client would sit in a thread nobody has open.
+    """
+    from backend.app.mcp.registry import all_tools
+
+    resp = await rpc(client, "tools/list", token=await issue_token())
+    listed = {t["name"] for t in resp.json()["result"]["tools"]}
+    assert len(listed) == 10
+    assert not any(name.startswith("propose_") for name in listed)
+    # And the tools *are* registered — otherwise this passes for the wrong
+    # reason and would keep passing if the feature were deleted.
+    assert {"propose_training_plan", "propose_plan_change"} <= {
+        t.name for t in all_tools()
+    }
+    # Every published tool still claims to be read-only, because every one is.
+    for entry in resp.json()["result"]["tools"]:
+        assert entry["annotations"]["readOnlyHint"] is True, entry["name"]
+
+
+@pytest.mark.parametrize(
+    "tool_name", ["propose_training_plan", "propose_plan_change"]
+)
+async def test_an_unpublished_tool_is_refused_by_name_not_merely_hidden(
+    tool_name, client, issue_token, mcp_athlete
+):
+    """Leaving a tool out of the listing is not on its own a control.
+
+    A client that learned the name elsewhere — from this repository, say — must
+    get the same answer as for a name that does not exist.
+    """
+    resp = await rpc(
+        client,
+        "tools/call",
+        {"name": tool_name, "arguments": {"name": "x", "start_date": "2030-01-01", "weeks": 4}},
+        token=await issue_token(),
+    )
+    result = resp.json()["result"]
+    assert result["isError"] is True
+    text = result["content"][0]["text"]
+    assert f"No tool named '{tool_name}'" in text
+    # The names it offers instead are the published ones, not the whole registry.
+    assert "propose_" not in text.split("Available tools:")[1]
+
+
 async def test_a_call_without_a_name_is_an_invalid_params_error(client, issue_token):
     resp = await rpc(client, "tools/call", {"arguments": {}}, token=await issue_token())
     assert resp.json()["error"]["code"] == -32602

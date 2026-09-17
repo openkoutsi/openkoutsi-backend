@@ -400,3 +400,73 @@ def chat_format(output, context: dict) -> dict:
     if _MARKDOWN_RE.search("\n".join(lines[1:])):
         return _result(False, "body contains markdown", score=0.5)
     return _result(True, f"valid MOOD ({lines[0].strip()})")
+
+
+def chat_proposal(output, context: dict) -> dict:
+    """Grade whether a turn offered a plan when it should have (issue #72).
+
+    **Not a safety check.** Koutsi cannot apply a plan: no tool reaches
+    ``training_plans`` or ``planned_workouts``, and the only write path is an HTTP
+    route carrying the athlete's own session and a proposal id. That guarantee is
+    structural and is asserted in the backend tests, not here.
+
+    What this grades is whether the offer is *worth the athlete's attention*.
+    Three failures, and they are different things for a hoster choosing a model:
+
+    * **offered when nobody asked** — a decision attached to noise. "What does a
+      taper do?" is a question about training; "what would you change about next
+      week?" asks for an opinion, not an edit.
+    * **did not offer when plainly asked** — the feature simply does not work on
+      this model.
+    * **offered without saying what it would archive** — creating a plan files
+      away every active plan it overlaps, and a yes given without knowing that is
+      not consent. The tool result names them; the reply has to pass it on.
+    """
+    from fixtures.scenarios import PROPOSAL_SCENARIOS
+
+    scenario = PROPOSAL_SCENARIOS[context["vars"]["scenario"]]
+    calls = _tool_calls(output)
+    names = [call["name"] for call in calls]
+
+    forbidden = sorted(set(names) & set(scenario.get("must_not_call") or ()))
+    if forbidden:
+        return _result(
+            False,
+            f"offered {', '.join(forbidden)} when the athlete asked for an "
+            "answer, not for something to decide",
+        )
+
+    required = scenario.get("must_call")
+    if required:
+        hit = sorted(set(names) & set(required))
+        if not hit:
+            return _result(
+                False,
+                f"called {names or 'nothing'} — the athlete asked for a plan and "
+                f"none of {sorted(required)} was offered",
+            )
+        limit = scenario.get("max_calls")
+        if limit is not None and len(calls) > limit:
+            return _result(
+                False, f"{len(calls)} calls in one turn, over the {limit} expected"
+            )
+        repeated = [n for n in required if names.count(n) > 1]
+        if repeated:
+            # One proposal per turn: two offers under one reply is two decisions
+            # the athlete did not ask for.
+            return _result(False, f"offered {repeated} more than once in one turn")
+
+    body = _body(_prose(output))
+    mentions = scenario.get("must_mention") or []
+    if mentions:
+        if not body:
+            return _result(False, "no prose this turn, so nothing was relayed")
+        missing = [m for m in mentions if m.lower() not in body.lower()]
+        if missing:
+            return _result(
+                False,
+                f"did not tell the athlete about {missing} — approving would "
+                "archive it, and a yes that did not know is not consent",
+            )
+
+    return _result(True, "offered, or held off, as the question deserved")

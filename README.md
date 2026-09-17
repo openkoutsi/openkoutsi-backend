@@ -112,6 +112,13 @@ Most cycling coaching tools are cloud-only SaaS. openkoutsi is different: you ru
   The prompt carries **the athlete's own clock** — today's date and weekday, the local time and zone, and yesterday's and tomorrow's dates spelled out — because chat is the one surface with no backend-written brief to put it in. It is the same instant the turn's tools reckon from, so the model and its lookups cannot disagree about which day "today" is. Only the dialogue is stored — tool calls and results deliberately are not, since they are most of the bytes, they go stale, and re-running a read-only tool on a later turn is *more* correct than replaying its old answer. What survives is `tool_names`, written through on every progress marker rather than when the turn settles, so the web app can draw each lookup as a step where it happened. Conversations are deletable per-thread and land in the GDPR export as `chat.json`.
 
   Chat has **no single-shot prompt to fall back on**, so each failure is visible and typed rather than silently degraded: a turn that can't get one of the `AGENT_MAX_CONCURRENT_RUNS` slots *queues* visibly, a model that can't call tools disables the surface up front rather than failing after the athlete has composed a question, and upstream errors settle the turn with a code the web app localises. Per-day and per-conversation turn budgets bound the first LLM surface an athlete can trigger arbitrarily often
+- **Training-plan proposals** — in chat, Koutsi can now *draft* a training plan, or a change to one, and put it in front of the athlete as a structured yes/no card under its reply. **The model never performs the write.** That is structural, not a prompt rule: Koutsi calls tools as a session credential, which carries every scope implicitly, so a `plans:write` scope would gate an external client and gate Koutsi by one sentence. Instead, *no tool, called by anyone, through any door, can reach `training_plans` or `planned_workouts`* — the two propose tools write one row to `plan_proposals` and nothing else, and the only code that writes a plan is an HTTP route requiring the athlete's own session and a proposal id. A test sweeps every registered tool and asserts the plan tables are unchanged either side of every call.
+
+  A proposal is inert by construction: not a plan row, so it never reaches the plan page, `plan_adherence_daily`, the activity matcher or the achievements. Its weeks come from the same LLM generator `POST /api/plans` uses — one schema-constrained completion with **no `tools` array**, so the nested call cannot re-enter the tool layer — falling back to the deterministic builder when that fails, with `built_by` recording which. The tool's own budget is deliberately *longer* than that nested call's, so a hung provider trips the inner timeout and gets the fallback rather than cancelling the tool after it has already committed an offer the model never gets to describe.
+
+  The preview names the plans an approval would **archive**, by name and date range, because creating a plan files away every active plan it overlaps and a yes that did not know that is not consent. It also counts the sessions a *shortened* plan would strand beyond its new last day, which go on scoring as misses. What the model is handed is bounded rather than hoped: `archives`, the week table and the goal are shed in a defined order until the result fits `MAX_TOOL_RESULT_CHARS`, each reduction reported (`archives_omitted`, `weeks_omitted`) — because an overflow truncates exactly the archive list and the instruction to relay it, which is the consent claim failing where it is load-bearing. The athlete's card still gets everything.
+
+  A move onto an occupied day is refused at draft time naming the occupant, and re-checked at apply: there is no unique key on `(plan, week, day)` and no REST endpoint that edits these fields, so nothing else would stop two prescriptions stacking on one date. A turn that **fails** or stalls discards whatever it offered, and the apply path refuses a proposal whose turn never finished — a yes/no card under an empty error bubble is the same "plan created out of a context the athlete can no longer read" the retry path already guarded. Offers stand for 24 hours, are superseded only by another offer (never by an ordinary question), and every invariant is re-run at apply time — a start date now in the past, a target that has gone, or an archive set that has moved is refused with a sentence rather than applied. Applying is idempotent by proposal id. A decision spends no chat turn and asks no model anything, but the next turn's history carries a backend-written note derived from the proposal row, so Koutsi does not re-offer a plan the athlete already accepted. `propose_training_plan` and `propose_plan_change` are registered but **not published**: `tools/list` is byte-for-byte unchanged, and a `tools/call` naming one is refused as an unknown tool. Proposals land in the GDPR export as `plan_proposals.json`
 - **MCP server** — see [MCP server](#mcp-server) below
 - **Inbox** — in-app messages notify athletes about their own events (earned achievements, personal access tokens about to expire or revoked by an admin) and admins about instance events (used invites). Each user has an isolated per-user message store, deletions are permanent, and the design leaves a hook for future email/push delivery. Messages carry their own rendered `title` and `body`, written by `message_text` when the message is sent and stored alongside the `locale` they were rendered in, so a new message type needs no matching template in the web app to be readable
 
@@ -484,7 +491,7 @@ are rate-limited per user (the in-process agent deliberately is not), and every
 invocation is audited with caller, tool, arguments, duration and outcome — never the
 result.
 
-**Genuinely read-only**: the two zone tools are explicitly asked not to freeze missing
+Everything published is **read-only**, and stays so: the two zone tools are explicitly asked not to freeze missing
 time-in-zone snapshots the way their REST counterparts do, and report the rides they
 couldn't count instead. A snapshot is permanent, so letting a `metrics:read` tool
 trigger one would let the moment an agent asked a question decide forever which zone
@@ -504,10 +511,14 @@ Point any MCP client at it with a personal access token:
 }
 ```
 
-The token's scopes decide which tools answer. `tools/list` returns every tool
-regardless — hiding the unreachable ones would make a scope refusal look like a missing
-feature — with the scopes each needs in its `_meta`, so a client can explain the gap
-rather than discover it by failing. There is **no `mcp:*` scope**, which would obscure
+The token's scopes decide which tools answer. `tools/list` returns every *published*
+tool regardless — hiding the unreachable ones would make a scope refusal look like a
+missing feature — with the scopes each needs in its `_meta`, so a client can explain the
+gap rather than discover it by failing. The two proposal tools (#72) are registered but
+not published: they exist to put a yes/no in front of the athlete in openkoutsi's own
+UI, and an external client drafting one would leave it sitting in a thread nobody has
+open — so `tools/list` is unchanged, and a `tools/call` naming one is refused as an
+unknown tool rather than executed. There is **no `mcp:*` scope**, which would obscure
 the actual grant: all ten tools are covered by the five read scopes
 `activities:read`, `athlete:read`, `goals:read`, `metrics:read` and `plans:read`, and
 each of those five opens at least one tool on its own. `athlete:export` is deliberately

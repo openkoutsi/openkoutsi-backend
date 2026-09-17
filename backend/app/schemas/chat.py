@@ -3,6 +3,57 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from backend.app.schemas.plan_proposals import PlanProposalSummary
+from backend.app.schemas.plans import TrainingPlanResponse
+
+
+class ChatProposal(BaseModel):
+    """A training-plan change Koutsi has offered on this turn (issue #72).
+
+    Present on the assistant turn that drafted it and nowhere else. The card the
+    web app renders from this **is** the prompt: the athlete answers with a
+    button, never by typing "yes", because a typed yes would put the decision
+    back inside the thing being gated.
+
+    Nothing here has been applied. ``status`` says where the offer stands, and
+    only ``pending`` has anything left to answer.
+    """
+
+    id: str
+    #: ``create_plan`` | ``update_plan`` | ``update_workout``.
+    kind: str
+    #: ``pending`` | ``applied`` | ``declined`` | ``expired`` | ``superseded``.
+    status: str
+    #: ``llm`` or ``rule_based`` — whether a model wrote the weeks or the
+    #: deterministic builder did. Surfaced rather than hidden: a fallback is a
+    #: different thing to be offered, not a worse version of the same thing.
+    built_by: Optional[str] = None
+    summary: PlanProposalSummary
+    created_at: datetime
+    expires_at: Optional[datetime] = None
+    decided_at: Optional[datetime] = None
+    #: The plan an approval created, once there is one — where to send the
+    #: athlete next.
+    applied_plan_id: Optional[str] = None
+
+    model_config = {"from_attributes": True}
+
+
+class ChatProposalDecision(BaseModel):
+    """What came of the athlete answering an offer (issue #72).
+
+    The proposal in its settled state, and — on an approval — the plan that now
+    exists, in exactly the shape the plan page serves. A decision deliberately
+    spends no chat turn and asks no model anything: the outcome the athlete
+    needs is *your plan is live, here it is*, which is a fact the backend knows
+    exactly.
+    """
+
+    proposal: ChatProposal
+    #: The plan the approval created or changed, in the same shape
+    #: ``GET /api/plans/{id}`` serves. Null on a decline.
+    plan: Optional[TrainingPlanResponse] = None
+
 
 class ChatMessageResponse(BaseModel):
     id: str
@@ -22,6 +73,9 @@ class ChatMessageResponse(BaseModel):
     #: thread shows ahead of the answer. Present and growing while the turn is
     #: still gathering. Never the arguments and never the results.
     tool_names: Optional[list[str]] = None
+    #: The plan Koutsi offered on this turn, if it offered one (issue #72).
+    #: Null on every other turn, which is almost all of them.
+    proposal: Optional[ChatProposal] = None
     created_at: datetime
 
     model_config = {"from_attributes": True}
