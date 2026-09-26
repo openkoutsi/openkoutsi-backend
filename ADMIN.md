@@ -1,5 +1,10 @@
 # Admin Guide
 
+The admin console manages users, invitations, password resets, an admin contact shown
+on the password-reset page, instance settings (sign-up, personal access tokens, MCP,
+course recon), instance-wide LLM presets and third-party API usage. The first
+administrator is created by the setup wizard on a fresh instance.
+
 ## Accounts & sign-up
 
 By default openkoutsi is **invite-only**: an admin mints an invitation
@@ -464,6 +469,69 @@ everything else on the client address. The key is the user rather than the token
 because a user may mint tokens freely, and per-token buckets would make every limit
 multiplicative in a number nothing caps. Token ids still appear in the audit log, which
 is where per-token attribution belongs.
+
+## LLM configuration
+
+There are no server-side LLM environment variables: every LLM connection is a
+**preset**, defined instance-wide by an admin, or per user via BYOK.
+
+### Presets
+
+Under **Settings → AI / LLM** an admin configures a list of selectable presets. Each
+is a self-contained connection: display name, stable identifier, base URL, model id,
+API key, headers and extra chat-completion body params (e.g. `max_tokens` or a
+`reasoning_effort` config), so distinct providers can be offered side by side.
+
+- **The first preset in the list is the instance default.**
+- The dropdown shows display names but stores the identifier, so renaming a preset
+  never breaks existing selections.
+- A user's selected preset (or BYOK server) is used everywhere an LLM is called on
+  their behalf — plan/workout generators and background analysers alike — falling
+  back to the instance default only when they haven't chosen one.
+
+**Test connection** sends a small "hello world" with the configured headers and the
+selected model's body params, so it validates ZDR headers and a thinking config, not
+just reachability. Users have the same test on their BYOK card
+(`POST /api/llm/test-my-connection`).
+
+The backend sends no `temperature` parameter, so each model applies its own default;
+that keeps thinking-enabled models (which reject any temperature other than `1`)
+working. Upstream LLM errors log the provider's response body.
+
+Two per-preset flags handle providers with partial support:
+
+| Flag | Default | Use when |
+|---|---|---|
+| `structured_outputs: false` | on | The provider rejects a JSON-schema `response_format`. Rejection is also detected at runtime and the call retried without it. |
+| `tools_supported: false` | on | The model accepts `tools` but then misbehaves. Agentic Koutsi falls back to the single-shot prompt, and chat is disabled up front. A provider that rejects the parameter outright is detected at runtime. |
+
+### Bring your own LLM (BYOK)
+
+Any user can point openkoutsi at their own OpenAI-compatible endpoint (base URL, model,
+optional API key). Once a user sets their own base URL, **only** their config is used —
+the instance's presets and keys are never sent to a user-chosen server. The user's key
+is encrypted at rest and never returned to the browser.
+
+- `LLM_ALLOWED_SERVERS` (comma-separated) restricts BYOK URLs to an allow-list, at save
+  time and at use time.
+- The **SSRF guard** always applies: cloud metadata, link-local and multicast ranges
+  are refused; loopback and private ranges too unless `LLM_ALLOW_PRIVATE_NETWORKS=true`
+  (needed for a self-hosted model on localhost or the LAN). A failing upstream's
+  response body is echoed only on the admin test, never on the BYOK test.
+
+### Subscription gating and usage tracking
+
+`llm_requires_subscription` (Settings → AI / LLM, default **off**) requires an "LLM
+access" entitlement to use the *instance's* LLM credentials. Users without one can still
+use every LLM feature via BYOK; otherwise they get a `llm_subscription_required` 403 the
+frontend turns into an upsell. Grant or revoke entitlements per user with
+`PUT /api/admin/users/{id}/llm-entitlement`.
+
+Independently, the token usage of every **instance-paid** call (input and output,
+provider and model) is recorded in its own database (`LLM_USAGE_DB`, default
+`<DATA_DIR>/llm_usage.db`). `GET /api/admin/llm-usage/summary` buckets it by day, week or
+month so you can compute average cost per user. BYOK calls are never recorded — the user
+pays their own provider.
 
 ## Third-party API usage and quota headroom
 
