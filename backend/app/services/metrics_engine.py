@@ -1,6 +1,6 @@
 from datetime import date, datetime, time, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.models.user_orm import Activity, DailyMetric
@@ -55,9 +55,48 @@ async def _find_stale_from(
     return earliest
 
 
+async def _find_first_missing_day(
+    athlete_id: str, session: AsyncSession
+) -> date | None:
+    """Return the earliest day with no DailyMetric row between the athlete's
+    first and last stored days, or None if the rows are contiguous.
+
+    A hole is what an older ``recalculate_from`` left when the day before its
+    start had no row: it seeded 0.0/0.0, so every day after the hole was
+    computed from zero. Recalculating from the hole back-fills it and restores
+    them. Unlike the stale-Load check this covers the whole history — one
+    aggregate over the primary key answers "any holes?", and the dates are
+    only listed when there is one.
+    """
+    first, last, count = (
+        await session.execute(
+            select(
+                func.min(DailyMetric.date),
+                func.max(DailyMetric.date),
+                func.count(),
+            ).where(DailyMetric.athlete_id == athlete_id)
+        )
+    ).one()
+    if first is None or (last - first).days + 1 == count:
+        return None
+
+    dates = await session.execute(
+        select(DailyMetric.date)
+        .where(DailyMetric.athlete_id == athlete_id)
+        .order_by(DailyMetric.date)
+    )
+    expected = first
+    for day in dates.scalars():
+        if day != expected:
+            return expected
+        expected = day + timedelta(days=1)
+    return None
+
+
 async def catch_up_metrics(athlete_id: str, session: AsyncSession) -> bool:
-    """Fill missing DailyMetric rows up to today and fix any rows made stale
-    by deleted activities.
+    """Fill missing DailyMetric rows up to today, back-fill any day missing
+    from the athlete's history, and fix any rows made stale by deleted
+    activities.
 
     Returns True if rows were written or corrected, False if already up to date.
     No stream reprocessing — uses stored Load values only.
@@ -81,10 +120,12 @@ async def catch_up_metrics(athlete_id: str, session: AsyncSession) -> bool:
         last_metric = last.scalar_one_or_none()
         recalc_from = (last_metric.date + timedelta(days=1)) if last_metric else today
 
-    stale_from = await _find_stale_from(athlete_id, today, session)
-    if stale_from is not None:
-        if recalc_from is None or stale_from < recalc_from:
-            recalc_from = stale_from
+    for candidate in (
+        await _find_first_missing_day(athlete_id, session),
+        await _find_stale_from(athlete_id, today, session),
+    ):
+        if candidate is not None and (recalc_from is None or candidate < recalc_from):
+            recalc_from = candidate
 
     if recalc_from is not None:
         await recalculate_from(athlete_id, recalc_from, session)
@@ -95,15 +136,24 @@ async def catch_up_metrics(athlete_id: str, session: AsyncSession) -> bool:
 async def recalculate_from(
     athlete_id: str, from_date: date, session: AsyncSession
 ) -> None:
-    # Seed Fitness/Fatigue from the day before from_date (or 0.0)
-    prev_date = from_date - timedelta(days=1)
+    # Seed Fitness/Fatigue from the latest stored day before from_date. That is
+    # usually the day before, but not always: rows are written only up to the
+    # "today" of whatever last ran, so a day with no ride and no dashboard visit
+    # leaves a hole. Seeding 0.0 across that hole reset the athlete's history to
+    # zero; instead the walk starts the day after the seed, filling the hole on
+    # the way. 0.0 is only the seed when there is no earlier row at all.
     prev_result = await session.execute(
-        select(DailyMetric).where(
+        select(DailyMetric)
+        .where(
             DailyMetric.athlete_id == athlete_id,
-            DailyMetric.date == prev_date,
+            DailyMetric.date < from_date,
         )
+        .order_by(DailyMetric.date.desc())
+        .limit(1)
     )
     prev = prev_result.scalar_one_or_none()
+    if prev is not None:
+        from_date = prev.date + timedelta(days=1)
     initial_fitness = prev.fitness if prev else 0.0
     initial_fatigue = prev.fatigue if prev else 0.0
 

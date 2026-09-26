@@ -8,7 +8,7 @@ import uuid
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from backend.app.models.user_orm import Activity, ActivitySource, Athlete, DailyMetric
 from backend.app.services.metrics_engine import catch_up_metrics, recalculate_from
@@ -46,6 +46,32 @@ async def _make_activity(session, athlete_id: str, load: float, day: date) -> Ac
     session.add(ActivitySource(activity_id=activity.id, provider="manual"))
     await session.flush()
     return activity
+
+
+async def _metrics_by_date(session, athlete_id: str) -> dict[date, DailyMetric]:
+    result = await session.execute(
+        select(DailyMetric).where(DailyMetric.athlete_id == athlete_id)
+    )
+    # Detached copies, so later writes to the same rows don't change them.
+    return {
+        m.date: DailyMetric(
+            athlete_id=m.athlete_id, date=m.date, fitness=m.fitness,
+            fatigue=m.fatigue, form=m.form, load_day=m.load_day,
+        )
+        for m in result.scalars()
+    }
+
+
+async def _delete_metrics_from(session, athlete_id: str, day: date) -> None:
+    """Drop every DailyMetric row on or after ``day`` — the state of an athlete
+    whose metrics were last written the day before."""
+    await session.execute(
+        delete(DailyMetric).where(
+            DailyMetric.athlete_id == athlete_id,
+            DailyMetric.date >= day,
+        )
+    )
+    await session.flush()
 
 
 class TestRecalculateFrom:
@@ -120,6 +146,34 @@ class TestRecalculateFrom:
         assert m2.fatigue == pytest.approx(expected_atl2, rel=1e-6)
         # Form on day 2 = day 1's Fitness - day 1's Fatigue
         assert m2.form == pytest.approx(m1.fitness - m1.fatigue, rel=1e-6)
+
+    async def test_missing_previous_day_seeds_from_last_stored_day(self, session):
+        """Regression: rows were written through the day before yesterday, nothing
+        wrote yesterday's, and a ride synced today. The recalculation used to find
+        no row for yesterday and seed 0.0/0.0, resetting Fitness to ~1."""
+        athlete = await _make_athlete(session)
+        start = TODAY - timedelta(days=30)
+        for i in range(29):
+            await _make_activity(session, athlete.id, load=50.0, day=start + timedelta(days=i))
+        await recalculate_from(athlete.id, start, session)
+        expected = await _metrics_by_date(session, athlete.id)
+
+        yesterday = TODAY - timedelta(days=1)
+        await _delete_metrics_from(session, athlete.id, yesterday)
+        await _make_activity(session, athlete.id, load=44.0, day=TODAY)
+
+        await recalculate_from(athlete.id, TODAY, session)
+
+        rows = await _metrics_by_date(session, athlete.id)
+        # The hole is filled rather than left for the chart to jump over.
+        assert yesterday in rows
+        assert rows[yesterday].fitness == pytest.approx(expected[yesterday].fitness, rel=1e-9)
+        assert rows[yesterday].fatigue == pytest.approx(expected[yesterday].fatigue, rel=1e-9)
+        # Today continues from yesterday, not from zero.
+        y = rows[yesterday]
+        assert rows[TODAY].fitness == pytest.approx(y.fitness + (44.0 - y.fitness) * K42, rel=1e-9)
+        assert rows[TODAY].fatigue == pytest.approx(y.fatigue + (44.0 - y.fatigue) * K7, rel=1e-9)
+        assert rows[TODAY].form == pytest.approx(y.fitness - y.fatigue, rel=1e-9)
 
     async def test_empty_athlete_produces_no_metrics(self, session):
         athlete = await _make_athlete(session)
@@ -224,3 +278,78 @@ class TestCatchUpMetrics:
         fixed = r3.scalar_one()
         # Activity deleted → load_day should now be 0
         assert fixed.load_day == pytest.approx(0.0)
+
+    async def test_heals_a_reset_left_across_a_missing_day(self, session):
+        """An athlete already hit by the old seed-from-zero bug has a hole
+        yesterday and a today row computed from 0.0/0.0. Today's row exists and
+        its load_day is right, so neither the forward fill nor the load check
+        saw anything; the hole itself must trigger the recalculation."""
+        athlete = await _make_athlete(session)
+        start = TODAY - timedelta(days=30)
+        for i in range(29):
+            await _make_activity(session, athlete.id, load=50.0, day=start + timedelta(days=i))
+        await _make_activity(session, athlete.id, load=44.0, day=TODAY)
+        await recalculate_from(athlete.id, start, session)
+        expected = await _metrics_by_date(session, athlete.id)
+
+        # Recreate the damage: yesterday missing, today seeded from zero.
+        yesterday = TODAY - timedelta(days=1)
+        await _delete_metrics_from(session, athlete.id, yesterday)
+        session.add(DailyMetric(
+            athlete_id=athlete.id, date=TODAY,
+            fitness=44.0 * K42, fatigue=44.0 * K7, form=0.0, load_day=44.0,
+        ))
+        await session.flush()
+
+        updated = await catch_up_metrics(athlete.id, session)
+
+        assert updated is True
+        rows = await _metrics_by_date(session, athlete.id)
+        assert yesterday in rows
+        for day in (yesterday, TODAY):
+            assert rows[day].fitness == pytest.approx(expected[day].fitness, rel=1e-9)
+            assert rows[day].fatigue == pytest.approx(expected[day].fatigue, rel=1e-9)
+            assert rows[day].form == pytest.approx(expected[day].form, rel=1e-9)
+        # Healed state is stable.
+        assert await catch_up_metrics(athlete.id, session) is False
+
+    async def test_back_fills_every_missing_day_across_the_whole_history(self, session):
+        """Holes are back-filled however old they are — including ones outside
+        the 90-day stale-Load window — and every day after the first hole is
+        recomputed from real values rather than the zero seed it once got."""
+        athlete = await _make_athlete(session)
+        start = TODAY - timedelta(days=200)
+        for i in range(0, 200, 2):
+            await _make_activity(session, athlete.id, load=60.0, day=start + timedelta(days=i))
+        await recalculate_from(athlete.id, start, session)
+        expected = await _metrics_by_date(session, athlete.id)
+
+        # Two holes: one well outside the stale window, one yesterday. Every
+        # row after the old hole carries the zero-seeded values the old code
+        # wrote; their load_day is still right, so only the hole gives it away.
+        old_hole = TODAY - timedelta(days=150)
+        recent_hole = TODAY - timedelta(days=1)
+        for hole in (old_hole, recent_hole):
+            await session.execute(
+                delete(DailyMetric).where(
+                    DailyMetric.athlete_id == athlete.id, DailyMetric.date == hole,
+                )
+            )
+        rows = await session.execute(
+            select(DailyMetric).where(
+                DailyMetric.athlete_id == athlete.id, DailyMetric.date > old_hole,
+            )
+        )
+        for m in rows.scalars():
+            m.fitness = m.fatigue = m.form = 0.0
+        await session.flush()
+
+        assert await catch_up_metrics(athlete.id, session) is True
+
+        healed = await _metrics_by_date(session, athlete.id)
+        assert healed.keys() == expected.keys()
+        for day, m in expected.items():
+            assert healed[day].fitness == pytest.approx(m.fitness, rel=1e-9), day
+            assert healed[day].fatigue == pytest.approx(m.fatigue, rel=1e-9), day
+            assert healed[day].form == pytest.approx(m.form, rel=1e-9), day
+        assert await catch_up_metrics(athlete.id, session) is False
