@@ -312,3 +312,44 @@ class TestCatchUpMetrics:
             assert rows[day].form == pytest.approx(expected[day].form, rel=1e-9)
         # Healed state is stable.
         assert await catch_up_metrics(athlete.id, session) is False
+
+    async def test_back_fills_every_missing_day_across_the_whole_history(self, session):
+        """Holes are back-filled however old they are — including ones outside
+        the 90-day stale-Load window — and every day after the first hole is
+        recomputed from real values rather than the zero seed it once got."""
+        athlete = await _make_athlete(session)
+        start = TODAY - timedelta(days=200)
+        for i in range(0, 200, 2):
+            await _make_activity(session, athlete.id, load=60.0, day=start + timedelta(days=i))
+        await recalculate_from(athlete.id, start, session)
+        expected = await _metrics_by_date(session, athlete.id)
+
+        # Two holes: one well outside the stale window, one yesterday. Every
+        # row after the old hole carries the zero-seeded values the old code
+        # wrote; their load_day is still right, so only the hole gives it away.
+        old_hole = TODAY - timedelta(days=150)
+        recent_hole = TODAY - timedelta(days=1)
+        for hole in (old_hole, recent_hole):
+            await session.execute(
+                delete(DailyMetric).where(
+                    DailyMetric.athlete_id == athlete.id, DailyMetric.date == hole,
+                )
+            )
+        rows = await session.execute(
+            select(DailyMetric).where(
+                DailyMetric.athlete_id == athlete.id, DailyMetric.date > old_hole,
+            )
+        )
+        for m in rows.scalars():
+            m.fitness = m.fatigue = m.form = 0.0
+        await session.flush()
+
+        assert await catch_up_metrics(athlete.id, session) is True
+
+        healed = await _metrics_by_date(session, athlete.id)
+        assert healed.keys() == expected.keys()
+        for day, m in expected.items():
+            assert healed[day].fitness == pytest.approx(m.fitness, rel=1e-9), day
+            assert healed[day].fatigue == pytest.approx(m.fatigue, rel=1e-9), day
+            assert healed[day].form == pytest.approx(m.form, rel=1e-9), day
+        assert await catch_up_metrics(athlete.id, session) is False

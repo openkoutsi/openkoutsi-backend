@@ -1,6 +1,6 @@
 from datetime import date, datetime, time, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.models.user_orm import Activity, DailyMetric
@@ -14,15 +14,10 @@ async def _find_stale_from(
     athlete_id: str, today: date, session: AsyncSession
 ) -> date | None:
     """Return the earliest date where DailyMetric.load_day doesn't match the
-    sum of Activity.load for that day, or that has no row at all between two
-    stored days, or None if everything is consistent.
+    sum of Activity.load for that day, or None if everything is consistent.
 
     A mismatch indicates activities were deleted (or added) without triggering
     a metric recalculation — e.g. via direct DB cleanup or dedup tooling.
-
-    A hole is what an older ``recalculate_from`` left when the day before its
-    start had no row: it seeded 0.0/0.0 and every day after the hole was
-    computed from zero. Recalculating from the hole restores them.
     """
     lookback = today - timedelta(days=_STALE_CHECK_DAYS)
 
@@ -57,22 +52,51 @@ async def _find_stale_from(
         if abs(stored_tss - actual.get(day, 0.0)) > 0.01:
             if earliest is None or day < earliest:
                 earliest = day
-
-    # Days after the last stored row are the forward fill `catch_up_metrics`
-    # already handles; only holes between stored rows are looked for here.
-    day, last = min(stored), max(stored)
-    while day < last:
-        if day not in stored:
-            if earliest is None or day < earliest:
-                earliest = day
-            break
-        day += timedelta(days=1)
     return earliest
 
 
+async def _find_first_missing_day(
+    athlete_id: str, session: AsyncSession
+) -> date | None:
+    """Return the earliest day with no DailyMetric row between the athlete's
+    first and last stored days, or None if the rows are contiguous.
+
+    A hole is what an older ``recalculate_from`` left when the day before its
+    start had no row: it seeded 0.0/0.0, so every day after the hole was
+    computed from zero. Recalculating from the hole back-fills it and restores
+    them. Unlike the stale-Load check this covers the whole history — one
+    aggregate over the primary key answers "any holes?", and the dates are
+    only listed when there is one.
+    """
+    first, last, count = (
+        await session.execute(
+            select(
+                func.min(DailyMetric.date),
+                func.max(DailyMetric.date),
+                func.count(),
+            ).where(DailyMetric.athlete_id == athlete_id)
+        )
+    ).one()
+    if first is None or (last - first).days + 1 == count:
+        return None
+
+    dates = await session.execute(
+        select(DailyMetric.date)
+        .where(DailyMetric.athlete_id == athlete_id)
+        .order_by(DailyMetric.date)
+    )
+    expected = first
+    for day in dates.scalars():
+        if day != expected:
+            return expected
+        expected = day + timedelta(days=1)
+    return None
+
+
 async def catch_up_metrics(athlete_id: str, session: AsyncSession) -> bool:
-    """Fill missing DailyMetric rows up to today and fix any rows made stale
-    by deleted activities or computed across a missing day.
+    """Fill missing DailyMetric rows up to today, back-fill any day missing
+    from the athlete's history, and fix any rows made stale by deleted
+    activities.
 
     Returns True if rows were written or corrected, False if already up to date.
     No stream reprocessing — uses stored Load values only.
@@ -96,10 +120,12 @@ async def catch_up_metrics(athlete_id: str, session: AsyncSession) -> bool:
         last_metric = last.scalar_one_or_none()
         recalc_from = (last_metric.date + timedelta(days=1)) if last_metric else today
 
-    stale_from = await _find_stale_from(athlete_id, today, session)
-    if stale_from is not None:
-        if recalc_from is None or stale_from < recalc_from:
-            recalc_from = stale_from
+    for candidate in (
+        await _find_first_missing_day(athlete_id, session),
+        await _find_stale_from(athlete_id, today, session),
+    ):
+        if candidate is not None and (recalc_from is None or candidate < recalc_from):
+            recalc_from = candidate
 
     if recalc_from is not None:
         await recalculate_from(athlete_id, recalc_from, session)
