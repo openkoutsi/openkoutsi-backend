@@ -302,6 +302,22 @@ _NOTES = {
 }
 
 
+#: The tools whose success leaves a card under the turn. Named here rather than
+#: imported from the tool module, which imports this one.
+PROPOSE_TOOL_NAMES = frozenset({"propose_training_plan", "propose_plan_change"})
+
+#: Replayed on a turn that called a propose tool but carries no proposal: the
+#: tool refused (a wrong id, a change that changes nothing, a taken day) and the
+#: refusal is gone with the rest of the turn's tool results. Without it the only
+#: record of that turn is Koutsi's own prose, and if that prose said "I have
+#: drafted it, accept the card", the next turn insists the card is there.
+NO_OFFER_NOTE = (
+    "[No offer came of this turn: the draft did not go through, so there is no "
+    "card in front of the athlete and nothing was changed. If you told them "
+    "otherwise, correct it.]"
+)
+
+
 def decision_note(proposal: PlanProposal) -> Optional[str]:
     """What to append to the assistant turn that carried this proposal.
 

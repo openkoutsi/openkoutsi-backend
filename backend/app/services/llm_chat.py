@@ -98,6 +98,8 @@ from .llm_agent import (
 from .llm_streaming import AgentProgress, failure_recovery, stream_into_db
 from .llm_training_status_analyzer import _decorate
 from .plan_proposals import (
+    NO_OFFER_NOTE,
+    PROPOSE_TOOL_NAMES,
     decision_note,
     discard_for_message,
     proposals_by_message,
@@ -205,6 +207,11 @@ reply, by name. Creating a plan files away every active plan whose dates overlap
 it, and a yes given without knowing that is not a yes to what happens.
 - Drafting a plan takes a few seconds while the weeks are written. That is \
 normal; do not call the tool a second time because the first felt slow.
+- Only a propose result that comes back with a proposal_id puts a card in \
+front of the athlete. If the tool refuses instead, nothing was drafted and \
+there is no card: fix what the refusal names and try again, or tell the athlete \
+you could not draft it. Never say you have drafted, saved or changed anything \
+the tool did not return, and never send them looking for a card you did not get.
 - A proposal changes nothing on its own. After offering one, say what you have \
 drafted and leave the decision with the athlete — do not describe the plan as \
 though it were already theirs.\
@@ -378,6 +385,31 @@ def build_wire_history(
         ] + out
         spent += size
     return out
+
+
+def history_notes(
+    rows: list[ChatMessage], attached: dict[str, Any]
+) -> dict[str, str]:
+    """The note to replay on each earlier turn, keyed by message id.
+
+    A turn that carried a proposal gets what became of it. A turn that *called*
+    a propose tool and carries none gets :data:`NO_OFFER_NOTE`: the tool refused,
+    the refusal is not stored, and the turn's prose may well have claimed a card
+    anyway — which the next turn would otherwise repeat as fact.
+    """
+    notes = {
+        message_id: note
+        for message_id, proposal in attached.items()
+        if (note := decision_note(proposal))
+    }
+    for row in rows:
+        if (
+            row.role == ROLE_ASSISTANT
+            and row.id not in attached
+            and PROPOSE_TOOL_NAMES.intersection(row.tool_names or ())
+        ):
+            notes[row.id] = NO_OFFER_NOTE
+    return notes
 
 
 def _with_note(row: ChatMessage, notes: dict[str, str]) -> str:
@@ -665,11 +697,7 @@ async def run_chat_turn_bg(
             # the dialogue at all — and without replaying it Koutsi re-offers a
             # plan they have already accepted.
             attached = await proposals_by_message(session, [m.id for m in earlier])
-            notes = {
-                message_id: note
-                for message_id, proposal in attached.items()
-                if (note := decision_note(proposal))
-            }
+            notes = history_notes(earlier, attached)
             history = build_wire_history(earlier, decision_notes=notes)
 
             tool_names: list[str] = []

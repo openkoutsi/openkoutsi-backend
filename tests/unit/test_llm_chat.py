@@ -409,6 +409,54 @@ class TestDecisionNotesInHistory:
         assert offered.content == "Here is eight weeks for October."
 
 
+class TestAnOfferThatNeverGotMade:
+    """A refused propose call leaves no card, and the next turn must know it.
+
+    The refusal is a tool result, and tool results are not stored — so if the
+    turn's prose claimed a card anyway, the only record left says there is one,
+    and Koutsi goes on telling the athlete to press a button that is not there.
+    """
+
+    def _turn(self, msg_id: str, tool_names):
+        row = _msg(ROLE_ASSISTANT, "I have drafted the change; accept the card.")
+        row.id = msg_id
+        row.tool_names = tool_names
+        return row
+
+    def test_a_propose_call_with_no_proposal_is_flagged(self):
+        from backend.app.services.llm_chat import history_notes
+        from backend.app.services.plan_proposals import NO_OFFER_NOTE
+
+        row = self._turn("a1", ["get_plan_status", "propose_plan_change"])
+        assert history_notes([row], {}) == {"a1": NO_OFFER_NOTE}
+        assert "no card" in NO_OFFER_NOTE
+
+    def test_a_turn_that_never_tried_to_propose_is_untouched(self):
+        from backend.app.services.llm_chat import history_notes
+
+        row = self._turn("a1", ["get_plan_status"])
+        assert history_notes([row], {}) == {}
+        row.tool_names = None
+        assert history_notes([row], {}) == {}
+
+    def test_a_turn_with_a_proposal_gets_its_decision_instead(self):
+        from backend.app.models.user_orm import PlanProposal
+        from backend.app.services.llm_chat import history_notes
+        from backend.app.services.plan_proposals import decision_note
+
+        row = self._turn("a1", ["propose_training_plan"])
+        proposal = PlanProposal(kind="create_plan", status="pending")
+        assert history_notes([row], {"a1": proposal}) == {
+            "a1": decision_note(proposal)
+        }
+
+    def test_the_prompt_forbids_claiming_a_card_the_tool_did_not_return(self):
+        from backend.app.services.llm_chat import _CHAT_TOOL_GUIDANCE
+
+        assert "comes back with a proposal_id" in _CHAT_TOOL_GUIDANCE
+        assert "never send them looking for a card" in _CHAT_TOOL_GUIDANCE
+
+
 class TestTheNotesThemselves:
     """Every status a proposal can be in says what happened, in one sentence."""
 
