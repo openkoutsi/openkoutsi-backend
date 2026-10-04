@@ -749,6 +749,39 @@ async def test_activity_detail_refuses_another_athletes_activity(
     assert "belongs to this athlete" in result.error
 
 
+async def test_plan_status_hands_propose_plan_change_the_ids_it_needs(
+    caller, session, training_data, registry_session
+):
+    """get_plan_status → propose_plan_change must work without guessing.
+
+    propose_plan_change refuses a session it cannot find, and tells the model
+    to take the id from get_plan_status. If get_plan_status never returns one,
+    every session-level edit is a guess and fails — and the athlete is told
+    about a card that was never drafted.
+    """
+    status = await run(
+        "get_plan_status", caller=caller, session=session, athlete=training_data,
+        registry_session=registry_session,
+    )
+    plan = status.data["plans"][0]
+    upcoming = [s for s in plan["upcoming"] if s["state"] == "upcoming"][0]
+    assert upcoming["weekday"] == date.fromisoformat(upcoming["date"]).strftime("%A")
+
+    result = await run(
+        "propose_plan_change",
+        {
+            "plan_id": plan["plan_id"],
+            "change": "update_workout",
+            "workout_id": upcoming["workout_id"],
+            "duration_min": (upcoming["duration_min"] or 0) + 15,
+        },
+        caller=caller, session=session, athlete=training_data,
+        registry_session=registry_session,
+    )
+    assert result.ok, result.error
+    assert result.data["proposal_id"]
+
+
 async def test_plan_status_distinguishes_missed_from_not_yet_due(
     caller, session, training_data, registry_session
 ):
