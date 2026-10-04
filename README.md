@@ -54,7 +54,7 @@ Most cycling coaching tools are cloud-only SaaS. openkoutsi runs on your own har
 
 - **Activity analysis and daily feedback** — LLM coaching on each ride and a daily training status card
 - **Agentic Koutsi** — opt-in agent mode where the coach queries your data through MCP tools
-- **Chat** — ask Koutsi questions; it can draft plans or plan changes that you approve. A draft that the backend refuses is flagged on later turns, so Koutsi does not keep pointing at a card that never appeared
+- **Chat** — ask Koutsi questions; it can draft plans or plan changes that you approve
 - **Any OpenAI-compatible model** — instance presets set by the admin, or bring your own (BYOK)
 
 ### Integrations
