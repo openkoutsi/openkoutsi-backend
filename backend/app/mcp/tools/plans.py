@@ -112,7 +112,21 @@ class PlanStatusArgs(ToolArgs):
 
 
 class PlannedSession(BaseModel):
+    workout_id: str = Field(
+        ...,
+        description=(
+            "Identifier of this planned session — the workout_id "
+            "propose_plan_change takes to change, move or skip it."
+        ),
+    )
     date: _Date = Field(..., description="Calendar date this session falls on.")
+    weekday: str = Field(
+        ...,
+        description=(
+            "Day of the week that date falls on, e.g. Tuesday. Use this rather "
+            "than working the weekday out from the date yourself."
+        ),
+    )
     workout_type: Optional[str] = Field(
         None, description="Session type as the plan names it, e.g. endurance, threshold, rest."
     )
@@ -230,7 +244,9 @@ def _session(
 ) -> PlannedSession:
     linked = workout.linked_activities
     return PlannedSession(
+        workout_id=workout.id,
         date=when,
+        weekday=when.strftime("%A"),
         workout_type=workout.workout_type,
         description=workout.description,
         target_load=workout.target_load,
