@@ -21,9 +21,10 @@ touches ``"manual"``. That is the invariant this module holds.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Iterable, Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from openkoutsi.sport_matching import CYCLING_SPORT_TYPES, canonical_sport_type
@@ -200,11 +201,15 @@ def assign(
         if activity.bike_source == SOURCE_AUTO and activity.bike_id not in retired_ids:
             activity.bike_id = None
             activity.bike_source = None
+            activity.bike_history_at = None
         return None
 
     if activity.bike_id != bike_id or activity.bike_source != SOURCE_AUTO:
         activity.bike_id = bike_id
         activity.bike_source = SOURCE_AUTO
+        # Whatever put the previous bike here, it was not this write — so an
+        # undo of the history pass must no longer claim the ride.
+        activity.bike_history_at = None
     return bike_id
 
 
@@ -246,14 +251,106 @@ async def assign_history(session: AsyncSession, athlete) -> dict:
         .where(Activity.athlete_id == athlete.id, Activity.bike_source.is_(None))
         .execution_options(yield_per=_YIELD_PER)
     )
+    now = datetime.now(timezone.utc)
     scanned = assigned = 0
     async for activity in result:
         scanned += 1
         if assign(activity, claims) is not None:
+            # Stamped so `revert_history` can find exactly these rides again.
+            activity.bike_history_at = now
             assigned += 1
     if assigned:
         await session.commit()
     return {"scanned": scanned, "assigned": assigned}
+
+
+def _attached_by_history(athlete):
+    """The rides `revert_history` would clear: attached by the history pass and
+    still exactly as it left them. ``bike_source == "auto"`` is belt and braces —
+    every other write clears the stamp — but a hand-made choice must never be
+    undone by this, whatever the stamp says."""
+    return (
+        Activity.athlete_id == athlete.id,
+        Activity.bike_history_at.is_not(None),
+        Activity.bike_source == SOURCE_AUTO,
+    )
+
+
+async def preview_history(session: AsyncSession, athlete) -> dict:
+    """What :func:`assign_history` would do, without doing it — and what an undo
+    of the earlier passes would take back.
+
+    The confirmation the garage shows before the pass, so an athlete sees "this
+    attaches 812 rides" before it does rather than after. Counted by grouping
+    the unassigned rows on ``sport_type`` in SQL and mapping the groups through
+    the same canonicalisation :func:`assign` uses, so the numbers agree with the
+    pass without loading a single activity.
+    """
+    claims = await claim_map(session, athlete)
+    per_bike: dict[str, int] = {}
+    if claims:
+        result = await session.execute(
+            select(Activity.sport_type, func.count())
+            .where(Activity.athlete_id == athlete.id, Activity.bike_source.is_(None))
+            .group_by(Activity.sport_type)
+        )
+        for sport_type, count in result:
+            sport = canonical_sport_type(sport_type)
+            if sport is None or sport not in CYCLING_SPORT_TYPES:
+                continue
+            bike_id = claims.get(sport)
+            if bike_id is not None:
+                per_bike[bike_id] = per_bike.get(bike_id, 0) + count
+
+    revertable = (
+        await session.execute(
+            select(func.count()).select_from(Activity).where(
+                *_attached_by_history(athlete)
+            )
+        )
+    ).scalar_one()
+
+    names = {}
+    if per_bike:
+        names = dict(
+            (
+                await session.execute(
+                    select(Bike.id, Bike.name).where(Bike.id.in_(per_bike))
+                )
+            ).all()
+        )
+    return {
+        "assignable": sum(per_bike.values()),
+        "bikes": [
+            {"bike_id": bike_id, "bike_name": names.get(bike_id, ""), "rides": count}
+            for bike_id, count in sorted(
+                per_bike.items(), key=lambda item: (-item[1], names.get(item[0], ""))
+            )
+        ],
+        "revertable": revertable,
+    }
+
+
+async def revert_history(session: AsyncSession, athlete) -> dict:
+    """Undo every "Attach past rides" pass: the rides it attached go back to
+    having no bike.
+
+    Only rides still exactly as a pass left them are touched. One the athlete
+    has since corrected by hand, or that a later ingest re-homed, is not the
+    pass's any more and stays where it is.
+
+    The cleared rides are ordinary unassigned rides afterwards — the next
+    reprocess or provider sync of one may match it again, which is the same
+    automapping every new ride gets.
+    """
+    result = await session.execute(
+        update(Activity)
+        .where(*_attached_by_history(athlete))
+        .values(bike_id=None, bike_source=None, bike_history_at=None)
+        .execution_options(synchronize_session=False)
+    )
+    await session.commit()
+    return {"reverted": result.rowcount or 0}
 
 
 async def tracked_km(session: AsyncSession, athlete) -> dict[str, float]:

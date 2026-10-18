@@ -186,6 +186,13 @@ class Activity(UserBase):
         String, ForeignKey("bikes.id", ondelete="SET NULL"), index=True, nullable=True
     )
     bike_source: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # When "Attach past rides" (`services.garage.assign_history`) attached this
+    # ride; NULL for every other assignment. It is what lets that pass be
+    # undone without also undoing the matches made as rides arrived. Cleared by
+    # anything else that rewrites the bike.
+    bike_history_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     labels: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     # Labels openkoutsi *thinks* apply, kept strictly apart from the ones the
     # athlete has actually applied above (issue #63). Shape:

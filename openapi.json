@@ -7479,6 +7479,35 @@
       }
     },
     "/api/bikes/assign-history": {
+      "get": {
+        "tags": [
+          "bikes"
+        ],
+        "summary": "How many past rides attaching history would touch",
+        "description": "Read-only: the counts the garage shows in its confirmation before\n``POST`` runs, and how many earlier attachments an undo would take back.\n\nGrouped counts rather than a walk of the history, so it is cheap enough to\nneed no rate limit of its own.\n\n**Personal access token scope:** `bikes:read`",
+        "operationId": "previewBikeHistory",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssignHistoryPreview"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "bikes:read"
+        }
+      },
       "post": {
         "tags": [
           "bikes"
@@ -7493,6 +7522,35 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/AssignHistoryResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "bikes:write"
+        }
+      },
+      "delete": {
+        "tags": [
+          "bikes"
+        ],
+        "summary": "Undo attaching past rides",
+        "description": "Take back every ride an earlier ``POST`` attached; they go back to having\nno bike.\n\nRides corrected by hand since, or re-matched by a later ingest, are no\nlonger the pass's and are left alone. One ``UPDATE``, so no rate limit.\n\n**Personal access token scope:** `bikes:write`",
+        "operationId": "revertBikeHistory",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RevertHistoryResponse"
                 }
               }
             }
@@ -10235,6 +10293,56 @@
         ],
         "title": "ArchivedPlanPreview",
         "description": "A plan an approval would file away."
+      },
+      "AssignHistoryBikePreview": {
+        "properties": {
+          "bike_id": {
+            "type": "string",
+            "title": "Bike Id"
+          },
+          "bike_name": {
+            "type": "string",
+            "title": "Bike Name"
+          },
+          "rides": {
+            "type": "integer",
+            "title": "Rides"
+          }
+        },
+        "type": "object",
+        "required": [
+          "bike_id",
+          "bike_name",
+          "rides"
+        ],
+        "title": "AssignHistoryBikePreview"
+      },
+      "AssignHistoryPreview": {
+        "properties": {
+          "assignable": {
+            "type": "integer",
+            "title": "Assignable"
+          },
+          "bikes": {
+            "items": {
+              "$ref": "#/components/schemas/AssignHistoryBikePreview"
+            },
+            "type": "array",
+            "title": "Bikes"
+          },
+          "revertable": {
+            "type": "integer",
+            "title": "Revertable"
+          }
+        },
+        "type": "object",
+        "required": [
+          "assignable",
+          "bikes",
+          "revertable"
+        ],
+        "title": "AssignHistoryPreview",
+        "description": "What ``POST /api/bikes/assign-history`` *would* do, read before doing it.\n\n``assignable`` is how many unassigned rides the pass would attach, broken\ndown per bike in ``bikes`` (largest first). ``revertable`` is how many rides\nearlier passes attached that ``DELETE /api/bikes/assign-history`` would\ntake back."
       },
       "AssignHistoryResponse": {
         "properties": {
@@ -16956,6 +17064,20 @@
           "new_password"
         ],
         "title": "ResetPasswordRequest"
+      },
+      "RevertHistoryResponse": {
+        "properties": {
+          "reverted": {
+            "type": "integer",
+            "title": "Reverted"
+          }
+        },
+        "type": "object",
+        "required": [
+          "reverted"
+        ],
+        "title": "RevertHistoryResponse",
+        "description": "What ``DELETE /api/bikes/assign-history`` took back."
       },
       "RpeQueueResponse": {
         "properties": {

@@ -33,6 +33,7 @@ from backend.app.schemas.bikes import (
     AccessoryCreate,
     AccessoryResponse,
     AccessoryUpdate,
+    AssignHistoryPreview,
     AssignHistoryResponse,
     BikeCreate,
     BikeDetailResponse,
@@ -41,6 +42,7 @@ from backend.app.schemas.bikes import (
     MaintenanceCreate,
     MaintenanceResponse,
     MaintenanceUpdate,
+    RevertHistoryResponse,
 )
 from backend.app.services import garage as garage_service
 
@@ -150,6 +152,20 @@ async def _get_owned_bike(bike_id: str, athlete, session) -> Bike:
     return bike
 
 
+@router.get("/assign-history", response_model=AssignHistoryPreview,
+            operation_id="previewBikeHistory",
+            summary="How many past rides attaching history would touch")
+async def preview_history(ctx_athlete=Depends(get_ctx_session_athlete)):
+    """Read-only: the counts the garage shows in its confirmation before
+    ``POST`` runs, and how many earlier attachments an undo would take back.
+
+    Grouped counts rather than a walk of the history, so it is cheap enough to
+    need no rate limit of its own.
+    """
+    ctx, session, athlete = ctx_athlete
+    return AssignHistoryPreview(**await garage_service.preview_history(session, athlete))
+
+
 @router.post("/assign-history", response_model=AssignHistoryResponse,
              operation_id="assignBikeHistory",
              summary="Assign past rides to the bikes that claim their sport")
@@ -177,6 +193,20 @@ async def assign_history(
     """
     ctx, session, athlete = ctx_athlete
     return AssignHistoryResponse(**await garage_service.assign_history(session, athlete))
+
+
+@router.delete("/assign-history", response_model=RevertHistoryResponse,
+               operation_id="revertBikeHistory",
+               summary="Undo attaching past rides")
+async def revert_history(ctx_athlete=Depends(get_ctx_session_athlete)):
+    """Take back every ride an earlier ``POST`` attached; they go back to having
+    no bike.
+
+    Rides corrected by hand since, or re-matched by a later ingest, are no
+    longer the pass's and are left alone. One ``UPDATE``, so no rate limit.
+    """
+    ctx, session, athlete = ctx_athlete
+    return RevertHistoryResponse(**await garage_service.revert_history(session, athlete))
 
 
 @router.get("/{bike_id}", response_model=BikeDetailResponse,
@@ -271,7 +301,7 @@ async def delete_bike(
     await session.execute(
         update(Activity)
         .where(Activity.bike_id == bike.id)
-        .values(bike_id=None, bike_source=None)
+        .values(bike_id=None, bike_source=None, bike_history_at=None)
     )
     # The log and the accessories are part of the bike and go with it. That one
     # is carried by the `delete-orphan` cascade on `Bike.maintenance` /
