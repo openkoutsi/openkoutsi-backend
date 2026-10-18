@@ -48,6 +48,7 @@ Most cycling coaching tools are cloud-only SaaS. openkoutsi runs on your own har
 ### Courses and bikes
 
 - **Course recon** — a GPX course becomes a segment table with power targets and predicted splits, solvable for a target time or power, plus a written pacing plan; optional road-surface matching via a self-hosted Valhalla sidecar
+- **Bulk edit** — select activities and add or remove labels, set the bike or set the workout category for all of them at once
 - **Garage** — your bikes, their distance, maintenance log and components; rides are assigned to bikes automatically, and "Attach past rides" shows how many rides it will touch before it runs and can be undone
 
 ### AI coaching

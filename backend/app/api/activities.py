@@ -36,6 +36,8 @@ from backend.app.schemas.imports import (
     ImportJobSummary,
 )
 from backend.app.schemas.activities import (
+    ActivityBulkUpdate,
+    ActivityBulkUpdateResponse,
     ActivityDetailResponse,
     ActivityListResponse,
     ActivityResponse,
@@ -1300,6 +1302,184 @@ async def reprocess_activity(
     )
 
 
+def _parse_category(value: Optional[str]) -> Optional[str]:
+    """A workout category as stored, or 422. ``None`` clears it."""
+    if value is None:
+        return None
+    try:
+        return WorkoutCategory(value).value
+    except ValueError:
+        raise HTTPException(status_code=422, detail=f"Unknown workout category: {value}")
+
+
+def _check_labels(labels) -> None:
+    bad = [lbl for lbl in labels if lbl not in _VALID_LABELS]
+    if bad:
+        raise HTTPException(status_code=422, detail=f"Unknown labels: {bad}")
+
+
+def _set_labels(activity: Activity, labels: list[str], touched=_VALID_LABELS) -> None:
+    """Replace a ride's labels by hand, answering any suggestion they settle.
+
+    Shared by ``PATCH /activities/{id}`` and the bulk edit, so a label applied to
+    fifty rides at once means exactly what it means on one. ``labels`` must
+    already have passed :func:`_check_labels`.
+
+    ``touched`` is which labels the athlete actually decided about. ``PATCH``
+    restates the whole list, so every label is decided; a bulk "add race" says
+    nothing about ``commute``, and must not dismiss a commute suggestion still
+    waiting on that ride.
+    """
+    # A label set by hand is the athlete's final word on this ride, so any
+    # suggestion still hanging over it is answered by the same edit (issue
+    # #63) — otherwise unticking a suggested label would leave the
+    # suggestion pending and the ride would be proposed all over again.
+    for label in touched:
+        state = commute_service.suggestion_state(activity, label)
+        if state is None:
+            # Nothing was ever suggested for this label, so there is nothing
+            # to answer. Without this guard, hand-labelling a ride writes a
+            # suggestion entry out of thin air — `{"labels": ["race"]}` on
+            # an account with no rules at all would record a `race`
+            # suggestion, and `race` has no detector. The column means
+            # "labels openkoutsi thinks apply"; it must not become a log of
+            # what the athlete applied by hand.
+            continue
+        if label in labels:
+            if state != commute_service.STATE_ACCEPTED:
+                commute_service.answer_suggestion(
+                    activity, label, commute_service.STATE_ACCEPTED
+                )
+        else:
+            # Any answered-or-pending suggestion, not just a pending one.
+            # Un-ticking an *accepted* label is the athlete rejecting it
+            # just as much as un-ticking a pending one, and leaving it at
+            # `accepted` hides that rejection from `rule_feedback`, whose
+            # "this rule is too wide" signal counts dismissals. The same
+            # athlete action would otherwise produce different feedback
+            # depending on whether the client sent `labels` or
+            # `label_answers`.
+            if state != commute_service.STATE_DISMISSED:
+                commute_service.answer_suggestion(
+                    activity, label, commute_service.STATE_DISMISSED
+                )
+    activity.labels = labels
+
+
+async def _owned_bike(session, athlete, bike_id: Optional[str]) -> Optional[Bike]:
+    """The athlete's bike, ``None`` for an explicit "no bike", or 404."""
+    if bike_id is None:
+        return None
+    bike = (
+        await session.execute(
+            select(Bike).where(Bike.id == bike_id, Bike.athlete_id == athlete.id)
+        )
+    ).scalar_one_or_none()
+    if bike is None:
+        raise HTTPException(status_code=404, detail="Bike not found")
+    return bike
+
+
+def _set_bike(activity: Activity, bike: Optional[Bike]) -> None:
+    """Record the athlete's own choice of bike for a ride (issue #64).
+
+    Stamping ``manual`` is the whole mechanism: without it the next reprocess
+    or provider sync would put the automatic guess straight back, which is
+    precisely the failure this override exists to prevent.
+
+    ``bike=None`` — "none of mine" — is a choice, so it is stamped like any
+    other. It has to be: ``(NULL, NULL)`` is the exact predicate automapping
+    reads as free to fill, so clearing without the marker would let the next
+    reprocess or re-sync put the guess straight back. ``delete_bike``
+    deliberately writes both NULL instead: there the bike is gone and no choice
+    was made, so automapping should be free to fill the gap.
+
+    Retired and unclaimed bikes are deliberately accepted even though they are
+    hidden from the course picker: correcting an old ride onto the bike it was
+    actually done on is the point of the override, and that bike is often
+    exactly the one since sold.
+    """
+    activity.bike_id = bike.id if bike is not None else None
+    activity.bike_source = garage_service.SOURCE_MANUAL
+    activity.bike_history_at = None
+
+
+@router.post("/bulk", response_model=ActivityBulkUpdateResponse,
+             operation_id="bulkUpdateActivities",
+             summary="Apply labels, a bike or a workout category to many activities")
+async def bulk_update_activities(
+    payload: ActivityBulkUpdate,
+    ctx_athlete=Depends(get_ctx_session_athlete),
+):
+    """The same edit as ``PATCH /activities/{id}``, for a selection at once.
+
+    Every activity goes through the same helpers the single edit uses, so a
+    label added here answers a pending suggestion and a bike set here is
+    stamped ``manual`` exactly as it would be one ride at a time. All or
+    nothing: everything is validated before the first row changes, and the
+    whole selection commits in one transaction.
+
+    Ids that are not the athlete's are reported back in ``not_found`` rather
+    than failing the request — a ride deleted in another tab while the
+    selection was open should not block the other forty-nine.
+    """
+    ctx, session, athlete = ctx_athlete
+    fields = payload.model_fields_set
+    if not (
+        payload.add_labels
+        or payload.remove_labels
+        or {"workout_category", "bike_id"} & fields
+    ):
+        raise HTTPException(status_code=422, detail="Nothing to change")
+
+    _check_labels(payload.add_labels)
+    _check_labels(payload.remove_labels)
+    clash = set(payload.add_labels) & set(payload.remove_labels)
+    if clash:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Labels both added and removed: {sorted(clash)}",
+        )
+    category = (
+        _parse_category(payload.workout_category)
+        if "workout_category" in fields
+        else None
+    )
+    bike = (
+        await _owned_bike(session, athlete, payload.bike_id)
+        if "bike_id" in fields
+        else None
+    )
+
+    touched = set(payload.add_labels) | set(payload.remove_labels)
+    ids = list(dict.fromkeys(payload.activity_ids))
+    activities = (
+        await session.execute(
+            select(Activity).where(Activity.athlete_id == athlete.id, Activity.id.in_(ids))
+        )
+    ).scalars().all()
+    found = {a.id for a in activities}
+
+    for activity in activities:
+        if payload.add_labels or payload.remove_labels:
+            labels = [
+                lbl for lbl in (activity.labels or []) if lbl not in payload.remove_labels
+            ]
+            labels += [lbl for lbl in payload.add_labels if lbl not in labels]
+            _set_labels(activity, labels, touched=touched)
+        if "workout_category" in fields:
+            activity.workout_category = category
+        if "bike_id" in fields:
+            _set_bike(activity, bike)
+
+    await session.commit()
+    if activities:
+        await mark_achievements_dirty(athlete.id, session)
+    return ActivityBulkUpdateResponse(
+        updated=len(activities), not_found=[i for i in ids if i not in found]
+    )
+
+
 @router.patch("/{activity_id}", response_model=ActivityResponse)
 async def update_activity(
     activity_id: str,
@@ -1318,55 +1498,11 @@ async def update_activity(
     if payload.name is not None:
         activity.name = payload.name.strip()
     if "workout_category" in payload.model_fields_set:
-        if payload.workout_category is None:
-            activity.workout_category = None
-        else:
-            try:
-                activity.workout_category = WorkoutCategory(payload.workout_category).value
-            except ValueError:
-                raise HTTPException(
-                    status_code=422,
-                    detail=f"Unknown workout category: {payload.workout_category}",
-                )
+        activity.workout_category = _parse_category(payload.workout_category)
     if "labels" in payload.model_fields_set:
         labels = payload.labels or []
-        bad = [lbl for lbl in labels if lbl not in _VALID_LABELS]
-        if bad:
-            raise HTTPException(status_code=422, detail=f"Unknown labels: {bad}")
-        # A label set by hand is the athlete's final word on this ride, so any
-        # suggestion still hanging over it is answered by the same edit (issue
-        # #63) — otherwise unticking a suggested label would leave the
-        # suggestion pending and the ride would be proposed all over again.
-        for label in _VALID_LABELS:
-            state = commute_service.suggestion_state(activity, label)
-            if state is None:
-                # Nothing was ever suggested for this label, so there is nothing
-                # to answer. Without this guard, hand-labelling a ride writes a
-                # suggestion entry out of thin air — `{"labels": ["race"]}` on
-                # an account with no rules at all would record a `race`
-                # suggestion, and `race` has no detector. The column means
-                # "labels openkoutsi thinks apply"; it must not become a log of
-                # what the athlete applied by hand.
-                continue
-            if label in labels:
-                if state != commute_service.STATE_ACCEPTED:
-                    commute_service.answer_suggestion(
-                        activity, label, commute_service.STATE_ACCEPTED
-                    )
-            else:
-                # Any answered-or-pending suggestion, not just a pending one.
-                # Un-ticking an *accepted* label is the athlete rejecting it
-                # just as much as un-ticking a pending one, and leaving it at
-                # `accepted` hides that rejection from `rule_feedback`, whose
-                # "this rule is too wide" signal counts dismissals. The same
-                # athlete action would otherwise produce different feedback
-                # depending on whether the client sent `labels` or
-                # `label_answers`.
-                if state != commute_service.STATE_DISMISSED:
-                    commute_service.answer_suggestion(
-                        activity, label, commute_service.STATE_DISMISSED
-                    )
-        activity.labels = labels
+        _check_labels(labels)
+        _set_labels(activity, labels)
     if "label_answers" in payload.model_fields_set:
         # Answering a suggestion without restating the whole label list. Accept
         # applies the label and records the answer in one write, so the two can
@@ -1385,41 +1521,8 @@ async def update_activity(
                 commute_service.remove_label(activity, label)
             commute_service.answer_suggestion(activity, label, answer)
     if "bike_id" in payload.model_fields_set:
-        # The athlete's correction of the automatic guess (issue #64). Stamping
-        # `manual` is the whole mechanism: without it the next reprocess or
-        # provider sync would put the guess straight back, which is precisely
-        # the failure this override exists to prevent.
-        if payload.bike_id is None:
-            # "None of mine" is a choice, so it is stamped like any other. It
-            # has to be: `(NULL, NULL)` is the exact predicate automapping
-            # reads as free to fill, so clearing without the marker would let
-            # the next reprocess or re-sync put the guess straight back — the
-            # one correction that did not survive the events this override
-            # exists to survive. The bike stays NULL, so no total moves.
-            #
-            # `delete_bike` deliberately writes both NULL instead: there the
-            # bike is gone and no choice was made, so there is nothing to
-            # record and automapping should be free to fill the gap.
-            activity.bike_id = None
-            activity.bike_source = garage_service.SOURCE_MANUAL
-            activity.bike_history_at = None
-        else:
-            bike = (
-                await session.execute(
-                    select(Bike).where(
-                        Bike.id == payload.bike_id, Bike.athlete_id == athlete.id
-                    )
-                )
-            ).scalar_one_or_none()
-            if bike is None:
-                raise HTTPException(status_code=404, detail="Bike not found")
-            # Retired and unclaimed bikes are deliberately accepted here even
-            # though they are hidden from the course picker: correcting an old
-            # ride onto the bike it was actually done on is the point of the
-            # override, and that bike is often exactly the one since sold.
-            activity.bike_id = bike.id
-            activity.bike_source = garage_service.SOURCE_MANUAL
-            activity.bike_history_at = None
+        bike = await _owned_bike(session, athlete, payload.bike_id)
+        _set_bike(activity, bike)
     if "notes" in payload.model_fields_set:
         activity.notes = payload.notes
     if "rpe" in payload.model_fields_set:
