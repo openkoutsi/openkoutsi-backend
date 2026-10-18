@@ -2994,6 +2994,57 @@
         }
       }
     },
+    "/api/activities/bulk": {
+      "post": {
+        "tags": [
+          "activities"
+        ],
+        "summary": "Apply labels, a bike or a workout category to many activities",
+        "description": "The same edit as ``PATCH /activities/{id}``, for a selection at once.\n\nEvery activity goes through the same helpers the single edit uses, so a\nlabel added here answers a pending suggestion and a bike set here is\nstamped ``manual`` exactly as it would be one ride at a time. All or\nnothing: everything is validated before the first row changes, and the\nwhole selection commits in one transaction.\n\nIds that are not the athlete's are reported back in ``not_found`` rather\nthan failing the request \u2014 a ride deleted in another tab while the\nselection was open should not block the other forty-nine.\n\n**Personal access token scope:** `activities:write`",
+        "operationId": "bulkUpdateActivities",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ActivityBulkUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActivityBulkUpdateResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "activities:write"
+        }
+      }
+    },
     "/api/activities/{activity_id}/analyze": {
       "post": {
         "tags": [
@@ -9054,6 +9105,83 @@
           "streaks"
         ],
         "title": "AchievementsResponse"
+      },
+      "ActivityBulkUpdate": {
+        "properties": {
+          "activity_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "maxItems": 1000,
+            "minItems": 1,
+            "title": "Activity Ids"
+          },
+          "add_labels": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Add Labels"
+          },
+          "remove_labels": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Remove Labels"
+          },
+          "workout_category": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Workout Category"
+          },
+          "bike_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bike Id"
+          }
+        },
+        "type": "object",
+        "required": [
+          "activity_ids"
+        ],
+        "title": "ActivityBulkUpdate",
+        "description": "One edit applied to many activities (``POST /api/activities/bulk``).\n\nLabels are *added* and *removed* rather than replaced: the selected rides\ncarry different labels, and \"make these commutes\" must not strip the race\nlabel off the one that was also a race. ``workout_category`` and\n``bike_id`` follow ``PATCH`` \u2014 omitted leaves each ride as it is, an\nexplicit ``null`` clears it (for a bike, \"none of mine\", stamped manual)."
+      },
+      "ActivityBulkUpdateResponse": {
+        "properties": {
+          "updated": {
+            "type": "integer",
+            "title": "Updated"
+          },
+          "not_found": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Not Found"
+          }
+        },
+        "type": "object",
+        "required": [
+          "updated",
+          "not_found"
+        ],
+        "title": "ActivityBulkUpdateResponse",
+        "description": "``updated`` activities were found and edited; ``not_found`` lists the ids\nthat are not this athlete's (or no longer exist) and were skipped."
       },
       "ActivityDetailResponse": {
         "properties": {

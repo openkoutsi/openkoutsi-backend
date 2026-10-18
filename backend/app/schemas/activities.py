@@ -84,6 +84,36 @@ class ActivityUpdate(BaseModel):
     bike_id: Optional[str] = None
 
 
+#: Most activities one bulk edit may name. A page of selections is tens; this
+#: is a ceiling against a runaway client, not a quota.
+BULK_UPDATE_MAX = 1000
+
+
+class ActivityBulkUpdate(BaseModel):
+    """One edit applied to many activities (``POST /api/activities/bulk``).
+
+    Labels are *added* and *removed* rather than replaced: the selected rides
+    carry different labels, and "make these commutes" must not strip the race
+    label off the one that was also a race. ``workout_category`` and
+    ``bike_id`` follow ``PATCH`` — omitted leaves each ride as it is, an
+    explicit ``null`` clears it (for a bike, "none of mine", stamped manual).
+    """
+
+    activity_ids: list[str] = Field(..., min_length=1, max_length=BULK_UPDATE_MAX)
+    add_labels: list[str] = Field(default_factory=list)
+    remove_labels: list[str] = Field(default_factory=list)
+    workout_category: Optional[str] = None
+    bike_id: Optional[str] = None
+
+
+class ActivityBulkUpdateResponse(BaseModel):
+    """``updated`` activities were found and edited; ``not_found`` lists the ids
+    that are not this athlete's (or no longer exist) and were skipped."""
+
+    updated: int
+    not_found: list[str]
+
+
 class FrontendAnalysisBody(BaseModel):
     analysis: str = Field(..., min_length=1)
 
