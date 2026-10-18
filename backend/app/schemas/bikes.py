@@ -169,3 +169,29 @@ class AssignHistoryResponse(BaseModel):
 
     scanned: int
     assigned: int
+
+
+class AssignHistoryBikePreview(BaseModel):
+    bike_id: str
+    bike_name: str
+    rides: int
+
+
+class AssignHistoryPreview(BaseModel):
+    """What ``POST /api/bikes/assign-history`` *would* do, read before doing it.
+
+    ``assignable`` is how many unassigned rides the pass would attach, broken
+    down per bike in ``bikes`` (largest first). ``revertable`` is how many rides
+    earlier passes attached that ``DELETE /api/bikes/assign-history`` would
+    take back.
+    """
+
+    assignable: int
+    bikes: list[AssignHistoryBikePreview]
+    revertable: int
+
+
+class RevertHistoryResponse(BaseModel):
+    """What ``DELETE /api/bikes/assign-history`` took back."""
+
+    reverted: int

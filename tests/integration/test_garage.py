@@ -847,6 +847,122 @@ class TestAssignHistory:
         assert after["bike_id"] == road["id"] != gravel["id"]
 
 
+class TestAssignHistoryPreview:
+    """The confirmation the garage shows before attaching anything: the count
+    has to be the count the pass then produces, and reading it changes nothing."""
+
+    async def test_it_counts_what_the_pass_would_attach(self, client, auth_headers):
+        ride = await _ride(client, auth_headers)
+        await _ride(client, auth_headers)
+        await _ride(client, auth_headers, sport_type="GravelRide")
+        await _ride(client, auth_headers, sport_type="Run")
+        await _ride(client, auth_headers, sport_type="VirtualRide")
+        road = await _create_bike(client, auth_headers, name="Road", default_sports=["Ride"])
+        gravel = await _create_bike(
+            client, auth_headers, name="Gravel", default_sports=["GravelRide"]
+        )
+
+        resp = await client.get("/api/bikes/assign-history", headers=auth_headers)
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {
+            "assignable": 3,
+            "bikes": [
+                {"bike_id": road["id"], "bike_name": "Road", "rides": 2},
+                {"bike_id": gravel["id"], "bike_name": "Gravel", "rides": 1},
+            ],
+            "revertable": 0,
+        }
+        # Read-only.
+        assert (await _get_activity(client, auth_headers, ride["id"]))["bike_id"] is None
+
+        resp = await client.post("/api/bikes/assign-history", headers=auth_headers)
+        assert resp.json()["assigned"] == 3
+
+    async def test_it_skips_rides_that_already_have_a_bike(self, client, auth_headers):
+        await _create_bike(client, auth_headers, default_sports=["Ride"])
+        await _ride(client, auth_headers)  # matched on arrival
+        resp = await client.get("/api/bikes/assign-history", headers=auth_headers)
+        assert resp.json() == {"assignable": 0, "bikes": [], "revertable": 0}
+
+    async def test_with_no_claims_it_counts_nothing(self, client, auth_headers):
+        await _ride(client, auth_headers)
+        await _create_bike(client, auth_headers)
+        resp = await client.get("/api/bikes/assign-history", headers=auth_headers)
+        assert resp.json() == {"assignable": 0, "bikes": [], "revertable": 0}
+
+
+class TestRevertHistory:
+    """Undoing "Attach past rides" takes back what that pass attached — and
+    nothing else: not rides matched as they arrived, not a hand correction."""
+
+    async def _attached(self, client, auth_headers):
+        old = await _ride(client, auth_headers, distance_m=30_000.0)
+        bike = await _create_bike(client, auth_headers, default_sports=["Ride"])
+        resp = await client.post("/api/bikes/assign-history", headers=auth_headers)
+        assert resp.json()["assigned"] == 1
+        return old, bike
+
+    async def test_it_takes_the_attached_rides_back(self, client, auth_headers):
+        old, bike = await self._attached(client, auth_headers)
+        preview = await client.get("/api/bikes/assign-history", headers=auth_headers)
+        assert preview.json()["revertable"] == 1
+
+        resp = await client.delete("/api/bikes/assign-history", headers=auth_headers)
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"reverted": 1}
+
+        after = await _get_activity(client, auth_headers, old["id"])
+        assert after["bike_id"] is None
+        assert after["bike_source"] is None
+        assert (await _get_bike(client, auth_headers, bike["id"]))["tracked_km"] == 0.0
+        preview = await client.get("/api/bikes/assign-history", headers=auth_headers)
+        assert preview.json()["revertable"] == 0
+        assert preview.json()["assignable"] == 1
+
+    async def test_it_leaves_rides_matched_on_arrival(self, client, auth_headers):
+        _old, bike = await self._attached(client, auth_headers)
+        fresh = await _ride(client, auth_headers)
+        assert fresh["bike_id"] == bike["id"]
+
+        resp = await client.delete("/api/bikes/assign-history", headers=auth_headers)
+        assert resp.json() == {"reverted": 1}
+        after = await _get_activity(client, auth_headers, fresh["id"])
+        assert after["bike_id"] == bike["id"]
+        assert after["bike_source"] == "auto"
+
+    async def test_it_leaves_a_hand_correction(self, client, auth_headers):
+        old, _bike = await self._attached(client, auth_headers)
+        other = await _create_bike(client, auth_headers, name="Other")
+        await client.patch(
+            f"/api/activities/{old['id']}", json={"bike_id": other["id"]}, headers=auth_headers
+        )
+
+        resp = await client.delete("/api/bikes/assign-history", headers=auth_headers)
+        assert resp.json() == {"reverted": 0}
+        after = await _get_activity(client, auth_headers, old["id"])
+        assert after["bike_id"] == other["id"]
+        assert after["bike_source"] == "manual"
+
+    async def test_a_ride_re_homed_since_is_no_longer_the_pass_s(
+        self, client, auth_headers
+    ):
+        """Narrowing the claim and handing the sport to another bike re-homes the
+        ride on its next reprocess; that write, not the pass, owns it now."""
+        old, road = await self._attached(client, auth_headers)
+        await client.patch(
+            f"/api/bikes/{road['id']}", json={"default_sports": []}, headers=auth_headers
+        )
+        gravel = await _create_bike(client, auth_headers, name="Gravel", default_sports=["Ride"])
+        resp = await client.post(
+            f"/api/activities/{old['id']}/reprocess", headers=auth_headers
+        )
+        assert resp.json()["bike_id"] == gravel["id"]
+
+        resp = await client.delete("/api/bikes/assign-history", headers=auth_headers)
+        assert resp.json() == {"reverted": 0}
+        assert (await _get_activity(client, auth_headers, old["id"]))["bike_id"] == gravel["id"]
+
+
 # ── Maintenance ────────────────────────────────────────────────────────────
 
 

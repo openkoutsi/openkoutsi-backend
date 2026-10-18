@@ -166,8 +166,11 @@ def test_migrated_schema_matches_the_orm(legacy):
         assert orm_columns == _columns(legacy, model.__tablename__)
     # `activities` is compared only on what this migration adds — the legacy
     # fixture builds a deliberately minimal one; see `_LEGACY_ACTIVITIES`.
+    # `bike_history_at` belongs to migration 037, not this one.
     orm_bike_columns = {
-        c.name for c in Activity.__table__.columns if c.name.startswith("bike")
+        c.name
+        for c in Activity.__table__.columns
+        if c.name.startswith("bike") and c.name != "bike_history_at"
     }
     assert orm_bike_columns == NEW_ACTIVITY_COLUMNS <= _columns(legacy, "activities")
 

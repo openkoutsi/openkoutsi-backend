@@ -1402,6 +1402,7 @@ async def update_activity(
             # record and automapping should be free to fill the gap.
             activity.bike_id = None
             activity.bike_source = garage_service.SOURCE_MANUAL
+            activity.bike_history_at = None
         else:
             bike = (
                 await session.execute(
@@ -1418,6 +1419,7 @@ async def update_activity(
             # override, and that bike is often exactly the one since sold.
             activity.bike_id = bike.id
             activity.bike_source = garage_service.SOURCE_MANUAL
+            activity.bike_history_at = None
     if "notes" in payload.model_fields_set:
         activity.notes = payload.notes
     if "rpe" in payload.model_fields_set:
