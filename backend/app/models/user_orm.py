@@ -689,35 +689,6 @@ class WahooWorkoutUpload(UserBase):
     )
 
 
-class HammerheadRouteUpload(UserBase):
-    """A course pushed to Hammerhead as a Karoo route (issue #69).
-
-    Route sync is push-only — the API has no route download — so this join
-    table is the whole of the link: it lets a re-push replace the route
-    (``PUT /routes/{id}/file``) instead of creating a duplicate, and lets
-    deleting the course delete the route we created. ``Course`` itself stays
-    untouched.
-    """
-
-    __tablename__ = "hammerhead_route_uploads"
-    __table_args__ = (
-        UniqueConstraint("athlete_id", "course_id", name="uq_hammerhead_route_course"),
-    )
-
-    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
-    athlete_id: Mapped[str] = mapped_column(
-        String, ForeignKey("athletes.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    course_id: Mapped[str] = mapped_column(
-        String, ForeignKey("courses.id", ondelete="CASCADE"), nullable=False
-    )
-    hammerhead_route_id: Mapped[str] = mapped_column(String, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_now, onupdate=_now
-    )
-
-
 class ImportJob(UserBase):
     """One bulk import of activity files — an archive, or a pile of them (issue #36).
 

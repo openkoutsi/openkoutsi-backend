@@ -61,7 +61,7 @@ Most cycling coaching tools are cloud-only SaaS. openkoutsi runs on your own har
 ### Integrations
 
 - **Strava and Wahoo** — OAuth connection, history import, webhook updates and zone sync
-- **Hammerhead (Karoo)** — the first two-way integration: activities sync in (history import + webhooks); FTP, weight, heart rate and zones push out to the Karoo (manually, or automatically on change), and courses can be sent to the Karoo as routes
+- **Hammerhead (Karoo)** — OAuth connection, history import from the Karoo's own FIT files, and webhook updates through an HMAC-verified bridge. One-way: nothing is sent back to the Karoo
 - **Email** — optional, provider-agnostic (Lettermint or EuroMail)
 
 ## Architecture

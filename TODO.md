@@ -94,8 +94,8 @@ Issue #69. Also optional — an instance that leaves these unset simply does not
 offer Hammerhead.
 
 1. **Register an app** in the Hammerhead developer dashboard. Redirect URI:
-   `https://<API_URL>/api/integrations/hammerhead/callback`. Scopes:
-   `activity:read route:read route:write workout:write metrics:write`.
+   `https://<API_URL>/api/integrations/hammerhead/callback`. Scope:
+   `activity:read` (read-only; nothing is pushed to the Karoo).
 2. **Deploy `hammerhead_bridge/`** behind public HTTPS (see DEPLOY.md §5b) and set
    its webhook URL (`https://<bridge-host>/webhook`) and webhook secret in the
    dashboard.

@@ -1,10 +1,9 @@
 """
 Hammerhead (Karoo) API provider implementation (issue #69).
 
-The first *two-way* integration: the Karoo is the source of truth for
-**activities**, which are pulled, and openkoutsi is the source of truth for
-**routes** and **training metrics**, which are pushed to it. The API offers no
-way round that split — there is no ``GET /metrics`` and no route download.
+One-way, like Strava and Wahoo: activities are pulled from the Karoo and
+nothing is sent back. The API could also take routes, workouts and training
+metrics; that is deliberately left out to keep the integration simple.
 
 OAuth 2.0 authorization code, the shape :class:`BaseProviderClient` models. The
 token response carries ``user_id`` directly, so unlike Wahoo there is no
@@ -24,10 +23,9 @@ one in — detail call plus FIT — only when the sync pipeline is actually goin
 to work on it. The FIT is cached so the import that follows does not fetch it a
 second time.
 
-**Partial grants.** Users may grant a subset of the scopes we request, and the
-documented token response carries no ``scope`` field, so nothing can be gated
-at connect time. Every capability degrades on its own 403 instead
-(:class:`ScopeNotGranted`).
+**A withheld grant.** The documented token response carries no ``scope``
+field, so a connection whose athlete declined ``activity:read`` is only found
+out on its first 403 (:class:`ScopeNotGranted`).
 """
 
 from __future__ import annotations
@@ -57,16 +55,8 @@ _TOKEN_URL = f"{_AUTH_BASE}/oauth/token"
 _DEAUTHORIZE_URL = f"{_AUTH_BASE}/oauth/deauthorize"
 _API_BASE = f"{_HOST}/v1/api"
 
-#: ``activity:read`` also covers receiving webhooks. ``workout:write`` is asked
-#: for now so the follow-up workout push does not need every athlete to
-#: reconnect.
-SCOPES: tuple[str, ...] = (
-    "activity:read",
-    "route:read",
-    "route:write",
-    "workout:write",
-    "metrics:write",
-)
+#: Read-only. ``activity:read`` also covers receiving webhooks.
+SCOPES: tuple[str, ...] = ("activity:read",)
 
 #: The API's own maximum, and real pagination metadata comes back with it — so
 #: the walk ends on ``currentPage >= totalPages`` without probing an empty page.
@@ -165,44 +155,6 @@ def _token_result(data: dict, *, fallback_refresh: str | None = None) -> dict:
     }
 
 
-# ── Metrics shape ──────────────────────────────────────────────────────────
-
-
-def _zones(zones: list[dict] | None) -> list[dict] | None:
-    """Ours are ``{low, high, name}``, theirs ``{min, max, name}`` — a rename.
-
-    Their array has no length constraint, so every zone goes as it is.
-    """
-    if not zones:
-        return None
-    out = []
-    for zone in zones:
-        entry = {"min": zone.get("low"), "max": zone.get("high")}
-        if zone.get("name"):
-            entry["name"] = zone["name"]
-        out.append(entry)
-    return out
-
-
-def build_metrics_payload(athlete) -> dict:
-    """The ``POST /metrics`` body for an athlete, with unset fields omitted.
-
-    ``POST /metrics`` is a partial update — "any unprovided fields are left
-    editable by the user" — so a ``None`` is left out rather than sent as a
-    null. That is deliberate: a field the athlete has not set here stays one
-    they own on the Karoo.
-    """
-    payload = {
-        "weightInKilograms": athlete.weight_kg,
-        "powerFtp": athlete.ftp,
-        "maxHr": athlete.max_hr,
-        "restingHr": athlete.resting_hr,
-        "heartRateZones": _zones(athlete.hr_zones),
-        "powerZones": _zones(athlete.power_zones),
-    }
-    return {k: v for k, v in payload.items() if v is not None}
-
-
 class HammerheadClient(BaseProviderClient):
     PROVIDER_NAME = "hammerhead"
 
@@ -259,11 +211,10 @@ class HammerheadClient(BaseProviderClient):
 
     @staticmethod
     async def deauthorize(access_token: str) -> None:  # type: ignore[override]
-        """Unlink the account.
+        """Unlink the account (best-effort; the caller swallows errors).
 
-        Destructive on Hammerhead's side: it also deletes every route and
-        workout this client pushed for the athlete. The UI warns before calling
-        the disconnect that ends here.
+        Hammerhead also deletes any routes and workouts this client created,
+        which, since nothing is ever pushed, is none.
         """
         async with provider_client(PROVIDER, timeout=_TIMEOUT) as client:
             await client.post(
@@ -459,80 +410,3 @@ class HammerheadClient(BaseProviderClient):
             avg_speed_ms=(sum(speed) / len(speed) / 3.6) if speed else None,
             avg_cadence=float(profile.avgCadence) if profile.avgCadence else None,
         )
-
-    # ── Metrics push ───────────────────────────────────────────────────────
-
-    async def push_metrics(self, access_token: str, metrics: dict) -> dict:
-        """``POST /metrics`` — a partial update; see :func:`build_metrics_payload`."""
-        async with provider_client(PROVIDER, timeout=_TIMEOUT) as client:
-            r = await client.post(
-                f"{_API_BASE}/metrics",
-                headers={"Authorization": f"Bearer {access_token}"},
-                json=metrics,
-            )
-            _check_scope(r, "metrics:write")
-            r.raise_for_status()
-            try:
-                return r.json()
-            except ValueError:
-                return {}
-
-    # ── Route push ─────────────────────────────────────────────────────────
-
-    async def upload_route(
-        self,
-        access_token: str,
-        *,
-        gpx_bytes: bytes,
-        filename: str,
-        existing_id: str | None = None,
-    ) -> str:
-        """Create (``POST /routes/file``) or replace (``PUT /routes/{id}/file``) a route.
-
-        Returns the route id. A ``PUT`` to a route the athlete has since deleted
-        on the Karoo answers 404; that falls through to a fresh ``POST`` rather
-        than failing the push.
-        """
-        headers = {"Authorization": f"Bearer {access_token}"}
-        files = {"file": (filename, gpx_bytes, "application/gpx+xml")}
-        async with provider_client(PROVIDER, timeout=_TIMEOUT) as client:
-            if existing_id:
-                r = await client.put(
-                    f"{_API_BASE}/routes/{existing_id}/file", headers=headers, files=files
-                )
-                if r.status_code != 404:
-                    _check_scope(r, "route:write")
-                    r.raise_for_status()
-                    return str(_route_id(r) or existing_id)
-            r = await client.post(
-                f"{_API_BASE}/routes/file", headers=headers, files=files
-            )
-            _check_scope(r, "route:write")
-            r.raise_for_status()
-            route_id = _route_id(r)
-        if not route_id:
-            raise ValueError("Hammerhead returned no route id")
-        return str(route_id)
-
-    async def delete_route(self, access_token: str, route_id: str) -> None:
-        """``DELETE /routes/{id}`` — allowed, since this client created it."""
-        async with provider_client(PROVIDER, timeout=_TIMEOUT) as client:
-            r = await client.delete(
-                f"{_API_BASE}/routes/{route_id}",
-                headers={"Authorization": f"Bearer {access_token}"},
-            )
-        if r.status_code == 404:
-            return  # already gone on the Karoo side
-        _check_scope(r, "route:write")
-        r.raise_for_status()
-
-
-def _route_id(response: httpx.Response) -> str | None:
-    try:
-        data = response.json()
-    except ValueError:
-        return None
-    if isinstance(data, dict):
-        value = data.get("id")
-        return str(value) if value is not None else None
-    return None

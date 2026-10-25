@@ -825,18 +825,15 @@ tab.
 
 ## 5b. Hammerhead Bridge (optional)
 
-Hammerhead (Karoo) is a **two-way** integration (issue #69): activities are pulled
-from the Karoo, while training metrics (FTP, weight, max/resting HR, zones) and
-courses are pushed *to* it. Connect, history sync and disconnect use the generic
+Hammerhead (Karoo) is a **one-way** integration (issue #69): activities are pulled
+from the Karoo and nothing is written back. Connect, history sync and disconnect use the generic
 `/api/integrations/hammerhead/*` routes once `HAMMERHEAD_CLIENT_ID` /
 `HAMMERHEAD_CLIENT_SECRET` are set; the bridge only adds automatic import of new
 rides via webhooks.
 
 Register an app at the Hammerhead developer dashboard with the redirect URI
-`https://<API_URL>/api/integrations/hammerhead/callback`. The app requests the
-scopes `activity:read route:read route:write workout:write metrics:write`.
-Athletes may grant a subset; each feature then fails on its own with
-`insufficient_scope` rather than the connection failing.
+`https://<API_URL>/api/integrations/hammerhead/callback`. The app requests
+only the `activity:read` scope, which also covers webhooks.
 
 ### Setup
 
@@ -871,12 +868,6 @@ bridge cannot persist is lost. The bridge therefore only verifies, queues and an
 200; the main app polls it every 60 seconds and makes the provider calls itself. Keep
 the bridge up — downtime means missed rides until the athlete presses *Sync*, which
 catches up on everything.
-
-### Disconnecting
-
-Disconnecting Hammerhead calls `/oauth/deauthorize`, which **also deletes every route
-and workout openkoutsi pushed** to that athlete's account. The web app warns before it
-disconnects.
 
 ---
 
@@ -1018,6 +1009,4 @@ A per-user table `wahoo_workout_uploads` tracks pushed workouts for idempotent r
 New, optional settings: `HAMMERHEAD_CLIENT_ID`, `HAMMERHEAD_CLIENT_SECRET`,
 `HAMMERHEAD_BRIDGE_URL`, `HAMMERHEAD_BRIDGE_SECRET` on the backend, and a new
 `hammerhead_bridge` service (see [5b](#5b-hammerhead-bridge-optional)). Nothing changes
-for instances that leave them unset. Migration `038_hammerhead_route_uploads` adds the
-per-user `hammerhead_route_uploads` table, which links a course to the Karoo route it was
-pushed as; it is applied automatically on start.
+for instances that leave them unset, and there is no database migration.

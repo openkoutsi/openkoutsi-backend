@@ -425,20 +425,6 @@ async def update_athlete(
     await session.commit()
     await session.refresh(athlete)
 
-    # Opt-in (issue #69): a change to anything the Karoo holds goes there too.
-    # Backgrounded and never raising, so the save does not wait on Hammerhead.
-    metrics_changed = any(
-        value is not None
-        for value in (
-            body.weight_kg, body.ftp, body.max_hr, body.resting_hr,
-            body.hr_zones, body.power_zones,
-        )
-    )
-    if metrics_changed:
-        from backend.app.api.hammerhead import auto_push_metrics
-
-        await auto_push_metrics(ctx.user_id, athlete)
-
     if rules_changed:
         # Editing a rule re-evaluates rather than freezing what already fired
         # (issue #63): a narrowed rule withdraws the suggestions it no longer

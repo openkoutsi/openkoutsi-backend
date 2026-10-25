@@ -4,7 +4,7 @@ Unit tests for HammerheadClient (issue #69).
 Every request goes through an ``httpx.MockTransport`` patched in for
 ``provider_client``, so these exercise the real request shapes and response
 handling: normalisation, pagination termination, throttling, partial-scope
-403s, completion from a FIT, and the metrics/route pushes.
+403s and completion from a FIT.
 """
 import json
 import urllib.parse
@@ -18,7 +18,6 @@ from backend.app.services.providers import hammerhead as hh
 from backend.app.services.providers.hammerhead import (
     HammerheadClient,
     ScopeNotGranted,
-    build_metrics_payload,
     sport_type_for,
 )
 from backend.app.services.providers.throttling import ProviderThrottled
@@ -85,7 +84,7 @@ _SUMMARY = {
 
 
 class TestOAuth:
-    def test_authorize_url_requests_every_scope(self, monkeypatch):
+    def test_authorize_url_requests_read_access_only(self, monkeypatch):
         monkeypatch.setattr(hh.settings, "hammerhead_client_id", "cid")
         url = HammerheadClient().get_oauth_url("st", "https://api/cb")
         parsed = urllib.parse.urlparse(url)
@@ -95,9 +94,8 @@ class TestOAuth:
         assert q["client_id"] == ["cid"]
         assert q["state"] == ["st"]
         assert q["response_type"] == ["code"]
-        assert set(q["scope"][0].split()) == {
-            "activity:read", "route:read", "route:write", "workout:write", "metrics:write",
-        }
+        # One-way: nothing is ever written to the athlete's Hammerhead account.
+        assert q["scope"] == ["activity:read"]
 
     async def test_exchange_takes_user_id_from_the_token_response(self, router):
         r = router({
@@ -295,83 +293,3 @@ def test_every_mapped_sport_counts_as_cycling():
 
     for raw in hh._SPORT_TYPES:
         assert sport_type_for(raw) in CYCLING_SPORT_TYPES
-
-
-# ── Metrics push ─────────────────────────────────────────────────────────────
-
-
-class _Athlete:
-    weight_kg = 72.5
-    ftp = 260
-    max_hr = 188
-    resting_hr = None
-    hr_zones = [{"low": 0, "high": 120, "name": "Z1"}, {"low": 120, "high": 999, "name": "Z2"}]
-    power_zones = None
-
-
-class TestMetrics:
-    def test_payload_renames_zones_and_omits_unset_fields(self):
-        payload = build_metrics_payload(_Athlete())
-        assert payload == {
-            "weightInKilograms": 72.5,
-            "powerFtp": 260,
-            "maxHr": 188,
-            "heartRateZones": [
-                {"min": 0, "max": 120, "name": "Z1"},
-                {"min": 120, "max": 999, "name": "Z2"},
-            ],
-        }
-        assert "restingHr" not in payload
-        assert "powerZones" not in payload
-
-    async def test_push_posts_json(self, router):
-        r = router({("POST", "/v1/api/metrics"): httpx.Response(200, json={})})
-        await HammerheadClient().push_metrics("tok", {"powerFtp": 250})
-        assert json.loads(r.requests[0].content) == {"powerFtp": 250}
-
-    async def test_push_without_the_scope(self, router):
-        router({("POST", "/v1/api/metrics"): httpx.Response(403)})
-        with pytest.raises(ScopeNotGranted) as exc_info:
-            await HammerheadClient().push_metrics("tok", {"powerFtp": 250})
-        assert exc_info.value.scope == "metrics:write"
-
-
-# ── Route push ───────────────────────────────────────────────────────────────
-
-
-class TestRoutes:
-    async def test_first_push_creates(self, router):
-        r = router({("POST", "/v1/api/routes/file"): httpx.Response(200, json={"id": "r1"})})
-        route_id = await HammerheadClient().upload_route(
-            "tok", gpx_bytes=b"<gpx/>", filename="c.gpx"
-        )
-        assert route_id == "r1"
-        assert b'filename="c.gpx"' in r.requests[0].content
-
-    async def test_re_push_replaces(self, router):
-        r = router({("PUT", "/v1/api/routes/r1/file"): httpx.Response(200, json={"id": "r1"})})
-        route_id = await HammerheadClient().upload_route(
-            "tok", gpx_bytes=b"<gpx/>", filename="c.gpx", existing_id="r1"
-        )
-        assert route_id == "r1"
-        assert [q.method for q in r.requests] == ["PUT"]
-
-    async def test_re_push_of_a_route_deleted_on_the_karoo_creates_anew(self, router):
-        r = router({
-            ("PUT", "/v1/api/routes/r1/file"): httpx.Response(404),
-            ("POST", "/v1/api/routes/file"): httpx.Response(200, json={"id": "r2"}),
-        })
-        route_id = await HammerheadClient().upload_route(
-            "tok", gpx_bytes=b"<gpx/>", filename="c.gpx", existing_id="r1"
-        )
-        assert route_id == "r2"
-        assert [q.method for q in r.requests] == ["PUT", "POST"]
-
-    async def test_push_without_the_scope(self, router):
-        router({("POST", "/v1/api/routes/file"): httpx.Response(403)})
-        with pytest.raises(ScopeNotGranted):
-            await HammerheadClient().upload_route("tok", gpx_bytes=b"x", filename="c.gpx")
-
-    async def test_delete_tolerates_an_already_deleted_route(self, router):
-        router({("DELETE", "/v1/api/routes/r1"): httpx.Response(404)})
-        await HammerheadClient().delete_route("tok", "r1")
