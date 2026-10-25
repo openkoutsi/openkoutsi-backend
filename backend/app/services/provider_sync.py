@@ -8,11 +8,12 @@ ActivitySource row, and (re)populate the Activity's metrics if the new source
 has higher priority than whatever was there before.
 
 Priority (lower = higher priority):
-  1  upload   — manual FIT upload
-  2  wahoo    — Wahoo cloud sync with a FIT file
-  3  strava   — Strava API (stream-based)
-  4  wahoo    — Wahoo cloud sync without a FIT file (blank)
-  5  manual   — manually entered activity
+  1  upload      — manual FIT upload
+  2  wahoo       — Wahoo cloud sync with a FIT file
+  2  hammerhead  — Hammerhead (Karoo) sync with a FIT file
+  3  strava      — Strava API (stream-based)
+  4  wahoo       — Wahoo cloud sync without a FIT file (blank)
+  5  manual      — manually entered activity, or an unknown provider
 """
 
 import asyncio
@@ -55,7 +56,7 @@ from openkoutsi.fit_processing import (
     build_auto_intervals,
     compute_interval_stats,
 )
-from backend.app.services.providers.base import NormalizedActivity
+from backend.app.services.providers.base import BaseProviderClient, NormalizedActivity
 from backend.app.services.providers.registry import PROVIDERS
 from backend.app.services.providers.throttling import (
     ProviderThrottled,
@@ -322,11 +323,17 @@ async def activity_create_guard(
 # ── Priority ──────────────────────────────────────────────────────────────────
 
 
+#: Providers whose FIT is the device's own recording, and so outranks Strava's
+#: stream copy of the same ride. Without its entry here Hammerhead fell to the
+#: unknown-provider rank, and a ride present on both was populated from Strava.
+_DEVICE_FIT_PROVIDERS = frozenset({"wahoo", "hammerhead"})
+
+
 def _source_priority(provider: str, has_fit: bool) -> int:
     """Lower number = higher priority."""
     if provider == "upload":
         return 1
-    if provider == "wahoo" and has_fit:
+    if provider in _DEVICE_FIT_PROVIDERS and has_fit:
         return 2
     if provider == "strava":
         return 3
@@ -353,6 +360,7 @@ def _winning_priority(activity: Activity) -> int:
 _REFRESH_LOOKAHEAD: dict[str, timedelta] = {
     "strava": timedelta(minutes=30),
     "wahoo": timedelta(minutes=1),
+    "hammerhead": timedelta(minutes=5),
 }
 _DEFAULT_REFRESH_LOOKAHEAD = timedelta(minutes=1)
 
@@ -992,6 +1000,13 @@ async def _import_all_pages(
                         # a deadline sized for a FIT download, and a merely slow
                         # holder is how the same lease reaches two callers.
                         await activity_pacer.wait()
+                        completed = await _complete_activity(
+                            client, access_token, norm, provider_name=provider_name
+                        )
+                        if completed is None:
+                            consecutive_unresolved += 1
+                            continue
+                        norm = completed
                         async with activity_create_guard(session, user_id, athlete.id):
                             repaired = await _repair_source(
                                 act,
@@ -1025,6 +1040,17 @@ async def _import_all_pages(
                 # walk back to where it left off at full speed.
                 page_settled = False
                 await activity_pacer.wait()
+
+                # A sparse listing is filled in here, before the duplicate
+                # window reads its start time — and only here, so skipping an
+                # activity that is already imported never pays for it.
+                completed = await _complete_activity(
+                    client, access_token, norm, provider_name=provider_name
+                )
+                if completed is None:
+                    consecutive_unresolved += 1
+                    continue
+                norm = completed
 
                 # ── Find-or-create under the activity-create guard ────────────
                 # The attach branch below downloads a FIT inside the block, which is
@@ -1316,6 +1342,49 @@ def _track_resolution(src: ActivitySource, consecutive_unresolved: int) -> int:
     through a history never accumulates into a stop.
     """
     return 0 if src.streams_fetched_at is not None else consecutive_unresolved + 1
+
+
+async def _complete_activity(
+    client, access_token: str, norm: NormalizedActivity, *, provider_name: str
+) -> NormalizedActivity | None:
+    """The listed activity, completed by its provider — or None to skip it.
+
+    See :meth:`BaseProviderClient.complete_activity`. A rate limit raises and
+    ends the walk like any other; anything else skips this one activity, which
+    is left unimported so the next sync asks again. Nothing is written for a
+    skipped activity, so there is nothing to repair.
+
+    A client that is not a :class:`BaseProviderClient` — a duck-typed stand-in
+    — is taken to list complete records, which is what the default does.
+    """
+    if not isinstance(client, BaseProviderClient):
+        return norm
+    try:
+        return await call_with_retry_after(
+            client.complete_activity,
+            access_token,
+            norm,
+            provider=provider_name,
+            what=f"details for {norm.external_id}",
+        )
+    except ProviderThrottled as exc:
+        if exc.is_rate_limit:
+            raise
+        log.warning(
+            "Could not complete %s/%s (%s) — leaving it for a later sync",
+            provider_name,
+            norm.external_id,
+            exc,
+        )
+    except Exception as exc:
+        log.warning(
+            "Could not complete %s/%s (%s: %s) — leaving it for a later sync",
+            provider_name,
+            norm.external_id,
+            type(exc).__name__,
+            exc,
+        )
+    return None
 
 
 async def _prefetch_fit(

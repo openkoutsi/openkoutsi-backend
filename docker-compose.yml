@@ -40,7 +40,21 @@ services:
       - "8085:8085"
     restart: unless-stopped
 
+  hammerhead_bridge:
+    build:
+      context: hammerhead_bridge
+      dockerfile: Dockerfile
+    env_file: hammerhead_bridge/.env
+    environment:
+      DATABASE_PATH: /data/bridge.db
+    volumes:
+      - hammerhead_bridge_data:/data
+    ports:
+      - "8086:8086"
+    restart: unless-stopped
+
 volumes:
   backend_data:
   bridge_data:
   wahoo_bridge_data:
+  hammerhead_bridge_data:

@@ -3281,7 +3281,7 @@
           "integrations"
         ],
         "summary": "Callback",
-        "description": "Exchange OAuth code for tokens and persist the connection.\n\nStrava / Wahoo redirect the user's browser here, so Bearer auth is not\navailable. We identify the user via the signed JWT in the ``state`` param.",
+        "description": "Exchange OAuth code for tokens and persist the connection.\n\nThe provider redirects the user's browser here, so Bearer auth is not\navailable. We identify the user via the signed JWT in the ``state`` param.\n\nA refusal on the consent screen arrives as ``?error=access_denied&state=\u2026``\nwith no ``code`` (Hammerhead documents it; the others behave alike). That\nis the athlete's answer, not a failure, and is sent back as ``denied``.",
         "operationId": "callback_api_integrations__provider__callback_get",
         "parameters": [
           {
@@ -3294,21 +3294,44 @@
             }
           },
           {
-            "name": "code",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Code"
-            }
-          },
-          {
             "name": "state",
             "in": "query",
             "required": true,
             "schema": {
               "type": "string",
               "title": "State"
+            }
+          },
+          {
+            "name": "code",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Code"
+            }
+          },
+          {
+            "name": "error",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Error"
             }
           }
         ],
@@ -4805,6 +4828,37 @@
         },
         "x-personal-access-token": {
           "allowed": false
+        }
+      }
+    },
+    "/api/integrations/hammerhead/push-metrics": {
+      "post": {
+        "tags": [
+          "integrations"
+        ],
+        "summary": "Push FTP, weight, heart rate and zones to the Karoo",
+        "description": "Send the athlete's training metrics to their Hammerhead account.\n\nA partial update: only the metrics set here are sent, and the rest stay\nwhatever the athlete set on the Karoo. Answers 403 ``insufficient_scope``\nwhen the athlete did not grant ``metrics:write``.\n\n**Personal access token scope:** `integrations:write`",
+        "operationId": "pushHammerheadMetrics",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MetricsPushResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "integrations:write"
         }
       }
     },
@@ -8678,6 +8732,108 @@
         },
         "x-personal-access-token": {
           "allowed": false
+        }
+      }
+    },
+    "/api/courses/{course_id}/push/hammerhead": {
+      "get": {
+        "tags": [
+          "courses"
+        ],
+        "summary": "Whether this course has been pushed to Hammerhead",
+        "description": "\n\n**Personal access token scope:** `courses:read`",
+        "operationId": "getCourseHammerheadRoute",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "course_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Course Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HammerheadRouteResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "courses:read"
+        }
+      },
+      "post": {
+        "tags": [
+          "courses"
+        ],
+        "summary": "Send a course to the Karoo as a route",
+        "description": "Push the course's original GPX to the athlete's Hammerhead account.\n\nThe athlete's own file, to the athlete's own device account: ``Course``\nalready keeps the original GPX encrypted at rest, and that exact file is\nwhat goes \u2014 ``.gpx`` is accepted as is, so nothing is converted. A re-push\nreplaces the route rather than adding a duplicate. Behind the course-recon\nswitch like every route here, so it disappears with the capability.\n\n**Personal access token scope:** `courses:write`",
+        "operationId": "pushCourseToHammerhead",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "course_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Course Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HammerheadRouteResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-personal-access-token": {
+          "allowed": true,
+          "scope": "courses:write"
         }
       }
     },
@@ -13444,6 +13600,31 @@
         "type": "object",
         "title": "HTTPValidationError"
       },
+      "HammerheadRouteResponse": {
+        "properties": {
+          "route_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Route Id"
+          },
+          "updated": {
+            "type": "boolean",
+            "title": "Updated",
+            "default": false
+          }
+        },
+        "type": "object",
+        "required": [
+          "route_id"
+        ],
+        "title": "HammerheadRouteResponse"
+      },
       "ImportFileResult": {
         "properties": {
           "filename": {
@@ -15251,6 +15432,22 @@
         "type": "object",
         "title": "ManualActivityCreate",
         "description": "Payload for logging a workout by hand (no device recording / FIT file).\n\nEvery field is optional so users can jot down as much or as little as they\nremember, but a completely empty submission is rejected."
+      },
+      "MetricsPushResponse": {
+        "properties": {
+          "pushed": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Pushed"
+          }
+        },
+        "type": "object",
+        "required": [
+          "pushed"
+        ],
+        "title": "MetricsPushResponse"
       },
       "OpenDuration": {
         "properties": {

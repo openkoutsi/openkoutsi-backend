@@ -200,7 +200,7 @@ class TestQuotaHeadroom:
     ):
         resp = await client.get("/api/admin/quota/headroom", headers=auth_headers)
         services = {s["service"]: s for s in resp.json()["services"]}
-        assert set(services) == {"strava", "wahoo"}
+        assert set(services) == {"strava", "wahoo", "hammerhead"}
         assert services["wahoo"]["observed_at"] is None
         assert services["wahoo"]["windows"] == []
 

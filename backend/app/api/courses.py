@@ -12,10 +12,13 @@ encrypted GPX exist for re-analysis, Stage 2 and the GDPR export — not for
 the API, the LLM, or MCP.
 """
 import asyncio
+import logging
 import uuid
 from datetime import datetime, timezone
 
+import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
+from pydantic import BaseModel
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,8 +27,14 @@ from backend.app.core.deps import get_ctx_session_athlete
 from backend.app.core.limiter import limiter
 from backend.app.core.scopes import pat_forbidden, pat_scopes
 from backend.app.db.registry import get_registry_session
-from backend.app.models.registry_orm import InstanceSettings
-from backend.app.models.user_orm import Bike, Course, CourseSegment, Goal
+from backend.app.models.registry_orm import InstanceSettings, ProviderConnection
+from backend.app.models.user_orm import (
+    Bike,
+    Course,
+    CourseSegment,
+    Goal,
+    HammerheadRouteUpload,
+)
 from backend.app.models.user_orm import CourseTrack as CourseTrackRow
 from backend.app.schemas.courses import (
     CoursePlanBody,
@@ -37,11 +46,15 @@ from backend.app.schemas.courses import (
 from backend.app.schemas.pagination import Page, PageParams, paginate_params
 from backend.app.services import course_analysis, course_surface
 from backend.app.services.instance_features import course_recon_enabled
+from backend.app.services.provider_sync import ensure_fresh_token
+from backend.app.services.providers.hammerhead import HammerheadClient, ScopeNotGranted
 from backend.app.services.stranded_runs import pending_timed_out, settle_course_plan
 from backend.app.services.surface_matcher import surface_matching_configured
 from openkoutsi import surface as surface_math
 from openkoutsi.course import BikeParams, RiderParams
 from openkoutsi.gpx import ActivityParseError
+
+log = logging.getLogger(__name__)
 
 async def require_course_recon(
     registry_session: AsyncSession = Depends(get_registry_session),
@@ -299,9 +312,14 @@ async def get_course(
 async def delete_course(
     course_id: str,
     ctx_athlete=Depends(get_ctx_session_athlete),
+    registry_session: AsyncSession = Depends(get_registry_session),
 ):
     ctx, session, athlete = ctx_athlete
     course = await _get_owned_course(course_id, athlete, session)
+    # The Karoo route it was pushed as goes with it (issue #69).
+    await _delete_pushed_route(
+        course.id, athlete.id, ctx.user_id, session, registry_session
+    )
     # The blob first — rows and file must go together, and the file is the
     # copy delete exists to remove.
     course_analysis.delete_course_blob(course, ctx.user_id)
@@ -501,3 +519,141 @@ async def trigger_course_plan(
         generate_course_plan_bg(athlete.id, course.id, ctx.user_id, body.locale, run_id)
     )
     return {"status": "pending"}
+
+
+# ── Push to Hammerhead (issue #69) ─────────────────────────────────────────
+
+
+class HammerheadRouteResponse(BaseModel):
+    #: The Karoo route this course was pushed as, or None if it never was.
+    route_id: str | None
+    #: True when this push replaced an earlier one rather than creating a route.
+    updated: bool = False
+
+
+async def _hammerhead_token(user_id: str, registry_session: AsyncSession) -> str | None:
+    """A fresh Hammerhead access token, or None when not connected."""
+    conn = (
+        await registry_session.execute(
+            select(ProviderConnection).where(
+                ProviderConnection.user_id == user_id,
+                ProviderConnection.provider == "hammerhead",
+            )
+        )
+    ).scalar_one_or_none()
+    if conn is None:
+        return None
+    return await ensure_fresh_token(conn, registry_session)
+
+
+async def _route_upload(course_id: str, athlete_id: str, session: AsyncSession):
+    return (
+        await session.execute(
+            select(HammerheadRouteUpload).where(
+                HammerheadRouteUpload.athlete_id == athlete_id,
+                HammerheadRouteUpload.course_id == course_id,
+            )
+        )
+    ).scalar_one_or_none()
+
+
+def _route_filename(name: str) -> str:
+    safe = "".join(c if c.isalnum() or c in " -_" else "_" for c in name).strip()
+    return f"{safe[:80] or 'course'}.gpx"
+
+
+@router.get("/{course_id}/push/hammerhead", response_model=HammerheadRouteResponse,
+            operation_id="getCourseHammerheadRoute",
+            summary="Whether this course has been pushed to Hammerhead")
+async def get_course_hammerhead_route(
+    course_id: str,
+    ctx_athlete=Depends(get_ctx_session_athlete),
+):
+    ctx, session, athlete = ctx_athlete
+    await _get_owned_course(course_id, athlete, session)
+    upload = await _route_upload(course_id, athlete.id, session)
+    return HammerheadRouteResponse(route_id=upload.hammerhead_route_id if upload else None)
+
+
+@router.post("/{course_id}/push/hammerhead", response_model=HammerheadRouteResponse,
+             operation_id="pushCourseToHammerhead",
+             summary="Send a course to the Karoo as a route")
+@limiter.limit("30/hour")
+async def push_course_to_hammerhead(
+    request: Request,
+    course_id: str,
+    ctx_athlete=Depends(get_ctx_session_athlete),
+    registry_session: AsyncSession = Depends(get_registry_session),
+):
+    """Push the course's original GPX to the athlete's Hammerhead account.
+
+    The athlete's own file, to the athlete's own device account: ``Course``
+    already keeps the original GPX encrypted at rest, and that exact file is
+    what goes — ``.gpx`` is accepted as is, so nothing is converted. A re-push
+    replaces the route rather than adding a duplicate. Behind the course-recon
+    switch like every route here, so it disappears with the capability.
+    """
+    ctx, session, athlete = ctx_athlete
+    course = await _get_owned_course(course_id, athlete, session)
+
+    access_token = await _hammerhead_token(ctx.user_id, registry_session)
+    if access_token is None:
+        raise HTTPException(status_code=400, detail="hammerhead is not connected")
+
+    try:
+        gpx_bytes = await asyncio.to_thread(
+            course_analysis.read_course_blob, course, ctx.user_id
+        )
+    except (OSError, ValueError):
+        raise HTTPException(status_code=409, detail="The course file is not available")
+
+    upload = await _route_upload(course.id, athlete.id, session)
+    try:
+        route_id = await HammerheadClient().upload_route(
+            access_token,
+            gpx_bytes=gpx_bytes,
+            filename=_route_filename(course.name),
+            existing_id=upload.hammerhead_route_id if upload else None,
+        )
+    except ScopeNotGranted:
+        raise HTTPException(status_code=403, detail="insufficient_scope")
+    except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 401:
+            raise HTTPException(status_code=403, detail="insufficient_scope")
+        raise HTTPException(status_code=502, detail="Hammerhead API error during push")
+    except (httpx.HTTPError, ValueError):
+        raise HTTPException(status_code=502, detail="Hammerhead API error during push")
+
+    updated = upload is not None and upload.hammerhead_route_id == route_id
+    if upload is None:
+        upload = HammerheadRouteUpload(athlete_id=athlete.id, course_id=course.id,
+                                       hammerhead_route_id=route_id)
+        session.add(upload)
+    upload.hammerhead_route_id = route_id
+    await session.commit()
+    return HammerheadRouteResponse(route_id=route_id, updated=updated)
+
+
+async def _delete_pushed_route(
+    course_id: str, athlete_id: str, user_id: str,
+    session: AsyncSession, registry_session: AsyncSession,
+) -> None:
+    """Remove the Karoo route a course was pushed as, best-effort.
+
+    Allowed because this client created it. A failure is logged and the course
+    is deleted anyway: the athlete asked for *our* copy to go, and a route left
+    on the Karoo is theirs to delete there.
+    """
+    upload = await _route_upload(course_id, athlete_id, session)
+    if upload is None:
+        return
+    try:
+        access_token = await _hammerhead_token(user_id, registry_session)
+        if access_token is not None:
+            await HammerheadClient().delete_route(access_token, upload.hammerhead_route_id)
+    except Exception:
+        log.warning("Could not delete Hammerhead route for course %s", course_id,
+                    exc_info=True)
+    await session.execute(
+        delete(HammerheadRouteUpload).where(HammerheadRouteUpload.id == upload.id)
+    )

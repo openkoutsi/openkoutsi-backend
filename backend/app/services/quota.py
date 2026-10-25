@@ -43,7 +43,7 @@ from .api_usage import OUTCOME_RATE_LIMITED
 #: Services whose responses we look for a quota reading on. Wahoo is listed even
 #: though it publishes none: "this provider does not report a quota" is a
 #: different, and more useful, answer than the service simply being absent.
-QUOTA_SERVICES: tuple[str, ...] = ("strava", "wahoo")
+QUOTA_SERVICES: tuple[str, ...] = ("strava", "wahoo", "hammerhead")
 
 #: Strava's short window. It is aligned to the quarter hour rather than being a
 #: rolling 15 minutes from the observation — which is what makes rollover

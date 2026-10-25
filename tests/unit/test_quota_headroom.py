@@ -244,6 +244,6 @@ class TestAllHeadroom:
     async def test_covers_every_watched_service(self, api_usage_db):
         await _record(api_usage_db)
         services = await all_headroom(now=OBSERVED_AT)
-        assert [s.service for s in services] == ["strava", "wahoo"]
+        assert [s.service for s in services] == ["strava", "wahoo", "hammerhead"]
         assert services[0].has_observation is True
         assert services[1].has_observation is False
