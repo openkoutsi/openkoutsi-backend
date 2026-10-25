@@ -5,7 +5,9 @@ Integration tests for Hammerhead through the generic integration routes (issue #
 * ``/connect`` answers 501 unconfigured, and the authorize URL otherwise;
 * the OAuth callback's deny redirect (``?error=access_denied``, no ``code``).
 """
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
+
+from jose import jwt
 
 from backend.app.core.config import settings
 
@@ -46,4 +48,20 @@ class TestGenericRoutes:
             "/api/integrations/hammerhead/callback?state=whatever",
             follow_redirects=False,
         )
+        assert resp.headers["location"].endswith("/profile?hammerhead=error")
+
+    async def test_a_token_response_without_a_user_id_is_an_error(self, client):
+        state = jwt.encode(
+            {"sub": "test-user-00000000", "purpose": "hammerhead_oauth"},
+            settings.secret_key,
+            algorithm="HS256",
+        )
+        with patch(
+            "backend.app.services.providers.hammerhead.HammerheadClient.exchange_code",
+            new=AsyncMock(side_effect=ValueError("Hammerhead token response has no user id")),
+        ):
+            resp = await client.get(
+                f"/api/integrations/hammerhead/callback?code=c&state={state}",
+                follow_redirects=False,
+            )
         assert resp.headers["location"].endswith("/profile?hammerhead=error")

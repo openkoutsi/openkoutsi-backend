@@ -114,6 +114,26 @@ class TestOAuth:
         form = urllib.parse.parse_qs(r.requests[0].content.decode())
         assert form["grant_type"] == ["authorization_code"]
 
+    async def test_exchange_without_a_user_id_refuses_the_connection(self, router):
+        """No id means every webhook would be acked as an unknown user — fail loudly."""
+        router({
+            ("POST", "/v1/auth/oauth/token"): httpx.Response(200, json={
+                "access_token": "at", "refresh_token": "rt", "expires_in": 3600,
+            }),
+        })
+        with pytest.raises(ValueError, match="no user id .*access_token"):
+            await HammerheadClient.exchange_code("code", "https://api/cb")
+
+    async def test_refresh_may_omit_the_user_id(self, router):
+        """The stored id is kept when a refresh returns none (integrations.py)."""
+        router({
+            ("POST", "/v1/auth/oauth/token"): httpx.Response(
+                200, json={"access_token": "at2", "refresh_token": "rt2", "expires_in": 60}
+            ),
+        })
+        tokens = await HammerheadClient.refresh_access_token("rt")
+        assert tokens["provider_athlete_id"] == ""
+
     async def test_refresh_keeps_old_refresh_token_when_none_returned(self, router):
         router({
             ("POST", "/v1/auth/oauth/token"): httpx.Response(

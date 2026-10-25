@@ -266,3 +266,96 @@ class TestWebhook:
         with p[0], p[1], p[2], p[3], p[4], p[5]:
             await process_hammerhead_webhook({"activityId": "h1", "userId": _HH_USER})
         assert (await session.execute(select(Activity))).scalars().all() == []
+
+
+# ── Review fixes: nothing that cannot recover may cost a ride ─────────────
+
+
+class _Fileless(_FakeHammerhead):
+    """Activities whose id starts with ``nofile`` have no FIT; ``junk`` ones an unreadable one."""
+
+    async def download_fit_file(self, access_token, external_id):
+        if external_id.startswith("nofile"):
+            self.fit_downloads += 1
+            return None
+        if external_id.startswith("junk"):
+            self.fit_downloads += 1
+            return b"not a fit file"
+        return await super().download_fit_file(access_token, external_id)
+
+
+class TestFilelessActivities:
+    async def test_a_run_of_fileless_activities_is_not_an_outage(self, session):
+        """More than the outage limit of no-file activities in a row must not stop the walk."""
+        from backend.app.models.user_orm import ProviderSyncState
+        from backend.app.services.provider_sync import _MAX_CONSECUTIVE_UNRESOLVED
+
+        athlete = await _athlete(session)
+        listing = [_sparse(f"nofile-{i}") for i in range(_MAX_CONSECUTIVE_UNRESOLVED + 5)]
+        listing += [_sparse(f"junk-{i}") for i in range(3)]
+        listing.append(_sparse("good"))
+
+        count, _ = await _sync(session, athlete, _Fileless(pages=[listing]))
+
+        assert count == 1, "the ride after the fileless run must still be imported"
+        src = (await session.execute(select(ActivitySource))).scalar_one()
+        assert src.external_id == "good"
+        state = (await session.execute(select(ProviderSyncState))).scalar_one()
+        assert state.stop_reason != ProviderSyncState.STOP_PROVIDER_OUTAGE
+
+    async def test_an_unreadable_fit_is_a_lookup_error(self):
+        with pytest.raises(LookupError):
+            await _Fileless().complete_activity("tok", _sparse("junk-1"))
+
+
+class TestWebhookRobustness:
+    async def test_one_karoo_account_on_two_users_imports_for_both(
+        self, session, registry_session
+    ):
+        await _seed(session, registry_session)
+        second = Athlete(global_user_id="hh-second-user", ftp_tests=[])
+        session.add(second)
+        await session.commit()
+        registry_session.add(ProviderConnection(
+            user_id="hh-second-user", provider="hammerhead",
+            provider_athlete_id=_HH_USER, access_token="tok2", refresh_token="rt2",
+        ))
+        await registry_session.flush()
+
+        p = _webhook_patches(session, registry_session, _FakeHammerhead())
+        with p[0], p[1], p[2], p[3], p[4], p[5]:
+            await process_hammerhead_webhook({"activityId": "h1", "userId": _HH_USER})
+
+        owners = {
+            a.athlete_id for a in (await session.execute(select(Activity))).scalars()
+        }
+        assert len(owners) == 2, "both linked users get the ride"
+
+    async def test_two_activities_in_the_window_attach_to_the_closest(
+        self, session, registry_session
+    ):
+        """A ride Strava split in two must not make the webhook raise and retire."""
+        athlete = await _seed(session, registry_session)
+        far = Activity(athlete_id=athlete.id, name="far", sport_type="Ride",
+                       start_time=FIT_START + timedelta(minutes=4), status="processed")
+        near = Activity(athlete_id=athlete.id, name="near", sport_type="Ride",
+                        start_time=FIT_START + timedelta(seconds=30), status="processed")
+        session.add_all([far, near])
+        await session.flush()
+        session.add_all([
+            ActivitySource(activity_id=far.id, provider="strava", external_id="s-far",
+                           streams_fetched_at=datetime.now(timezone.utc)),
+            ActivitySource(activity_id=near.id, provider="strava", external_id="s-near",
+                           streams_fetched_at=datetime.now(timezone.utc)),
+        ])
+        await session.commit()
+
+        p = _webhook_patches(session, registry_session, _FakeHammerhead())
+        with p[0], p[1], p[2], p[3], p[4], p[5]:
+            await process_hammerhead_webhook({"activityId": "h1", "userId": _HH_USER})
+
+        hh = (await session.execute(
+            select(ActivitySource).where(ActivitySource.provider == "hammerhead")
+        )).scalar_one()
+        assert hh.activity_id == near.id
+        assert len((await session.execute(select(Activity))).scalars().all()) == 2

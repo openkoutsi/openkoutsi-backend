@@ -265,7 +265,9 @@ async def callback(
     redirect_uri = f"{settings.api_url}/api/integrations/{provider}/callback"
     try:
         tokens = await client_cls.exchange_code(code, redirect_uri)  # type: ignore[call-arg]
-    except httpx.HTTPStatusError:
+    except (httpx.HTTPStatusError, ValueError):
+        # ValueError: a token response we cannot use, such as Hammerhead's
+        # without a user id — refused rather than stored half-working.
         log.exception("%s code exchange failed", provider)
         return RedirectResponse(url=f"{redirect_base}/profile?{provider}=error")
 

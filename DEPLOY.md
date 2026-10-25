@@ -869,6 +869,11 @@ bridge cannot persist is lost. The bridge therefore only verifies, queues and an
 the bridge up — downtime means missed rides until the athlete presses *Sync*, which
 catches up on everything.
 
+An event the main app fails to import is retried from the bridge's queue for about
+2¼ hours (`MAX_DELIVERY_ATTEMPTS`, default 12, backing off from 1 to 15 minutes).
+One that runs out is logged by the bridge at error level with the Hammerhead user and
+activity id; that athlete pressing *Sync* recovers it.
+
 ---
 
 ## 6. systemd Services

@@ -142,11 +142,22 @@ def _int(value: Any) -> int | None:
         return None
 
 
-def _token_result(data: dict, *, fallback_refresh: str | None = None) -> dict:
+def _token_result(
+    data: dict, *, fallback_refresh: str | None = None, require_user_id: bool = False
+) -> dict:
     expires_at = int(datetime.now(timezone.utc).timestamp()) + int(
         data.get("expires_in", 3600)
     )
     user_id = data.get("user_id") or data.get("userId") or ""
+    if require_user_id and not user_id:
+        # The id is how a webhook finds its athlete. Connecting without one
+        # would "work" while every new ride was acked as an unknown user and
+        # lost — so refuse the connection, and say which keys did arrive.
+        raise ValueError(
+            "Hammerhead token response has no user id (keys: "
+            + ", ".join(sorted(data))
+            + ")"
+        )
     return {
         "access_token": data["access_token"],
         "refresh_token": data.get("refresh_token") or fallback_refresh or "",
@@ -192,7 +203,7 @@ class HammerheadClient(BaseProviderClient):
                 },
             )
             r.raise_for_status()
-            return _token_result(r.json())
+            return _token_result(r.json(), require_user_id=True)
 
     @staticmethod
     async def refresh_access_token(refresh_token: str) -> dict:  # type: ignore[override]
@@ -351,7 +362,8 @@ class HammerheadClient(BaseProviderClient):
         the sport and the athlete's own name for the ride; failing to get it is
         not fatal, because the FIT names a sport too.
 
-        Raises ``LookupError`` when the activity has no file to date it by.
+        Raises ``LookupError`` when the activity has no file to date it by, or
+        one that cannot be read — both lasting answers, not outages.
         """
         from openkoutsi.fit import summarizeWorkout
         from openkoutsi.fit_processing import resolve_sport_type
@@ -359,7 +371,13 @@ class HammerheadClient(BaseProviderClient):
         fit_bytes = await self.download_fit_file(access_token, norm.external_id)
         if fit_bytes is None:
             raise LookupError(f"Hammerhead activity {norm.external_id} has no FIT file")
-        profile = await asyncio.to_thread(summarizeWorkout, io.BytesIO(fit_bytes))
+        try:
+            profile = await asyncio.to_thread(summarizeWorkout, io.BytesIO(fit_bytes))
+        except Exception as exc:
+            # The same bytes will fail the same way next time: a lasting answer.
+            raise LookupError(
+                f"Hammerhead activity {norm.external_id} has an unreadable FIT file"
+            ) from exc
 
         detail: dict = {}
         try:

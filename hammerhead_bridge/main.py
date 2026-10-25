@@ -51,9 +51,13 @@ from sqlalchemy import event
 
 # ── Settings ──────────────────────────────────────────────────────────────
 
-#: Nack backoff, doubling from two seconds, so the attempt budget spans about
-#: half an hour rather than the four minutes immediate redelivery gave it.
-_NACK_BASE_BACKOFF_S = 2.0
+#: Nack backoff: 1, 2, 4 and 8 minutes, then every 15. With the default
+#: `max_delivery_attempts` that keeps a failing event alive for about two and a
+#: quarter hours. Measured in minutes on purpose: the main app polls once a
+#: minute, so a backoff in seconds is spent between two polls and adds nothing.
+#: Hammerhead never redelivers, so this queue is the only retry there is — it
+#: has to outlast a provider incident or an expired token, not just a blip.
+_NACK_BASE_BACKOFF_S = 60.0
 _NACK_MAX_BACKOFF_S = 900.0
 
 _INSECURE_DEFAULT = "changeme"
@@ -83,7 +87,8 @@ class Settings(BaseSettings):
     claim_visibility_seconds: int = 900
 
     # After this many attempts an event is retired rather than served again.
-    max_delivery_attempts: int = 5
+    # Twelve, with the backoff above, is about 2¼ hours (see _NACK_BASE_BACKOFF_S).
+    max_delivery_attempts: int = 12
 
     @model_validator(mode="after")
     def _validate_bridge_secret(self) -> "Settings":
@@ -506,6 +511,48 @@ async def claim_events(request: Request):
             WebhookEvent.claim_expires_at.is_(None),
             WebhookEvent.claim_expires_at <= now,
         )
+        # Retire anything that has spent its last attempt, so it neither holds
+        # a `max_queue_events` slot for seven days nor reads as "unclaimed" to
+        # operators. First, and only once it is no longer in flight: done after
+        # the claim, it caught the event just handed out for its final try and
+        # cleared that token, so the last attempt was never delivered; and done
+        # only when something was claimable, an exhausted event alone in the
+        # queue was never retired at all.
+        #
+        # Each one is named in the log: a retired event is a ride that will not
+        # arrive on its own, and the ids are what an operator needs to have
+        # that athlete re-sync.
+        exhausted = (
+            await session.execute(
+                select(WebhookEvent.id, WebhookEvent.owner_id, WebhookEvent.payload)
+                .where(
+                    WebhookEvent.claimed_at.is_(None),
+                    or_(*free),
+                    WebhookEvent.attempts >= settings.max_delivery_attempts,
+                )
+            )
+        ).all()
+        if exhausted:
+            for event_id, owner_id, payload in exhausted:
+                log.error(
+                    "Retiring event %s after %d failed attempts: Hammerhead user %s, "
+                    "activity %s — it will not be delivered; a manual sync recovers it",
+                    event_id,
+                    settings.max_delivery_attempts,
+                    owner_id,
+                    (payload or {}).get("activityId"),
+                )
+            await session.execute(
+                update(WebhookEvent)
+                .where(
+                    WebhookEvent.id.in_([row[0] for row in exhausted]),
+                    WebhookEvent.claimed_at.is_(None),
+                )
+                .values(claimed_at=now, claim_token=None, claim_expires_at=None)
+                .execution_options(synchronize_session=False)
+            )
+            await session.commit()
+
         candidates = (
             await session.execute(
                 select(WebhookEvent.id)
@@ -535,25 +582,6 @@ async def claim_events(request: Request):
             )
             .execution_options(synchronize_session=False)
         )
-        # Retire anything that has spent its last attempt. Dropping out of the
-        # `WHERE` above would retire it silently, leaving `claimed_at` unset —
-        # so it would hold a `max_queue_events` slot for seven days and be
-        # reported to operators as "unclaimed".
-        retired = await session.execute(
-            update(WebhookEvent)
-            .where(
-                WebhookEvent.claimed_at.is_(None),
-                WebhookEvent.attempts >= settings.max_delivery_attempts,
-            )
-            .values(claimed_at=now, claim_token=None, claim_expires_at=None)
-            .execution_options(synchronize_session=False)
-        )
-        if retired.rowcount:
-            log.error(
-                "Retired %d event(s) after %d failed delivery attempts",
-                retired.rowcount,
-                settings.max_delivery_attempts,
-            )
         await session.commit()
 
         # Only the rows that actually carry our token — another consumer may
@@ -612,9 +640,9 @@ async def nack_event(event_id: str, request: Request):
     """Known failure: return the event to the queue, after a backoff.
 
     The backoff is what makes the attempt budget mean anything. Releasing
-    immediately put the event back on the next poll, so five attempts spanned
-    four minutes — shorter than the provider incidents and expired tokens it
-    exists for. Doubling from two seconds spreads them over about half an hour.
+    immediately put the event back on the next poll. The delay doubles from a
+    minute up to fifteen, so the default twelve attempts span about 2¼ hours —
+    see ``_NACK_BASE_BACKOFF_S`` for why minutes rather than seconds.
 
     No new column: a future `claim_expires_at` with `claim_token` cleared
     already reads as "not deliverable yet" to the claim query.

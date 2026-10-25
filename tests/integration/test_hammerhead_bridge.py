@@ -237,3 +237,60 @@ class TestPollerRoundTrip:
         assert body["provider"] == "hammerhead"
         outcomes = {row["outcome"]: row["count"] for row in body["stats"]}
         assert outcomes == {"accepted": 1, "rejected": 1}
+
+
+class TestRetryBudget:
+    """Hammerhead never redelivers, so the queue's retries must outlast an incident."""
+
+    def test_the_budget_spans_hours_not_minutes(self):
+        attempts = bridge_module.Settings(hammerhead_bridge_secret="b" * 32).max_delivery_attempts
+        delays = [
+            min(bridge_module._NACK_BASE_BACKOFF_S * 2 ** (n - 1), bridge_module._NACK_MAX_BACKOFF_S)
+            for n in range(1, attempts + 1)
+        ]
+        # Every delay at least one poll interval, so none is wasted between polls.
+        assert min(delays) >= 60
+        assert sum(delays) >= 2 * 3600
+
+    async def test_a_nack_waits_at_least_a_poll(self, bridge_client, patched_bridge):
+        await _deliver(bridge_client)
+        await _poll(AsyncMock(side_effect=RuntimeError("down")))
+        event = (await _queued(patched_bridge[1]))[0]
+        wait = (
+            event.claim_expires_at.replace(tzinfo=None)
+            - event.received_at.replace(tzinfo=None)
+        ).total_seconds()
+        assert wait >= 59
+
+    async def test_a_retired_event_is_named_in_the_log(
+        self, bridge_client, patched_bridge, caplog
+    ):
+        from sqlalchemy import update as sa_update
+
+        await _deliver(bridge_client)
+        async with patched_bridge[1]() as s:
+            await s.execute(sa_update(WebhookEvent).values(
+                attempts=bridge_module.settings.max_delivery_attempts
+            ))
+            await s.commit()
+        with caplog.at_level("ERROR", logger=bridge_module.log.name):
+            resp = await bridge_client.post(
+                "/events/claim", headers={"Authorization": f"Bearer {BRIDGE_SECRET}"}
+            )
+        assert resp.json() == []
+        assert "hh-user-1" in caplog.text and "act-123" in caplog.text
+
+    async def test_the_last_attempt_is_actually_delivered(self, bridge_client, patched_bridge):
+        """Retiring after the claim used to swallow the final try before anyone saw it."""
+        from sqlalchemy import update as sa_update
+
+        await _deliver(bridge_client)
+        async with patched_bridge[1]() as s:
+            await s.execute(sa_update(WebhookEvent).values(
+                attempts=bridge_module.settings.max_delivery_attempts - 1
+            ))
+            await s.commit()
+        resp = await bridge_client.post(
+            "/events/claim", headers={"Authorization": f"Bearer {BRIDGE_SECRET}"}
+        )
+        assert len(resp.json()) == 1

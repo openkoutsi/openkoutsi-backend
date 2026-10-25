@@ -995,16 +995,20 @@ async def _import_all_pages(
                     # attach path, because the repair can replace this activity's
                     # streams wholesale.
                     if existing_src.streams_fetched_at is None:
+                        was_settled = page_settled
                         page_settled = False
                         # Paced *outside* the guard: sleeping inside one spends
                         # a deadline sized for a FIT download, and a merely slow
                         # holder is how the same lease reaches two callers.
                         await activity_pacer.wait()
-                        completed = await _complete_activity(
+                        completed, final = await _complete_activity(
                             client, access_token, norm, provider_name=provider_name
                         )
                         if completed is None:
-                            consecutive_unresolved += 1
+                            if final:
+                                page_settled = was_settled
+                            else:
+                                consecutive_unresolved += 1
                             continue
                         norm = completed
                         async with activity_create_guard(session, user_id, athlete.id):
@@ -1038,17 +1042,25 @@ async def _import_all_pages(
                 # (issue #68). The skip above is not, and is deliberately not
                 # paced: a run resuming through history it already holds must
                 # walk back to where it left off at full speed.
+                was_settled = page_settled
                 page_settled = False
                 await activity_pacer.wait()
 
                 # A sparse listing is filled in here, before the duplicate
                 # window reads its start time — and only here, so skipping an
                 # activity that is already imported never pays for it.
-                completed = await _complete_activity(
+                completed, final = await _complete_activity(
                     client, access_token, norm, provider_name=provider_name
                 )
                 if completed is None:
-                    consecutive_unresolved += 1
+                    # An activity the provider has no usable file for is its
+                    # final answer, not an outage: counting it would let a run of
+                    # them stop every backfill in the same place, and leaving the
+                    # page unsettled would stop the resume jump over it.
+                    if final:
+                        page_settled = was_settled
+                    else:
+                        consecutive_unresolved += 1
                     continue
                 norm = completed
 
@@ -1346,27 +1358,36 @@ def _track_resolution(src: ActivitySource, consecutive_unresolved: int) -> int:
 
 async def _complete_activity(
     client, access_token: str, norm: NormalizedActivity, *, provider_name: str
-) -> NormalizedActivity | None:
-    """The listed activity, completed by its provider — or None to skip it.
+) -> tuple[NormalizedActivity | None, bool]:
+    """The listed activity completed by its provider, and whether a skip is final.
+
+    Returns ``(completed, final)``. ``completed`` is None when the activity is
+    skipped; ``final`` then says whether that is the provider's lasting answer —
+    a ``LookupError`` (no usable file) or another definitive refusal — rather
+    than a failure the next sync may get past. Only the second kind counts
+    toward the walk's outage stop.
 
     See :meth:`BaseProviderClient.complete_activity`. A rate limit raises and
-    ends the walk like any other; anything else skips this one activity, which
-    is left unimported so the next sync asks again. Nothing is written for a
-    skipped activity, so there is nothing to repair.
+    ends the walk like any other. Nothing is written for a skipped activity, so
+    there is nothing to repair.
 
     A client that is not a :class:`BaseProviderClient` — a duck-typed stand-in
     — is taken to list complete records, which is what the default does.
     """
     if not isinstance(client, BaseProviderClient):
-        return norm
+        return norm, True
     try:
-        return await call_with_retry_after(
+        completed = await call_with_retry_after(
             client.complete_activity,
             access_token,
             norm,
             provider=provider_name,
             what=f"details for {norm.external_id}",
         )
+        return completed, True
+    except LookupError as exc:
+        log.info("Skipping %s/%s: %s", provider_name, norm.external_id, exc)
+        return None, True
     except ProviderThrottled as exc:
         if exc.is_rate_limit:
             raise
@@ -1384,7 +1405,8 @@ async def _complete_activity(
             type(exc).__name__,
             exc,
         )
-    return None
+        return None, is_definitive(exc)
+    return None, False
 
 
 async def _prefetch_fit(

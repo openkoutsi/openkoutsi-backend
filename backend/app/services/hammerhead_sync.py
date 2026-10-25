@@ -48,6 +48,11 @@ log = logging.getLogger(__name__)
 PROVIDER = "hammerhead"
 
 
+def _aware(dt: datetime) -> datetime:
+    """SQLite hands datetimes back naive; every one stored here is UTC."""
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
 def _ids(payload: dict) -> tuple[str, str] | None:
     """``(activity_id, user_id)`` from a webhook payload, or None if malformed."""
     if not isinstance(payload, dict):
@@ -67,9 +72,14 @@ async def process_hammerhead_webhook(payload: dict) -> None:
     so the poller nacks the event and the bridge serves it again after a
     backoff: Hammerhead itself never redelivers, so the bridge's queue is the
     only second chance an event gets.
+
+    Nothing stops two openkoutsi accounts linking the same Karoo account, so the
+    event is imported for *every* matching connection. One user's failure does
+    not cost the other theirs: each is tried, and the first error is raised
+    afterwards so the event is retried — harmlessly for whoever already has it,
+    since the import is idempotent.
     """
     from backend.app.db.registry import _RegistrySessionLocal
-    from backend.app.db.user_session import get_user_session_factory, init_user_db
 
     ids = _ids(payload)
     if ids is None:
@@ -78,19 +88,47 @@ async def process_hammerhead_webhook(payload: dict) -> None:
     activity_id, hh_user_id = ids
 
     async with _RegistrySessionLocal() as reg_session:
-        conn = (
+        conn_ids = (
             await reg_session.execute(
-                select(ProviderConnection).where(
+                select(ProviderConnection.id).where(
                     ProviderConnection.provider == PROVIDER,
                     ProviderConnection.provider_athlete_id == hh_user_id,
                 )
             )
-        ).scalar_one_or_none()
-        if conn is None:
-            log.warning("Hammerhead webhook for unknown user %s — ignoring", hh_user_id)
-            return
-        user_id = conn.user_id
-        access_token = await ensure_fresh_token(conn, reg_session)
+        ).scalars().all()
+    if not conn_ids:
+        log.warning("Hammerhead webhook for unknown user %s — ignoring", hh_user_id)
+        return
+    if len(conn_ids) > 1:
+        log.warning(
+            "Hammerhead user %s is linked to %d accounts — importing for each",
+            hh_user_id,
+            len(conn_ids),
+        )
+
+    first_error: Exception | None = None
+    for conn_id in conn_ids:
+        try:
+            # A registry session per connection, closed before the import, as
+            # the other webhook paths do: the import can wait on a lease.
+            async with _RegistrySessionLocal() as reg_session:
+                conn = await reg_session.get(ProviderConnection, conn_id)
+                if conn is None:
+                    continue
+                user_id = conn.user_id
+                access_token = await ensure_fresh_token(conn, reg_session)
+            await _import_for_connection(activity_id, user_id, access_token)
+        except Exception as exc:
+            log.exception(
+                "Hammerhead activity %s failed for connection %s", activity_id, conn_id
+            )
+            first_error = first_error or exc
+    if first_error is not None:
+        raise first_error
+
+
+async def _import_for_connection(activity_id: str, user_id: str, access_token: str) -> None:
+    from backend.app.db.user_session import get_user_session_factory, init_user_db
 
     await init_user_db(user_id)
     async with get_user_session_factory(user_id)() as session:
@@ -161,19 +199,28 @@ async def _import_for_user(
         if await _already_imported(session, athlete.id, activity_id):
             return
 
-        existing_act = (
-            await session.execute(
-                select(Activity).where(
-                    Activity.athlete_id == athlete.id,
-                    Activity.start_time >= norm.start_time - _DUPLICATE_WINDOW,
-                    Activity.start_time <= norm.start_time + _DUPLICATE_WINDOW,
+        # The window can hold more than one activity — a ride Strava split in
+        # two lands as two — and raising on that would retire an event that
+        # never comes back. So take every candidate that is not already a Karoo
+        # ride, and attach to the closest.
+        candidates = [
+            act
+            for act in (
+                await session.execute(
+                    select(Activity).where(
+                        Activity.athlete_id == athlete.id,
+                        Activity.start_time >= norm.start_time - _DUPLICATE_WINDOW,
+                        Activity.start_time <= norm.start_time + _DUPLICATE_WINDOW,
+                    )
                 )
-            )
-        ).scalar_one_or_none()
-        if existing_act is not None and any(
-            s.provider == PROVIDER for s in existing_act.sources
-        ):
-            existing_act = None  # two distinct Karoo rides close in time
+            ).scalars().all()
+            if not any(src.provider == PROVIDER for src in act.sources)
+        ]
+        existing_act = min(
+            candidates,
+            key=lambda act: abs((_aware(act.start_time) - norm.start_time).total_seconds()),
+            default=None,
+        )
 
         if existing_act is not None:
             new_src = ActivitySource(
