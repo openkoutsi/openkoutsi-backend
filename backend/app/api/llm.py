@@ -84,6 +84,7 @@ from backend.app.services.llm_access import (
 from backend.app.services.llm_client import (
     apply_body_extras,
     merge_llm_headers,
+    message_text,
     preset_map,
     resolve_llm,
 )
@@ -309,7 +310,7 @@ async def _probe_llm_endpoint(
             error="The endpoint responded but the reply was not in the expected chat-completion format.",
         )
 
-    reply_text = (reply or "").strip()
+    reply_text = message_text(reply).strip()
     if not reply_text:
         return LlmTestResponse(
             ok=False, base_url=base_url, model_configured=model, prompt_sent=_TEST_PROMPT,

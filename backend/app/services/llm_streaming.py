@@ -51,6 +51,7 @@ from .llm_client import (
     ResolvedLlm,
     apply_body_extras,
     merge_llm_headers,
+    message_text,
     raise_for_llm_status,
     resolve_llm_config,
     temperature_param,
@@ -245,7 +246,7 @@ async def stream_completion_events(
                     continue
                 if not isinstance(delta, dict):
                     continue
-                content = delta.get("content")
+                content = message_text(delta.get("content"))
                 if content:
                     yield TextDelta(content)
                 for fragment in _tool_call_deltas(delta):

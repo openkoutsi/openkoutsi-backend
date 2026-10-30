@@ -470,6 +470,32 @@ def is_tool_calling_unsupported_error(exc: httpx.HTTPStatusError) -> bool:
     return any(marker in body for marker in _TOOLS_UNSUPPORTED_MARKERS)
 
 
+def message_text(content: Any) -> str:
+    """Flatten a chat-completion ``content`` value into plain text.
+
+    Most OpenAI-compatible servers return a string, but some (notably gateways
+    in front of reasoning models) return a list of content parts such as
+    ``[{"type": "thinking", ...}, {"type": "text", "text": "..."}]``. Only the
+    ``text`` parts are kept, so thinking/reasoning blocks never leak into the
+    reply. ``None`` and anything unrecognised become ``""``.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif (
+                isinstance(part, dict)
+                and part.get("type", "text") in ("text", "output_text")
+                and isinstance(part.get("text"), str)
+            ):
+                parts.append(part["text"])
+        return "".join(parts)
+    return ""
+
+
 def extract_json(text: str) -> str:
     """Strip markdown code fences if present and return the raw JSON string."""
     text = text.strip()
@@ -587,7 +613,7 @@ async def call_llm(
 
     data = resp.json()
     usage = data.get("usage") if isinstance(data, dict) else None
-    return data["choices"][0]["message"]["content"], usage
+    return message_text(data["choices"][0]["message"]["content"]), usage
 
 
 async def call_llm_with_optional_schema(

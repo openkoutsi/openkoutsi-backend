@@ -72,6 +72,20 @@ class TestLlmTestConnection:
         assert data["response_text"] == "Hello! I'm here."
         assert data["http_status"] == 200
 
+    async def test_content_parts_list_reply(self, client, auth_headers):
+        """Some gateways return ``content`` as a list of parts; it used to 500."""
+        await _configure_llm(client, auth_headers)
+        completion = {"choices": [{"message": {"role": "assistant", "content": [
+            {"type": "thinking", "thinking": "The user wants a greeting."},
+            {"type": "text", "text": "Hello there!"},
+        ]}}]}
+        with patch("httpx.AsyncClient", return_value=_mock_httpx_client(json_body=completion)()):
+            resp = await client.post("/api/llm/test-connection", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["response_text"] == "Hello there!"
+
     async def test_empty_reply_is_not_ok(self, client, auth_headers):
         await _configure_llm(client, auth_headers)
         completion = {"choices": [{"message": {"role": "assistant", "content": "   "}}]}
