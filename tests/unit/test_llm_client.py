@@ -16,6 +16,7 @@ import pytest
 from backend.app.services.llm_client import (
     call_llm,
     is_response_format_unsupported_error,
+    message_text,
     is_tool_calling_unsupported_error,
     raise_for_llm_status,
     temperature_param,
@@ -215,3 +216,23 @@ class TestIsToolCallingUnsupportedError:
             request=resp.request, response=resp,
         )
         assert is_tool_calling_unsupported_error(exc) is False
+
+
+class TestMessageText:
+    def test_plain_string_passes_through(self):
+        assert message_text("hi") == "hi"
+
+    def test_none_and_unknown_become_empty(self):
+        assert message_text(None) == ""
+        assert message_text(42) == ""
+
+    def test_content_parts_keep_only_text(self):
+        parts = [
+            {"type": "thinking", "thinking": "hmm"},
+            {"type": "reasoning", "text": "secret"},
+            {"type": "text", "text": "Hello "},
+            "there",
+            {"type": "output_text", "text": "!"},
+            {"type": "image_url", "image_url": {"url": "x"}},
+        ]
+        assert message_text(parts) == "Hello there!"
