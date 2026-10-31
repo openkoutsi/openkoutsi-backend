@@ -36,7 +36,7 @@ from backend.app.services.provider_sync import (
     sync_lease_name,
     sync_provider_activities,
 )
-from backend.app.services.providers.registry import PROVIDERS
+from backend.app.services.providers.registry import PROVIDERS, provider_configured
 from openkoutsi.zones import (
     HR_ZONE_COUNT,
     HR_ZONE_NAMES,
@@ -113,12 +113,7 @@ def _decode_state(state: str, provider: str) -> str:
 @router.get("/available")
 async def available(ctx_session=Depends(get_ctx_and_session)):
     """Return the list of provider names that have credentials configured on the server."""
-    configured = []
-    if settings.strava_client_id:
-        configured.append("strava")
-    if settings.wahoo_client_id:
-        configured.append("wahoo")
-    return {"available": configured}
+    return {"available": [name for name in PROVIDERS if provider_configured(name)]}
 
 
 class ProviderSyncStatus(BaseModel):
@@ -221,10 +216,10 @@ async def connect(
     ctx, _ = ctx_session
     client_cls = _require_provider(provider)
 
-    if provider == "strava" and not settings.strava_client_id:
-        raise HTTPException(status_code=501, detail="Strava is not configured")
-    if provider == "wahoo" and not settings.wahoo_client_id:
-        raise HTTPException(status_code=501, detail="Wahoo is not configured")
+    if not provider_configured(provider):
+        raise HTTPException(
+            status_code=501, detail=f"{provider.capitalize()} is not configured"
+        )
 
     state = _encode_state(ctx.user_id, provider)
     redirect_uri = f"{settings.api_url}/api/integrations/{provider}/callback"
@@ -236,16 +231,27 @@ async def connect(
 @router.get("/{provider}/callback")
 async def callback(
     provider: str,
-    code: str,
     state: str,
+    code: str | None = None,
+    error: str | None = None,
     registry_session: AsyncSession = Depends(get_registry_session),
 ):
     """Exchange OAuth code for tokens and persist the connection.
 
-    Strava / Wahoo redirect the user's browser here, so Bearer auth is not
+    The provider redirects the user's browser here, so Bearer auth is not
     available. We identify the user via the signed JWT in the ``state`` param.
+
+    A refusal on the consent screen arrives as ``?error=access_denied&state=…``
+    with no ``code`` (Hammerhead documents it; the others behave alike). That
+    is the athlete's answer, not a failure, and is sent back as ``denied``.
     """
     client_cls = _require_provider(provider)
+
+    if error or not code:
+        outcome = "denied" if error == "access_denied" else "error"
+        return RedirectResponse(
+            url=f"{settings.frontend_url}/profile?{provider}={outcome}"
+        )
 
     try:
         user_id = _decode_state(state, provider)
@@ -259,7 +265,9 @@ async def callback(
     redirect_uri = f"{settings.api_url}/api/integrations/{provider}/callback"
     try:
         tokens = await client_cls.exchange_code(code, redirect_uri)  # type: ignore[call-arg]
-    except httpx.HTTPStatusError:
+    except (httpx.HTTPStatusError, ValueError):
+        # ValueError: a token response we cannot use, such as Hammerhead's
+        # without a user id — refused rather than stored half-working.
         log.exception("%s code exchange failed", provider)
         return RedirectResponse(url=f"{redirect_base}/profile?{provider}=error")
 

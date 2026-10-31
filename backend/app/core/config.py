@@ -46,6 +46,14 @@ class Settings(BaseSettings):
     wahoo_bridge_url: str = ""
     wahoo_bridge_secret: str = ""
 
+    # Hammerhead / Karoo (issue #69; register at the Hammerhead developer
+    # dashboard). The bridge pair mirrors Wahoo's: where the main app polls
+    # the hammerhead_bridge for queued webhook events.
+    hammerhead_client_id: str = ""
+    hammerhead_client_secret: str = ""
+    hammerhead_bridge_url: str = ""
+    hammerhead_bridge_secret: str = ""
+
     # Optional OSM surface-classification sidecar (issue #56) — a Valhalla
     # instance the self-hoster runs themselves, reachable only from inside the
     # deployment (http://valhalla:8002 under the ops Compose profile). Optional

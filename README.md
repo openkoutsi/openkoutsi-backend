@@ -2,7 +2,7 @@
 
 [![codecov](https://codecov.io/gh/openkoutsi/openkoutsi-backend/graph/badge.svg)](https://codecov.io/gh/openkoutsi/openkoutsi-backend)
 
-The backend (FastAPI API + bridge services + core library) for openkoutsi, a self-hosted cycling coaching platform. Upload FIT files or sync from Strava/Wahoo, track fitness metrics (Fitness/Fatigue/Form), and generate periodized training plans from your own server.
+The backend (FastAPI API + bridge services + core library) for openkoutsi, a self-hosted cycling coaching platform. Upload FIT files or sync from Strava/Wahoo/Hammerhead, track fitness metrics (Fitness/Fatigue/Form), and generate periodized training plans from your own server.
 
 > **koutsi** (κουτσί) — Finnish for "coach"
 
@@ -61,6 +61,7 @@ Most cycling coaching tools are cloud-only SaaS. openkoutsi runs on your own har
 ### Integrations
 
 - **Strava and Wahoo** — OAuth connection, history import, webhook updates and zone sync
+- **Hammerhead (Karoo)** — OAuth connection, history import from the Karoo's own FIT files, and webhook updates through an HMAC-verified bridge. One-way: nothing is sent back to the Karoo
 - **Email** — optional, provider-agnostic (Lettermint or EuroMail)
 
 ## Architecture
@@ -79,6 +80,10 @@ Most cycling coaching tools are cloud-only SaaS. openkoutsi runs on your own har
        │ Strava Bridge (FastAPI)      │     │ Wahoo Bridge (FastAPI)       │
        │ public webhook endpoint       │     │ public webhook endpoint       │
        └──────────────────────────────┘     └──────────────────────────────┘
+       ┌──────────────────────────────┐
+       │ Hammerhead Bridge (FastAPI)  │
+       │ HMAC-verified webhook queue   │
+       └──────────────────────────────┘
 ```
 
 The bridges are small public webhook receivers. The main app polls them, so it can stay private (e.g. behind NAT).
@@ -129,7 +134,7 @@ uv run uvicorn backend.main:app --reload --port 8000
 
 Then run the [web UI](https://github.com/openkoutsi/openkoutsi-web) with its `API_URL` pointing at `http://localhost:8000` and complete the setup wizard.
 
-All environment variables (Strava, Wahoo, email, LLM, Valhalla, …) are documented in [DEPLOY.md](DEPLOY.md). LLM providers are configured in the app, not via environment — see [ADMIN.md](ADMIN.md#llm-configuration).
+All environment variables (Strava, Wahoo, Hammerhead, email, LLM, Valhalla, …) are documented in [DEPLOY.md](DEPLOY.md). LLM providers are configured in the app, not via environment — see [ADMIN.md](ADMIN.md#llm-configuration).
 
 ### Tests
 

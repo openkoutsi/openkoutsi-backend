@@ -8,11 +8,23 @@ To add a new provider:
 4. Document the new env vars in TODO.md
 """
 
+from backend.app.core.config import settings
 from backend.app.services.providers.base import BaseProviderClient
+from backend.app.services.providers.hammerhead import HammerheadClient
 from backend.app.services.providers.strava import StravaProviderClient
 from backend.app.services.providers.wahoo import WahooClient
 
 PROVIDERS: dict[str, type[BaseProviderClient]] = {
     "strava": StravaProviderClient,
     "wahoo": WahooClient,
+    "hammerhead": HammerheadClient,
 }
+
+
+def provider_configured(provider: str) -> bool:
+    """Whether the server has OAuth credentials for *provider*.
+
+    Read off ``settings.<provider>_client_id`` by convention, so registering a
+    provider and adding its settings is all ``/integrations/available`` needs.
+    """
+    return bool(getattr(settings, f"{provider}_client_id", ""))

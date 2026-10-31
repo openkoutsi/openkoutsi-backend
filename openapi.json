@@ -3281,7 +3281,7 @@
           "integrations"
         ],
         "summary": "Callback",
-        "description": "Exchange OAuth code for tokens and persist the connection.\n\nStrava / Wahoo redirect the user's browser here, so Bearer auth is not\navailable. We identify the user via the signed JWT in the ``state`` param.",
+        "description": "Exchange OAuth code for tokens and persist the connection.\n\nThe provider redirects the user's browser here, so Bearer auth is not\navailable. We identify the user via the signed JWT in the ``state`` param.\n\nA refusal on the consent screen arrives as ``?error=access_denied&state=\u2026``\nwith no ``code`` (Hammerhead documents it; the others behave alike). That\nis the athlete's answer, not a failure, and is sent back as ``denied``.",
         "operationId": "callback_api_integrations__provider__callback_get",
         "parameters": [
           {
@@ -3294,21 +3294,44 @@
             }
           },
           {
-            "name": "code",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string",
-              "title": "Code"
-            }
-          },
-          {
             "name": "state",
             "in": "query",
             "required": true,
             "schema": {
               "type": "string",
               "title": "State"
+            }
+          },
+          {
+            "name": "code",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Code"
+            }
+          },
+          {
+            "name": "error",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Error"
             }
           }
         ],

@@ -10,6 +10,8 @@ _ACTIVITY_SPORT_TO_CATEGORY: dict[str, str] = {
     "MountainBikeRide": "cycling",
     "EBikeRide": "cycling",
     "EBikeSport": "cycling",
+    "EMountainBikeRide": "cycling",
+    "Velomobile": "cycling",
     "Handcycle": "cycling",
     "Run": "running",
     "TrailRun": "running",

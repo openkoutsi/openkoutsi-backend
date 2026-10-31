@@ -34,6 +34,10 @@ jobs:
             image: ghcr.io/openkoutsi/openkoutsi-wahoo-bridge
             context: wahoo_bridge
             dockerfile: wahoo_bridge/Dockerfile
+          - name: hammerhead-bridge
+            image: ghcr.io/openkoutsi/openkoutsi-hammerhead-bridge
+            context: hammerhead_bridge
+            dockerfile: hammerhead_bridge/Dockerfile
 
     steps:
       - uses: actions/checkout@v4

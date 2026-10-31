@@ -28,6 +28,7 @@ The deployment model is **build-in-CI, pull-on-VM**:
 | Backend       | `ghcr.io/openkoutsi/openkoutsi-backend`        | this repo (`Dockerfile`)            |
 | Strava bridge | `ghcr.io/openkoutsi/openkoutsi-strava-bridge`  | this repo (`strava_bridge/`)        |
 | Wahoo bridge  | `ghcr.io/openkoutsi/openkoutsi-wahoo-bridge`   | this repo (`wahoo_bridge/`)         |
+| Hammerhead bridge | `ghcr.io/openkoutsi/openkoutsi-hammerhead-bridge` | this repo (`hammerhead_bridge/`) |
 | Web frontend  | `ghcr.io/openkoutsi/openkoutsi-web`            | [openkoutsi-web](https://github.com/openkoutsi/openkoutsi-web) |
 
 The backend image carries **numpy**, which the per-second stream math and the
@@ -56,16 +57,18 @@ Use a read-only token so a VM compromise cannot push images.
 
 ### Secrets (Docker secrets, not `.env`)
 
-All three services read their secret fields from files under `/run/secrets/`
+All services read their secret fields from files under `/run/secrets/`
 (pydantic-settings `secrets_dir`). Compose mounts one file per secret, named for
 the lowercase settings field:
 
 - backend: `secret_key`, `encryption_key`, `strava_client_secret`,
   `bridge_secret`, `wahoo_client_secret`, `wahoo_bridge_secret`,
+  `hammerhead_client_secret`, `hammerhead_bridge_secret`,
   `lettermint_api_key` / `euromail_api_key` (only when outbound email is used;
   set the one matching `EMAIL_PROVIDER`)
 - strava bridge: `strava_client_secret`, `bridge_secret`
 - wahoo bridge: `wahoo_bridge_secret`, `wahoo_webhook_token`
+- hammerhead bridge: `hammerhead_bridge_secret`, `hammerhead_webhook_secret`
 
 Email (all optional; omit entirely to leave email disabled): `EMAIL_PROVIDER`
 (default `lettermint`; `euromail` is also available) and `EMAIL_FROM` are
@@ -112,6 +115,7 @@ account is skipped on the next deploy instead of replaying the whole history.
 docker build -t openkoutsi-backend .
 docker build -t openkoutsi-strava-bridge strava_bridge
 docker build -t openkoutsi-wahoo-bridge wahoo_bridge
+docker build -t openkoutsi-hammerhead-bridge hammerhead_bridge
 
 # Backend needs SECRET_KEY and ENCRYPTION_KEY (as file secrets) and a data volume:
 mkdir -p /tmp/ok-secrets
@@ -186,6 +190,12 @@ WAHOO_CLIENT_ID=
 WAHOO_CLIENT_SECRET=
 WAHOO_BRIDGE_URL=                  # public URL of the Wahoo bridge, e.g. https://wahoo-bridge.your-domain
 WAHOO_BRIDGE_SECRET=               # shared secret — must match WAHOO_BRIDGE_SECRET in wahoo_bridge/.env
+
+# Hammerhead / Karoo (register at the Hammerhead developer dashboard — see "Hammerhead Bridge" section)
+HAMMERHEAD_CLIENT_ID=
+HAMMERHEAD_CLIENT_SECRET=
+HAMMERHEAD_BRIDGE_URL=             # public URL of the Hammerhead bridge, e.g. https://hammerhead-bridge.your-domain
+HAMMERHEAD_BRIDGE_SECRET=          # shared secret — must match HAMMERHEAD_BRIDGE_SECRET in hammerhead_bridge/.env
 
 # Road surface classification (optional, issue #56) — a Valhalla sidecar you run
 # yourself, reachable only from inside the deployment. Leave unset and a course
@@ -813,6 +823,59 @@ tab.
 
 ---
 
+## 5b. Hammerhead Bridge (optional)
+
+Hammerhead (Karoo) is a **one-way** integration (issue #69): activities are pulled
+from the Karoo and nothing is written back. Connect, history sync and disconnect use the generic
+`/api/integrations/hammerhead/*` routes once `HAMMERHEAD_CLIENT_ID` /
+`HAMMERHEAD_CLIENT_SECRET` are set; the bridge only adds automatic import of new
+rides via webhooks.
+
+Register an app at the Hammerhead developer dashboard with the redirect URI
+`https://<API_URL>/api/integrations/hammerhead/callback`. The app requests
+only the `activity:read` scope, which also covers webhooks.
+
+### Setup
+
+```bash
+cd hammerhead_bridge
+uv sync
+```
+
+Create `hammerhead_bridge/.env`:
+
+```env
+HAMMERHEAD_BRIDGE_SECRET=<same random string as HAMMERHEAD_BRIDGE_SECRET in main .env>   # python -c "import secrets; print(secrets.token_hex(32))"
+# ^ REQUIRED and at least 32 characters; the bridge refuses to start otherwise.
+HAMMERHEAD_WEBHOOK_SECRET=<the webhook secret from the Hammerhead developer dashboard>
+# ^ Every delivery's X-Hmac-Signature (HMAC-SHA256 of the raw body) is checked
+#   against it. There is no unsigned mode: while it is unset, every delivery is refused.
+DATABASE_PATH=bridge.db
+```
+
+### Run
+
+```bash
+uv run uvicorn main:app --host 0.0.0.0 --port 8086
+```
+
+Expose it via your reverse proxy (e.g. `hammerhead-bridge.your-domain`) and set the
+webhook URL in the Hammerhead developer dashboard to
+`https://hammerhead-bridge.your-domain/webhook`.
+
+**Hammerhead does not redeliver.** A non-200 response is ignored, so an event the
+bridge cannot persist is lost. The bridge therefore only verifies, queues and answers
+200; the main app polls it every 60 seconds and makes the provider calls itself. Keep
+the bridge up — downtime means missed rides until the athlete presses *Sync*, which
+catches up on everything.
+
+An event the main app fails to import is retried from the bridge's queue for about
+2¼ hours (`MAX_DELIVERY_ATTEMPTS`, default 12, backing off from 1 to 15 minutes).
+One that runs out is logged by the bridge at error level with the Hammerhead user and
+activity id; that athlete pressing *Sync* recovers it.
+
+---
+
 ## 6. systemd Services
 
 Service files are provided in the `systemd/` directory as [template units](https://www.freedesktop.org/software/systemd/man/systemd.unit.html#Description). The `@username` suffix at enable time fills in the user and home directory automatically.
@@ -825,6 +888,8 @@ sudo systemctl enable --now openkoutsi-backend@$(whoami)
 sudo systemctl enable --now openkoutsi-bridge@$(whoami)
 # Only needed if using the Wahoo bridge:
 sudo systemctl enable --now openkoutsi-wahoo-bridge@$(whoami)
+# Only needed if using the Hammerhead bridge:
+sudo systemctl enable --now openkoutsi-hammerhead-bridge@$(whoami)
 ```
 
 The units expect the repository to be checked out at `~/projects/openkoutsi-backend`. The frontend systemd unit ships with the [openkoutsi-web](https://github.com/openkoutsi/openkoutsi-web) repository.
@@ -835,7 +900,7 @@ Check logs with `journalctl -u openkoutsi-backend@$(whoami) -f` (replace the uni
 
 ## 7. Automated image builds (GitHub Actions)
 
-`.github/workflows/build-images.yml` builds the backend and both bridge images
+`.github/workflows/build-images.yml` builds the backend and every bridge image
 on every push to `main` and on every pull request:
 
 - **Pull requests:** images are built (to verify they still build) but **not**
@@ -858,7 +923,7 @@ The frontend has its own `build-images.yml` in the
 - [ ] `SECRET_KEY` set to a strong random value
 - [ ] `ENCRYPTION_KEY` set — **required**; the backend refuses to start without it unless `ALLOW_PLAINTEXT_SECRETS=true`, which stores Strava and Wahoo OAuth tokens unencrypted and is not for production
 - [ ] `ALLOW_PLAINTEXT_SECRETS` **not** set (check it was not carried over from a dev `.env`)
-- [ ] `BRIDGE_SECRET` and `WAHOO_BRIDGE_SECRET` are real random values of at least 32 characters, identical on the main app and on their bridge — each bridge now refuses to start on the old `changeme` placeholder
+- [ ] `BRIDGE_SECRET`, `WAHOO_BRIDGE_SECRET` and `HAMMERHEAD_BRIDGE_SECRET` (if used) are real random values of at least 32 characters, identical on the main app and on their bridge — each bridge now refuses to start on the old `changeme` placeholder
 - [ ] `DATA_DIR` points to a persistent directory (survives restarts/upgrades)
 - [ ] `FRONTEND_URL` and `API_URL` point to real domains
 - [ ] TLS termination in place for the API (and the frontend, deployed from openkoutsi-web)
@@ -867,6 +932,7 @@ The frontend has its own `build-images.yml` in the
 - [ ] Completed first-run setup wizard (creates the first admin account)
 - [ ] Strava app callback domain updated to production domain (if using Strava)
 - [ ] Wahoo webhook URL registered in the developer portal (if using Wahoo)
+- [ ] Hammerhead webhook URL and secret set in the developer dashboard, and `HAMMERHEAD_WEBHOOK_SECRET` on the bridge (if using Hammerhead)
 - [ ] `SYNC_ACTIVITIES_PER_MINUTE` considered — the default of 60 trades a slower first import for an instance that stays responsive during one; `0` disables pacing
 
 ### Upgrading: sync status and backfill pacing (added in this release)
@@ -942,3 +1008,10 @@ Existing activity syncing is **unaffected** — only zone sync will fail with a 
 Sending structured workouts to Wahoo requires the additional `plans_read`, `plans_write`, and `workouts_write` OAuth scopes. **Existing users who connected Wahoo before this release must disconnect and reconnect** to grant them. Until they do, pushing a workout fails with an `insufficient_scope` error and the UI shows a "reconnect Wahoo" prompt; activity and zone syncing are unaffected.
 
 A per-user table `wahoo_workout_uploads` tracks pushed workouts for idempotent re-pushes. It is created automatically for new per-user databases; existing databases pick it up via the per-user Alembic migration step.
+
+### Upgrading: Hammerhead integration (added in this release)
+
+New, optional settings: `HAMMERHEAD_CLIENT_ID`, `HAMMERHEAD_CLIENT_SECRET`,
+`HAMMERHEAD_BRIDGE_URL`, `HAMMERHEAD_BRIDGE_SECRET` on the backend, and a new
+`hammerhead_bridge` service (see [5b](#5b-hammerhead-bridge-optional)). Nothing changes
+for instances that leave them unset, and there is no database migration.

@@ -131,6 +131,10 @@ async def _background_work() -> None:
         wahoo_bridge_poller_configured,
         wahoo_bridge_poller_once,
     )
+    from backend.app.api.hammerhead import (
+        hammerhead_bridge_poller_configured,
+        hammerhead_bridge_poller_once,
+    )
     from backend.app.services.achievements_sweep import (
         SWEEP_INTERVAL_SECONDS as ACHIEVEMENTS_SWEEP_INTERVAL_SECONDS,
         achievements_sweep_once,
@@ -158,6 +162,10 @@ async def _background_work() -> None:
         jobs.insert(0, ("Strava bridge poll", 60.0, strava_bridge_poller_once))
     if wahoo_bridge_poller_configured():
         jobs.insert(0, ("Wahoo bridge poll", 60.0, wahoo_bridge_poller_once))
+    if hammerhead_bridge_poller_configured():
+        jobs.insert(
+            0, ("Hammerhead bridge poll", 60.0, hammerhead_bridge_poller_once)
+        )
 
     from backend.app.services.leadership import STANDBY_POLL_S
 
@@ -259,6 +267,7 @@ def create_app() -> FastAPI:
     from backend.app.api.goals import router as goals_router
     from backend.app.api.strava import router as strava_router
     from backend.app.api.wahoo import router as wahoo_router
+    from backend.app.api.hammerhead import router as hammerhead_router
     from backend.app.api.plans import router as plans_router
     from backend.app.api.llm import router as llm_router
     from backend.app.api.public import router as public_router
@@ -299,6 +308,7 @@ def create_app() -> FastAPI:
     app.include_router(goals_router, prefix="/api")
     app.include_router(strava_router, prefix="/api")
     app.include_router(wahoo_router, prefix="/api")
+    app.include_router(hammerhead_router, prefix="/api")
     app.include_router(plans_router, prefix="/api")
     app.include_router(llm_router, prefix="/api")
     app.include_router(public_router, prefix="/api")

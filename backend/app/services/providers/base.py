@@ -108,6 +108,24 @@ class BaseProviderClient(ABC):
         """
         return None
 
+    async def complete_activity(
+        self, access_token: str, norm: NormalizedActivity
+    ) -> NormalizedActivity:
+        """Fill in a listed activity before the sync pipeline works on it.
+
+        Most providers list everything the import needs, and the default hands
+        the record back unchanged. One whose list is *sparse* — Hammerhead's
+        carries no start time, sport or power at all — overrides this to fetch
+        the rest, so that the cost is paid only for the activities the sync is
+        about to import or repair, never for the ones it merely skips.
+
+        Called before the duplicate-window match, so ``start_time`` on the
+        returned record must be the real one. Raise ``LookupError`` when the
+        activity cannot be completed at all; the sync skips it and tries again
+        next time.
+        """
+        return norm
+
     async def fetch_zones(self, access_token: str) -> "ZoneData | None":
         """Fetch training zones and FTP from the provider.
 

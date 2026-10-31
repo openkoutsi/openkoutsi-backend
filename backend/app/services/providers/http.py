@@ -40,6 +40,7 @@ from backend.app.services.api_usage import parse_rate_limit, schedule_api_usage
 _KNOWN_HOSTS: dict[str, tuple[str, ...]] = {
     "www.strava.com": ("/api/v3",),
     "api.wahooligan.com": ("/v1",),
+    "api.hammerhead.io": ("/v1/api", "/v1/auth"),
 }
 
 _UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"

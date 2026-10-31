@@ -38,6 +38,7 @@ jobs:
           # Required since #102 F-10 — the bridges no longer start on "changeme".
           BRIDGE_SECRET: "ci-test-strava-bridge-secret-not-for-production"
           WAHOO_BRIDGE_SECRET: "ci-test-wahoo-bridge-secret-not-for-production"
+          HAMMERHEAD_BRIDGE_SECRET: "ci-test-hammerhead-bridge-secret-not-for-production"
           # Coverage via sys.monitoring (Python 3.12+) rather than the default C
           # trace function: same lines, a fraction of the cost (33s → 35s where
           # the tracer takes 59s), and the total moves *up* by about a point,

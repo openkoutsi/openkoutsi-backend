@@ -961,6 +961,11 @@ async def webhook_usage_summary(
         for provider, url, secret in (
             ("strava", settings.bridge_url, settings.bridge_secret),
             ("wahoo", settings.wahoo_bridge_url, settings.wahoo_bridge_secret),
+            (
+                "hammerhead",
+                settings.hammerhead_bridge_url,
+                settings.hammerhead_bridge_secret,
+            ),
         )
         if url and secret
     ]
