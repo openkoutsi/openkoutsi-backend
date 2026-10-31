@@ -563,7 +563,7 @@ class TestUnreachableSurfaces:
     ):
         raw = await _issue(registry_session, scopes=_ALL_SCOPES)
         resp = await pat_client.post(
-            "/api/consent", json={"consent_version": "1.0"}, headers=_pat_headers(raw)
+            "/api/consent", json={"consent_version": "1.0", "confirmed_adult": True}, headers=_pat_headers(raw)
         )
         assert resp.status_code == 403
 

@@ -11747,10 +11747,17 @@
           "consent_version": {
             "type": "string",
             "title": "Consent Version",
-            "default": "1.0"
+            "default": "1.1"
+          },
+          "confirmed_adult": {
+            "type": "boolean",
+            "title": "Confirmed Adult"
           }
         },
         "type": "object",
+        "required": [
+          "confirmed_adult"
+        ],
         "title": "ConsentRequest"
       },
       "ConsentResponse": {

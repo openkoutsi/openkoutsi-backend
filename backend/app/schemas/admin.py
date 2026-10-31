@@ -103,7 +103,19 @@ class PasswordResetLinkResponse(BaseModel):
 # ── Consent ────────────────────────────────────────────────────────────────
 
 class ConsentRequest(BaseModel):
-    consent_version: str = "1.0"
+    consent_version: str = "1.1"
+    # The user's own statement that they are 18 or older. Processing a minor's
+    # (health) data needs parental consent we have no way to collect, so consent
+    # is only recorded alongside this claim. Required, and must be true: an
+    # older client that omits it gets a 422 rather than a silent pass.
+    confirmed_adult: bool
+
+    @field_validator("confirmed_adult")
+    @classmethod
+    def must_confirm_adult(cls, v: bool) -> bool:
+        if v is not True:
+            raise ValueError("You must confirm that you are at least 18 years old")
+        return v
 
 
 class ConsentResponse(BaseModel):

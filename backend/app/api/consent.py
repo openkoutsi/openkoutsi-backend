@@ -1,6 +1,9 @@
 from datetime import datetime, timezone
 
-CURRENT_CONSENT_VERSION = "1.0"
+# 1.1: consent now carries the user's confirmation that they are 18 or older.
+# Bumping the version sends everyone who accepted 1.0 back through the consent
+# step, so existing accounts make that claim too.
+CURRENT_CONSENT_VERSION = "1.1"
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
