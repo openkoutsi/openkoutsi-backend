@@ -1,10 +1,11 @@
 """Daily active users: a dashboard load (``POST /api/metrics/catch-up``)
 records the caller as active today, and admins read the counts back."""
-from datetime import date, timedelta
+from datetime import date
+from unittest.mock import patch
 
 import pytest
 from fastapi import Request
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from backend.app.core.auth import PERSONAL_ACCESS_TOKEN, UserContext
 from backend.app.core.deps import get_ctx_and_session
@@ -55,6 +56,16 @@ class TestRecording:
 
         app.dependency_overrides[get_ctx_and_session] = _pat_ctx
         resp = await client.post("/api/metrics/catch-up", headers=auth_headers)
+        assert resp.status_code == 200
+        assert await _rows(registry_session) == []
+
+    async def test_a_failed_write_does_not_break_the_dashboard(
+        self, client, auth_headers, registry_session
+    ):
+        with patch.object(
+            registry_session, "execute", side_effect=RuntimeError("db locked")
+        ):
+            resp = await client.post("/api/metrics/catch-up", headers=auth_headers)
         assert resp.status_code == 200
         assert await _rows(registry_session) == []
 
