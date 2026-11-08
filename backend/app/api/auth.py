@@ -687,9 +687,9 @@ async def _dead_signup_stub(
     an abandoned attempt leaves a row squatting on it with ``email_verified_at``
     NULL and an expired verification token. :func:`signup` treats such a row as
     reusable, so refusing to let a change claim the same address would be
-    stricter than the flow that created the obstruction — permanently, since
-    nothing expires it — and would make "sign up as someone and never verify" a
-    way to deny them an address for good.
+    stricter than the flow that created the obstruction — for up to 30 days,
+    until :mod:`backend.app.services.pending_signups` drops the row — and would
+    make "sign up as someone and never verify" a way to deny them an address.
 
     A row still holding a *live* verification token is a signup in progress and
     keeps the address.

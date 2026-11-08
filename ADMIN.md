@@ -99,6 +99,12 @@ nobody finished leaves a row behind. It cannot sign in — login by email requir
 verified address — but it is listed like any other account, and the console is the only
 place that difference shows.
 
+Such rows do not linger forever: a daily background sweep **deletes any signup still
+unconfirmed 30 days after its latest attempt** (re-submitting the sign-up form with the
+same address sends a fresh link and restarts the clock). Invite-created accounts, which
+are keyed by username and never confirm an address, are never touched. The address is
+free to sign up with again afterwards.
+
 The **Users** tab shows it under each account: **Confirmed** (hover for the date)
 or **Not confirmed**. Accounts with no address at all show neither, because there
 is nothing to confirm — an invite-created account is reached by username.
@@ -166,8 +172,9 @@ withdraws everything: sessions, personal access tokens, and any change of addres
 flight.
 
 One address that does *not* block a change is one held by a self-serve signup that was
-started and never verified. Such a row has no owner and nothing expires it, so treating
-it as taken would deny the address to its real owner forever — and, with self-signup
+started and never verified. Such a row has no owner and lingers for up to 30 days before
+the clean-up sweep removes it, so treating it as taken would deny the address to its real
+owner for that long — and, with self-signup
 enabled, would let anyone reserve someone else's address by signing up and walking
 away. Confirming a change clears the stub out of the way. A signup still holding a live
 verification link is in progress, and does block.
