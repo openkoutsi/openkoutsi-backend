@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.core.deps import get_ctx_session_athlete
+from backend.app.db.registry import get_registry_session
 from backend.app.core.scopes import pat_scopes
 from backend.app.db.user_session import get_user_session_factory
 from backend.app.models.user_orm import Activity, ActivityStream, Athlete, DailyMetric
@@ -25,6 +26,7 @@ from backend.app.services.intensity_distribution import (
     compute_intensity_distribution,
     resolve_window,
 )
+from backend.app.services.active_users import record_active_day
 from backend.app.services.metrics_engine import catch_up_metrics
 from backend.app.services.metrics_forecast import (
     DEFAULT_FORECAST_DAYS,
@@ -359,9 +361,19 @@ async def get_ftp_history(ctx_athlete=Depends(get_ctx_session_athlete)):
 
 
 @router.post("/catch-up", status_code=200)
-async def catch_up(ctx_athlete=Depends(get_ctx_session_athlete)):
-    """Fill missing DailyMetric rows using stored Load. Called on dashboard load."""
+async def catch_up(
+    ctx_athlete=Depends(get_ctx_session_athlete),
+    registry: AsyncSession = Depends(get_registry_session),
+):
+    """Fill missing DailyMetric rows using stored Load. Called on dashboard load.
+
+    Also records the caller as active today for the daily-active-users count —
+    a dashboard load is what counts as a use. Personal access tokens are not
+    counted: a script calling this is not someone using the app.
+    """
     ctx, session, athlete = ctx_athlete
+    if not ctx.is_pat:
+        await record_active_day(ctx.user_id, registry)
     updated = await catch_up_metrics(athlete.id, session)
     return {"updated": updated}
 

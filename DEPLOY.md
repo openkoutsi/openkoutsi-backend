@@ -422,6 +422,12 @@ migration loop, or by the helper script above.
 > load, not a policy default, so arriving halted would close every deployment at
 > once and the admin would hear about it from their users.
 
+> **Note:** registry migration `020_user_active_days` adds the `user_active_days`
+> table (one row per user per UTC day of dashboard use) behind the daily-active-users
+> count in `GET /api/admin/active-users/summary`. Nothing is backfilled — counting
+> starts on the day you upgrade — and there are no new environment variables. The
+> rows are deleted with the account.
+
 > **Note:** per-user migration `031_garage` adds five nullable columns —
 > `bikes.odometer_base_km`, `bikes.default_sports`, `bikes.retired_at`,
 > `activities.bike_id` and `activities.bike_source` — plus an index on

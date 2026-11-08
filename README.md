@@ -22,6 +22,7 @@ Most cycling coaching tools are cloud-only SaaS. openkoutsi runs on your own har
 - **Privacy-first** — GDPR consent for health data (users must confirm they are 18 or older; consent policy v1.1 re-prompts earlier accounts), full data export and account deletion; stored secrets and activity files are encrypted (`ENCRYPTION_KEY`)
 - **AI transparency** — model-written text is flagged in every response so the UI can label it (EU AI Act Art. 50)
 - **Inbox** — in-app notifications for achievements, token expiry and admin events
+- **Active users** — daily/weekly/monthly active-user counts for admins; a dashboard load counts as a use (personal access tokens do not)
 
 ### Activities
 

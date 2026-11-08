@@ -2,7 +2,7 @@
 
 The admin console manages users, invitations, password resets, an admin contact shown
 on the password-reset page, instance settings (sign-up, personal access tokens, MCP,
-course recon), instance-wide LLM presets and third-party API usage. The first
+course recon), instance-wide LLM presets, third-party API usage and active-user counts. The first
 administrator is created by the setup wizard on a fresh instance.
 
 ## Accounts & sign-up
@@ -532,6 +532,28 @@ provider and model) is recorded in its own database (`LLM_USAGE_DB`, default
 `<DATA_DIR>/llm_usage.db`). `GET /api/admin/llm-usage/summary` buckets it by day, week or
 month so you can compute average cost per user. BYOK calls are never recorded — the user
 pays their own provider.
+
+## Active users
+
+A user counts as **active** on a day (UTC) once they load the dashboard that day.
+Each load records at most one row per user per day, so repeat visits do not inflate
+the count. Calls made with a personal access token are not counted — a script
+polling the API is not somebody using the app.
+
+```
+GET /api/admin/active-users/summary?from=YYYY-MM-DD&to=YYYY-MM-DD&group_by=day|week|month
+```
+
+`from` and `to` are inclusive. `day` gives daily active users; `week` and `month`
+count **distinct** users across the period (a user active on five days of a week
+counts once), so they are true weekly/monthly active users rather than sums of daily
+figures. `total_active_users` is the distinct count over the whole range. Days on
+which nobody was active are omitted rather than reported as zero.
+
+The rows live in the registry (`user_active_days`) and hold only the user id and the
+date. They are deleted with the account, so historical counts can drop after an
+account deletion. Counting starts when an instance upgrades to registry migration
+`020_user_active_days`; there is nothing to backfill from.
 
 ## Third-party API usage and quota headroom
 
