@@ -534,7 +534,7 @@ running when a backfill is not.
 
 On a fresh deployment, navigate to the frontend URL. The setup wizard will appear and guide you through creating the first administrator account. Thereafter, an administrator issues an instance-wide invite from the Admin dashboard and new users register with that invite token.
 
-Optionally, admins can enable **self-serve email signup** (Settings tab, or `allow_self_signup` via `PATCH /api/admin/settings`). It requires a configured email provider (see *Email* above): users register with an email address, verify it via an emailed link, and the account activates. Invites keep working regardless. With email configured, users can also reset their own passwords via the "Forgot password?" page, and change the email address on their account (or set one, on an invite-created account that never had one) — that change needs an emailed approval from the *old* address as well as the new one before anything moves, so this too stays unavailable while no provider is configured. An admin can set or clear an address directly (`PATCH /api/admin/users/{id}/email`) for the case where the old mailbox is unreachable. See [ADMIN.md](ADMIN.md) for the full account and password-reset flows.
+Optionally, admins can enable **self-serve email signup** (Settings tab, or `allow_self_signup` via `PATCH /api/admin/settings`). It requires a configured email provider (see *Email* above): users register with an email address, verify it via an emailed link, and the account activates. Signups left unconfirmed for 30 days are deleted by a daily background sweep (log line `Removed N unconfirmed signup(s) …`). Invites keep working regardless. With email configured, users can also reset their own passwords via the "Forgot password?" page, and change the email address on their account (or set one, on an invite-created account that never had one) — that change needs an emailed approval from the *old* address as well as the new one before anything moves, so this too stays unavailable while no provider is configured. An admin can set or clear an address directly (`PATCH /api/admin/users/{id}/email`) for the case where the old mailbox is unreachable. See [ADMIN.md](ADMIN.md) for the full account and password-reset flows.
 
 Self-serve signup can also be **paused** without changing that policy — `signups_halted`, with a free-text `signup_halt_reason` shown on the sign-up page. It is the switch to reach for when the constraint is capacity (a resource bottleneck, a provider's API application limits) rather than policy: invitations keep redeeming and verification links already emailed still activate, so it stops new strangers arriving without stranding anyone mid-flight. See [ADMIN.md](ADMIN.md).
 
@@ -547,7 +547,8 @@ uv run uvicorn backend.main:app --host 0.0.0.0 --port 8000
 **Run exactly one process — no `--workers`, no gunicorn.** The backend is
 single-process by design, and several things depend on that:
 
-- The **bridge pollers**, the **token-expiry sweep** and the **achievement sweep**
+- The **bridge pollers**, the **token-expiry sweep**, the **achievement sweep** and the
+  **pending-signup clean-up**
   run under a single claim on the registry (`registry_leases`, name
   `background-work`), so only one process runs them at a time and a second stands by.
   The event protocol underneath carries a deadline too: a consumer claims a batch,

@@ -144,6 +144,10 @@ async def _background_work() -> None:
         SWEEP_INTERVAL_SECONDS,
         pat_expiry_sweep_once,
     )
+    from backend.app.services.pending_signups import (
+        SWEEP_INTERVAL_SECONDS as PENDING_SIGNUP_SWEEP_INTERVAL_SECONDS,
+        pending_signup_cleanup_once,
+    )
 
     # Asked before contending: an instance with no bridge configured should not
     # take a claim it has nothing to do with.
@@ -156,6 +160,12 @@ async def _background_work() -> None:
             "Achievement sweep",
             float(ACHIEVEMENTS_SWEEP_INTERVAL_SECONDS),
             achievements_sweep_once,
+        ),
+        # Drops self-serve signups left unconfirmed for 30 days.
+        (
+            "Pending signup cleanup",
+            float(PENDING_SIGNUP_SWEEP_INTERVAL_SECONDS),
+            pending_signup_cleanup_once,
         ),
     ]
     if strava_bridge_poller_configured():
