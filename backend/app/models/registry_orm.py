@@ -1,9 +1,9 @@
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Optional
 
 from sqlalchemy import (
-    JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint,
+    JSON, Boolean, Date, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -71,6 +71,30 @@ class User(RegistryBase):
     personal_access_tokens: Mapped[list["PersonalAccessToken"]] = relationship(
         "PersonalAccessToken", back_populates="user", cascade="all, delete-orphan"
     )
+    active_days: Mapped[list["UserActiveDay"]] = relationship(
+        "UserActiveDay", cascade="all, delete-orphan"
+    )
+
+
+class UserActiveDay(RegistryBase):
+    """One row per user per UTC day on which they used the app.
+
+    The source of the daily-active-users count. A use is a dashboard load (the
+    web app's ``POST /api/metrics/catch-up``); personal access tokens never
+    record one, so a script polling the API does not make its owner "active".
+
+    Deliberately the bare minimum: who and which day, no timestamp, no request
+    detail. The composite primary key makes recording idempotent — a second
+    dashboard load the same day is an ignored insert — and the rows go with the
+    account when it is deleted.
+    """
+
+    __tablename__ = "user_active_days"
+
+    user_id: Mapped[str] = mapped_column(
+        String, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    day: Mapped[date] = mapped_column(Date, primary_key=True, index=True)
 
 
 class PasswordResetToken(RegistryBase):

@@ -266,6 +266,30 @@ class LlmUsageSummaryResponse(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+# ── Active users ─────────────────────────────────────────────────────────────
+
+
+class ActiveUsersBucket(BaseModel):
+    """Distinct users active in one day, week or month.
+
+    For ``week`` and ``month`` a user active on several days counts once, so
+    these are true weekly/monthly active users, not sums of daily counts.
+    """
+    key: str
+    active_users: int
+
+
+class ActiveUsersSummaryResponse(BaseModel):
+    group_by: str
+    from_: Optional[str] = Field(default=None, serialization_alias="from")
+    to: Optional[str] = None
+    #: Distinct users active anywhere in the requested range.
+    total_active_users: int = 0
+    buckets: list[ActiveUsersBucket] = []
+
+    model_config = {"populate_by_name": True}
+
+
 # ── Third-party API usage and quota headroom (issue #66) ────────────────────
 
 

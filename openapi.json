@@ -1260,6 +1260,90 @@
         }
       }
     },
+    "/api/admin/active-users/summary": {
+      "get": {
+        "tags": [
+          "admin"
+        ],
+        "summary": "Daily/weekly/monthly active users",
+        "description": "Count distinct active users per ``day``, ``week`` or ``month`` (UTC).\n\nA user is active on a day once they load the dashboard that day. ``from``\nand ``to`` are inclusive dates (``YYYY-MM-DD``). Days with nobody active are\nabsent rather than reported as zero. Deleted accounts take their rows with\nthem, so past counts can go down after a deletion.\n\n**Not available to personal access tokens.**",
+        "operationId": "getActiveUsersSummary",
+        "security": [
+          {
+            "OAuth2PasswordBearer": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "from",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "From"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "To"
+            }
+          },
+          {
+            "name": "group_by",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "default": "day",
+              "title": "Group By"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ActiveUsersSummaryResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-personal-access-token": {
+          "allowed": false
+        }
+      }
+    },
     "/api/admin/quota/headroom": {
       "get": {
         "tags": [
@@ -4195,7 +4279,7 @@
           "metrics"
         ],
         "summary": "Catch Up",
-        "description": "Fill missing DailyMetric rows using stored Load. Called on dashboard load.\n\n**Personal access token scope:** `metrics:write`",
+        "description": "Fill missing DailyMetric rows using stored Load. Called on dashboard load.\n\nAlso records the caller as active today for the daily-active-users count \u2014\na dashboard load is what counts as a use. Personal access tokens are not\ncounted: a script calling this is not someone using the app.\n\n**Personal access token scope:** `metrics:write`",
         "operationId": "catch_up_api_metrics_catch_up_post",
         "responses": {
           "200": {
@@ -9128,6 +9212,73 @@
           "streaks"
         ],
         "title": "AchievementsResponse"
+      },
+      "ActiveUsersBucket": {
+        "properties": {
+          "key": {
+            "type": "string",
+            "title": "Key"
+          },
+          "active_users": {
+            "type": "integer",
+            "title": "Active Users"
+          }
+        },
+        "type": "object",
+        "required": [
+          "key",
+          "active_users"
+        ],
+        "title": "ActiveUsersBucket",
+        "description": "Distinct users active in one day, week or month.\n\nFor ``week`` and ``month`` a user active on several days counts once, so\nthese are true weekly/monthly active users, not sums of daily counts."
+      },
+      "ActiveUsersSummaryResponse": {
+        "properties": {
+          "group_by": {
+            "type": "string",
+            "title": "Group By"
+          },
+          "from": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "From"
+          },
+          "to": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "To"
+          },
+          "total_active_users": {
+            "type": "integer",
+            "title": "Total Active Users",
+            "default": 0
+          },
+          "buckets": {
+            "items": {
+              "$ref": "#/components/schemas/ActiveUsersBucket"
+            },
+            "type": "array",
+            "title": "Buckets",
+            "default": []
+          }
+        },
+        "type": "object",
+        "required": [
+          "group_by"
+        ],
+        "title": "ActiveUsersSummaryResponse"
       },
       "ActivityBulkUpdate": {
         "properties": {

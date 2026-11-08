@@ -44,8 +44,11 @@ from backend.app.models.registry_orm import (
     PersonalAccessToken,
     ProviderConnection,
     User,
+    UserActiveDay,
 )
 from backend.app.schemas.admin import (
+    ActiveUsersBucket,
+    ActiveUsersSummaryResponse,
     ApiUsageBucket,
     ApiUsageSummaryResponse,
     InstanceSettingsPatch,
@@ -722,6 +725,63 @@ async def llm_usage_summary(
         for row in rows
     ]
     return LlmUsageSummaryResponse(group_by=group_by, from_=from_, to=to, buckets=buckets)
+
+
+# ── Active users ─────────────────────────────────────────────────────────────
+
+
+@router.get("/active-users/summary", response_model=ActiveUsersSummaryResponse,
+            operation_id="getActiveUsersSummary", summary="Daily/weekly/monthly active users")
+async def active_users_summary(
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = Query(None, alias="to"),
+    group_by: str = Query("day"),
+    _: UserContext = Depends(require_admin),
+    session: AsyncSession = Depends(get_registry_session),
+):
+    """Count distinct active users per ``day``, ``week`` or ``month`` (UTC).
+
+    A user is active on a day once they load the dashboard that day. ``from``
+    and ``to`` are inclusive dates (``YYYY-MM-DD``). Days with nobody active are
+    absent rather than reported as zero. Deleted accounts take their rows with
+    them, so past counts can go down after a deletion.
+    """
+    if group_by not in TIME_BUCKETS:
+        raise HTTPException(
+            status_code=400, detail="group_by must be one of day, week, month."
+        )
+    from_dt = parse_usage_dt(from_)
+    to_dt = parse_usage_dt(to)
+
+    def _bounded(stmt):
+        if from_dt is not None:
+            stmt = stmt.where(UserActiveDay.day >= from_dt.date())
+        if to_dt is not None:
+            stmt = stmt.where(UserActiveDay.day <= to_dt.date())
+        return stmt
+
+    key_expr = time_bucket_expr(group_by, UserActiveDay.day)
+    stmt = _bounded(
+        select(
+            key_expr.label("bucket"),
+            func.count(func.distinct(UserActiveDay.user_id)),
+        )
+    ).group_by(key_expr).order_by(key_expr)
+    rows = (await session.execute(stmt)).all()
+
+    total = (
+        await session.execute(
+            _bounded(select(func.count(func.distinct(UserActiveDay.user_id))))
+        )
+    ).scalar_one()
+
+    return ActiveUsersSummaryResponse(
+        group_by=group_by,
+        from_=from_,
+        to=to,
+        total_active_users=int(total or 0),
+        buckets=[ActiveUsersBucket(key=r[0], active_users=int(r[1])) for r in rows],
+    )
 
 
 # ── Third-party API usage and quota headroom (issue #66) ────────────────────
