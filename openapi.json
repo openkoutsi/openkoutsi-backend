@@ -1266,7 +1266,7 @@
           "admin"
         ],
         "summary": "Daily/weekly/monthly active users",
-        "description": "Count distinct active users per ``day``, ``week`` or ``month`` (UTC).\n\nA user is active on a day once they load the dashboard that day. ``from``\nand ``to`` are inclusive dates (``YYYY-MM-DD``). Days with nobody active are\nabsent rather than reported as zero. Deleted accounts take their rows with\nthem, so past counts can go down after a deletion.\n\n**Not available to personal access tokens.**",
+        "description": "Count distinct active users per ``day``, ``week`` or ``month`` (UTC).\n\nA user is active on a day once they load the dashboard that day. ``from``\nand ``to`` are inclusive dates (``YYYY-MM-DD``). Days with nobody active are\nabsent rather than reported as zero. Deleted accounts take their rows with\nthem, so past counts can go down after a deletion.\n\n``confirmed_email_accounts`` is the current number of existing accounts\nwhose email address is confirmed; it ignores ``from``/``to``.\n\n**Not available to personal access tokens.**",
         "operationId": "getActiveUsersSummary",
         "security": [
           {
@@ -9263,6 +9263,11 @@
           "total_active_users": {
             "type": "integer",
             "title": "Total Active Users",
+            "default": 0
+          },
+          "confirmed_email_accounts": {
+            "type": "integer",
+            "title": "Confirmed Email Accounts",
             "default": 0
           },
           "buckets": {

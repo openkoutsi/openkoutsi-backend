@@ -285,6 +285,10 @@ class ActiveUsersSummaryResponse(BaseModel):
     to: Optional[str] = None
     #: Distinct users active anywhere in the requested range.
     total_active_users: int = 0
+    #: Existing (not deleted) accounts with a confirmed email address, right now.
+    #: Not bounded by ``from``/``to``. Invite-created accounts without an
+    #: address are not counted.
+    confirmed_email_accounts: int = 0
     buckets: list[ActiveUsersBucket] = []
 
     model_config = {"populate_by_name": True}

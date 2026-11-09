@@ -745,6 +745,9 @@ async def active_users_summary(
     and ``to`` are inclusive dates (``YYYY-MM-DD``). Days with nobody active are
     absent rather than reported as zero. Deleted accounts take their rows with
     them, so past counts can go down after a deletion.
+
+    ``confirmed_email_accounts`` is the current number of existing accounts
+    whose email address is confirmed; it ignores ``from``/``to``.
     """
     if group_by not in TIME_BUCKETS:
         raise HTTPException(
@@ -775,11 +778,20 @@ async def active_users_summary(
         )
     ).scalar_one()
 
+    confirmed = (
+        await session.execute(
+            select(func.count())
+            .select_from(User)
+            .where(User.deleted_at.is_(None), User.email_verified_at.is_not(None))
+        )
+    ).scalar_one()
+
     return ActiveUsersSummaryResponse(
         group_by=group_by,
         from_=from_,
         to=to,
         total_active_users=int(total or 0),
+        confirmed_email_accounts=int(confirmed or 0),
         buckets=[ActiveUsersBucket(key=r[0], active_users=int(r[1])) for r in rows],
     )
 

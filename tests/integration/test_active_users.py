@@ -1,10 +1,11 @@
 """Daily active users: a dashboard load (``POST /api/metrics/catch-up``)
 records the caller as active today, and admins read the counts back."""
-from datetime import date, timedelta
+from datetime import date
+from unittest.mock import patch
 
 import pytest
 from fastapi import Request
-from sqlalchemy import func, select
+from sqlalchemy import select
 
 from backend.app.core.auth import PERSONAL_ACCESS_TOKEN, UserContext
 from backend.app.core.deps import get_ctx_and_session
@@ -55,6 +56,16 @@ class TestRecording:
 
         app.dependency_overrides[get_ctx_and_session] = _pat_ctx
         resp = await client.post("/api/metrics/catch-up", headers=auth_headers)
+        assert resp.status_code == 200
+        assert await _rows(registry_session) == []
+
+    async def test_a_failed_write_does_not_break_the_dashboard(
+        self, client, auth_headers, registry_session
+    ):
+        with patch.object(
+            registry_session, "execute", side_effect=RuntimeError("db locked")
+        ):
+            resp = await client.post("/api/metrics/catch-up", headers=auth_headers)
         assert resp.status_code == 200
         assert await _rows(registry_session) == []
 
@@ -115,6 +126,27 @@ class TestSummary:
         assert data["from"] == "2026-10-06"
         assert data["total_active_users"] == 2
         assert data["buckets"] == [{"key": "2026-10-06", "active_users": 2}]
+
+    async def test_confirmed_email_accounts(self, client, auth_headers, registry_session):
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        registry_session.add_all([
+            User(id="c1", email="a@x.test", email_verified_at=now, password_hash="x"),
+            User(id="c2", email="b@x.test", email_verified_at=now, password_hash="x"),
+            # Unconfirmed, deleted, and address-less accounts are not counted.
+            User(id="c3", email="c@x.test", password_hash="x"),
+            User(id="c4", email="d@x.test", email_verified_at=now, deleted_at=now, password_hash="x"),
+        ])
+        await registry_session.commit()
+        resp = await client.get(
+            "/api/admin/active-users/summary?from=2020-01-01&to=2020-01-01",
+            headers=auth_headers,
+        )
+        data = resp.json()
+        # Not bounded by the date range, unlike the activity counts.
+        assert data["total_active_users"] == 0
+        assert data["confirmed_email_accounts"] == 2
 
     async def test_bad_group_by(self, client, auth_headers):
         resp = await client.get(
