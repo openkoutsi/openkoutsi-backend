@@ -127,6 +127,27 @@ class TestSummary:
         assert data["total_active_users"] == 2
         assert data["buckets"] == [{"key": "2026-10-06", "active_users": 2}]
 
+    async def test_confirmed_email_accounts(self, client, auth_headers, registry_session):
+        from datetime import datetime, timezone
+
+        now = datetime.now(timezone.utc)
+        registry_session.add_all([
+            User(id="c1", email="a@x.test", email_verified_at=now, password_hash="x"),
+            User(id="c2", email="b@x.test", email_verified_at=now, password_hash="x"),
+            # Unconfirmed, deleted, and address-less accounts are not counted.
+            User(id="c3", email="c@x.test", password_hash="x"),
+            User(id="c4", email="d@x.test", email_verified_at=now, deleted_at=now, password_hash="x"),
+        ])
+        await registry_session.commit()
+        resp = await client.get(
+            "/api/admin/active-users/summary?from=2020-01-01&to=2020-01-01",
+            headers=auth_headers,
+        )
+        data = resp.json()
+        # Not bounded by the date range, unlike the activity counts.
+        assert data["total_active_users"] == 0
+        assert data["confirmed_email_accounts"] == 2
+
     async def test_bad_group_by(self, client, auth_headers):
         resp = await client.get(
             "/api/admin/active-users/summary?group_by=user", headers=auth_headers

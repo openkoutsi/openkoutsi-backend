@@ -557,6 +557,10 @@ counts once), so they are true weekly/monthly active users rather than sums of d
 figures. `total_active_users` is the distinct count over the whole range. Days on
 which nobody was active are omitted rather than reported as zero.
 
+The response also carries `confirmed_email_accounts`: how many existing accounts
+have a confirmed email address right now. It ignores `from`/`to`, and accounts
+created by invitation without an address are not included.
+
 The rows live in the registry (`user_active_days`) and hold only the user id and the
 date. They are deleted with the account, so historical counts can drop after an
 account deletion. Counting starts when an instance upgrades to registry migration
